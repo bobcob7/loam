@@ -21,33 +21,41 @@ message QueryScope {
   repeated string repos = 1;
 }
 
-// Outcome attached to a submitted review.
-enum ReviewOutcome {
-  REVIEW_OUTCOME_UNSPECIFIED = 0;
-  REVIEW_OUTCOME_APPROVE = 1;
-  REVIEW_OUTCOME_DISAPPROVE = 2;
-  REVIEW_OUTCOME_NEUTRAL = 3;
+// Outcome a reviewer attaches to a submitted verdict.
+enum VerdictOutcome {
+  VERDICT_OUTCOME_UNSPECIFIED = 0;
+  VERDICT_OUTCOME_APPROVE = 1;
+  VERDICT_OUTCOME_DISAPPROVE = 2;
+  VERDICT_OUTCOME_NEUTRAL = 3;
 }
 
-// Lifecycle state of a pull request.
-enum PullRequestState {
-  PULL_REQUEST_STATE_UNSPECIFIED = 0;
-  PULL_REQUEST_STATE_OPEN = 1;
-  PULL_REQUEST_STATE_COMPLETE = 2;
+// Lifecycle state of a work branch. Reviewing is a feature of a work branch, not
+// a separate object: REVIEWABLE means it is up for review.
+enum WorkBranchState {
+  WORK_BRANCH_STATE_UNSPECIFIED = 0;
+  // Created and being worked on; not yet up for review.
+  WORK_BRANCH_STATE_DRAFT = 1;
+  // Up for review; other agents may submit verdicts.
+  WORK_BRANCH_STATE_REVIEWABLE = 2;
+  // Approved and marked complete; surfaced to the admin as a proposed upstream PR.
+  WORK_BRANCH_STATE_COMPLETE = 3;
 }
 
-// A pull request. Identity is (repo, branch) — there is no numeric id.
-message PullRequest {
+// A work branch — the first-party unit of work. Identity is (repo, name); the
+// name is randomly generated and otherwise carries no meaning, so the title and
+// description are its human-facing identity. "Review" is the REVIEWABLE state
+// plus the comment/verdict activity on it, not a separate resource.
+message WorkBranch {
   // Enrolled repo identifier, "<group>/<name>".
   string repo = 1;
-  // Feature branch; the PR identifier together with `repo`.
-  string branch = 2;
-  // Target branch the PR merges into.
+  // The randomly generated work branch name; the identifier together with `repo`.
+  string name = 2;
+  // Target branch the work will eventually merge into upstream.
   string target = 3;
   string title = 4;
   // Full description. Omitted in list summaries.
   string description = 5;
-  PullRequestState state = 6;
+  WorkBranchState state = 6;
   // Agent identifier of the author, "<name>-<id>-<role>".
   string author = 7;
 }
@@ -67,7 +75,7 @@ message FileLine {
   optional uint32 line = 2;
 }
 
-// A published comment thread on a pull request.
+// A published comment thread on a work branch.
 message Thread {
   string id = 1;
   bool resolved = 2;

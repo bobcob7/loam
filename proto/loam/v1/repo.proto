@@ -2,16 +2,12 @@ syntax = "proto3";
 
 package loam.v1;
 
-// Repo metadata and server-side branch operations. The git data itself (clone,
-// fetch, push) moves over the git wire protocol, not these RPCs.
+// Repo metadata. The git data itself (clone, fetch, push) moves over the git wire
+// protocol, not these RPCs; work branch creation lives in WorkBranchService.
 service RepoService {
   // Resolve an enrolled repo: its target branches and the default target.
   // Backs the metadata lookup in `loam clone`.
   rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
-
-  // Create a feature branch server-side from a target branch, without a working
-  // copy. Backs `loam branch`.
-  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
 }
 
 message GetRepoRequest {
@@ -21,22 +17,8 @@ message GetRepoRequest {
 
 message GetRepoResponse {
   string repo = 1;
-  // Branches eligible for PR creation.
+  // Branches eligible as targets for work branches.
   repeated string target_branches = 2;
-  // The branch `clone`/`branch` default to when none is specified.
+  // The branch `clone` / `work start` default to when none is specified.
   string default_target_branch = 3;
-}
-
-message CreateBranchRequest {
-  string repo = 1;
-  // New feature branch name (free-form).
-  string name = 2;
-  // Target branch to base off; defaults to the repo's default target.
-  optional string from = 3;
-}
-
-message CreateBranchResponse {
-  string repo = 1;
-  string branch = 2;
-  string from = 3;
 }

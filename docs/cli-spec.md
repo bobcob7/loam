@@ -25,9 +25,9 @@ repos (each at `./<repo_name>`). A typical layout:
 ```
 
 Commands are normally run from the workspace root. When run from inside a repo directory
-(`<workspace>/<repo_name>`), the `repo` and `branch` arguments are inferred — repo from the
-directory name, branch from the current git branch — so they may be omitted from **any**
-command that takes them.
+(`<workspace>/<repo_name>`), the `repo` and work-branch arguments are inferred — repo from
+the directory name, work branch from the current git branch — so they may be omitted from
+**any** command that takes them.
 
 ### Output
 
@@ -70,7 +70,7 @@ On failure the CLI writes a structured error in the active `LOAM_OUTPUT_FORMAT` 
 shown):
 
 ```json
-{ "error": { "code": "not_found", "message": "PR #42 not found in repo acme/web" } }
+{ "error": { "code": "not_found", "message": "work branch wb-9c2f1a not found in repo acme/web" } }
 ```
 
 The `code` string names the specific failure within its exit-code class — e.g. `usage`,
@@ -101,7 +101,7 @@ do.
 ```json
 {
   "usage": "…overall usage and conventions…",
-  "commands": [ { "name": "pr list", "summary": "List reviewable PRs" } ],
+  "commands": [ { "name": "work list", "summary": "List work branches" } ],
   "role_instructions": "…configured for this role…"
 }
 ```
@@ -139,14 +139,15 @@ Clone an enrolled repo from the server (server as sole remote), optionally at a 
 
 - `repo` *(required)* — the enrolled repo identifier, `<group>/<repo_name>` (e.g.
   `bobcob7/doc-server`).
-- `branch` *(optional)* — branch to check out; defaults to the repo's target branch.
+- `branch` *(optional)* — branch to check out (typically a work branch created via
+  `work start`); defaults to the repo's target branch.
 
 **Behavior:** Clones the repo from the Loam server into `./<repo_name>` — always the final
 path segment of the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`).
 The clone's only remote is the Loam server, and its git author (`user.name` / `user.email`)
 is set to the agent identity so commits are attributed to the agent. Checks out `branch` if
 given, and **pins** the clone to that branch: `commit` and `push` operate only on it, and
-switching feature branches means cloning again.
+switching work branches means cloning again.
 
 To steer agents through the CLI, `clone` also installs `pre-commit` and `pre-push` git hooks
 in the clone that reject direct `git commit` / `git push`. `loam commit` and `loam push` set
@@ -162,181 +163,209 @@ Work).
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "path": "./doc-server", "branch": "main" }
+{ "repo": "bobcob7/doc-server", "path": "./doc-server", "branch": "wb-9c2f1a" }
 ```
 
 **Errors:** exit `3` if the repo is not enrolled; exit `2` if `branch` does not exist.
 
-#### branch (start feature branch)
-Start a feature branch from a target branch.
+#### commit
+Commit the working copy's changes on the clone's work branch.
 
-**Synopsis:** `loam branch <repo> <name> [from]`
+**Synopsis:** `loam commit` (commit message read from stdin)
+
+**Behavior:** Commits all changes in the working copy on the clone's work branch, authored
+as the agent identity (configured by `clone`). Operates **only** on the work branch the
+clone was created for — if HEAD is on any other branch, it errors. Switching to a different
+work branch requires a fresh `loam clone`.
+
+**Output** (JSON):
+
+```json
+{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "commit": "a1b2c3d" }
+```
+
+**Errors:** exit `2` if HEAD is not on the clone's work branch or there is nothing to
+commit; exit `3` if not run inside a clone.
+
+#### push
+Push the work branch's commits to the server.
+
+**Synopsis:** `loam push`
+
+**Behavior:** Pushes the clone's work branch to the Loam server (its only remote), attaching
+the agent identity/role so the server can authorize the push (role-level in the MVP — see
+README → Agent Identity & Roles). Operates **only** on the clone's work branch; if HEAD is
+on any other branch, it errors. Switching branches requires a fresh `loam clone`.
+
+**Output** (JSON):
+
+```json
+{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "pushed": 3 }
+```
+
+**Errors:** exit `2` if HEAD is not on the clone's work branch or the push is not authorized
+for the caller's role; exit `3` if not run inside a clone.
+
+### Work Branches
+
+A **work branch** is the unit of work and the first-party entity. It is identified by its
+`repo` and `name` — the name is randomly generated and carries no meaning, so a work
+branch's title and description (set via `set`, editable at any time) are its human-facing
+identity. It moves through states `draft` → `reviewable` → `complete`; "review" is simply
+the `reviewable` state plus the comment/verdict activity on it, not a separate object.
+
+Commands that act on an existing work branch take `<repo>` and `<work-branch>` (its name) as
+positional arguments; both are optional when run from inside the repo directory (inferred
+per the Workspace rules above) and required otherwise.
+
+A reviewer contributes a **verdict**: a batch of comments plus an outcome
+(`approve` / `disapprove` / `neutral`), published atomically by `verdict`.
+
+#### start
+Start a work branch from a target branch. The name is randomly generated.
+
+**Synopsis:** `loam work start <repo> [from]`
 
 **Arguments:**
 
 - `repo` *(required)* — the enrolled repo identifier, `<group>/<repo_name>`.
-- `name` *(required)* — the new feature branch name. Free-form (no enforced prefix).
-- `from` *(optional)* — target branch to base off; defaults to the repo's target branch.
+- `from` *(optional)* — target branch to base off; defaults to the repo's default target.
 
-**Behavior:** Creates feature branch `name` on the server from `from`. This is a
-**server-side** ref creation — no local checkout — after which the agent `clone`s the repo
-at `name`. Errors if `name` already exists.
-
-**Output** (JSON):
-
-```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "from": "main" }
-```
-
-**Errors:** exit `2` if `name` already exists or `from` is not a valid target branch; exit
-`3` if the repo is not enrolled.
-
-#### commit
-Commit the working copy's changes on the clone's feature branch.
-
-**Synopsis:** `loam commit` (commit message read from stdin)
-
-**Behavior:** Commits all changes in the working copy on the clone's feature branch,
-authored as the agent identity (configured by `clone`). Operates **only** on the feature
-branch the clone was created for — if HEAD is on any other branch, it errors. Switching to a
-different feature branch requires a fresh `loam clone`.
+**Behavior:** Creates a **randomly named** work branch on the server from `from`, in state
+`draft`, and returns it. This is a **server-side** ref creation — no local checkout — after
+which the agent `clone`s the repo at the returned work branch. The name carries no meaning;
+a work branch's identity is its title and description, not its name.
 
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "commit": "a1b2c3d" }
+{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "state": "draft" }
 ```
 
-**Errors:** exit `2` if HEAD is not on the clone's feature branch or there is nothing to
-commit; exit `3` if not run inside a clone.
+**Errors:** exit `2` if `from` is not a valid target branch; exit `3` if the repo is not
+enrolled.
 
-#### push
-Push the feature branch's commits to the server.
+#### set
+Set or update a work branch's title and/or description. Editable at any point.
 
-**Synopsis:** `loam push`
-
-**Behavior:** Pushes the clone's feature branch to the Loam server (its only remote),
-attaching the agent identity/role so the server can authorize the push (role-level in the
-MVP — see README → Agent Identity & Roles). Operates **only** on the clone's feature branch;
-if HEAD is on any other branch, it errors. Switching branches requires a fresh `loam clone`.
-
-**Output** (JSON):
-
-```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "pushed": 3 }
-```
-
-**Errors:** exit `2` if HEAD is not on the clone's feature branch or the push is not
-authorized for the caller's role; exit `3` if not run inside a clone.
-
-### Local PRs
-
-A PR is identified by its `repo` and feature `branch` — there is no numeric ID. Commands
-that act on an existing PR take `<repo>` and `<branch>` as positional arguments; both are
-optional when run from inside the repo directory (inferred per the Workspace rules above)
-and required otherwise.
-
-#### create
-Open a PR from the current feature branch to its target branch.
-
-**Synopsis:** `loam pr create --title <title>` (description read from stdin)
+**Synopsis:** `loam work set [repo] [work-branch] [--title <title>]` (optional description read from stdin)
 
 **Input:**
 
-- `--title <title>` *(required)* — the PR title.
-- **stdin** *(required)* — the PR description. Free text, or a JSON document when the repo
-  has a description schema configured (see below).
-- `repo`, source branch, and target branch are **not** arguments: repo and source branch
-  are inferred from the current working copy, and the target is the branch the feature
-  branch was created from (via `branch`). There is no `--to` / `--from`.
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- `--title <title>` *(optional)* — new title. Omit to leave the title unchanged.
+- **stdin** *(optional)* — new description, validated against the repo's schema when
+  configured. Omit (empty stdin) to leave the description unchanged.
 
-**Behavior:** Opens a PR from the current feature branch to its target branch. If the repo
-has a description JSON schema configured, the stdin body is validated against it server-side
-before the PR is created. Once created, the PR is visible to reviewers via `pr list`.
+At least one of `--title` or a non-empty stdin must be provided.
 
-**Output** (JSON):
+**Behavior:** Replaces the work branch's title and/or description; nothing else changes.
+Both must be present before the work branch can be made `reviewable`.
+
+**Output** (JSON) — the updated work branch:
 
 ```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "target": "main", "title": "Add login", "state": "open" }
+{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "state": "draft" }
 ```
 
-**Errors:** exit `2` on missing title, failed schema validation, or precondition failure
-(e.g. the feature branch has no commits / has not been pushed); exit `3` if the repo is not
-enrolled.
+**Errors:** exit `2` if neither title nor description is provided, or on failed schema
+validation; exit `3` if the work branch does not exist.
+
+#### reviewable
+Set a work branch reviewable — this is what puts it up for review.
+
+**Synopsis:** `loam work reviewable [repo] [work-branch]`
+
+**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
+above).
+
+**Behavior:** Transitions the work branch from `draft` to `reviewable`, making it visible to
+reviewers via `list`. Requires a title and description to already be set (via `set`).
+
+**Output** (JSON) — the work branch:
+
+```json
+{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "state": "reviewable" }
+```
+
+**Errors:** exit `2` if the work branch has no title or description (precondition failed);
+exit `3` if it does not exist.
 
 #### list
-List PRs across all enrolled repos.
+List work branches across all enrolled repos.
 
-**Synopsis:** `loam pr list [--repo <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state <state>]`
+**Synopsis:** `loam work list [--repo <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state <state>]`
 
 **Input:**
 
 - `--repo <repo>` *(optional)* — limit to one enrolled repo.
-- `--author <id>` *(optional)* — limit to PRs opened by this agent identifier.
-- `--target <branch>` *(optional)* — limit to PRs targeting this branch.
-- `--awaiting-review` *(optional)* — limit to PRs awaiting the calling agent's review.
-- `--state <state>` *(optional)* — defaults to `open`.
+- `--author <id>` *(optional)* — limit to work branches authored by this agent identifier.
+- `--target <branch>` *(optional)* — limit to work branches targeting this branch.
+- `--awaiting-review` *(optional)* — limit to reviewable work branches awaiting the calling
+  agent's verdict.
+- `--state <state>` *(optional)* — `draft` / `reviewable` / `complete`; defaults to
+  `reviewable`.
 
-With no flags, lists all open PRs across all enrolled repos.
+With no flags, lists all reviewable work branches across all enrolled repos.
 
-**Behavior:** Returns matching PRs, each identified by its `repo` and feature `branch`.
+**Behavior:** Returns matching work branches, each identified by its `repo` and `name`.
 
 **Output** (JSON array):
 
 ```json
-[ { "repo": "bobcob7/doc-server", "branch": "feat/login", "target": "main", "title": "Add login", "author": "grace-hopper-3-author", "state": "open" } ]
+[ { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "author": "grace-hopper-3-author", "state": "reviewable" } ]
 ```
 
 **Errors:** exit `2` on a bad filter value. An empty result is a normal exit `0`.
 
-#### get (details)
-Return a PR's metadata, description, and review state. The diff and comment threads are
-fetched separately via `pr diff` and `pr comments`, to keep each response small.
+#### show (details)
+Return a work branch's metadata, title, description, and state. The diff and comment threads
+are fetched separately via `diff` and `comments`, to keep each response small.
 
-**Synopsis:** `loam pr get [repo] [branch]`
+**Synopsis:** `loam work show [repo] [work-branch]`
 
-**Input:** `repo` and `branch` positional arguments identify the PR (see the identifier
+**Input:** `repo` and `work-branch` positional arguments identify the work branch (see the
 convention above).
 
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "target": "main", "title": "Add login",
-  "description": "…", "state": "open", "author": "grace-hopper-3-author" }
+{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login",
+  "description": "…", "state": "reviewable", "author": "grace-hopper-3-author" }
 ```
 
-**Errors:** exit `3` if the PR does not exist; exit `2` if the identifier cannot be resolved
-(not in a clone and arguments omitted).
+**Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
+resolved (not in a clone and arguments omitted).
 
 #### diff
-Return the PR's diff, separately from `pr get` to keep both responses small.
+Return the work branch's diff against its target, separately from `show` to keep both small.
 
-**Synopsis:** `loam pr diff [repo] [branch]`
+**Synopsis:** `loam work diff [repo] [work-branch]`
 
-**Input:** `repo` and `branch` positional arguments identify the PR (see the identifier
+**Input:** `repo` and `work-branch` positional arguments identify the work branch (see the
 convention above).
 
-**Output:** the unified diff of the feature branch against its target branch. Rendered as a
-field in the active `LOAM_OUTPUT_FORMAT` (e.g. `{ "diff": "…" }` for JSON) so output stays
-consistent with every other command.
+**Output:** the unified diff of the work branch against its target branch, as a field in the
+active `LOAM_OUTPUT_FORMAT` (e.g. `{ "diff": "…" }` for JSON).
 
-**Errors:** exit `3` if the PR does not exist; exit `2` if the identifier cannot be resolved.
+**Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
+resolved.
 
 #### comments (get)
-Fetch the comment threads for a PR, or the caller's own staged comments.
+Fetch the comment threads on a work branch, or the caller's own staged comments.
 
-**Synopsis:** `loam pr comments [repo] [branch] [--staged]`
+**Synopsis:** `loam work comments [repo] [work-branch] [--staged]`
 
 **Input:**
 
-- `repo`, `branch` positional — identify the PR (see the identifier convention above).
-- `--staged` *(optional)* — return the caller's locally staged (unpublished) comments for
-  this PR from `.loam` instead of the published threads.
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- `--staged` *(optional)* — return the caller's locally staged (unpublished) comments from
+  `.loam` instead of the published threads.
 
-**Behavior:** By default returns the PR's published threads — each with its resolved state,
-optional file/line anchor, and the comments within it. Published threads only; the caller's
-staged comments are excluded until submitted. With `--staged`, returns those staged items
-instead (the shape produced by `comment`), so an agent can review what it is about to
+**Behavior:** By default returns the work branch's published threads — each with its resolved
+state, optional file/line anchor, and the comments within it. Published threads only; the
+caller's staged comments are excluded until submitted. With `--staged`, returns those staged
+items instead (the shape produced by `comment`), so an agent can review what it is about to
 submit.
 
 **Output** (JSON array) — published threads by default:
@@ -346,16 +375,17 @@ submit.
     "comments": [ { "author": "ada-lovelace-7-reviewer", "body": "…" } ] } ]
 ```
 
-**Errors:** exit `3` if the PR does not exist; exit `2` if the identifier cannot be resolved.
+**Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
+resolved.
 
 #### comment (add)
-Stage a comment on a PR locally. Nothing is published until `pr review` submits.
+Stage a comment on a work branch locally. Nothing is published until `verdict` submits.
 
-**Synopsis:** `loam pr comment [repo] [branch] [--file <path> --line <n>] [--reply <thread-id>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>]` (body read from stdin)
+**Synopsis:** `loam work comment [repo] [work-branch] [--file <path> --line <n>] [--reply <thread-id>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>]` (body read from stdin)
 
 **Input:**
 
-- `repo`, `branch` positional — identify the PR (see the identifier convention above).
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
 - **stdin** — the comment body. Required unless only `--resolve` or `--discard` is given.
 - `--file <path>` + `--line <n>` *(optional)* — anchor a new comment to a line.
 - `--reply <thread-id>` *(optional)* — add the comment to an existing thread rather than
@@ -370,13 +400,14 @@ The modes are mutually exclusive: a single invocation either opens a new thread
 (top-level or `--file`/`--line`-anchored), `--reply`s to one, `--edit`s a staged comment,
 or `--discard`s one. `--resolve` may accompany a new comment or reply, or stand alone.
 
-**Behavior:** Operates on the caller's **local staging area** for this PR (in `.loam`). New
-comments, replies, and resolves append to it; `--edit` and `--discard` modify or remove an
-already-staged item. Staged items accumulate across invocations and stay invisible to
-everyone else until `pr review` publishes them.
+**Behavior:** Operates on the caller's **local staging area** for this work branch (in
+`.loam`). New comments, replies, and resolves append to it; `--edit` and `--discard` modify
+or remove an already-staged item. Staged items accumulate across invocations and stay
+invisible to everyone else until `verdict` publishes them.
 
 **Staging location:** the workspace's `.loam/` directory (see Workspace above), keyed by
-repo, branch, and agent — outside any clone, so reviewers who never clone can still stage.
+repo, work branch, and agent — outside any clone, so reviewers who never clone can still
+stage.
 
 **Output** (JSON) — the staged item with a local staging id:
 
@@ -386,57 +417,57 @@ repo, branch, and agent — outside any clone, so reviewers who never clone can 
 
 **Errors:** exit `2` on conflicting modes (e.g. `--file` with `--reply`), a missing body
 when one is required, or attempting to resolve a thread the caller did not author; exit `3`
-if the PR, referenced thread, or referenced staged comment does not exist.
+if the work branch, referenced thread, or referenced staged comment does not exist.
 
-#### review
-Publish the caller's staged comments for a PR atomically, with an overall outcome.
+#### verdict
+Publish the caller's staged comments on a work branch atomically, as a verdict with an
+outcome.
 
-**Synopsis:** `loam pr review [repo] [branch] --outcome <approve|disapprove|neutral>`
+**Synopsis:** `loam work verdict [repo] [work-branch] --outcome <approve|disapprove|neutral>`
 
 **Input:**
 
-- `repo`, `branch` positional — identify the PR (see the identifier convention above).
-- `--outcome <approve|disapprove|neutral>` *(required)* — the overall review outcome.
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- `--outcome <approve|disapprove|neutral>` *(required)* — the verdict's overall outcome.
 
-**Behavior:** Publishes all of the caller's locally staged comments for this PR in one
-atomic action, attaches the outcome, and clears the local staging area. This is the only
-point at which staged comments become visible on the PR. An `approve` outcome counts toward
-the completion bar (≥1 approval). Submitting with no staged comments is allowed (an
-outcome-only review). Re-submitting records a fresh review and outcome from that reviewer.
+**Behavior:** Publishes all of the caller's locally staged comments for this work branch in
+one atomic action as a verdict, attaches the outcome, and clears the local staging area.
+This is the only point at which staged comments become visible. An `approve` outcome counts
+toward the completion bar (≥1 approval). Submitting with no staged comments is allowed (an
+outcome-only verdict). Re-submitting records a fresh verdict from that reviewer.
 
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "outcome": "approve", "published": 3 }
+{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "outcome": "approve", "published": 3 }
 ```
 
-**Errors:** exit `2` on a missing or invalid outcome; exit `3` if the PR does not exist.
+**Errors:** exit `2` on a missing or invalid outcome; exit `3` if the work branch does not
+exist.
 
 #### complete
-Mark a PR complete and surface it to the admin as a proposed upstream PR.
+Mark a work branch complete and surface it to the admin as a proposed upstream PR.
 
-**Synopsis:** `loam pr complete [repo] [branch] [--title <title>]` (optional description read from stdin)
+**Synopsis:** `loam work complete [repo] [work-branch]`
 
-**Input:**
+**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
+above).
 
-- `repo`, `branch` positional — identify the PR (see the identifier convention above).
-- `--title <title>` *(optional)* — proposed upstream PR title; defaults to the PR's title.
-- **stdin** *(optional)* — proposed upstream PR description; defaults to the PR's
-  description.
-
-**Behavior:** Marks the PR complete, which requires **at least one approval**. Records the
-proposed upstream title/description (the PR's own unless overridden) and surfaces the PR in
-the web interface for the admin to accept or comment on. Completion does **not** itself open
-the upstream PR — that happens only on admin acceptance (see README → Workflow).
+**Behavior:** Marks the work branch `complete`, which requires **at least one approval**. Its
+current title and description become the proposed upstream PR — there is no override, so edit
+them with `set` first if needed — and the work branch is surfaced in the web interface for
+the admin to accept or comment on. Completion does **not** itself open the upstream PR — that
+happens only on admin acceptance, at which point a meaningful upstream branch name is
+generated (see README → Workflow).
 
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "branch": "feat/login", "state": "complete" }
+{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "state": "complete" }
 ```
 
-**Errors:** exit `2` if the PR has fewer than one approval (precondition failed); exit `3`
-if the PR does not exist.
+**Errors:** exit `2` if the work branch has fewer than one approval (precondition failed);
+exit `3` if it does not exist.
 
 ### Graph DB queries
 
@@ -494,7 +525,7 @@ provenance.
 **Output** (JSON array):
 
 ```json
-[ { "repo": "bobcob7/doc-server", "path": "auth.go", "lines": [40, 58], "score": 0.82, "snippet": "…" } ]
+[ { "repo": "bobcob7/doc-server", "file": "auth.go", "lines": [40, 58], "score": 0.82, "snippet": "…" } ]
 ```
 
 **Errors:** exit `2` on bad arguments or unresolvable scope.

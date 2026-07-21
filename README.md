@@ -9,7 +9,7 @@ Github has a lot of features that seem more like metadata about the content, not
 
 Loam is a single self-hosted server that mirrors enrolled upstream repos and
 exposes them to AI agents through one consistent tool. Agents do all their work —
-cloning, branching, committing, opening and reviewing PRs, querying code — against
+cloning, branching, committing, opening and reviewing changes, querying code — against
 this server, never directly against the upstream forge. A human admin enrolls repos and
 gives the final sign-off before anything is pushed upstream.
 
@@ -25,7 +25,7 @@ it sits outside the provider interface.
 ### Components at a glance
 
 - **Server** — the single source of truth. Holds the mirrored git repos, the graph DB,
-  the vector DB, and local PR state. It is the only git remote agents ever see.
+  the vector DB, and local review state. It is the only git remote agents ever see.
 - **CLI tool** — the agent-facing interface. One binary that talks to the server; all
   workflow, querying, and authorization flow through it.
 - **Web interface** — the admin-facing interface. Never used by agents. Used to enroll
@@ -36,7 +36,7 @@ it sits outside the provider interface.
 Local CLI tool that sets up the Git repo and enables consistent workflow and querying and enforces authorization.
 
 A single tool talks to the central server and is the only path agents use to reach it,
-which keeps the workflow (clone → branch → commit → PR → review) consistent and auditable.
+which keeps the workflow (clone → branch → commit → open review → verdict) consistent and auditable.
 Every call carries the agent's identity and role (below), which the server uses to
 authorize the requested operation. Its command surface is specified in
 [`docs/cli-spec.md`](docs/cli-spec.md).
@@ -84,53 +84,63 @@ This information can be queried through the CLI tool.
 On merge to a target branch, docs and code are split into semantically meaningful chunks
 (a doc section, a function, a class), embedded, and stored in a vector DB. Agents run
 natural-language queries through the CLI to pull the most relevant chunks as context —
-"how is auth handled here", "where do we format PR descriptions" — instead of grepping
+"how is auth handled here", "where do we format review descriptions" — instead of grepping
 blind. The graph DB answers *structural* questions; RAG answers *semantic* ones.
 
-#### Local PRs
+#### Work Branches
 
-PRs live on the Loam server, not upstream. Agents open them, other agents review
-them, and only after the admin approves does anything reach the upstream forge. The CLI
-exposes the full review loop below. Reviewer selection and lifecycle are handled by an
-external orchestrator, not by Loam — agents discover PRs awaiting their review by
-polling List.
+A work branch is the first-party unit of work; "review" is a state of it, not a separate
+object. A work branch has a randomly generated name plus a title and description the agent
+sets and refines as work progresses. When ready, the agent sets it **reviewable**; other
+agents then submit **verdicts**, and only after the admin approves does anything reach the
+upstream forge. The CLI exposes the full loop below. Reviewer selection and lifecycle are
+handled by an external orchestrator, not by Loam — agents discover reviewable work branches
+awaiting their verdict by polling List.
 
 ##### List
-Using the CLI tool, agents will be able to list reviewable PRs.
+Using the CLI tool, agents will be able to list work branches.
 
-Returns open PRs with basic status, filterable by repo, target branch, author, and
-whether the PR is awaiting the calling agent's review.
+Returns work branches with basic status, filterable by repo, target branch, author, state,
+and whether a reviewable work branch is awaiting the calling agent's verdict.
 
 ##### Get Details
-Another command will pull the details of the PR.
+Another command will pull the details of a work branch.
 
-Returns the full PR: title, description, source/target branches, the diff, current review
-state, and the comment threads.
+Returns the full work branch: title, description, target branch, current state, and the
+comment threads (the diff is fetched separately).
+
+##### Set Title / Description
+A command sets or updates a work branch's title and description. Because the branch name is
+random, these are its human-facing identity and can be changed at any point as the work
+evolves.
+
+##### Set Reviewable
+A command transitions a work branch to **reviewable**, putting it up for review. It requires
+a title and description to be set first.
 
 ##### Comment
-Another command will pull individual PR comments.
+Another command will pull individual comments on a work branch.
 
-Fetches comment threads for a PR — the comment body, the file/line it anchors to, author,
-and whether the thread is resolved — so an agent can work through review feedback item by
-item.
+Fetches comment threads — the comment body, the file/line it anchors to, author, and whether
+the thread is resolved — so an agent can work through feedback item by item.
 
 ##### Add Comment
-Another command will either reply to a PR comment, or create a new one.
+Another command will either reply to a comment, or create a new one.
 
-Creates a new comment (optionally anchored to a file/line) or replies to an existing
-thread, and can mark a thread resolved. Comment and response shape can be constrained by
-the admin's JSON schema (see Git → Local PRs).
+Creates a new comment (optionally anchored to a file/line) or replies to an existing thread,
+and can mark a thread resolved. Comment and response shape can be constrained by the admin's
+JSON schema (see Git → Work Branches).
 
 Comments are **staged locally on the CLI**, not sent to the server as they are written. A
-reviewer accumulates their comments across the diff and nothing is visible on the PR until
-they submit (see Submit Review).
+reviewer accumulates their comments across the diff and nothing is visible until they submit
+(see Submit Verdict).
 
-##### Submit Review
-Publishes a reviewer's staged comments to the server in one atomic action, together with an
-overall outcome: **approve**, **disapprove**, or **neutral**. This is the only point at
-which staged comments become visible on the PR. Approvals gate completion: a PR needs **at
-least one approval** before it can be marked complete and surfaced to the admin as a
-proposed upstream PR.
+##### Submit Verdict
+Publishes a reviewer's staged comments to the server in one atomic action as a verdict,
+together with an overall outcome: **approve**, **disapprove**, or **neutral**. This is the
+only point at which staged comments become visible. Approvals gate completion: a work branch
+needs **at least one approval** before it can be marked complete and surfaced to the admin as
+a proposed upstream PR.
 
 ### Git
 
@@ -162,21 +172,22 @@ The CLI tool will have a git clone command that will clone in the repo at specif
 Clones an enrolled repo from the server, checking out a given branch when one is specified
 and the target branch otherwise. The resulting clone has the server set as its only remote.
 
-#### Local PRs
+#### Work Branches
 
-The CLI tool can be used to create PRs from specific branches to target branches.
-When a PR is opened, a title, and description is required.
-Upon opening a PR, open PRs will show up on the CLI tool
-A JSON schema can be setup by the admin from the web interface to enforce PR description format and comment/response formats.
+The CLI tool can be used to start work branches from target branches, set their title and
+description, and set them reviewable. Making a work branch reviewable requires a title and
+description.
+A JSON schema can be setup by the admin from the web interface to enforce description format and comment/response formats.
 
-Creating a PR requires a title and description; the PR then becomes visible to other agents
-for review via the List/Get Details commands. The admin can register a JSON schema per repo
-that the server validates PR descriptions and comments/responses against, so every PR and
-review follows a consistent, machine-checkable format.
+Once reviewable, a work branch is visible to other agents via the List/Get Details commands.
+The admin can register a JSON schema per repo that the server validates descriptions and
+comments/responses against, so every work branch follows a consistent, machine-checkable
+format.
 
-Local PRs never merge into the server's branches. Accepting a completed PR only opens the
-corresponding upstream PR against the target branch; the server's target branch advances
-solely by pulling merged changes back from upstream (see mirror sync above).
+Work branches never merge into the server's branches. Accepting a completed work branch (in
+the web interface) only opens the corresponding upstream PR against the target branch; the
+server's target branch advances solely by pulling merged changes back from upstream (see
+mirror sync above).
 
 ### Web Interface
 
@@ -202,7 +213,7 @@ provider interface.
 
 The admin should be able to enroll repos, by upstream URL.
 
-Target branches can be specified. These branches are eligable for PR creation.
+Target branches can be specified. These branches are eligible as targets for reviews.
 
 ### Workflow
 
@@ -214,17 +225,17 @@ Target branches can be specified. These branches are eligable for PR creation.
 5. Admin specifies target branches.
 6. Server ingests data from the target branches.
 
-#### Feature Work
-1. Feature is defined by user.
-2. Agent will use CLI to start a feature branch from target branch.
-3. Agent will use CLI Clone the repo with the feature branch.
-4. Agent will do work and make commits and push them.
-5. Agent will use the CLI to open a PR and request reviews.
-6. Other agents review the PR and submit reviews (staged comments plus an approve/disapprove/neutral outcome).
-7. Agent will read PR comments and iterate on them. Comments will be resolved once the agent thinks that they've been.
-8. Once the PR has at least one approval, it is marked complete, and the web interface shows the proposed upstream PR title and description.
-9. Admin will review the proposed upstream PR in the web interface. Admin can either accept or leave a comment.
-10. Upon acceptance, an upstream PR is created on the forge (Forgejo for MVP, GitHub for GH) with the proposed title and description.
+#### Work & Review
+1. Work is defined by the user.
+2. The agent starts a work branch from a target branch. Its name is randomly generated — a work branch's identity is its title and description, not its name.
+3. The agent clones the repo at the work branch, then does the work, committing and pushing as it goes.
+4. The agent gives the work branch a title and description, refining them as the work takes shape. They belong to the work branch and can be updated at any time.
+5. When the work is ready, the agent sets the work branch **reviewable** — this is what puts it up for review. There is no separate PR or review object; "review" is simply a state of the work branch.
+6. Other agents review it and submit **verdicts**: staged comments plus an approve / disapprove / neutral outcome.
+7. The author reads the comments and iterates, resolving threads once it believes they've been addressed.
+8. Once the work branch has at least one approving verdict, the author marks it **complete**. Its current title and description become the proposed upstream PR, shown to the admin in the web interface.
+9. The admin reviews the proposed upstream PR and either accepts it or leaves a comment.
+10. On acceptance, an upstream PR is created on the forge (Forgejo for MVP, GitHub for GH) with a generated branch name, using the work branch's title and description.
 
 ### Future Work
 
@@ -246,17 +257,20 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
 - **Reviewer sub-roles.** Split the single reviewer role into specialized types (e.g.
   security, style, architecture), each with its own sub-instructions delivered via the
   `instructions` command. Each sub-role carries two policy flags: whether its review is
-  **required** (a PR cannot complete until that sub-role has reviewed) and whether its
+  **required** (a work branch cannot complete until that sub-role has reviewed) and whether its
   **approval** is required (that sub-role must return an approve outcome), extending the
   MVP's flat "at least one approval" bar into a per-sub-role matrix.
 - **Reviewer orchestration.** Have Loam itself drive reviewers rather than relying
-  on an external orchestrator: assign the sub-roles a given PR needs, dispatch/notify the
+  on an external orchestrator: assign the sub-roles a given review needs, dispatch/notify the
   matching agents, and track which required reviews and approvals are still outstanding
-  before a PR can be marked complete.
+  before a work branch can be marked complete.
+- **Collaborative work branches.** Let multiple agents work the same work branch at once by
+  cloning it into separate directories and coordinating commits/pushes on the shared branch.
+  The MVP assumes a single agent per work branch.
 - **Expanded Tree-sitter grammar coverage.** Grow the shipped grammar set beyond the MVP
   starter languages as needed.
 - **Releases.** Local release proposals (tag + notes on a target branch) that propagate
-  upstream on admin approval, mirroring the PR flow.
+  upstream on admin approval, the same way a completed work branch reaches upstream.
 - **Multiple admins / users.** Move beyond the single startup admin credential to multiple
   admin accounts and roles in the web interface.
 
