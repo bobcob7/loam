@@ -7,35 +7,52 @@ Status: **draft / in progress.** Sections marked TODO are not yet specified.
 
 ## Conventions
 
-TODO — remaining shared conventions to specify:
-
-- Binary / invocation name.
-- Global flags (e.g. `--repo`, `--server`) and how they relate to the environment
-  variables below.
-- Exit codes and error shape.
+The binary is invoked as `loam`. Configuration is entirely through environment variables
+(see below) — the CLI has **no global flags**.
 
 ### Output
 
 Output is **JSON by default** — the CLI is agent-first, so structured output is the norm
-and the format agents should parse. Set `LOAM_HUMAN_READABLE` (see Environment
-Variables) to switch to human-readable output for interactive use. This applies globally
-to every command.
+and the format agents should parse. `LOAM_OUTPUT_FORMAT` (see Environment Variables) selects the
+format: `json` (default), `yaml`, `xml`, or `human` for interactive use. This applies
+globally to every command.
 
 ### Environment Variables
 
-The complete set of environment variables the CLI reads. Identity & role feed the
-authorization model described in README → Agent Identity & Roles. Names are provisional.
+The complete set of environment variables the CLI reads. All are **required except
+`LOAM_OUTPUT_FORMAT`**. Identity & role feed the authorization model described in README → Agent
+Identity & Roles. Names are provisional.
 
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `LOAM_SERVER` | Base URL of the Loam server the CLI talks to. | TODO — required? |
-| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | — |
-| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | — |
-| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | — |
-| `LOAM_HUMAN_READABLE` | When set to a truthy value, emit human-readable output instead of JSON. | unset (JSON) |
+| Variable | Purpose | Required | Default |
+| --- | --- | --- | --- |
+| `LOAM_SERVER_URL` | URL of the Loam server the CLI talks to. A URL (rather than host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
+| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes | — |
+| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes | — |
+| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes | — |
+| `LOAM_OUTPUT_FORMAT` | Output format: `json`, `yaml`, `xml`, or `human`. | no | `json` |
 
-TODO — confirm the `LOAM_` prefix, which variables are required vs. optional, and
-precedence if a global flag ever overlaps an environment variable.
+### Exit Codes & Errors
+
+All output — success and error alike — is written to **stdout**. Because the CLI is used
+almost entirely by agents, exit codes are kept deliberately coarse:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Unexpected internal error |
+| 2 | Usage error, authorization denied, conflict, or precondition failed |
+| 3 | Not found |
+
+On failure the CLI writes a structured error in the active `LOAM_OUTPUT_FORMAT` format (JSON
+shown):
+
+```json
+{ "error": { "code": "not_found", "message": "PR #42 not found in repo acme/web" } }
+```
+
+The `code` string names the specific failure within its exit-code class — e.g. `usage`,
+`unauthorized`, `conflict`, and `precondition_failed` all exit `2`. In `human` output mode
+the CLI prints a plain message instead of the structured object.
 
 ## Commands
 
