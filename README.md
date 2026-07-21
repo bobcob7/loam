@@ -230,11 +230,12 @@ Target branches can be specified. These branches are eligable for PR creation.
 
 Post-MVP directions, roughly in priority order. None are required for the MVP to be useful.
 
-- **Precise cross-file code intelligence.** Layer per-language symbol resolution on top of
-  the Tree-sitter parse to get accurate definitions, references, and blast-radius. Standard
-  options: **SCIP** (Sourcegraph) with per-language indexers, or **stack-graphs** (GitHub)
-  to stay within the Tree-sitter toolchain. This upgrades the Graph DB from approximate to
-  exact reference edges.
+- **Precise & cross-repo code intelligence.** Layer per-language symbol resolution on top
+  of the Tree-sitter parse to get accurate definitions, references, and blast-radius — and,
+  crucially, **cross-repo dependency edges** (global symbol identity + import/coordinate
+  resolution, so a usage in one repo links to its definition in another). Standard options:
+  **SCIP** (Sourcegraph) with per-language indexers, or **stack-graphs** (GitHub) to stay
+  within the Tree-sitter toolchain. Until then, `graph --all` is a per-repo fan-out only.
 - **GitHub support (close second forge).** Promote GitHub from secondary to fully
   supported behind the existing provider interface — GitHub PAT credentials and the GitHub
   PR REST API. Git transport already works unchanged.
