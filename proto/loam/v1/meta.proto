@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package loam.v1;
+
+// Orientation for the calling agent. Backs `loam instructions`.
+// (`loam whoami` is local-only and has no RPC.)
+service MetaService {
+  // Returns general CLI usage, the commands available to the caller's role, and
+  // the role-specific instructions configured in the web console.
+  rpc GetInstructions(GetInstructionsRequest) returns (GetInstructionsResponse);
+}
+
+message GetInstructionsRequest {
+  // When set, return help for just this command instead of the full orientation.
+  optional string command = 1;
+}
+
+message GetInstructionsResponse {
+  // General usage guide (overall usage + conventions).
+  string usage = 1;
+  // Commands available to the caller's role.
+  repeated CommandInfo commands = 2;
+  // Role-specific instructions configured for the caller's role.
+  string role_instructions = 3;
+}
+
+message CommandInfo {
+  string name = 1;
+  string summary = 2;
+}

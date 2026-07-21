@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package loam.v1;
+
+// Shared messages and enums used across the Loam services.
+//
+// Agent identity and role are NOT carried in any request message. The CLI sends
+// the LOAM_AGENT_* values as request headers and a server interceptor reads them
+// into the request context for authorization. Requests therefore only describe
+// the operation, never who is asking.
+
+// Scope for queries that can target specific repos or every enrolled repo.
+//
+// The CLI resolves directory inference locally and populates `repos` with the
+// concrete repo(s) chosen: an inferred or `--repo` repo yields one entry, and
+// `--all` yields an empty list. An empty list means "all enrolled repos" (the
+// fan-out); the CLI only sends empty on explicit `--all`, so an accidental
+// empty scope never fans out.
+message QueryScope {
+  // Enrolled repo identifiers, each "<group>/<name>". Empty = all enrolled repos.
+  repeated string repos = 1;
+}
+
+// Outcome attached to a submitted review.
+enum ReviewOutcome {
+  REVIEW_OUTCOME_UNSPECIFIED = 0;
+  REVIEW_OUTCOME_APPROVE = 1;
+  REVIEW_OUTCOME_DISAPPROVE = 2;
+  REVIEW_OUTCOME_NEUTRAL = 3;
+}
+
+// Lifecycle state of a pull request.
+enum PullRequestState {
+  PULL_REQUEST_STATE_UNSPECIFIED = 0;
+  PULL_REQUEST_STATE_OPEN = 1;
+  PULL_REQUEST_STATE_COMPLETE = 2;
+}
+
+// A pull request. Identity is (repo, branch) — there is no numeric id.
+message PullRequest {
+  // Enrolled repo identifier, "<group>/<name>".
+  string repo = 1;
+  // Feature branch; the PR identifier together with `repo`.
+  string branch = 2;
+  // Target branch the PR merges into.
+  string target = 3;
+  string title = 4;
+  // Full description. Omitted in list summaries.
+  string description = 5;
+  PullRequestState state = 6;
+  // Agent identifier of the author, "<name>-<id>-<role>".
+  string author = 7;
+}
+
+// A single comment within a thread.
+message Comment {
+  // Agent identifier of the comment's author.
+  string author = 1;
+  string body = 2;
+}
+
+// A location within a file: a file path and an optional line. Shared by comment
+// anchors and by the graph's resolved code Location.
+message FileLine {
+  string file = 1;
+  // Absent = the whole file / no specific line.
+  optional uint32 line = 2;
+}
+
+// A published comment thread on a pull request.
+message Thread {
+  string id = 1;
+  bool resolved = 2;
+  // File/line anchor. Unset for a top-level thread.
+  optional FileLine anchor = 3;
+  repeated Comment comments = 4;
+}
+
+// Offset-based pagination for list-returning requests.
+message Page {
+  // Maximum records to return. 0 means "use the server default"; the server also
+  // enforces a hard maximum regardless of the requested value.
+  uint32 limit = 1;
+  // Number of leading records to skip.
+  uint32 offset = 2;
+}
+
+// Pagination metadata returned alongside a page of results. With `total`, the
+// caller knows more remain when offset + returned-count < total.
+message PageInfo {
+  // Total records matching the request across all pages.
+  uint32 total = 1;
+}

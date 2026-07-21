@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package loam.v1;
+
+import "loam/v1/common.proto";
+
+// Structural queries over the Tree-sitter graph. A single Query RPC whose
+// request is a oneof over the supported query kinds (so each kind can grow its
+// own parameters independently) and whose response is a oneof over the result
+// shapes. `--all` scope is a per-repo fan-out (no cross-repo dependency edges in
+// the MVP).
+service GraphService {
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+message QueryRequest {
+  // Scope is shared across every query kind.
+  QueryScope scope = 1;
+  // Pagination, applied to whichever result list the query produces.
+  Page page = 2;
+  oneof query {
+    DefinitionQuery definition = 3; // -> locations
+    ReferencesQuery references = 4; // -> locations
+    DependenciesQuery dependencies = 5; // -> dependencies
+    DependentsQuery dependents = 6; // -> dependencies
+    HistoryQuery history = 7; // -> history
+  }
+}
+
+// Where a symbol is defined.
+message DefinitionQuery {
+  string symbol = 1;
+}
+
+// Everywhere a symbol is referenced.
+message ReferencesQuery {
+  string symbol = 1;
+}
+
+// What the target depends on.
+message DependenciesQuery {
+  string target = 1; // file or symbol
+}
+
+// What depends on the target (blast radius).
+message DependentsQuery {
+  string target = 1; // file or symbol
+}
+
+// A symbol's commit/ref history.
+message HistoryQuery {
+  string symbol = 1;
+}
+
+// The server always sets the result variant matching the requested query kind,
+// even when there are no matches (an empty list), so the caller can tell which
+// result shape it received. The variant is never left unset on success.
+message QueryResponse {
+  oneof result {
+    LocationList locations = 1; // definition, references
+    DependencyList dependencies = 2; // dependencies, dependents
+    HistoryList history = 3; // history
+  }
+  PageInfo page_info = 4;
+}
+
+message Location {
+  string repo = 1;
+  FileLine file_line = 2;
+  // Absent when the location refers to a file rather than a specific symbol.
+  optional string symbol = 3;
+}
+
+message DependencyEdge {
+  // The dependent endpoint (what has the dependency).
+  Location from = 1;
+  // The depended-upon endpoint. Per-endpoint repo means a future cross-repo edge
+  // can span two repos; in the MVP fan-out both endpoints share a repo.
+  Location to = 2;
+}
+
+message HistoryEntry {
+  string repo = 1;
+  string commit = 2;
+  string ref = 3;
+  string message = 4;
+}
+
+message LocationList {
+  repeated Location locations = 1;
+}
+
+message DependencyList {
+  repeated DependencyEdge edges = 1;
+}
+
+message HistoryList {
+  repeated HistoryEntry entries = 1;
+}

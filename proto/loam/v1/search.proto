@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package loam.v1;
+
+import "loam/v1/common.proto";
+
+// Natural-language semantic search over ingested docs/code (RAG). Backs
+// `loam search`. Unlike graph, `--all` scope genuinely spans repos.
+service SearchService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message SearchRequest {
+  string query = 1;
+  QueryScope scope = 2;
+  // Pagination. When Page.limit is 0, the server default (10) applies.
+  Page page = 3;
+}
+
+message SearchResult {
+  string repo = 1;
+  string file = 2;
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+  float score = 5;
+  string snippet = 6;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  PageInfo page_info = 2;
+}

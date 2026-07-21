@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package loam.v1;
+
+import "loam/v1/common.proto";
+
+// The local pull request lifecycle. Comment staging (`loam pr comment`) and
+// `--staged` listing happen locally in `.loam`; only SubmitReview crosses the
+// wire, publishing the staged comments in one atomic action.
+service PullRequestService {
+  // Open a PR from the current feature branch to its target branch.
+  rpc CreatePullRequest(CreatePullRequestRequest) returns (CreatePullRequestResponse);
+
+  // List PRs across all enrolled repos, filtered by the request fields.
+  rpc ListPullRequests(ListPullRequestsRequest) returns (ListPullRequestsResponse);
+
+  // Fetch a PR's metadata, description, and review state (no diff, no threads).
+  rpc GetPullRequest(GetPullRequestRequest) returns (GetPullRequestResponse);
+
+  // Fetch a PR's diff, separately to keep responses small.
+  rpc GetPullRequestDiff(GetPullRequestDiffRequest) returns (GetPullRequestDiffResponse);
+
+  // Fetch a PR's published comment threads.
+  rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse);
+
+  // Publish the caller's staged comments atomically with an overall outcome.
+  rpc SubmitReview(SubmitReviewRequest) returns (SubmitReviewResponse);
+
+  // Mark a PR complete (requires >= 1 approval) and record the proposed upstream
+  // title/description, surfacing it to the admin.
+  rpc CompletePullRequest(CompletePullRequestRequest) returns (CompletePullRequestResponse);
+}
+
+message CreatePullRequestRequest {
+  string repo = 1;
+  string title = 2;
+  // PR description; validated against the repo's schema when configured.
+  string description = 3;
+}
+
+message CreatePullRequestResponse {
+  PullRequest pull_request = 1;
+}
+
+message ListPullRequestsRequest {
+  optional string repo = 1;
+  // Filter by author agent identifier.
+  optional string author = 2;
+  optional string target = 3;
+  // Limit to PRs awaiting the calling agent's review.
+  bool awaiting_review = 4;
+  // Defaults to OPEN when unset.
+  optional PullRequestState state = 5;
+  Page page = 6;
+}
+
+message ListPullRequestsResponse {
+  repeated PullRequest pull_requests = 1;
+  PageInfo page_info = 2;
+}
+
+message GetPullRequestRequest {
+  string repo = 1;
+  string branch = 2;
+}
+
+message GetPullRequestResponse {
+  PullRequest pull_request = 1;
+}
+
+message GetPullRequestDiffRequest {
+  string repo = 1;
+  string branch = 2;
+}
+
+message GetPullRequestDiffResponse {
+  // Unified diff of the feature branch against its target.
+  string diff = 1;
+}
+
+message ListCommentsRequest {
+  string repo = 1;
+  string branch = 2;
+  Page page = 3;
+}
+
+message ListCommentsResponse {
+  repeated Thread threads = 1;
+  PageInfo page_info = 2;
+}
+
+// A comment being published as part of a review.
+message ReviewComment {
+  oneof target {
+    // Start a new thread (optionally line-anchored).
+    NewThread new_thread = 1;
+    // Reply to an existing thread by id.
+    string reply_to_thread_id = 2;
+  }
+  string body = 3;
+}
+
+message NewThread {
+  // File/line anchor; unset for a top-level thread.
+  optional FileLine anchor = 1;
+}
+
+message SubmitReviewRequest {
+  string repo = 1;
+  string branch = 2;
+  ReviewOutcome outcome = 3;
+  // The caller's staged comments, published atomically.
+  repeated ReviewComment comments = 4;
+  // Threads to mark resolved. The server enforces author-only resolution.
+  repeated string resolve_thread_ids = 5;
+}
+
+message SubmitReviewResponse {
+  ReviewOutcome outcome = 1;
+  // Number of comments published.
+  uint32 published = 2;
+}
+
+message CompletePullRequestRequest {
+  string repo = 1;
+  string branch = 2;
+  // Proposed upstream title; defaults to the PR's title.
+  optional string title = 3;
+  // Proposed upstream description; defaults to the PR's description.
+  optional string description = 4;
+}
+
+message CompletePullRequestResponse {
+  PullRequest pull_request = 1;
+}
