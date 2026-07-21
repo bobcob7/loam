@@ -1,13 +1,13 @@
-# Work Spaces
+# Loam
 
-This is a centralized code repo with MCP services.
+This is a centralized code repo with a CLI tool and code-intelligence services.
 
 ### Purpose
 
 I find it cumbersome to use GitHub or other centralized code repository systems.
 Github has a lot of features that seem more like metadata about the content, not enriching the metadata.
 
-Work Spaces is a single self-hosted server that mirrors enrolled upstream repos and
+Loam is a single self-hosted server that mirrors enrolled upstream repos and
 exposes them to AI agents through one consistent tool. Agents do all their work —
 cloning, branching, committing, opening and reviewing PRs, querying code — against
 this server, never directly against the upstream forge. A human admin enrolls repos and
@@ -26,21 +26,20 @@ it sits outside the provider interface.
 
 - **Server** — the single source of truth. Holds the mirrored git repos, the graph DB,
   the vector DB, and local PR state. It is the only git remote agents ever see.
-- **MCP / CLI tool** — the agent-facing interface. One binary that runs either as a plain
-  CLI or as an MCP server, so agents drive it with natural tool calls. All workflow,
-  querying, and authorization flow through it.
+- **CLI tool** — the agent-facing interface. One binary that talks to the server; all
+  workflow, querying, and authorization flow through it.
 - **Web interface** — the admin-facing interface. Never used by agents. Used to enroll
   repos, manage upstream credentials, and approve proposed upstream PRs.
 
-### MCP
+### CLI Tool
 
-Local MCP CLI tool that sets up the Git repo and enables consistent workflow and querying and enforces authorization.
+Local CLI tool that sets up the Git repo and enables consistent workflow and querying and enforces authorization.
 
-A single tool serves two front-ends over the same core: a scriptable CLI for humans and
-an MCP server so agents can call each command as a tool. It is the only path agents use to
-reach the server, which keeps the workflow (clone → branch → commit → PR → review)
-consistent and auditable. Every call carries the agent's identity and role (below), which
-the server uses to authorize the requested operation.
+A single tool talks to the central server and is the only path agents use to reach it,
+which keeps the workflow (clone → branch → commit → PR → review) consistent and auditable.
+Every call carries the agent's identity and role (below), which the server uses to
+authorize the requested operation. Its command surface is specified in
+[`docs/cli-spec.md`](docs/cli-spec.md).
 
 #### Agent Identity & Roles
 
@@ -90,10 +89,10 @@ blind. The graph DB answers *structural* questions; RAG answers *semantic* ones.
 
 #### Local PRs
 
-PRs live on the Work Spaces server, not upstream. Agents open them, other agents review
+PRs live on the Loam server, not upstream. Agents open them, other agents review
 them, and only after the admin approves does anything reach the upstream forge. The CLI
 exposes the full review loop below. Reviewer selection and lifecycle are handled by an
-external orchestrator, not by Work Spaces — agents discover PRs awaiting their review by
+external orchestrator, not by Loam — agents discover PRs awaiting their review by
 polling List.
 
 ##### List
@@ -249,7 +248,7 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
   **required** (a PR cannot complete until that sub-role has reviewed) and whether its
   **approval** is required (that sub-role must return an approve outcome), extending the
   MVP's flat "at least one approval" bar into a per-sub-role matrix.
-- **Reviewer orchestration.** Have Work Spaces itself drive reviewers rather than relying
+- **Reviewer orchestration.** Have Loam itself drive reviewers rather than relying
   on an external orchestrator: assign the sub-roles a given PR needs, dispatch/notify the
   matching agents, and track which required reviews and approvals are still outstanding
   before a PR can be marked complete.
