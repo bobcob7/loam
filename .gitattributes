@@ -1,0 +1,11 @@
+# Normalize line endings to LF for all text files, on every platform.
+* text=auto eol=lf
+
+# Be explicit for the file types in this repo.
+*.proto text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
