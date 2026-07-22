@@ -1,0 +1,34 @@
+version: '3'
+
+# Buf and the codegen plugins are pinned in go.mod's `tool` block and run via
+# `go tool ...`, so no global installs are needed — only the Go toolchain.
+
+tasks:
+  default:
+    cmds:
+      - task: proto:lint
+
+  tools:
+    desc: Download the pinned Go tools (buf, protoc-gen-go, protoc-gen-connect-go)
+    cmds:
+      - go mod download
+
+  proto:lint:
+    desc: Lint the protobuf schema
+    cmds:
+      - go tool buf lint
+
+  proto:format:
+    desc: Format the protobuf files in place
+    cmds:
+      - go tool buf format -w
+
+  proto:generate:
+    desc: Generate Go + Connect code into gen/
+    cmds:
+      - go tool buf generate
+
+  proto:breaking:
+    desc: Check the schema for breaking changes against the master branch
+    cmds:
+      - go tool buf breaking --against '.git#branch=master'

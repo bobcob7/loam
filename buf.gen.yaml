@@ -3,11 +3,12 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/bobcob7/loam/gen
+      value: github.com/bobcob7/loam/internal/gen
 plugins:
-  - remote: buf.build/protocolbuffers/go
-    out: gen
+  # Local plugins pinned as Go tools (see go.mod `tool` block), invoked via `go tool`.
+  - local: [go, tool, protoc-gen-go]
+    out: internal/gen
     opt: paths=source_relative
-  - remote: buf.build/connectrpc/go
-    out: gen
+  - local: [go, tool, protoc-gen-connect-go]
+    out: internal/gen
     opt: paths=source_relative

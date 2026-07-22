@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package loam.admin.v1;
+
+import "loam/v1/common.proto";
+
+// Admin-only repo enrollment and management (see docs/web-spec.md). Gated by admin
+// basic auth. The admin's repo view is richer than the CLI's read-only
+// loam.v1.RepoService.GetRepo.
+service RepoAdminService {
+  // Enroll by upstream URL; the server derives the "<group>/<repo_name>" identifier,
+  // clones the repo, and begins periodic sync + ingest of the target branches.
+  rpc EnrollRepo(EnrollRepoRequest) returns (EnrollRepoResponse);
+
+  // Enrolled repos with status.
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+
+  // One repo with full status.
+  rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
+
+  // Unenroll and drop the local mirror, graph, and vector data.
+  rpc RemoveRepo(RemoveRepoRequest) returns (RemoveRepoResponse);
+
+  // Replace the branches eligible as work-branch targets.
+  rpc SetTargetBranches(SetTargetBranchesRequest) returns (SetTargetBranchesResponse);
+
+  // Set/replace the JSON Schema (as a JSON string) validating work-branch
+  // descriptions and comment/response formats; empty clears it.
+  rpc SetDescriptionSchema(SetDescriptionSchemaRequest) returns (SetDescriptionSchemaResponse);
+}
+
+enum SyncState {
+  SYNC_STATE_UNSPECIFIED = 0;
+  SYNC_STATE_IDLE = 1;
+  SYNC_STATE_SYNCING = 2;
+  SYNC_STATE_ERROR = 3;
+}
+
+message SyncStatus {
+  SyncState state = 1;
+  // RFC 3339 timestamp of the last successful sync; empty if never.
+  string last_synced_at = 2;
+  // Error detail when state is SYNC_STATE_ERROR; empty otherwise.
+  string error = 3;
+}
+
+message EnrolledRepo {
+  // Enrolled repo identifier, "<group>/<repo_name>".
+  string repo = 1;
+  string upstream_url = 2;
+  repeated string target_branches = 3;
+  string default_target = 4;
+  SyncStatus sync = 5;
+  bool has_description_schema = 6;
+}
+
+message EnrollRepoRequest {
+  string upstream_url = 1;
+  repeated string target_branches = 2;
+}
+
+message EnrollRepoResponse {
+  EnrolledRepo repo = 1;
+}
+
+message ListReposRequest {
+  loam.v1.Page page = 1;
+}
+
+message ListReposResponse {
+  repeated EnrolledRepo repos = 1;
+  loam.v1.PageInfo page_info = 2;
+}
+
+message GetRepoRequest {
+  string repo = 1;
+}
+
+message GetRepoResponse {
+  EnrolledRepo repo = 1;
+}
+
+message RemoveRepoRequest {
+  string repo = 1;
+}
+
+message RemoveRepoResponse {}
+
+message SetTargetBranchesRequest {
+  string repo = 1;
+  repeated string target_branches = 2;
+}
+
+message SetTargetBranchesResponse {
+  EnrolledRepo repo = 1;
+}
+
+message SetDescriptionSchemaRequest {
+  string repo = 1;
+  // JSON Schema document, as a JSON string. Empty clears the schema.
+  string schema = 2;
+}
+
+message SetDescriptionSchemaResponse {
+  EnrolledRepo repo = 1;
+}

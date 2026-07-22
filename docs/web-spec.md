@@ -50,8 +50,9 @@ request-review) rather than duplicating them. Agents (identity headers only) can
 
 ## Admin API
 
-Admin-facing Connect services, package `loam.admin.v1`, served under `/loam.admin.v1.*` and
-gated by admin basic auth. The SPA consumes them with a connect-web client.
+Admin-facing Connect services, package `loam.admin.v1` (defined in `proto/loam/admin/v1/`),
+served under `/loam.admin.v1.*` and gated by admin basic auth. The SPA consumes them with a
+connect-web client.
 
 ### RepoAdminService
 Enroll and manage repos. The admin's repo view is richer than the CLI's read-only

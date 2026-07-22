@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package loam.admin.v1;
+
+// Admin-only configuration of agent roles (see README -> Agent Identity & Roles and
+// docs/web-spec.md). A role grants a set of operations and carries the instruction
+// text returned by loam.v1.MetaService.GetInstructions.
+service RoleService {
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc GetRole(GetRoleRequest) returns (GetRoleResponse);
+  rpc CreateRole(CreateRoleRequest) returns (CreateRoleResponse);
+  rpc UpdateRole(UpdateRoleRequest) returns (UpdateRoleResponse);
+  // Built-in roles cannot be deleted.
+  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse);
+}
+
+message Role {
+  string name = 1;
+  // Granted operations, from the fixed command-group vocabulary: "work.start",
+  // "work.set", "work.request_review", "work.reply", "work.verdict", "work.read",
+  // "git.clone", "git.push", "graph.query", "search". (`instructions` and `whoami`
+  // are always available and ungated; `commit` is local.)
+  repeated string operations = 2;
+  // Role-specific instructions returned by MetaService.GetInstructions.
+  string instructions = 3;
+  // True for built-in roles (author, reviewer), which cannot be deleted.
+  bool builtin = 4;
+}
+
+message ListRolesRequest {}
+
+message ListRolesResponse {
+  repeated Role roles = 1;
+}
+
+message GetRoleRequest {
+  string name = 1;
+}
+
+message GetRoleResponse {
+  Role role = 1;
+}
+
+message CreateRoleRequest {
+  Role role = 1;
+}
+
+message CreateRoleResponse {
+  Role role = 1;
+}
+
+message UpdateRoleRequest {
+  Role role = 1;
+}
+
+message UpdateRoleResponse {
+  Role role = 1;
+}
+
+message DeleteRoleRequest {
+  string name = 1;
+}
+
+message DeleteRoleResponse {}
