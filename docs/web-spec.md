@@ -146,7 +146,8 @@ becomes `stale` once a later review is requested.
 
 ## Screens
 
-The SPA the admin uses. All behind basic auth.
+The SPA the admin uses. All behind basic auth. The SPA's front-end architecture (stack,
+codegen, routing, build/embed) is designed in [`docs/web-frontend-spec.md`](web-frontend-spec.md).
 
 - **Login** — the browser's basic-auth prompt; no dedicated page.
 - **Repos** — list enrolled repos with sync status; enroll form (upstream URL + target
