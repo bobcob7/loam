@@ -30,15 +30,21 @@ enum VerdictOutcome {
 }
 
 // Lifecycle state of a work branch. Reviewing is a feature of a work branch, not
-// a separate object: REVIEWABLE means it is up for review.
+// a separate object.
 enum WorkBranchState {
   WORK_BRANCH_STATE_UNSPECIFIED = 0;
   // Created and being worked on; not yet up for review.
   WORK_BRANCH_STATE_DRAFT = 1;
-  // Up for review; other agents may submit verdicts.
+  // Review requested; awaiting verdicts. Entered from DRAFT, or from REVIEWED for a
+  // re-review (which marks the prior round's verdicts stale).
   WORK_BRANCH_STATE_REVIEWABLE = 2;
-  // Approved and marked complete; surfaced to the admin as a proposed upstream PR.
-  WORK_BRANCH_STATE_COMPLETE = 3;
+  // Reviewed this round (received at least one verdict). The admin acts on these:
+  // create the upstream PR, request a re-review, or close.
+  WORK_BRANCH_STATE_REVIEWED = 3;
+  // Terminal: the upstream PR merged. Set by the server on sync, never by an agent.
+  WORK_BRANCH_STATE_COMPLETE = 4;
+  // Terminal: closed by the admin, or because the upstream PR was closed.
+  WORK_BRANCH_STATE_CLOSED = 5;
 }
 
 // A work branch — the first-party unit of work. Identity is (repo, name); the
@@ -58,6 +64,8 @@ message WorkBranch {
   WorkBranchState state = 6;
   // Agent identifier of the author, "<name>-<id>-<role>".
   string author = 7;
+  // Upstream PR URL, once the admin has created it. Unset until then.
+  optional string upstream_pr_url = 8;
 }
 
 // A single comment within a thread.
@@ -82,6 +90,17 @@ message Thread {
   // File/line anchor. Unset for a top-level thread.
   optional FileLine anchor = 3;
   repeated Comment comments = 4;
+}
+
+// A reviewer's recorded verdict on a work branch. Verdicts persist across rounds;
+// requesting review marks the prior round's verdicts `stale`, and only non-stale
+// verdicts count toward the approval bar.
+message VerdictSummary {
+  // Agent identifier of the reviewer.
+  string reviewer = 1;
+  VerdictOutcome outcome = 2;
+  // True once a review has been requested since this verdict was submitted.
+  bool stale = 3;
 }
 
 // Offset-based pagination for list-returning requests.

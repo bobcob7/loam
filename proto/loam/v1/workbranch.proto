@@ -17,9 +17,12 @@ service WorkBranchService {
   // Update a work branch's title and/or description at any point.
   rpc UpdateWorkBranch(UpdateWorkBranchRequest) returns (UpdateWorkBranchResponse);
 
-  // Set a work branch reviewable (requires title + description already set).
-  // Backs `loam work reviewable`.
-  rpc SetReviewable(SetReviewableRequest) returns (SetReviewableResponse);
+  // Request review of a work branch: DRAFT -> REVIEWABLE, or REVIEWED -> REVIEWABLE
+  // for a re-review (which marks the prior round's verdicts stale). Requires title +
+  // description to be set. This is a single operation with two callers: the author
+  // (`loam work request-review`) and the admin sending a reviewed branch back with a
+  // comment. The admin reaches it as a superuser (see docs/web-spec.md).
+  rpc RequestReview(RequestReviewRequest) returns (RequestReviewResponse);
 
   // List work branches across all enrolled repos, filtered by the request fields.
   rpc ListWorkBranches(ListWorkBranchesRequest) returns (ListWorkBranchesResponse);
@@ -33,12 +36,21 @@ service WorkBranchService {
   // Fetch a work branch's published comment threads.
   rpc ListComments(ListCommentsRequest) returns (ListCommentsResponse);
 
+  // Fetch the verdicts on a work branch — the current round plus stale ones from
+  // prior rounds, each flagged.
+  rpc ListVerdicts(ListVerdictsRequest) returns (ListVerdictsResponse);
+
   // Publish the caller's staged comments atomically as a verdict with an outcome.
+  // The first non-stale verdict of a round flips REVIEWABLE -> REVIEWED; verdicts are
+  // tracked per unique agent and marked stale when a review is requested, so only
+  // non-stale verdicts count toward the approval bar. (There is no agent-facing
+  // completion RPC — COMPLETE is set by the server when the upstream PR merges.)
   rpc SubmitVerdict(SubmitVerdictRequest) returns (SubmitVerdictResponse);
 
-  // Mark a work branch complete (requires >= 1 approve verdict) and surface it to
-  // the admin as a proposed upstream PR.
-  rpc CompleteWorkBranch(CompleteWorkBranchRequest) returns (CompleteWorkBranchResponse);
+  // Reply to an existing thread. Immediate (not staged) — the reply posts right away.
+  // This is how an author responds to review feedback; reviewers raise threads via a
+  // verdict, not here.
+  rpc ReplyToThread(ReplyToThreadRequest) returns (ReplyToThreadResponse);
 }
 
 message CreateWorkBranchRequest {
@@ -64,12 +76,15 @@ message UpdateWorkBranchResponse {
   WorkBranch work_branch = 1;
 }
 
-message SetReviewableRequest {
+message RequestReviewRequest {
   string repo = 1;
   string work_branch = 2;
+  // Optional comment attached to the request, surfaced to the author on the work
+  // branch. Typically used by the admin when sending a reviewed branch back.
+  optional string comment = 3;
 }
 
-message SetReviewableResponse {
+message RequestReviewResponse {
   WorkBranch work_branch = 1;
 }
 
@@ -120,20 +135,22 @@ message ListCommentsResponse {
   PageInfo page_info = 2;
 }
 
-// A comment being published as part of a verdict.
-message VerdictComment {
-  oneof target {
-    // Start a new thread (optionally line-anchored).
-    NewThread new_thread = 1;
-    // Reply to an existing thread by id.
-    string reply_to_thread_id = 2;
-  }
-  string body = 3;
+message ListVerdictsRequest {
+  string repo = 1;
+  string work_branch = 2;
 }
 
-message NewThread {
+message ListVerdictsResponse {
+  // Verdicts for the work branch, including stale ones from prior rounds (flagged).
+  repeated VerdictSummary verdicts = 1;
+}
+
+// A new thread opened as part of a verdict, optionally line-anchored. Replies are
+// not part of a verdict — see ReplyToThread.
+message VerdictComment {
   // File/line anchor; unset for a top-level thread.
   optional FileLine anchor = 1;
+  string body = 2;
 }
 
 message SubmitVerdictRequest {
@@ -152,11 +169,14 @@ message SubmitVerdictResponse {
   uint32 published = 2;
 }
 
-message CompleteWorkBranchRequest {
+message ReplyToThreadRequest {
   string repo = 1;
   string work_branch = 2;
+  string thread_id = 3;
+  string body = 4;
 }
 
-message CompleteWorkBranchResponse {
-  WorkBranch work_branch = 1;
+message ReplyToThreadResponse {
+  // The posted reply.
+  Comment comment = 1;
 }

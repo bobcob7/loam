@@ -44,7 +44,8 @@ Identity & Roles. Names are provisional.
 
 | Variable | Purpose | Required | Default |
 | --- | --- | --- | --- |
-| `LOAM_SERVER_URL` | URL of the Loam server the CLI talks to. A URL (rather than host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
+| `LOAM_SERVER_URL` | Base URL of the Loam RPC (HTTP) endpoint — the CLI and admin Connect API. A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
+| `LOAM_GIT_URL` | Base SSH URL for git transport (clone/fetch/push), e.g. `ssh://git@host:port`. `clone` composes `<LOAM_GIT_URL>/<group>/<repo>.git`. | yes | — |
 | `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes | — |
 | `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes | — |
 | `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes | — |
@@ -142,10 +143,11 @@ Clone an enrolled repo from the server (server as sole remote), optionally at a 
 - `branch` *(optional)* — branch to check out (typically a work branch created via
   `work start`); defaults to the repo's target branch.
 
-**Behavior:** Clones the repo from the Loam server into `./<repo_name>` — always the final
-path segment of the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`).
-The clone's only remote is the Loam server, and its git author (`user.name` / `user.email`)
-is set to the agent identity so commits are attributed to the agent. Checks out `branch` if
+**Behavior:** Clones the repo over SSH from the git endpoint
+(`<LOAM_GIT_URL>/<group>/<repo>.git`) into `./<repo_name>` — always the final path segment of
+the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`). The clone's
+only remote is that endpoint, and its git author (`user.name` / `user.email`) is set to the
+agent identity so commits are attributed to the agent. Checks out `branch` if
 given, and **pins** the clone to that branch: `commit` and `push` operate only on it, and
 switching work branches means cloning again.
 
@@ -211,15 +213,23 @@ for the caller's role; exit `3` if not run inside a clone.
 A **work branch** is the unit of work and the first-party entity. It is identified by its
 `repo` and `name` — the name is randomly generated and carries no meaning, so a work
 branch's title and description (set via `set`, editable at any time) are its human-facing
-identity. It moves through states `draft` → `reviewable` → `complete`; "review" is simply
-the `reviewable` state plus the comment/verdict activity on it, not a separate object.
+identity. "Review" is simply activity on a work branch, not a separate object.
+
+Its lifecycle: `draft` → (**request-review**) → `reviewable` → (**first verdict**) →
+`reviewed`. A re-review returns it to `reviewable` (marking the prior round's verdicts
+stale), requested by the author (`request-review`) or by the admin. The terminal states are
+`complete` (set by the server when the upstream PR merges) and `closed` (admin-only, or when
+the upstream PR is closed) — neither is an agent action.
 
 Commands that act on an existing work branch take `<repo>` and `<work-branch>` (its name) as
 positional arguments; both are optional when run from inside the repo directory (inferred
 per the Workspace rules above) and required otherwise.
 
-A reviewer contributes a **verdict**: a batch of comments plus an outcome
-(`approve` / `disapprove` / `neutral`), published atomically by `verdict`.
+A reviewer contributes a **verdict**: a batch of new-thread comments plus an outcome
+(`approve` / `disapprove` / `neutral`), published atomically by `verdict`. Verdicts are
+tracked per unique agent and marked **stale** when a new review is requested; only non-stale
+verdicts count. Reviewers raise threads through their verdict; anyone (typically the author)
+responds to a thread with `reply`, which posts immediately.
 
 #### start
 Start a work branch from a target branch. The name is randomly generated.
@@ -271,16 +281,24 @@ Both must be present before the work branch can be made `reviewable`.
 **Errors:** exit `2` if neither title nor description is provided, or on failed schema
 validation; exit `3` if the work branch does not exist.
 
-#### reviewable
-Set a work branch reviewable — this is what puts it up for review.
+#### request-review
+Request review of a work branch — the signal that puts it up for review, or asks for another
+round.
 
-**Synopsis:** `loam work reviewable [repo] [work-branch]`
+**Synopsis:** `loam work request-review [repo] [work-branch]` (optional comment read from stdin)
 
-**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
-above).
+**Input:**
 
-**Behavior:** Transitions the work branch from `draft` to `reviewable`, making it visible to
-reviewers via `list`. Requires a title and description to already be set (via `set`).
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- **stdin** *(optional)* — a comment attached to the request, surfaced to the author on the
+  work branch.
+
+**Behavior:** Transitions the work branch to `reviewable` — from `draft` (first review) or
+from `reviewed` (a re-review, which marks the prior round's verdicts stale) — making it
+visible to reviewers via `list`. Requires a title and description to already be set (via
+`set`). This is a single operation with two callers: the author (this command) and the admin
+sending a reviewed branch back with a comment (a button in the web UI, reaching the same RPC
+as a superuser — see `docs/web-spec.md`).
 
 **Output** (JSON) — the work branch:
 
@@ -288,8 +306,8 @@ reviewers via `list`. Requires a title and description to already be set (via `s
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "state": "reviewable" }
 ```
 
-**Errors:** exit `2` if the work branch has no title or description (precondition failed);
-exit `3` if it does not exist.
+**Errors:** exit `2` if the work branch has no title or description, or is in a terminal
+state (precondition failed); exit `3` if it does not exist.
 
 #### list
 List work branches across all enrolled repos.
@@ -303,8 +321,8 @@ List work branches across all enrolled repos.
 - `--target <branch>` *(optional)* — limit to work branches targeting this branch.
 - `--awaiting-review` *(optional)* — limit to reviewable work branches awaiting the calling
   agent's verdict.
-- `--state <state>` *(optional)* — `draft` / `reviewable` / `complete`; defaults to
-  `reviewable`.
+- `--state <state>` *(optional)* — `draft` / `reviewable` / `reviewed` / `complete` /
+  `closed`; defaults to `reviewable`.
 
 With no flags, lists all reviewable work branches across all enrolled repos.
 
@@ -378,32 +396,53 @@ submit.
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved.
 
-#### comment (add)
-Stage a comment on a work branch locally. Nothing is published until `verdict` submits.
+#### verdicts
+List the verdicts on a work branch — the current round plus stale ones from prior rounds.
 
-**Synopsis:** `loam work comment [repo] [work-branch] [--file <path> --line <n>] [--reply <thread-id>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>]` (body read from stdin)
+**Synopsis:** `loam work verdicts [repo] [work-branch]`
+
+**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
+above).
+
+**Behavior:** Returns each reviewer's recorded verdict (unique agent + outcome), including
+those marked **stale** by a later review request. Only non-stale verdicts count toward the
+approval bar.
+
+**Output** (JSON array):
+
+```json
+[ { "reviewer": "ada-lovelace-7-reviewer", "outcome": "approve", "stale": false } ]
+```
+
+**Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
+resolved.
+
+#### comment (add)
+Stage a review comment on a work branch locally. Nothing is published until `verdict`
+submits. Reviewer tooling — comments open *new* threads; replying to an existing thread is
+immediate, via `reply`.
+
+**Synopsis:** `loam work comment [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>]` (body read from stdin)
 
 **Input:**
 
 - `repo`, `work-branch` positional — identify the work branch (see the convention above).
 - **stdin** — the comment body. Required unless only `--resolve` or `--discard` is given.
-- `--file <path>` + `--line <n>` *(optional)* — anchor a new comment to a line.
-- `--reply <thread-id>` *(optional)* — add the comment to an existing thread rather than
-  starting a new one.
+- `--file <path>` + `--line <n>` *(optional)* — anchor the new thread to a line.
 - `--resolve <thread-id>` *(optional)* — mark a thread resolved. Only the thread's original
-  author may resolve it. May carry a reply body or be used alone.
+  author may resolve it. May carry a body or be used alone.
 - `--edit <staged-id>` *(optional)* — replace the body of a previously staged comment (new
   body from stdin), before it is submitted.
 - `--discard <staged-id>` *(optional)* — remove a staged comment from the staging area.
 
-The modes are mutually exclusive: a single invocation either opens a new thread
-(top-level or `--file`/`--line`-anchored), `--reply`s to one, `--edit`s a staged comment,
-or `--discard`s one. `--resolve` may accompany a new comment or reply, or stand alone.
+The modes are mutually exclusive: a single invocation either opens a new thread (top-level or
+`--file`/`--line`-anchored), `--edit`s a staged comment, or `--discard`s one. `--resolve` may
+accompany a new comment or stand alone.
 
 **Behavior:** Operates on the caller's **local staging area** for this work branch (in
-`.loam`). New comments, replies, and resolves append to it; `--edit` and `--discard` modify
-or remove an already-staged item. Staged items accumulate across invocations and stay
-invisible to everyone else until `verdict` publishes them.
+`.loam`). New-thread comments and resolves append to it; `--edit` and `--discard` modify or
+remove an already-staged item. Staged items accumulate across invocations and stay invisible
+to everyone else until `verdict` publishes them.
 
 **Staging location:** the workspace's `.loam/` directory (see Workspace above), keyed by
 repo, work branch, and agent — outside any clone, so reviewers who never clone can still
@@ -415,9 +454,32 @@ stage.
 { "staged": true, "id": "s3", "file": "auth.go", "line": 42, "body": "…" }
 ```
 
-**Errors:** exit `2` on conflicting modes (e.g. `--file` with `--reply`), a missing body
-when one is required, or attempting to resolve a thread the caller did not author; exit `3`
-if the work branch, referenced thread, or referenced staged comment does not exist.
+**Errors:** exit `2` on conflicting modes, a missing body when one is required, or attempting
+to resolve a thread the caller did not author; exit `3` if the work branch, referenced
+thread, or referenced staged comment does not exist.
+
+#### reply
+Reply to an existing comment thread. Immediate — the reply posts right away, not staged.
+
+**Synopsis:** `loam work reply [repo] [work-branch] --thread <thread-id>` (body read from stdin)
+
+**Input:**
+
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- `--thread <thread-id>` *(required)* — the thread to reply to.
+- **stdin** *(required)* — the reply body.
+
+**Behavior:** Posts a reply to the thread immediately (no staging). This is how an author
+responds to review feedback; reviewers raise threads via `verdict`, not here.
+
+**Output** (JSON) — the posted reply:
+
+```json
+{ "author": "grace-hopper-3-author", "body": "…" }
+```
+
+**Errors:** exit `3` if the work branch or thread does not exist; exit `2` if the identifier
+cannot be resolved.
 
 #### verdict
 Publish the caller's staged comments on a work branch atomically, as a verdict with an
@@ -432,9 +494,12 @@ outcome.
 
 **Behavior:** Publishes all of the caller's locally staged comments for this work branch in
 one atomic action as a verdict, attaches the outcome, and clears the local staging area.
-This is the only point at which staged comments become visible. An `approve` outcome counts
-toward the completion bar (≥1 approval). Submitting with no staged comments is allowed (an
-outcome-only verdict). Re-submitting records a fresh verdict from that reviewer.
+This is the only point at which staged comments become visible. The **first** non-stale
+verdict of a round flips the work branch `reviewable` → `reviewed`; verdicts are tracked per
+unique agent and are marked **stale** when a review is requested. Only non-stale verdicts
+count, so the admin can create the upstream PR once there is ≥1 non-stale approve. Submitting
+with no staged comments is allowed (an outcome-only verdict). Re-submitting replaces that
+agent's verdict for the round.
 
 **Output** (JSON):
 
@@ -445,29 +510,10 @@ outcome-only verdict). Re-submitting records a fresh verdict from that reviewer.
 **Errors:** exit `2` on a missing or invalid outcome; exit `3` if the work branch does not
 exist.
 
-#### complete
-Mark a work branch complete and surface it to the admin as a proposed upstream PR.
-
-**Synopsis:** `loam work complete [repo] [work-branch]`
-
-**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
-above).
-
-**Behavior:** Marks the work branch `complete`, which requires **at least one approval**. Its
-current title and description become the proposed upstream PR — there is no override, so edit
-them with `set` first if needed — and the work branch is surfaced in the web interface for
-the admin to accept or comment on. Completion does **not** itself open the upstream PR — that
-happens only on admin acceptance, at which point a meaningful upstream branch name is
-generated (see README → Workflow).
-
-**Output** (JSON):
-
-```json
-{ "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "state": "complete" }
-```
-
-**Errors:** exit `2` if the work branch has fewer than one approval (precondition failed);
-exit `3` if it does not exist.
+Once a work branch is `reviewed` with at least one approve verdict, it becomes a proposal in
+the admin's queue (see `docs/web-spec.md` → ProposalService). There is no agent `complete`
+command — the admin creates the upstream PR, and the work branch flips to `complete` only
+when that PR merges.
 
 ### Graph DB queries
 
