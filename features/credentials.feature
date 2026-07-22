@@ -1,0 +1,32 @@
+Feature: Managing upstream credentials
+  As an admin
+  I want to configure credentials per forge host
+  So that the server can clone, sync, and open PRs upstream
+
+  Background:
+    Given I am signed in to the web interface as the admin
+
+  Scenario: Setting a token for a forge host
+    When I set an upstream token for "github.com"
+    Then the server validates the token
+    And the credential status for "github.com" shows a token is present
+
+  Scenario: A rejected token is reported
+    When I set an invalid upstream token for "github.com"
+    Then the credential is rejected as invalid
+
+  Scenario: Generating an SSH key pair returns only the public key
+    When I generate an SSH key pair for "github.com"
+    Then I receive the public key to install upstream
+    And the private key never leaves the server
+    And the credential status for "github.com" shows an SSH key is present
+
+  Scenario: Credentials are shared by all repos on a host
+    Given a credential exists for "github.com"
+    When I enroll two repos hosted on "github.com"
+    Then both use the "github.com" credential
+
+  Scenario: Credentials are scoped per host
+    Given a credential exists for "github.com"
+    When I view the credential status for "forgejo.example.com"
+    Then it shows no credential is present
