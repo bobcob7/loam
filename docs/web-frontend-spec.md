@@ -104,6 +104,9 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
     `ListVerdicts` (admin superuser on `loam.v1`).
   - Actions: `ProposalService.AcceptProposal`, `ProposalService.CloseWorkBranch`,
     `WorkBranchService.RequestReview` (send back for re-review, with a comment).
+- **`/jobs` → Jobs.** Ingest activity across repos.
+  - Queries: `RepoAdminService.ListIngestJobs` (paginated; filter by repo/status).
+  - Actions: `RepoAdminService.ReindexRepo` (force a full rebuild).
 
 ## Data Layer
 

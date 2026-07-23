@@ -93,28 +93,44 @@ opening comment creates the thread; replies add comments.
 > `author`/`reviewer` are stored as identifier strings, not foreign keys. Server-issued agent
 > credentials (an `agents` table) come with the deferred authentication work.
 
+### ingest_jobs
+`id`, `repo_id` (fk → repos), `target_branch`, `kind` (`incremental`/`full`), `status`
+(`queued`/`running`/`succeeded`/`failed`), `attempts`, `error` (null), `stats` (jsonb —
+files parsed, chunks embedded), `queued_at`, `started_at` (null), `finished_at` (null).
+Drives the ingest worker queue (one running job per repo) and the web Jobs view. Operational
+state, not rebuildable. See `docs/ingestion-spec.md`.
+
 ## Code intelligence (derived, rebuildable)
 
-Rebuilt per repo whenever an ingested target branch advances: the repo's rows below are
-replaced in a transaction from a fresh Tree-sitter parse of the mirror.
+Maintained per repo by the ingestion pipeline (`docs/ingestion-spec.md`): **incrementally** on
+a target-branch advance (only changed files re-parsed/re-embedded), or fully on first ingest
+and the fallback cases. All tables below carry `repo_id` and `target_branch` — the MVP indexes
+only the default target; the column leaves room to index all target branches later.
 
 ### symbols
-`id`, `repo_id` (fk), `file`, `line` (null for file-level), `name`, `kind`
+`id`, `repo_id` (fk), `target_branch`, `file`, `line` (null for file-level), `name`, `kind`
 (`function`/`type`/`module`/…).
 
+### symbol_references
+`id`, `repo_id` (fk), `target_branch`, `file`, `name` (referenced symbol), `kind`, `line`.
+The unresolved references the parser emits per file; edges are resolved from these.
+
 ### graph_edges
-`id`, `repo_id` (fk), `from_symbol_id` (fk → symbols), `to_symbol_id` (fk → symbols), `kind`
-(`dependency`). `dependents`/`deps` (blast radius) are recursive CTEs over this table. MVP is
-intra-repo; edges never cross repos (fan-out only).
+`id`, `repo_id` (fk), `target_branch`, `from_symbol_id` (fk → symbols), `to_symbol_id`
+(fk → symbols), `kind` (`dependency`). **Recomputed each ingest** by resolving
+`symbol_references` against `symbols` (intra-repo, name-based, approximate).
+`dependents`/`deps` (blast radius) are recursive CTEs over this table; MVP edges never cross
+repos (fan-out only).
 
 ### symbol_history
-`id`, `symbol_id` (fk → symbols), `commit`, `ref`, `message`. Backs the `history` query
-(alternatively derivable from `git log`; stored for query simplicity).
+`id`, `symbol_id` (fk → symbols), `commit`, `ref`, `message`. Backs the `history` query;
+derived from git (`git log -L`) at ingest for the affected files.
 
 ### chunks
-`id`, `repo_id` (fk), `file`, `start_line`, `end_line`, `content`, `embedding vector(N)`,
-`created_at`. RAG search is `ORDER BY embedding <=> :q LIMIT :n`, filtered by the scope's
-repo ids, over an HNSW index:
+`id`, `repo_id` (fk), `target_branch`, `file`, `start_line`, `end_line`, `content`,
+`embedding vector(N)`, `created_at`. Only changed files are re-embedded on an incremental
+ingest. RAG search is `ORDER BY embedding <=> :q LIMIT :n`, filtered by the scope's repo ids,
+over an HNSW index:
 
 ```sql
 CREATE INDEX chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
@@ -127,8 +143,8 @@ The mirror is the source of truth for code:
 
 - Work branches are git refs; commits arrive via the SSH git endpoint.
 - Diffs, blame, and file contents are read from git, not the DB.
-- The server syncs from upstream (upstream-wins) and, on target-branch advance, triggers the
-  graph + vector rebuild above.
+- The server syncs from upstream (upstream-wins) and, on target-branch advance, triggers
+  ingestion (`docs/ingestion-spec.md`) to update the derived indexes above.
 
 ## Secrets
 

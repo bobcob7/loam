@@ -70,10 +70,14 @@ Enroll and manage repos. The admin's repo view is richer than the CLI's read-onl
 - `SetDescriptionSchema(repo, string schema) → { EnrolledRepo }` — set/replace the JSON
   Schema (as a JSON string) that validates work-branch descriptions and comment/response
   formats; empty clears it.
+- `ReindexRepo(repo) → { IngestJob }` — force a full rebuild of the repo's derived indexes.
+- `ListIngestJobs(Page, optional string repo, optional string status) → { IngestJob[], PageInfo }`
+  — recent and active ingest jobs across repos, for the Jobs view (see `docs/ingestion-spec.md`).
 
 `EnrolledRepo` is `{ repo, upstream_url, target_branches[], default_target, SyncStatus sync,
 bool has_description_schema }`. `SyncStatus` is `{ SyncState state, string last_synced_at,
-string error }`, with `state` one of `idle` / `syncing` / `error`.
+string error }`, with `state` one of `idle` / `syncing` / `error`. `IngestJob` is
+`{ repo, target_branch, kind, status, attempts, error, queued_at, started_at, finished_at }`.
 
 ### CredentialService
 Manage the credentials the server uses to reach each upstream forge. Credentials are keyed by
@@ -155,8 +159,10 @@ codegen, routing, build/embed) is designed in [`docs/web-frontend-spec.md`](web-
 - **Credentials** — set the upstream token, or generate and show an SSH public key to
   install upstream.
 - **Roles** — edit agent roles: granted operations, instructions, defaults.
-- **Proposals** — the review queue: list completed work branches, view a proposed upstream
-  PR (title/description/diff), accept or comment.
+- **Proposals** — the queue of reviewed work branches: view one (title/description/diff/
+  verdicts), then accept (create the upstream PR), request a re-review, or close.
+- **Jobs** — ingest job activity across repos (queued/running/succeeded/failed, timings,
+  errors), and a per-repo reindex action.
 
 TODO — per-screen detail, navigation, and states.
 

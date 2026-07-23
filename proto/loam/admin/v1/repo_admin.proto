@@ -27,6 +27,12 @@ service RepoAdminService {
   // Set/replace the JSON Schema (as a JSON string) validating work-branch
   // descriptions and comment/response formats; empty clears it.
   rpc SetDescriptionSchema(SetDescriptionSchemaRequest) returns (SetDescriptionSchemaResponse);
+
+  // Force a full rebuild of the repo's derived indexes (graph + vectors).
+  rpc ReindexRepo(ReindexRepoRequest) returns (ReindexRepoResponse);
+
+  // Recent and active ingest jobs across repos, for the web Jobs view.
+  rpc ListIngestJobs(ListIngestJobsRequest) returns (ListIngestJobsResponse);
 }
 
 enum SyncState {
@@ -103,4 +109,53 @@ message SetDescriptionSchemaRequest {
 
 message SetDescriptionSchemaResponse {
   EnrolledRepo repo = 1;
+}
+
+enum IngestKind {
+  INGEST_KIND_UNSPECIFIED = 0;
+  INGEST_KIND_INCREMENTAL = 1;
+  INGEST_KIND_FULL = 2;
+}
+
+enum IngestStatus {
+  INGEST_STATUS_UNSPECIFIED = 0;
+  INGEST_STATUS_QUEUED = 1;
+  INGEST_STATUS_RUNNING = 2;
+  INGEST_STATUS_SUCCEEDED = 3;
+  INGEST_STATUS_FAILED = 4;
+}
+
+// An ingestion job. See docs/ingestion-spec.md.
+message IngestJob {
+  string repo = 1;
+  string target_branch = 2;
+  IngestKind kind = 3;
+  IngestStatus status = 4;
+  uint32 attempts = 5;
+  // Error detail when status is FAILED; empty otherwise.
+  string error = 6;
+  // RFC 3339 timestamps; started/finished empty until they occur.
+  string queued_at = 7;
+  string started_at = 8;
+  string finished_at = 9;
+}
+
+message ReindexRepoRequest {
+  string repo = 1;
+}
+
+message ReindexRepoResponse {
+  IngestJob job = 1;
+}
+
+message ListIngestJobsRequest {
+  loam.v1.Page page = 1;
+  // Optional filters.
+  optional string repo = 2;
+  optional IngestStatus status = 3;
+}
+
+message ListIngestJobsResponse {
+  repeated IngestJob jobs = 1;
+  loam.v1.PageInfo page_info = 2;
 }
