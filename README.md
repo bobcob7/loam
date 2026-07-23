@@ -24,8 +24,10 @@ it sits outside the provider interface.
 
 ### Components at a glance
 
-- **Server** — the single source of truth. Holds the mirrored git repos, the graph DB,
-  the vector DB, and local review state. It is the only git remote agents ever see.
+- **Server** — the single source of truth. Holds the mirrored git repos (on disk) plus a
+  Postgres store for metadata, the code graph, and RAG vectors (see
+  [`docs/persistence-spec.md`](docs/persistence-spec.md)). It is the only git remote agents
+  ever see.
 - **CLI tool** — the agent-facing interface. One binary that talks to the server; all
   workflow, querying, and authorization flow through it.
 - **Web interface** — the admin-facing interface. Never used by agents. Used to enroll
@@ -262,6 +264,10 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
 - **GitHub support (close second forge).** Promote GitHub from secondary to fully
   supported behind the existing provider interface — GitHub PAT credentials and the GitHub
   PR REST API. Git transport already works unchanged.
+- **Dedicated persistence stores.** The MVP consolidates metadata, the code graph, and RAG
+  vectors in one Postgres (pgvector + recursive-CTE graph). Split the rebuildable stores onto
+  dedicated services — a vector DB (e.g. Qdrant) and/or a graph DB — behind the existing
+  repository seams as scale demands. See `docs/persistence-spec.md`.
 - **Authentication.** Replace the MVP's trusted-environment identity model with
   server-issued agent credentials so identity and role can be verified rather than asserted —
   including per-agent auth for the git SSH endpoint, which the MVP accesses with a shared key.
