@@ -49,5 +49,7 @@ Each file covers one area (see the specs for detail):
 - `credentials.feature` — admin sets upstream tokens / generates SSH keys, per forge host.
 - `roles.feature` — role definitions, defaults, and authorization (author vs reviewer).
 - `code-intelligence.feature` — graph queries and RAG search, including `--all` fan-out.
+- `ingestion.feature` — indexing on enrollment and target-branch advance, edge freshness,
+  admin reindex, the Jobs view, and failure handling.
 - `clone-and-push.feature` — clone at a work branch; commit/push pinned to it; hook guard.
 - `instructions.feature` — agent orientation (`instructions` / `whoami`).
