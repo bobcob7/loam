@@ -137,12 +137,19 @@ app-level key (AES-GCM), the key supplied to the server via config/env (`LOAM_EN
 or a KMS. Only ciphertext is stored; the SSH **public** key and validation status are stored
 in the clear.
 
-## Migrations & Testing
+## Migrations, Queries & Testing
 
-- Versioned SQL migrations (e.g. `goose`), embedded in the binary and applied on startup;
-  built-in roles seeded here.
-- Integration and godog acceptance tests bring up real Postgres (and the git server) via
-  `testcontainers-go`, so specs run against actual infrastructure.
+- **Migrations**: versioned SQL via **golang-migrate** (`NNNN_name.up.sql` / `.down.sql`),
+  embedded with `iofs` + `embed.FS` and applied on startup; built-in roles seeded here.
+  SQL-only — the migrations are the single schema of record.
+- **Queries**: **sqlc** generates type-safe Go from hand-written SQL, reading the schema
+  straight from the migrations directory (so there is no separate schema file to keep in
+  sync). Configured for pgx (`sql_package: pgx/v5`). A type override maps the `pgvector`
+  `vector` column to `pgvector-go`'s type; enum-like `text` + `CHECK` columns map to Go
+  strings.
+- **Testing**: integration and godog acceptance tests bring up real Postgres (and the git
+  server) via `testcontainers-go`, so specs run against actual infrastructure and the
+  sqlc-generated queries.
 
 ## Future Work
 
