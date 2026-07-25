@@ -1,12 +1,33 @@
 package fakeforge
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/bobcob7/loam/internal/forge"
+)
 
 // Sentinel errors returned by the fake forge, both from direct Go method
 // calls (control API) and reconstructed by Client from REST error codes.
+//
+// errUnauthorized, errMissingScope, errRepoNotFound, and errNoWriteAccess
+// wrap the corresponding internal/forge sentinel, so a caller holding a
+// fakeforge.Client wherever a forge.Provider is expected can use the same
+// errors.Is(err, forge.ErrX) assertion against the fake and the real
+// Forgejo provider (loam-li0.9's shared contract suite; see loam-4k7).
+// The other sentinels have no forge-level equivalent: they are raised
+// only by the control API and the git smart-HTTP surface, neither of
+// which is part of the forge.Provider contract.
+//
+// errMissingScope wraps ErrInvalidToken, not a scope-specific sentinel:
+// forge.Provider's ValidateToken contract folds "does not authenticate"
+// and "authenticates but lacks the scopes needed to open PRs" into one
+// error path (see forge/interfaces.go and Forgejo.ValidateToken, which
+// maps both 401 and 403 to ErrInvalidToken). There is no fourth
+// forge-level class for "valid token, wrong scope" to map onto.
 var (
-	errUnauthorized    = errors.New("fakeforge: unauthorized")
-	errRepoNotFound    = errors.New("fakeforge: repo not found")
+	errUnauthorized    = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
+	errRepoNotFound    = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)
 	errRepoExists      = errors.New("fakeforge: repo already exists")
 	errBranchNotFound  = errors.New("fakeforge: branch not found")
 	errPRNotFound      = errors.New("fakeforge: pull request not found")
@@ -14,8 +35,8 @@ var (
 	errMergeConflict   = errors.New("fakeforge: merge conflict")
 	errGitUnavailable  = errors.New("fakeforge: git binary not available")
 	errInvalidUpstream = errors.New("fakeforge: invalid upstream url")
-	errNoWriteAccess   = errors.New("fakeforge: token has no write access")
-	errMissingScope    = errors.New("fakeforge: token missing required scope")
+	errNoWriteAccess   = fmt.Errorf("fakeforge: token has no write access: %w", forge.ErrNoWriteAccess)
+	errMissingScope    = fmt.Errorf("fakeforge: token missing required scope: %w", forge.ErrInvalidToken)
 )
 
 // errorCodes maps sentinel errors to the stable string codes carried over

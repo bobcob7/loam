@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/forge"
 )
 
 type validateTokenRequest struct {
@@ -116,6 +118,11 @@ type Client struct {
 	token   string
 	http    *http.Client
 }
+
+// Ensure *Client satisfies forge.Provider at compile time, so tests can
+// hand a *Client anywhere a forge.Provider is expected (loam-li0.9's
+// shared contract suite; see loam-4k7).
+var _ forge.Provider = (*Client)(nil)
 
 // NewClient builds a Client bound to one fake forge Server at baseURL
 // (e.g. an httptest.Server's URL), authenticating provider REST calls with
