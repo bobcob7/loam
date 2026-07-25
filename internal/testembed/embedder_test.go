@@ -14,6 +14,23 @@ import (
 
 var _ embed.Embedder = (*Embedder)(nil)
 
+// rankingQuery and rankingDocs are the co-ranked corpus
+// TestEmbed_CosineIncreasesWithSharedTokenCount asserts the ranking property
+// docs/testing-spec.md:41-44 depends on ("the auth chunk ranks first for an
+// auth query") against. collision_test.go's
+// TestCollidingTokens_CurrentRankingVocabularyIsCollisionFreeAt768 checks
+// this exact vocabulary for collisions at Dimension=768; sharing these vars
+// means an edit to this corpus can't silently stop being guarded.
+var (
+	rankingQuery = "auth token validate session"
+	rankingDocs  = []string{
+		"database migration schema export",
+		"auth database migration schema",
+		"auth token database migration",
+		"auth token validate database",
+	}
+)
+
 func cosine(a, b []float32) float64 {
 	var dot, normA, normB float64
 	for i := range a {
@@ -30,15 +47,8 @@ func cosine(a, b []float32) float64 {
 func TestEmbed_CosineIncreasesWithSharedTokenCount(t *testing.T) {
 	t.Parallel()
 	e := New()
-	query := "auth token validate session"
-	docs := []string{
-		"database migration schema export",
-		"auth database migration schema",
-		"auth token database migration",
-		"auth token validate database",
-	}
 	sharedCounts := []int{0, 1, 2, 3}
-	vectors, err := e.Embed(t.Context(), append([]string{query}, docs...))
+	vectors, err := e.Embed(t.Context(), append([]string{rankingQuery}, rankingDocs...))
 	require.NoError(t, err)
 	queryVec := vectors[0]
 	docVecs := vectors[1:]

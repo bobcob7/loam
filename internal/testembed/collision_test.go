@@ -40,19 +40,15 @@ func TestCollidingTokens_KnownPairAtProductionDimensionNamesBothTokens(t *testin
 
 // This is the vocabulary TestEmbed_CosineIncreasesWithSharedTokenCount
 // actually depends on for the ranking property docs/testing-spec.md:41-44
-// describes ("the auth chunk ranks first for an auth query"): the query
-// "auth token validate session" against the four docs of increasing overlap.
-// It must stay collision-free at the real Dimension for that test to mean
+// describes ("the auth chunk ranks first for an auth query"): rankingQuery
+// against rankingDocs, the four docs of increasing overlap. It reads
+// rankingQuery/rankingDocs from embedder_test.go rather than duplicating the
+// literals, so an edit to that corpus can't silently stop being guarded. It
+// must stay collision-free at the real Dimension for that test to mean
 // anything.
 func TestCollidingTokens_CurrentRankingVocabularyIsCollisionFreeAt768(t *testing.T) {
 	t.Parallel()
-	got := CollidingTokens(
-		"auth token validate session",
-		"database migration schema export",
-		"auth database migration schema",
-		"auth token database migration",
-		"auth token validate database",
-	)
+	got := CollidingTokens(append([]string{rankingQuery}, rankingDocs...)...)
 	assert.Empty(t, got)
 }
 
@@ -91,16 +87,17 @@ func TestCollidingTokens_OutputOrderingIsDeterministicAcrossRepeatedCalls(t *tes
 	}
 }
 
-func TestRequireNoCollisions_ReturnsNilForCollisionFreeVocabulary(t *testing.T) {
+func TestCheckNoCollisions_ReturnsNilForCollisionFreeVocabulary(t *testing.T) {
 	t.Parallel()
-	err := RequireNoCollisions("auth token validate session", "database migration schema export")
+	err := CheckNoCollisions(append([]string{rankingQuery}, rankingDocs...)...)
 	assert.NoError(t, err)
 }
 
-func TestRequireNoCollisions_NamesBothCollidingTokens(t *testing.T) {
+func TestCheckNoCollisions_NamesBothCollidingTokensAndTheirBucket(t *testing.T) {
 	t.Parallel()
-	err := RequireNoCollisions("an auth query", "a stable dimension")
+	err := CheckNoCollisions("an auth query", "a stable dimension")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "query")
 	assert.Contains(t, err.Error(), "dimension")
+	assert.Contains(t, err.Error(), "bucket 483", "error should name the bucket the pair collides in, not just the tokens")
 }
