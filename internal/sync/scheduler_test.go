@@ -44,17 +44,20 @@ func (l *eventLog) forRepo(repo RepoID) []string {
 }
 
 // repoOutcome is what the harness's SyncStateReporter mock feeds back to
-// the test: which repo finished, and its error (nil on ReportIdle).
+// the test: which repo finished, its error (nil on ReportIdle), and
+// whether step 4 enqueued an ingest job before the cycle ended.
 type repoOutcome struct {
-	repo RepoID
-	err  error
+	repo           RepoID
+	err            error
+	enqueuedIngest bool
 }
 
 // harness bundles a Scheduler wired to moq mocks with the channels tests
 // use to drive and observe it deterministically: an explicit tick channel
 // (the manual-scheduler seam) in, and a buffered outcome channel out, fed
 // by the state-reporter mock. No test in this file sleeps or polls; every
-// wait is a blocking receive on one of these channels.
+// wait is either a blocking receive on one of these channels or a call to
+// scheduler.waitIdle, which blocks on the scheduler's own WaitGroup.
 type harness struct {
 	scheduler *Scheduler
 	ticks     chan time.Time
@@ -64,6 +67,7 @@ type harness struct {
 	merge     *MergeabilityCheckerMock
 	ingest    *IngestEnqueuerMock
 	prs       *PRPollerMock
+	state     *SyncStateReporterMock
 	outcomes  chan repoOutcome
 }
 
@@ -81,21 +85,23 @@ func newHarness(repoIDs ...RepoID) *harness {
 	h.repoList.ListReposFunc = func(ctx context.Context) ([]RepoID, error) {
 		return repoIDs, nil
 	}
-	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) error { return nil }
-	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID) ([]string, error) { return nil, nil }
-	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []string) error { return nil }
-	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []string) error { return nil }
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) { return FetchResult{}, nil }
+	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) { return nil, nil }
+	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return nil }
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return nil }
 	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return nil }
-	state := &SyncStateReporterMock{
-		ReportSyncingFunc: func(ctx context.Context, repo RepoID) {},
-		ReportIdleFunc: func(ctx context.Context, repo RepoID) {
-			h.outcomes <- repoOutcome{repo: repo}
+	h.state = &SyncStateReporterMock{
+		ReportSyncingFunc: func(ctx context.Context, repo RepoID) error { return nil },
+		ReportIdleFunc: func(ctx context.Context, repo RepoID, enqueuedIngest bool) error {
+			h.outcomes <- repoOutcome{repo: repo, enqueuedIngest: enqueuedIngest}
+			return nil
 		},
-		ReportErrorFunc: func(ctx context.Context, repo RepoID, err error) {
-			h.outcomes <- repoOutcome{repo: repo, err: err}
+		ReportErrorFunc: func(ctx context.Context, repo RepoID, err error, enqueuedIngest bool) error {
+			h.outcomes <- repoOutcome{repo: repo, err: err, enqueuedIngest: enqueuedIngest}
+			return nil
 		},
 	}
-	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, state)
+	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state)
 	return h
 }
 
@@ -114,16 +120,19 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 	defer cancel()
 	var log eventLog
 	h := newHarness("repoA", "repoB")
-	h.fetch.FetchFunc = recordStep(&log, "fetch")
-	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID) ([]string, error) {
-		log.add(string(repo) + ":advances")
-		return []string{"main"}, nil
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		log.add(string(repo) + ":fetch")
+		return FetchResult{}, nil
 	}
-	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []string) error {
+	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) {
+		log.add(string(repo) + ":advances")
+		return []Advance{{Branch: "main", OldSHA: "aaa", NewSHA: "bbb"}}, nil
+	}
+	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error {
 		log.add(string(repo) + ":merge")
 		return nil
 	}
-	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []string) error {
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error {
 		log.add(string(repo) + ":ingest")
 		return nil
 	}
@@ -134,6 +143,8 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 	second := <-h.outcomes
 	require.NoError(t, first.err)
 	require.NoError(t, second.err)
+	assert.True(t, first.enqueuedIngest)
+	assert.True(t, second.enqueuedIngest)
 	assert.ElementsMatch(t, []RepoID{"repoA", "repoB"}, []RepoID{first.repo, second.repo})
 	assert.Equal(t, []string{"repoA:fetch", "repoA:advances", "repoA:merge", "repoA:ingest", "repoA:pollprs"}, log.forRepo("repoA"))
 	assert.Equal(t, []string{"repoB:fetch", "repoB:advances", "repoB:merge", "repoB:ingest", "repoB:pollprs"}, log.forRepo("repoB"))
@@ -145,7 +156,7 @@ func TestScheduler_FailingStepInOneRepoDoesNotBlockAnother(t *testing.T) {
 	defer cancel()
 	h := newHarness("repoA", "repoB")
 	wantErr := errors.New("merge-tree exploded")
-	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []string) error {
+	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error {
 		if repo == "repoA" {
 			return wantErr
 		}
@@ -160,6 +171,8 @@ func TestScheduler_FailingStepInOneRepoDoesNotBlockAnother(t *testing.T) {
 	}
 	require.ErrorIs(t, outcomes["repoA"].err, wantErr)
 	require.NoError(t, outcomes["repoB"].err)
+	assert.False(t, outcomes["repoA"].enqueuedIngest, "repoA never reached step 4")
+	assert.True(t, outcomes["repoB"].enqueuedIngest)
 	assert.Len(t, h.prs.PollPRsCalls(), 1)
 }
 
@@ -169,11 +182,12 @@ func TestScheduler_FailingStepAbortsRemainingStepsForThatRepo(t *testing.T) {
 	defer cancel()
 	h := newHarness("repoA")
 	wantErr := errors.New("merge-tree exploded")
-	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []string) error { return wantErr }
+	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return wantErr }
 	go h.scheduler.Run(ctx)
 	h.ticks <- time.Now()
 	outcome := <-h.outcomes
 	require.ErrorIs(t, outcome.err, wantErr)
+	assert.False(t, outcome.enqueuedIngest)
 	assert.Len(t, h.fetch.FetchCalls(), 1)
 	assert.Len(t, h.advances.DetectAdvancesCalls(), 1)
 	assert.Len(t, h.merge.CheckMergeabilityCalls(), 1)
@@ -181,46 +195,98 @@ func TestScheduler_FailingStepAbortsRemainingStepsForThatRepo(t *testing.T) {
 	assert.Empty(t, h.prs.PollPRsCalls())
 }
 
+// TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails covers the case
+// loam-giq.9's DESIGN turns on: step 4 (ingest enqueue) succeeds, handing
+// off sync_state ownership for this tick, and step 5 (PR polling) then
+// fails. The error outcome must still carry enqueuedIngest = true so
+// giq.9 can tell its own error write would race the ingest worker's.
+func TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	wantErr := errors.New("forge unreachable")
+	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return wantErr }
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	outcome := <-h.outcomes
+	require.ErrorIs(t, outcome.err, wantErr)
+	assert.True(t, outcome.enqueuedIngest, "step 4 succeeded before step 5 failed")
+}
+
 // TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight drives the
 // in-flight guard directly through the unexported tick method rather than
-// through the ticks channel: the guard is a property of tick's
-// synchronous tryStart pass, and calling it directly from the test
-// goroutine gives a hard happens-before guarantee (no channel-timing
-// assumptions) that the second tick's guard check has really run before
-// the assertions below fire.
+// through the ticks channel, and asserts on tick's return value — the
+// repos it actually started — rather than on a mock's call count read
+// from a different goroutine. Asserting a goroutine side effect right
+// after tick returns (e.g. FetchCalls()) races the very goroutine tick
+// just spawned; asserting tick's synchronous return value does not.
+// waitIdle (backed by the scheduler's WaitGroup) is the sleep-free
+// happens-before barrier used to wait for that goroutine before
+// inspecting call counts afterward.
 func TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	h := newHarness("repoA")
-	entered := make(chan struct{})
+	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) error {
-		close(entered)
+	var once sync.Once
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		once.Do(func() { entered <- struct{}{} })
+		<-release
+		return FetchResult{}, nil
+	}
+	started := h.scheduler.tick(ctx)
+	assert.Equal(t, []RepoID{"repoA"}, started)
+	<-entered
+	assert.Empty(t, h.scheduler.tick(ctx), "second tick must not start a new cycle while the first is in flight")
+	close(release)
+	h.scheduler.waitIdle()
+	assert.Len(t, h.fetch.FetchCalls(), 1)
+	started = h.scheduler.tick(ctx)
+	assert.Equal(t, []RepoID{"repoA"}, started, "once the first cycle finishes, a later tick may start a new one")
+	h.scheduler.waitIdle()
+	assert.Len(t, h.fetch.FetchCalls(), 2)
+}
+
+// TestScheduler_GuardHeldUntilOutcomeIsReported guards against releasing
+// the in-flight guard before a cycle's outcome is reported: it blocks
+// cycle 1 inside ReportIdle and fires a second tick while it is stuck
+// there. If finish ran before the report (as it once did), the second
+// tick would start cycle 2 — and cycle 2's ReportSyncing could then land
+// before cycle 1's still-pending ReportIdle, so a reporter would briefly
+// see a stale idle overwrite an in-progress syncing. Asserting on tick's
+// return value (not a goroutine side effect) keeps this deterministic.
+func TestScheduler_GuardHeldUntilOutcomeIsReported(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := newHarness("repoA")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	h.state.ReportIdleFunc = func(ctx context.Context, repo RepoID, enqueuedIngest bool) error {
+		once.Do(func() { entered <- struct{}{} })
 		<-release
 		return nil
 	}
-	h.scheduler.tick(ctx)
+	started := h.scheduler.tick(ctx)
+	assert.Equal(t, []RepoID{"repoA"}, started)
 	<-entered
-	h.scheduler.tick(ctx)
-	assert.Len(t, h.fetch.FetchCalls(), 1, "second tick must not start a new cycle while the first is in flight")
+	assert.Empty(t, h.scheduler.tick(ctx), "guard must still be held while the outcome is being reported")
 	close(release)
-	outcome := <-h.outcomes
-	require.NoError(t, outcome.err)
-	assert.Equal(t, RepoID("repoA"), outcome.repo)
-	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) error { return nil }
-	h.scheduler.tick(ctx)
-	outcome = <-h.outcomes
-	require.NoError(t, outcome.err)
-	assert.Len(t, h.fetch.FetchCalls(), 2, "once the first cycle finishes, a later tick may start a new one")
+	h.scheduler.waitIdle()
+	started = h.scheduler.tick(ctx)
+	assert.Equal(t, []RepoID{"repoA"}, started, "guard releases once the outcome has been reported")
+	h.scheduler.waitIdle()
 }
 
+// DEFERRED-WIP: Sync failures are retried on the next cycle -> TestScheduler_SyncFailureIsRetriedOnTheNextTick (establishes the scheduler-level mechanism only: a repo whose step fails on tick 1 is retried, from step 1, on tick 2, with no retry logic inside the cycle itself — only the next tick attempts it again. Does NOT cover the real "upstream forge unreachable" condition, which is owned by giq.2's Fetcher plus the fake-forge control API; does NOT cover persistence of repos.sync_state to error/healthy, owned by giq.9; and does NOT cover web-visible sync status, which testing-spec:60-67 drives through the connect-go admin client rather than this package. The godog scenario in features/sync.feature stays @wip.)
+//
 // TestScheduler_SyncFailureIsRetriedOnTheNextTick establishes, at the
 // scheduler level, the behavior named by the still-@wip acceptance
 // scenario "sync.feature: Sync failures are retried on the next cycle":
 // a repo whose step fails on one tick is attempted again — from step 1 —
 // on the next tick, with no retry/backoff logic inside the cycle itself.
-// See the DEFERRED-WIP note in the bead report for what this test does
-// and does not cover.
 func TestScheduler_SyncFailureIsRetriedOnTheNextTick(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -228,12 +294,12 @@ func TestScheduler_SyncFailureIsRetriedOnTheNextTick(t *testing.T) {
 	h := newHarness("repoA")
 	wantErr := errors.New("upstream forge unreachable")
 	failNext := true
-	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) error {
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
 		if failNext {
 			failNext = false
-			return wantErr
+			return FetchResult{}, wantErr
 		}
-		return nil
+		return FetchResult{}, nil
 	}
 	go h.scheduler.Run(ctx)
 	h.ticks <- time.Now()

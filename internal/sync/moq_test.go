@@ -84,7 +84,7 @@ var _ Fetcher = &FetcherMock{}
 //
 //		// make and configure a mocked Fetcher
 //		mockedFetcher := &FetcherMock{
-//			FetchFunc: func(ctx context.Context, repo RepoID) error {
+//			FetchFunc: func(ctx context.Context, repo RepoID) (FetchResult, error) {
 //				panic("mock out the Fetch method")
 //			},
 //		}
@@ -95,7 +95,7 @@ var _ Fetcher = &FetcherMock{}
 //	}
 type FetcherMock struct {
 	// FetchFunc mocks the Fetch method.
-	FetchFunc func(ctx context.Context, repo RepoID) error
+	FetchFunc func(ctx context.Context, repo RepoID) (FetchResult, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -111,7 +111,7 @@ type FetcherMock struct {
 }
 
 // Fetch calls FetchFunc.
-func (mock *FetcherMock) Fetch(ctx context.Context, repo RepoID) error {
+func (mock *FetcherMock) Fetch(ctx context.Context, repo RepoID) (FetchResult, error) {
 	if mock.FetchFunc == nil {
 		panic("FetcherMock.FetchFunc: method is nil but Fetcher.Fetch was just called")
 	}
@@ -156,7 +156,7 @@ var _ AdvanceDetector = &AdvanceDetectorMock{}
 //
 //		// make and configure a mocked AdvanceDetector
 //		mockedAdvanceDetector := &AdvanceDetectorMock{
-//			DetectAdvancesFunc: func(ctx context.Context, repo RepoID) ([]string, error) {
+//			DetectAdvancesFunc: func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) {
 //				panic("mock out the DetectAdvances method")
 //			},
 //		}
@@ -167,7 +167,7 @@ var _ AdvanceDetector = &AdvanceDetectorMock{}
 //	}
 type AdvanceDetectorMock struct {
 	// DetectAdvancesFunc mocks the DetectAdvances method.
-	DetectAdvancesFunc func(ctx context.Context, repo RepoID) ([]string, error)
+	DetectAdvancesFunc func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -177,27 +177,31 @@ type AdvanceDetectorMock struct {
 			Ctx context.Context
 			// Repo is the repo argument value.
 			Repo RepoID
+			// Fetched is the fetched argument value.
+			Fetched FetchResult
 		}
 	}
 	lockDetectAdvances sync.RWMutex
 }
 
 // DetectAdvances calls DetectAdvancesFunc.
-func (mock *AdvanceDetectorMock) DetectAdvances(ctx context.Context, repo RepoID) ([]string, error) {
+func (mock *AdvanceDetectorMock) DetectAdvances(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) {
 	if mock.DetectAdvancesFunc == nil {
 		panic("AdvanceDetectorMock.DetectAdvancesFunc: method is nil but AdvanceDetector.DetectAdvances was just called")
 	}
 	callInfo := struct {
-		Ctx  context.Context
-		Repo RepoID
+		Ctx     context.Context
+		Repo    RepoID
+		Fetched FetchResult
 	}{
-		Ctx:  ctx,
-		Repo: repo,
+		Ctx:     ctx,
+		Repo:    repo,
+		Fetched: fetched,
 	}
 	mock.lockDetectAdvances.Lock()
 	mock.calls.DetectAdvances = append(mock.calls.DetectAdvances, callInfo)
 	mock.lockDetectAdvances.Unlock()
-	return mock.DetectAdvancesFunc(ctx, repo)
+	return mock.DetectAdvancesFunc(ctx, repo, fetched)
 }
 
 // DetectAdvancesCalls gets all the calls that were made to DetectAdvances.
@@ -205,12 +209,14 @@ func (mock *AdvanceDetectorMock) DetectAdvances(ctx context.Context, repo RepoID
 //
 //	len(mockedAdvanceDetector.DetectAdvancesCalls())
 func (mock *AdvanceDetectorMock) DetectAdvancesCalls() []struct {
-	Ctx  context.Context
-	Repo RepoID
+	Ctx     context.Context
+	Repo    RepoID
+	Fetched FetchResult
 } {
 	var calls []struct {
-		Ctx  context.Context
-		Repo RepoID
+		Ctx     context.Context
+		Repo    RepoID
+		Fetched FetchResult
 	}
 	mock.lockDetectAdvances.RLock()
 	calls = mock.calls.DetectAdvances
@@ -228,7 +234,7 @@ var _ MergeabilityChecker = &MergeabilityCheckerMock{}
 //
 //		// make and configure a mocked MergeabilityChecker
 //		mockedMergeabilityChecker := &MergeabilityCheckerMock{
-//			CheckMergeabilityFunc: func(ctx context.Context, repo RepoID, advanced []string) error {
+//			CheckMergeabilityFunc: func(ctx context.Context, repo RepoID, advanced []Advance) error {
 //				panic("mock out the CheckMergeability method")
 //			},
 //		}
@@ -239,7 +245,7 @@ var _ MergeabilityChecker = &MergeabilityCheckerMock{}
 //	}
 type MergeabilityCheckerMock struct {
 	// CheckMergeabilityFunc mocks the CheckMergeability method.
-	CheckMergeabilityFunc func(ctx context.Context, repo RepoID, advanced []string) error
+	CheckMergeabilityFunc func(ctx context.Context, repo RepoID, advanced []Advance) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -250,21 +256,21 @@ type MergeabilityCheckerMock struct {
 			// Repo is the repo argument value.
 			Repo RepoID
 			// Advanced is the advanced argument value.
-			Advanced []string
+			Advanced []Advance
 		}
 	}
 	lockCheckMergeability sync.RWMutex
 }
 
 // CheckMergeability calls CheckMergeabilityFunc.
-func (mock *MergeabilityCheckerMock) CheckMergeability(ctx context.Context, repo RepoID, advanced []string) error {
+func (mock *MergeabilityCheckerMock) CheckMergeability(ctx context.Context, repo RepoID, advanced []Advance) error {
 	if mock.CheckMergeabilityFunc == nil {
 		panic("MergeabilityCheckerMock.CheckMergeabilityFunc: method is nil but MergeabilityChecker.CheckMergeability was just called")
 	}
 	callInfo := struct {
 		Ctx      context.Context
 		Repo     RepoID
-		Advanced []string
+		Advanced []Advance
 	}{
 		Ctx:      ctx,
 		Repo:     repo,
@@ -283,12 +289,12 @@ func (mock *MergeabilityCheckerMock) CheckMergeability(ctx context.Context, repo
 func (mock *MergeabilityCheckerMock) CheckMergeabilityCalls() []struct {
 	Ctx      context.Context
 	Repo     RepoID
-	Advanced []string
+	Advanced []Advance
 } {
 	var calls []struct {
 		Ctx      context.Context
 		Repo     RepoID
-		Advanced []string
+		Advanced []Advance
 	}
 	mock.lockCheckMergeability.RLock()
 	calls = mock.calls.CheckMergeability
@@ -306,7 +312,7 @@ var _ IngestEnqueuer = &IngestEnqueuerMock{}
 //
 //		// make and configure a mocked IngestEnqueuer
 //		mockedIngestEnqueuer := &IngestEnqueuerMock{
-//			EnqueueIngestFunc: func(ctx context.Context, repo RepoID, advanced []string) error {
+//			EnqueueIngestFunc: func(ctx context.Context, repo RepoID, advanced []Advance) error {
 //				panic("mock out the EnqueueIngest method")
 //			},
 //		}
@@ -317,7 +323,7 @@ var _ IngestEnqueuer = &IngestEnqueuerMock{}
 //	}
 type IngestEnqueuerMock struct {
 	// EnqueueIngestFunc mocks the EnqueueIngest method.
-	EnqueueIngestFunc func(ctx context.Context, repo RepoID, advanced []string) error
+	EnqueueIngestFunc func(ctx context.Context, repo RepoID, advanced []Advance) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -328,21 +334,21 @@ type IngestEnqueuerMock struct {
 			// Repo is the repo argument value.
 			Repo RepoID
 			// Advanced is the advanced argument value.
-			Advanced []string
+			Advanced []Advance
 		}
 	}
 	lockEnqueueIngest sync.RWMutex
 }
 
 // EnqueueIngest calls EnqueueIngestFunc.
-func (mock *IngestEnqueuerMock) EnqueueIngest(ctx context.Context, repo RepoID, advanced []string) error {
+func (mock *IngestEnqueuerMock) EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) error {
 	if mock.EnqueueIngestFunc == nil {
 		panic("IngestEnqueuerMock.EnqueueIngestFunc: method is nil but IngestEnqueuer.EnqueueIngest was just called")
 	}
 	callInfo := struct {
 		Ctx      context.Context
 		Repo     RepoID
-		Advanced []string
+		Advanced []Advance
 	}{
 		Ctx:      ctx,
 		Repo:     repo,
@@ -361,12 +367,12 @@ func (mock *IngestEnqueuerMock) EnqueueIngest(ctx context.Context, repo RepoID, 
 func (mock *IngestEnqueuerMock) EnqueueIngestCalls() []struct {
 	Ctx      context.Context
 	Repo     RepoID
-	Advanced []string
+	Advanced []Advance
 } {
 	var calls []struct {
 		Ctx      context.Context
 		Repo     RepoID
-		Advanced []string
+		Advanced []Advance
 	}
 	mock.lockEnqueueIngest.RLock()
 	calls = mock.calls.EnqueueIngest
@@ -456,13 +462,13 @@ var _ SyncStateReporter = &SyncStateReporterMock{}
 //
 //		// make and configure a mocked SyncStateReporter
 //		mockedSyncStateReporter := &SyncStateReporterMock{
-//			ReportErrorFunc: func(ctx context.Context, repo RepoID, err error)  {
+//			ReportErrorFunc: func(ctx context.Context, repo RepoID, err error, enqueuedIngest bool) error {
 //				panic("mock out the ReportError method")
 //			},
-//			ReportIdleFunc: func(ctx context.Context, repo RepoID)  {
+//			ReportIdleFunc: func(ctx context.Context, repo RepoID, enqueuedIngest bool) error {
 //				panic("mock out the ReportIdle method")
 //			},
-//			ReportSyncingFunc: func(ctx context.Context, repo RepoID)  {
+//			ReportSyncingFunc: func(ctx context.Context, repo RepoID) error {
 //				panic("mock out the ReportSyncing method")
 //			},
 //		}
@@ -473,13 +479,13 @@ var _ SyncStateReporter = &SyncStateReporterMock{}
 //	}
 type SyncStateReporterMock struct {
 	// ReportErrorFunc mocks the ReportError method.
-	ReportErrorFunc func(ctx context.Context, repo RepoID, err error)
+	ReportErrorFunc func(ctx context.Context, repo RepoID, err error, enqueuedIngest bool) error
 
 	// ReportIdleFunc mocks the ReportIdle method.
-	ReportIdleFunc func(ctx context.Context, repo RepoID)
+	ReportIdleFunc func(ctx context.Context, repo RepoID, enqueuedIngest bool) error
 
 	// ReportSyncingFunc mocks the ReportSyncing method.
-	ReportSyncingFunc func(ctx context.Context, repo RepoID)
+	ReportSyncingFunc func(ctx context.Context, repo RepoID) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -491,6 +497,8 @@ type SyncStateReporterMock struct {
 			Repo RepoID
 			// Err is the err argument value.
 			Err error
+			// EnqueuedIngest is the enqueuedIngest argument value.
+			EnqueuedIngest bool
 		}
 		// ReportIdle holds details about calls to the ReportIdle method.
 		ReportIdle []struct {
@@ -498,6 +506,8 @@ type SyncStateReporterMock struct {
 			Ctx context.Context
 			// Repo is the repo argument value.
 			Repo RepoID
+			// EnqueuedIngest is the enqueuedIngest argument value.
+			EnqueuedIngest bool
 		}
 		// ReportSyncing holds details about calls to the ReportSyncing method.
 		ReportSyncing []struct {
@@ -513,23 +523,25 @@ type SyncStateReporterMock struct {
 }
 
 // ReportError calls ReportErrorFunc.
-func (mock *SyncStateReporterMock) ReportError(ctx context.Context, repo RepoID, err error) {
+func (mock *SyncStateReporterMock) ReportError(ctx context.Context, repo RepoID, err error, enqueuedIngest bool) error {
 	if mock.ReportErrorFunc == nil {
 		panic("SyncStateReporterMock.ReportErrorFunc: method is nil but SyncStateReporter.ReportError was just called")
 	}
 	callInfo := struct {
-		Ctx  context.Context
-		Repo RepoID
-		Err  error
+		Ctx            context.Context
+		Repo           RepoID
+		Err            error
+		EnqueuedIngest bool
 	}{
-		Ctx:  ctx,
-		Repo: repo,
-		Err:  err,
+		Ctx:            ctx,
+		Repo:           repo,
+		Err:            err,
+		EnqueuedIngest: enqueuedIngest,
 	}
 	mock.lockReportError.Lock()
 	mock.calls.ReportError = append(mock.calls.ReportError, callInfo)
 	mock.lockReportError.Unlock()
-	mock.ReportErrorFunc(ctx, repo, err)
+	return mock.ReportErrorFunc(ctx, repo, err, enqueuedIngest)
 }
 
 // ReportErrorCalls gets all the calls that were made to ReportError.
@@ -537,14 +549,16 @@ func (mock *SyncStateReporterMock) ReportError(ctx context.Context, repo RepoID,
 //
 //	len(mockedSyncStateReporter.ReportErrorCalls())
 func (mock *SyncStateReporterMock) ReportErrorCalls() []struct {
-	Ctx  context.Context
-	Repo RepoID
-	Err  error
+	Ctx            context.Context
+	Repo           RepoID
+	Err            error
+	EnqueuedIngest bool
 } {
 	var calls []struct {
-		Ctx  context.Context
-		Repo RepoID
-		Err  error
+		Ctx            context.Context
+		Repo           RepoID
+		Err            error
+		EnqueuedIngest bool
 	}
 	mock.lockReportError.RLock()
 	calls = mock.calls.ReportError
@@ -553,21 +567,23 @@ func (mock *SyncStateReporterMock) ReportErrorCalls() []struct {
 }
 
 // ReportIdle calls ReportIdleFunc.
-func (mock *SyncStateReporterMock) ReportIdle(ctx context.Context, repo RepoID) {
+func (mock *SyncStateReporterMock) ReportIdle(ctx context.Context, repo RepoID, enqueuedIngest bool) error {
 	if mock.ReportIdleFunc == nil {
 		panic("SyncStateReporterMock.ReportIdleFunc: method is nil but SyncStateReporter.ReportIdle was just called")
 	}
 	callInfo := struct {
-		Ctx  context.Context
-		Repo RepoID
+		Ctx            context.Context
+		Repo           RepoID
+		EnqueuedIngest bool
 	}{
-		Ctx:  ctx,
-		Repo: repo,
+		Ctx:            ctx,
+		Repo:           repo,
+		EnqueuedIngest: enqueuedIngest,
 	}
 	mock.lockReportIdle.Lock()
 	mock.calls.ReportIdle = append(mock.calls.ReportIdle, callInfo)
 	mock.lockReportIdle.Unlock()
-	mock.ReportIdleFunc(ctx, repo)
+	return mock.ReportIdleFunc(ctx, repo, enqueuedIngest)
 }
 
 // ReportIdleCalls gets all the calls that were made to ReportIdle.
@@ -575,12 +591,14 @@ func (mock *SyncStateReporterMock) ReportIdle(ctx context.Context, repo RepoID) 
 //
 //	len(mockedSyncStateReporter.ReportIdleCalls())
 func (mock *SyncStateReporterMock) ReportIdleCalls() []struct {
-	Ctx  context.Context
-	Repo RepoID
+	Ctx            context.Context
+	Repo           RepoID
+	EnqueuedIngest bool
 } {
 	var calls []struct {
-		Ctx  context.Context
-		Repo RepoID
+		Ctx            context.Context
+		Repo           RepoID
+		EnqueuedIngest bool
 	}
 	mock.lockReportIdle.RLock()
 	calls = mock.calls.ReportIdle
@@ -589,7 +607,7 @@ func (mock *SyncStateReporterMock) ReportIdleCalls() []struct {
 }
 
 // ReportSyncing calls ReportSyncingFunc.
-func (mock *SyncStateReporterMock) ReportSyncing(ctx context.Context, repo RepoID) {
+func (mock *SyncStateReporterMock) ReportSyncing(ctx context.Context, repo RepoID) error {
 	if mock.ReportSyncingFunc == nil {
 		panic("SyncStateReporterMock.ReportSyncingFunc: method is nil but SyncStateReporter.ReportSyncing was just called")
 	}
@@ -603,7 +621,7 @@ func (mock *SyncStateReporterMock) ReportSyncing(ctx context.Context, repo RepoI
 	mock.lockReportSyncing.Lock()
 	mock.calls.ReportSyncing = append(mock.calls.ReportSyncing, callInfo)
 	mock.lockReportSyncing.Unlock()
-	mock.ReportSyncingFunc(ctx, repo)
+	return mock.ReportSyncingFunc(ctx, repo)
 }
 
 // ReportSyncingCalls gets all the calls that were made to ReportSyncing.
