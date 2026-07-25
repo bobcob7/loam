@@ -2,6 +2,14 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Development Workflow
+
+When picking up and completing beads, follow the operating loop in
+[docs/bead-workflow.md](docs/bead-workflow.md): Sonnet implements in an isolated
+worktree, a separate Opus subagent reviews the diff (accuracy, completion, test
+coverage, idiomatic practice), fixes loop back up to 5 times, and the review
+verdict is recorded in the bead's notes on close.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 

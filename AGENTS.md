@@ -2,6 +2,14 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
+## Development Workflow
+
+When picking up and completing beads, follow the operating loop in
+[docs/bead-workflow.md](docs/bead-workflow.md): Sonnet implements in an isolated
+worktree, a separate Opus subagent reviews the diff (accuracy, completion, test
+coverage, idiomatic practice), fixes loop back up to 5 times, and the review
+verdict is recorded in the bead's notes on close.
+
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
 > git-compatible protocol), stored under `refs/dolt/data` on your git
