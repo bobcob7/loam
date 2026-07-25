@@ -8,45 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEnvConfig_OutputFormat_DefaultsToJSON(t *testing.T) {
-	t.Setenv("LOAM_OUTPUT_FORMAT", "")
-	cfg := &envConfig{}
-	assert.Equal(t, "json", cfg.OutputFormat())
-}
-
-func TestEnvConfig_OutputFormat_ReadsEnv(t *testing.T) {
-	t.Setenv("LOAM_OUTPUT_FORMAT", "yaml")
-	cfg := &envConfig{}
-	assert.Equal(t, "yaml", cfg.OutputFormat())
-}
-
-func TestEnvConfig_ReadsAgentIdentityFromEnv(t *testing.T) {
-	t.Setenv("LOAM_AGENT_NAME", "ada-lovelace")
-	t.Setenv("LOAM_AGENT_ID", "7")
-	t.Setenv("LOAM_AGENT_ROLE", "reviewer")
-	t.Setenv("LOAM_SERVER_URL", "https://loam.example")
-	cfg := &envConfig{}
-	assert.Equal(t, "ada-lovelace", cfg.AgentName())
-	assert.Equal(t, "7", cfg.AgentID())
-	assert.Equal(t, "reviewer", cfg.AgentRole())
-	assert.Equal(t, "https://loam.example", cfg.ServerURL())
-}
-
-func TestJSONEncoder_Encode_WritesJSON(t *testing.T) {
-	t.Parallel()
-	var buf bytes.Buffer
-	encoder := &jsonEncoder{w: &buf}
-	require.NoError(t, encoder.Encode(map[string]string{"a": "b"}))
-	assert.JSONEq(t, `{"a":"b"}`, buf.String())
-}
-
-func TestCoarseErrorMapper_ExitCode(t *testing.T) {
-	t.Parallel()
-	mapper := &coarseErrorMapper{}
-	assert.Equal(t, 0, mapper.ExitCode(nil))
-	assert.Equal(t, 1, mapper.ExitCode(errNotImplemented))
-}
-
 func TestUnresolvedWorkspace_AlwaysFails(t *testing.T) {
 	t.Parallel()
 	ws := &unresolvedWorkspace{}
@@ -56,14 +17,37 @@ func TestUnresolvedWorkspace_AlwaysFails(t *testing.T) {
 	assert.ErrorIs(t, err, errWorkspaceUnresolved)
 }
 
+// TestNewPlaceholderDeps_ConstructsAllCollaborators proves NewPlaceholderDeps
+// wires the real config/encoder/error-mapper collaborators (this bead's
+// group) alongside the still-placeholder workspace resolver (loam-0pj.5).
 func TestNewPlaceholderDeps_ConstructsAllCollaborators(t *testing.T) {
-	t.Parallel()
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	baseEnv(t)
 	var buf bytes.Buffer
-	deps := NewPlaceholderDeps(testLogger(), &buf)
+	deps, err := NewPlaceholderDeps(testLogger(), &buf)
+	require.NoError(t, err)
 	require.NotNil(t, deps)
 	require.NoError(t, deps.encoder.Encode(map[string]string{"ok": "true"}))
 	assert.JSONEq(t, `{"ok":"true"}`, buf.String())
 	assert.Equal(t, 1, deps.errorMapper.ExitCode(errNotImplemented))
-	_, err := deps.workspace.ResolveRepo()
-	assert.Error(t, err)
+	assert.Equal(t, "ada-lovelace-7-reviewer", deps.config.Identifier())
+	_, err = deps.workspace.ResolveRepo()
+	assert.ErrorIs(t, err, errWorkspaceUnresolved)
+}
+
+// TestNewPlaceholderDeps_MissingRequiredVar_ReturnsErrorAndEncodesUsagePayload
+// proves a missing required LOAM_* variable both fails construction and
+// still reports through the resolved output format (LOAM_OUTPUT_FORMAT
+// alone never errors, so the encoder is available even when the rest of
+// config is invalid).
+func TestNewPlaceholderDeps_MissingRequiredVar_ReturnsErrorAndEncodesUsagePayload(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	baseEnv(t)
+	t.Setenv(envAgentRole, "")
+	var buf bytes.Buffer
+	deps, err := NewPlaceholderDeps(testLogger(), &buf)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errMissingEnv)
+	assert.Nil(t, deps)
+	assert.Contains(t, buf.String(), `"code":"usage"`)
 }

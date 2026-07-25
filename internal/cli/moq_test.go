@@ -26,6 +26,9 @@ var _ Config = &ConfigMock{}
 //			AgentRoleFunc: func() string {
 //				panic("mock out the AgentRole method")
 //			},
+//			IdentifierFunc: func() string {
+//				panic("mock out the Identifier method")
+//			},
 //			OutputFormatFunc: func() string {
 //				panic("mock out the OutputFormat method")
 //			},
@@ -48,6 +51,9 @@ type ConfigMock struct {
 	// AgentRoleFunc mocks the AgentRole method.
 	AgentRoleFunc func() string
 
+	// IdentifierFunc mocks the Identifier method.
+	IdentifierFunc func() string
+
 	// OutputFormatFunc mocks the OutputFormat method.
 	OutputFormatFunc func() string
 
@@ -65,6 +71,9 @@ type ConfigMock struct {
 		// AgentRole holds details about calls to the AgentRole method.
 		AgentRole []struct {
 		}
+		// Identifier holds details about calls to the Identifier method.
+		Identifier []struct {
+		}
 		// OutputFormat holds details about calls to the OutputFormat method.
 		OutputFormat []struct {
 		}
@@ -75,6 +84,7 @@ type ConfigMock struct {
 	lockAgentID      sync.RWMutex
 	lockAgentName    sync.RWMutex
 	lockAgentRole    sync.RWMutex
+	lockIdentifier   sync.RWMutex
 	lockOutputFormat sync.RWMutex
 	lockServerURL    sync.RWMutex
 }
@@ -157,6 +167,33 @@ func (mock *ConfigMock) AgentRoleCalls() []struct {
 	mock.lockAgentRole.RLock()
 	calls = mock.calls.AgentRole
 	mock.lockAgentRole.RUnlock()
+	return calls
+}
+
+// Identifier calls IdentifierFunc.
+func (mock *ConfigMock) Identifier() string {
+	if mock.IdentifierFunc == nil {
+		panic("ConfigMock.IdentifierFunc: method is nil but Config.Identifier was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockIdentifier.Lock()
+	mock.calls.Identifier = append(mock.calls.Identifier, callInfo)
+	mock.lockIdentifier.Unlock()
+	return mock.IdentifierFunc()
+}
+
+// IdentifierCalls gets all the calls that were made to Identifier.
+// Check the length with:
+//
+//	len(mockedConfig.IdentifierCalls())
+func (mock *ConfigMock) IdentifierCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockIdentifier.RLock()
+	calls = mock.calls.Identifier
+	mock.lockIdentifier.RUnlock()
 	return calls
 }
 

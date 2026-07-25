@@ -21,9 +21,13 @@ func Run(ctx context.Context, router *Router, args []string) int {
 	}
 	var ue *usageError
 	if errors.As(err, &ue) {
-		_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: "usage", Message: ue.Error()}})
+		_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: codeUsage, Message: ue.Error()}})
 		return exitUsage
 	}
-	_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: "internal", Message: err.Error()}})
+	code := codeInternal
+	if ce := mapCommandError(err); ce != nil {
+		code = ce.code
+	}
+	_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: code, Message: err.Error()}})
 	return router.deps.errorMapper.ExitCode(err)
 }

@@ -6,9 +6,9 @@ package cli
 //go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver
 
 // Config exposes the LOAM_* environment configuration every command may
-// need (see docs/cli-spec.md -> Environment Variables). Implemented by a
-// later bead (loam-0pj.2); this package only depends on the small read-only
-// surface below.
+// need (see docs/cli-spec.md -> Environment Variables). Implemented by
+// loadConfig in config.go; this package only depends on the small
+// read-only surface below.
 type Config interface {
 	// OutputFormat returns the active output format: json, yaml, xml, or
 	// human. Unrecognized values fall back to json.
@@ -23,10 +23,14 @@ type Config interface {
 	// and the git smart-HTTP endpoint (clone composes
 	// <ServerURL>/git/<group>/<repo>.git; there is no separate git URL).
 	ServerURL() string
+	// Identifier returns the resolved "<name>-<id>-<role>" identifier (see
+	// docs/cli-spec.md -> Environment Variables), reused by whoami and by
+	// the Connect identity headers.
+	Identifier() string
 }
 
 // OutputEncoder writes a command's result, or a structured error, to stdout
-// in the active output format. Implemented by a later bead (loam-0pj.3).
+// in the active output format. Implemented by the encoders in encoder.go.
 type OutputEncoder interface {
 	Encode(v any) error
 }
@@ -34,7 +38,7 @@ type OutputEncoder interface {
 // ErrorMapper maps a command handler's error to the CLI's coarse exit-code
 // scheme (see docs/cli-spec.md -> Exit Codes & Errors: 0 success, 1
 // unexpected internal error, 2 usage/authz/conflict/precondition, 3 not
-// found). Implemented by a later bead (loam-0pj.4).
+// found). Implemented by cliErrorMapper in errormapper.go.
 type ErrorMapper interface {
 	ExitCode(err error) int
 }
