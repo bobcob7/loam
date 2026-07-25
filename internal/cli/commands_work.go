@@ -13,18 +13,16 @@ func requireWorkBranchArgs(command string, positional []string) error {
 	return nil
 }
 
-// runWorkStart implements `loam work start <repo> [from]`.
+// runWorkStart implements `loam work start <repo> <from>`. Both are
+// required — there is no default base branch.
 func runWorkStart(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("work start")
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
 	}
-	if len(positional) < 1 {
-		return newUsageError("work start requires a repo argument")
-	}
-	if len(positional) > 2 {
-		return newUsageError("work start takes at most a repo and a from branch")
+	if len(positional) != 2 {
+		return newUsageError("work start requires exactly a repo and a from argument")
 	}
 	return errNotImplemented
 }
@@ -59,8 +57,8 @@ func runWorkRequestReview(ctx context.Context, deps *Deps, args []string) error 
 }
 
 // runWorkList implements `loam work list [--repo <repo>] [--author <id>]
-// [--target <branch>] [--awaiting-review] [--state <state>] [--limit <n>]`.
-// --limit is the NOTES spec correction on top of docs/cli-spec.md.
+// [--target <branch>] [--awaiting-review] [--state <state>] [--limit <n>]`
+// (see docs/cli-spec.md -> work list; --limit defaults to 100).
 func runWorkList(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("work list")
 	fs.String("repo", "", "limit to one enrolled repo")
@@ -68,7 +66,7 @@ func runWorkList(ctx context.Context, deps *Deps, args []string) error {
 	fs.String("target", "", "limit to work branches targeting this branch")
 	fs.Bool("awaiting-review", false, "limit to work branches awaiting the caller's verdict")
 	fs.String("state", "reviewable", "draft, reviewable, reviewed, complete, or closed")
-	fs.Int("limit", 0, "maximum number of work branches to return")
+	fs.Int("limit", 100, "maximum number of work branches to return")
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())

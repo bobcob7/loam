@@ -26,9 +26,6 @@ var _ Config = &ConfigMock{}
 //			AgentRoleFunc: func() string {
 //				panic("mock out the AgentRole method")
 //			},
-//			GitURLFunc: func() string {
-//				panic("mock out the GitURL method")
-//			},
 //			OutputFormatFunc: func() string {
 //				panic("mock out the OutputFormat method")
 //			},
@@ -51,9 +48,6 @@ type ConfigMock struct {
 	// AgentRoleFunc mocks the AgentRole method.
 	AgentRoleFunc func() string
 
-	// GitURLFunc mocks the GitURL method.
-	GitURLFunc func() string
-
 	// OutputFormatFunc mocks the OutputFormat method.
 	OutputFormatFunc func() string
 
@@ -71,9 +65,6 @@ type ConfigMock struct {
 		// AgentRole holds details about calls to the AgentRole method.
 		AgentRole []struct {
 		}
-		// GitURL holds details about calls to the GitURL method.
-		GitURL []struct {
-		}
 		// OutputFormat holds details about calls to the OutputFormat method.
 		OutputFormat []struct {
 		}
@@ -84,7 +75,6 @@ type ConfigMock struct {
 	lockAgentID      sync.RWMutex
 	lockAgentName    sync.RWMutex
 	lockAgentRole    sync.RWMutex
-	lockGitURL       sync.RWMutex
 	lockOutputFormat sync.RWMutex
 	lockServerURL    sync.RWMutex
 }
@@ -167,33 +157,6 @@ func (mock *ConfigMock) AgentRoleCalls() []struct {
 	mock.lockAgentRole.RLock()
 	calls = mock.calls.AgentRole
 	mock.lockAgentRole.RUnlock()
-	return calls
-}
-
-// GitURL calls GitURLFunc.
-func (mock *ConfigMock) GitURL() string {
-	if mock.GitURLFunc == nil {
-		panic("ConfigMock.GitURLFunc: method is nil but Config.GitURL was just called")
-	}
-	callInfo := struct {
-	}{}
-	mock.lockGitURL.Lock()
-	mock.calls.GitURL = append(mock.calls.GitURL, callInfo)
-	mock.lockGitURL.Unlock()
-	return mock.GitURLFunc()
-}
-
-// GitURLCalls gets all the calls that were made to GitURL.
-// Check the length with:
-//
-//	len(mockedConfig.GitURLCalls())
-func (mock *ConfigMock) GitURLCalls() []struct {
-} {
-	var calls []struct {
-	}
-	mock.lockGitURL.RLock()
-	calls = mock.calls.GitURL
-	mock.lockGitURL.RUnlock()
 	return calls
 }
 

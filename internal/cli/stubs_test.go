@@ -25,13 +25,11 @@ func TestEnvConfig_ReadsAgentIdentityFromEnv(t *testing.T) {
 	t.Setenv("LOAM_AGENT_ID", "7")
 	t.Setenv("LOAM_AGENT_ROLE", "reviewer")
 	t.Setenv("LOAM_SERVER_URL", "https://loam.example")
-	t.Setenv("LOAM_GIT_URL", "ssh://git@loam.example")
 	cfg := NewEnvConfig()
 	assert.Equal(t, "ada-lovelace", cfg.AgentName())
 	assert.Equal(t, "7", cfg.AgentID())
 	assert.Equal(t, "reviewer", cfg.AgentRole())
 	assert.Equal(t, "https://loam.example", cfg.ServerURL())
-	assert.Equal(t, "ssh://git@loam.example", cfg.GitURL())
 }
 
 func TestJSONEncoder_Encode_WritesJSON(t *testing.T) {

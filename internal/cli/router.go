@@ -63,8 +63,9 @@ func dispatchGroup(ctx context.Context, deps *Deps, groupName string, group *com
 }
 
 // commandTree is the single definition of the loam command surface (see
-// docs/cli-spec.md, as corrected by loam-0pj.1's NOTES: commit and push are
-// removed; graph gains --file/--limit and work list gains --limit).
+// docs/cli-spec.md). There is no commit or push command: after clone,
+// source control is plain git, authorized server-side at receive time (see
+// docs/git-spec.md).
 func commandTree() map[string]*command {
 	return map[string]*command{
 		"instructions": {summary: "Role-specific instructions and CLI usage", run: runInstructions},

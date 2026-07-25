@@ -27,19 +27,17 @@ func runWhoami(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
-// runClone implements `loam clone <repo> [branch]` (see docs/cli-spec.md ->
-// clone). No flags; repo is required.
+// runClone implements `loam clone <repo> <branch>` (see docs/cli-spec.md ->
+// clone). No flags; both repo and branch are required — there is no
+// default branch.
 func runClone(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("clone")
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
 	}
-	if len(positional) < 1 {
-		return newUsageError("clone requires a repo argument")
-	}
-	if len(positional) > 2 {
-		return newUsageError("clone takes at most a repo and a branch")
+	if len(positional) != 2 {
+		return newUsageError("clone requires exactly a repo and a branch argument")
 	}
 	return errNotImplemented
 }

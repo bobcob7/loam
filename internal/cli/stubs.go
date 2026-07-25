@@ -41,9 +41,6 @@ func (c *EnvConfig) AgentRole() string { return os.Getenv("LOAM_AGENT_ROLE") }
 // ServerURL returns LOAM_SERVER_URL.
 func (c *EnvConfig) ServerURL() string { return os.Getenv("LOAM_SERVER_URL") }
 
-// GitURL returns LOAM_GIT_URL.
-func (c *EnvConfig) GitURL() string { return os.Getenv("LOAM_GIT_URL") }
-
 // JSONEncoder always writes v as JSON to w, regardless of the configured
 // output format. Replaced by the real json/yaml/xml/human encoder in
 // loam-0pj.3.

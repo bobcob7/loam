@@ -4,16 +4,17 @@ import "context"
 
 // runGraphQuery implements the shared shape of every `loam graph <subquery>
 // <target> [--repo <repo>] [--all] [--file <path>] [--limit <n>]` subquery
-// (see docs/cli-spec.md -> Graph DB queries). --file and --limit are the
-// NOTES spec correction on top of the documented synopsis. --repo and --all
-// are mutually exclusive scope selectors; with neither, scope is inferred
-// from the current directory (a later bead, via WorkspaceResolver).
+// (see docs/cli-spec.md -> Graph DB queries). --file narrows an ambiguous
+// symbol target to one file's definition; --limit caps result rows
+// (default 50). --repo and --all are mutually exclusive scope selectors;
+// with neither, scope is inferred from the current directory (a later
+// bead, via WorkspaceResolver).
 func runGraphQuery(name string, deps *Deps, args []string) error {
 	fs := newFlagSet(name)
 	repo := fs.String("repo", "", "target a specific enrolled repo")
 	all := fs.Bool("all", false, "query across all enrolled repos")
 	fs.String("file", "", "disambiguate the target to a specific file")
-	fs.Int("limit", 0, "maximum number of results to return")
+	fs.Int("limit", 50, "maximum number of results to return")
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())

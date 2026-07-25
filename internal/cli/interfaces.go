@@ -19,10 +19,10 @@ type Config interface {
 	AgentID() string
 	// AgentRole returns the calling agent's configured role.
 	AgentRole() string
-	// ServerURL returns the base URL of the Loam RPC endpoint.
+	// ServerURL returns the base URL of the Loam server: the Connect APIs
+	// and the git smart-HTTP endpoint (clone composes
+	// <ServerURL>/git/<group>/<repo>.git; there is no separate git URL).
 	ServerURL() string
-	// GitURL returns the base SSH URL for git transport.
-	GitURL() string
 }
 
 // OutputEncoder writes a command's result, or a structured error, to stdout
