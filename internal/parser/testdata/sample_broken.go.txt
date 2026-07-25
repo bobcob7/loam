@@ -1,0 +1,5 @@
+package broken
+
+func broken(a, b int (
+	return a + b
+}
