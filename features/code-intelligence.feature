@@ -5,7 +5,7 @@ Feature: Querying code intelligence
 
   Background:
     Given the repo "bobcob7/doc-server" is enrolled with target branch "main"
-    And its target branch has been ingested
+    And its indexed branch has been ingested
     And I am working inside a clone of "bobcob7/doc-server"
 
   Scenario: Finding where a symbol is defined

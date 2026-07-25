@@ -7,9 +7,9 @@ Feature: Code ingestion
     Given I am signed in to the web interface as the admin
     And the repo "bobcob7/doc-server" is enrolled with target branch "main"
 
-  Scenario: Enrolling a repo ingests its default target branch
+  Scenario: Enrolling a repo ingests its indexed branch
     When enrollment completes
-    Then the default target branch "main" is ingested
+    Then the indexed branch "main" is ingested
     And graph and search queries return results for it
 
   Scenario: Advancing the target branch refreshes the index
@@ -28,7 +28,7 @@ Feature: Code ingestion
   Scenario: The admin can force a reindex
     When I reindex "bobcob7/doc-server"
     Then a full ingest job runs for it
-    And once it succeeds, queries reflect the current target branch
+    And once it succeeds, queries reflect the current indexed branch
 
   Scenario: Viewing ingest job activity
     Given ingest jobs have run for enrolled repos

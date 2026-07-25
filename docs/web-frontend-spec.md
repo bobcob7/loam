@@ -83,12 +83,13 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 
 - **`/` → Repos** (default). List enrolled repos with sync status.
   - Queries: `RepoAdminService.ListRepos`.
-  - Actions: `EnrollRepo` (form: upstream URL + target branches).
+  - Actions: `EnrollRepo` (form: upstream URL + target branches + indexed branch,
+    pre-filled from upstream's `HEAD`).
   - States: loading / empty ("no repos enrolled") / error.
-- **`/repos/:repo` → Repo detail.** Target branches, description schema, and the repo's
+- **`/repos/:repo` → Repo detail.** Target branches, the indexed branch, and the repo's
   credential status.
   - Queries: `RepoAdminService.GetRepo`, `CredentialService.GetCredentialStatus` (repo's host).
-  - Actions: `SetTargetBranches`, `SetDescriptionSchema`, `RemoveRepo`.
+  - Actions: `SetTargetBranches` (including designating the indexed branch), `RemoveRepo`.
 - **`/credentials` → Credentials.** Per-forge-host tokens (one token covers REST and
   git; see `docs/sync-spec.md` → Upstream Transport).
   - Queries: `CredentialService.ListCredentials`.

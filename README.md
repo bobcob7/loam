@@ -74,8 +74,9 @@ dropping in a grammar rather than changing the ingest core. It records symbols (
 types, modules), the files they live in, and the dependency edges between them, along with
 the commit/ref history for each symbol. Agents query this to answer structural questions
 without reading the whole tree: where a symbol is defined, what references it, what it
-depends on, and the blast radius of a proposed change. Re-ingested whenever a target branch
-advances.
+depends on, and the blast radius of a proposed change. Re-ingested whenever the repo's
+indexed branch advances (one designated target branch in the MVP; all target branches is
+Future Work).
 
 The MVP ships a starter set of grammars (e.g. TypeScript/JavaScript, Python, Go). At this
 layer cross-file symbols and dependency edges are approximate; precise reference resolution
@@ -86,7 +87,7 @@ is planned (see Future Work).
 Documentation in the code, and the code itself is chunked and ingested into a vector DB upon merge to specific branches.
 This information can be queried through the CLI tool.
 
-On merge to a target branch, docs and code are split into semantically meaningful chunks
+On merge to the indexed branch, docs and code are split into semantically meaningful chunks
 (a doc section, a function, a class), embedded, and stored in a vector DB. Agents run
 natural-language queries through the CLI to pull the most relevant chunks as context —
 "how is auth handled here", "where do we format review descriptions" — instead of grepping
@@ -132,8 +133,7 @@ the thread is resolved — so an agent can work through feedback item by item.
 
 ##### Add Comment
 A reviewer command that stages a new comment thread (optionally anchored to a file/line) and
-can mark a thread resolved. Comment shape can be constrained by the admin's JSON schema (see
-Git → Work Branches).
+can mark a thread resolved.
 
 Comments are **staged locally on the CLI**, not sent to the server as they are written. A
 reviewer accumulates their comments across the diff and nothing is visible until they submit
@@ -185,21 +185,20 @@ mirror and the enrolled target branches current.
 
 #### Clone
 
-The CLI tool will have a git clone command that will clone in the repo at specific branch if specified.
+The CLI tool will have a git clone command that clones the repo at a named branch.
 
-Clones an enrolled repo from the server, checking out a given branch when one is specified
-and the target branch otherwise. The resulting clone has the server set as its only remote.
+Clones an enrolled repo from the server, checking out the named branch — always explicit,
+typically the work branch the agent is working or reviewing. The resulting clone has the
+server set as its only remote.
 
 #### Work Branches
 
 The CLI tool can be used to start work branches from target branches, set their title and
 description, and request review. Requesting review requires a title and description.
-A JSON schema can be setup by the admin from the web interface to enforce description format and comment/response formats.
 
 Once review is requested, a work branch is visible to other agents via the List/Get Details
-commands. The admin can register a JSON schema per repo that the server validates
-descriptions and comments/responses against, so every work branch follows a consistent,
-machine-checkable format.
+commands. Descriptions and comments are free text in the MVP; admin-configurable
+communication schemas are Future Work.
 
 Work branches never merge into the server's branches. When the admin accepts a reviewed work
 branch (in the web interface), the server opens the corresponding upstream PR against the
@@ -246,8 +245,8 @@ Target branches can be specified. These branches are eligible as targets for rev
 2. Admin adds an upstream access token (Forgejo token for MVP, GitHub PAT for GH). The token is confirmed to work and to have the appropriate permissions.
 3. Admin types in exact repo name <group>/<repo_name>.
 4. Server clones the repo locally.
-5. Admin specifies target branches.
-6. Server ingests data from the target branches.
+5. Admin specifies target branches and designates one as the indexed branch (pre-filled from upstream's default).
+6. Server ingests data from the indexed branch.
 
 #### Work & Review
 1. Work is defined by the user.
@@ -294,6 +293,10 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
   on an external orchestrator: assign the sub-roles a given review needs, dispatch/notify the
   matching agents, and track which required reviews and approvals are still outstanding
   before a work branch can be marked complete.
+- **Communication schemas.** Per-repo JSON Schemas, set by the admin, validating
+  work-branch descriptions and review-comment bodies at the server boundary — forcing
+  agents into a consistent, machine-checkable communication format that stays flexible
+  for the admin to adjust as needed. Dropped from the MVP; free text until then.
 - **Collaborative work branches.** Let multiple agents work the same work branch at once by
   cloning it into separate directories and coordinating commits/pushes on the shared branch.
   The MVP assumes a single agent per work branch.

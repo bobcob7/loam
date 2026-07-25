@@ -59,25 +59,27 @@ connect-web client.
 Enroll and manage repos. The admin's repo view is richer than the CLI's read-only
 `RepoService.GetRepo`.
 
-- `EnrollRepo(string upstream_url, string[] target_branches) → { EnrolledRepo }` — enroll by
-  upstream URL; the server derives the `<group>/<repo_name>` identifier, clones the repo, and
-  begins periodic sync + ingest of the target branches. Uses the credential for the URL's
-  forge host (see CredentialService).
+- `EnrollRepo(string upstream_url, string[] target_branches, string indexed_branch) →
+  { EnrolledRepo }` — enroll by upstream URL; the server derives the `<group>/<repo_name>`
+  identifier, clones the repo, and begins periodic sync + ingest of the indexed branch.
+  `indexed_branch` must be one of `target_branches`; the enrollment form pre-fills it from
+  upstream's `HEAD` (free from the `ls-remote` access probe). Uses the credential for the
+  URL's forge host (see CredentialService).
 - `ListRepos(Page) → { EnrolledRepo[], PageInfo }` — enrolled repos with status.
 - `GetRepo(repo) → { EnrolledRepo }` — one repo with full status.
 - `RemoveRepo(repo) → { }` — unenroll and drop the local mirror, graph, and vector data.
-- `SetTargetBranches(repo, string[] target_branches) → { EnrolledRepo }` — replace the
-  branches eligible as work-branch targets.
-- `SetDescriptionSchema(repo, string schema) → { EnrolledRepo }` — set/replace the JSON
-  Schema (as a JSON string) that validates work-branch descriptions and comment/response
-  formats; empty clears it.
+- `SetTargetBranches(repo, string[] target_branches, string indexed_branch) →
+  { EnrolledRepo }` — replace the branches eligible as work-branch targets and designate
+  which one is indexed. Changing `indexed_branch` triggers a full ingest of the new
+  branch. Removing a target branch only affects *eligibility* — existing work branches
+  keep their recorded target and full lifecycle.
 - `ReindexRepo(repo) → { IngestJob }` — force a full rebuild of the repo's derived indexes.
 - `ListIngestJobs(Page, optional string repo, optional string status) → { IngestJob[], PageInfo }`
   — recent and active ingest jobs across repos, for the Jobs view (see `docs/ingestion-spec.md`).
 
-`EnrolledRepo` is `{ repo, upstream_url, target_branches[], default_target, SyncStatus sync,
-bool has_description_schema, string ingested_ref }` — `ingested_ref` is the default
-target's last ingested commit, empty until first ingest. `SyncStatus` is `{ SyncState state, string last_synced_at,
+`EnrolledRepo` is `{ repo, upstream_url, target_branches[], indexed_branch, SyncStatus sync,
+string ingested_ref }` — `ingested_ref` is the indexed branch's last ingested commit,
+empty until first ingest. `SyncStatus` is `{ SyncState state, string last_synced_at,
 string error }`, with `state` one of `idle` / `syncing` / `error`. `IngestJob` is
 `{ repo, target_branch, kind, status, attempts, error, queued_at, started_at, finished_at }`.
 
@@ -162,7 +164,7 @@ codegen, routing, build/embed) is designed in [`docs/web-frontend-spec.md`](web-
 
 - **Login** — the browser's basic-auth prompt; no dedicated page.
 - **Repos** — list enrolled repos with sync status; enroll form (upstream URL + target
-  branches); per-repo settings (target branches, description schema, credentials).
+  branches); per-repo settings (target branches, credentials).
 - **Credentials** — set and validate the upstream token per forge host.
 - **Roles** — edit agent roles: granted operations, instructions, defaults.
 - **Proposals** — the queue of reviewed work branches: view one (title/description/diff/

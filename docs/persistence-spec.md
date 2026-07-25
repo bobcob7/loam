@@ -34,9 +34,9 @@ Work.
 ## Metadata (source of truth)
 
 ### repos
-`id`, `name` (unique, `<group>/<repo_name>`), `upstream_url`, `forge_host`, `default_target`,
-`description_schema` (jsonb, null), `sync_state` (`idle`/`syncing`/`error`), `last_synced_at`
-(null), `sync_error` (null), timestamps.
+`id`, `name` (unique, `<group>/<repo_name>`), `upstream_url`, `forge_host`,
+`indexed_branch` (the target branch the derived indexes are built from), `sync_state`
+(`idle`/`syncing`/`error`), `last_synced_at` (null), `sync_error` (null), timestamps.
 - `forge_host` links to `credentials.host` (soft reference; a working credential exists before
   enrollment).
 
@@ -115,7 +115,8 @@ state, not rebuildable. See `docs/ingestion-spec.md`.
 Maintained per repo by the ingestion pipeline (`docs/ingestion-spec.md`): **incrementally** on
 a target-branch advance (only changed files re-parsed/re-embedded), or fully on first ingest
 and the fallback cases. All tables below carry `repo_id` and `target_branch` — the MVP indexes
-only the default target; the column leaves room to index all target branches later.
+only the designated indexed branch; the column leaves room to index all target branches
+later.
 
 ### symbols
 `id`, `repo_id` (fk), `target_branch`, `file`, `line` (null for file-level), `name`, `kind`

@@ -72,8 +72,10 @@ ingest jobs — and one sync cycle runs, in order:
    **Registered work-branch refs are excluded from the fetch refspec** — they
    are Loam's own refs and must never be clobbered even if upstream grows a
    branch with a colliding name.
-2. **Detect target advances** by comparing each target branch's SHA before and
-   after the fetch.
+2. **Detect advances** by comparing SHAs before and after the fetch — for every
+   listed target branch, plus any branch that is the recorded target of an open
+   work branch, so conflict detection keeps running for targets de-listed while
+   work was in flight.
 3. **Mergeability check** (below) for every advanced target.
 4. **Enqueue ingest** for advanced indexed branches (`docs/ingestion-spec.md`).
 5. **Poll PR states** for work branches with an open recorded PR (below).

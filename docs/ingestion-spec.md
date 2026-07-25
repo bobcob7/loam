@@ -36,10 +36,11 @@ commits).
 
 ## Indexed Scope
 
-For the MVP, Loam indexes each repo's **default target branch** only; queries reflect it. The
-derived tables carry a `target_branch` column (set to the default target now) so indexing
-**all** enrolled target branches later is an additive change, not a schema rewrite (Future
-Work).
+For the MVP, Loam indexes each repo's designated **indexed branch** only — one of its
+target branches, chosen at enrollment — and queries reflect it. The derived tables carry
+a `target_branch` column (set to the indexed branch now) so indexing **all** enrolled
+target branches later is an additive change, not a schema rewrite (Future Work — this
+was the original intent, deferred for embedding cost).
 
 ## Incremental Build
 
@@ -62,6 +63,7 @@ a half-built index.
 - first ingest of a repo,
 - no valid diff base (force-push, history rewrite, shallow/reset ref),
 - a Tree-sitter grammar / pipeline version bump, or an embedding-model change,
+- the admin changing the repo's indexed branch,
 - a manual "reindex" requested by the admin.
 
 Rationale: embedding is the expensive step and is per-file, so skipping unchanged files

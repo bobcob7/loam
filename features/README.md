@@ -44,8 +44,8 @@ Each file covers one area (see the specs for detail):
   lists verdicts.
 - `replies.feature` — author replies to review threads (immediate).
 - `admin-proposals.feature` — admin accepts / requests re-review / closes; the proposal queue.
-- `enrollment.feature` — admin enrolls repos, sets target branches and description schema,
-  removes repos.
+- `enrollment.feature` — admin enrolls repos, sets target branches and the indexed
+  branch, removes repos.
 - `credentials.feature` — admin sets upstream tokens per forge host; one token covers
   REST and git.
 - `roles.feature` — role definitions, defaults, and authorization (author vs reviewer).

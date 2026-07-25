@@ -21,11 +21,22 @@ Feature: Enrolling and managing repos
     When I set its target branches to "main" and "release"
     Then both "main" and "release" are eligible as work-branch targets
 
-  Scenario: Registering a description schema validates descriptions
-    Given "bobcob7/doc-server" is enrolled
-    When I register a description JSON schema for it
-    Then opening a work branch with a non-conforming description is rejected
-    And opening one with a conforming description succeeds
+  Scenario: The indexed branch must be a target branch
+    Given "bobcob7/doc-server" is enrolled with target branch "main"
+    When I try to designate "docs" as the indexed branch
+    Then the change is rejected
+
+  Scenario: Changing the indexed branch triggers a full ingest
+    Given "bobcob7/doc-server" is enrolled with target branches "main" and "release" and indexed branch "main"
+    When I change the indexed branch to "release"
+    Then a full ingest job runs for "release"
+    And once it succeeds, graph and search queries reflect "release"
+
+  Scenario: Removing a target branch does not end work in flight
+    Given a work branch targeting "release" is under review
+    When I remove "release" from the target branches
+    Then no new work branches can start from "release"
+    But the existing work branch keeps its lifecycle
 
   Scenario: Enrolled repos report sync status
     Given "bobcob7/doc-server" is enrolled

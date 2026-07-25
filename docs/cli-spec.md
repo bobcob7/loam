@@ -135,23 +135,24 @@ identity. Local only — no server call.
 ### Git
 
 #### clone
-Clone an enrolled repo from the server (server as sole remote), optionally at a branch,
-and bootstrap it so plain git works from then on.
+Clone an enrolled repo from the server (server as sole remote) at a branch, and
+bootstrap it so plain git works from then on.
 
-**Synopsis:** `loam clone <repo> [branch]`
+**Synopsis:** `loam clone <repo> <branch>`
 
 **Arguments:**
 
 - `repo` *(required)* — the enrolled repo identifier, `<group>/<repo_name>` (e.g.
   `bobcob7/doc-server`).
-- `branch` *(optional)* — branch to check out (typically a work branch created via
-  `work start`); defaults to the repo's target branch.
+- `branch` *(required)* — branch to check out: typically a work branch created via
+  `work start`, or a target branch for exploration. Always explicit — there is no
+  default.
 
 **Behavior:** Clones the repo over smart HTTP from
 `<LOAM_SERVER_URL>/git/<group>/<repo>.git` into `./<repo_name>` — always the final path
 segment of the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`).
-The clone's only remote is that endpoint. Checks out `branch` if given, as a
-single-branch clone — a convenient default, not an enforcement. `clone` then bootstraps
+The clone's only remote is that endpoint. Checks out `branch` as a single-branch clone —
+a convenient default shape, not an enforcement. `clone` then bootstraps
 the clone for plain git: it sets the git author (`user.name` / `user.email`) to the agent
 identity so commits are attributed, and writes the agent identity headers into the
 clone's git config so every subsequent git operation carries them.
@@ -200,12 +201,13 @@ responds to a thread with `reply`, which posts immediately.
 #### start
 Start a work branch from a target branch. The name is randomly generated.
 
-**Synopsis:** `loam work start <repo> [from]`
+**Synopsis:** `loam work start <repo> <from>`
 
 **Arguments:**
 
 - `repo` *(required)* — the enrolled repo identifier, `<group>/<repo_name>`.
-- `from` *(optional)* — target branch to base off; defaults to the repo's default target.
+- `from` *(required)* — target branch to base off. Always explicit — there is no default
+  base branch; the orchestrator tells the agent its target.
 
 **Behavior:** Creates a **randomly named** work branch on the server from `from`, in state
 `draft`, and returns it. This is a **server-side** ref creation — no local checkout — after
@@ -230,8 +232,8 @@ Set or update a work branch's title and/or description. Editable at any point.
 
 - `repo`, `work-branch` positional — identify the work branch (see the convention above).
 - `--title <title>` *(optional)* — new title. Omit to leave the title unchanged.
-- **stdin** *(optional)* — new description, validated against the repo's schema when
-  configured. Omit (empty stdin) to leave the description unchanged.
+- **stdin** *(optional)* — new description (free text). Omit (empty stdin) to leave the
+  description unchanged.
 
 At least one of `--title` or a non-empty stdin must be provided.
 
@@ -244,8 +246,8 @@ Both must be present before the work branch can be made `reviewable`.
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "state": "draft" }
 ```
 
-**Errors:** exit `2` if neither title nor description is provided, or on failed schema
-validation; exit `3` if the work branch does not exist.
+**Errors:** exit `2` if neither title nor description is provided; exit `3` if the work
+branch does not exist.
 
 #### request-review
 Request review of a work branch — the signal that puts it up for review, or asks for another
