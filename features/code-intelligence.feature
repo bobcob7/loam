@@ -18,6 +18,17 @@ Feature: Querying code intelligence
     Then the response names the commit the index was built from
     And I can tell the results predate the tip of "main"
 
+  Scenario: An ambiguous symbol returns every match
+    Given "Login" is defined in both "auth.go" and "admin.go"
+    When I ask the graph where "Login" is defined
+    Then I get both definitions
+    And each result names the definition it belongs to
+
+  Scenario: Results are capped with a truncation indicator
+    When I ask for the dependents of a widely used symbol with a limit of 5
+    Then at most 5 results are returned
+    And the response indicates it was truncated
+
   Scenario: Finding references to a symbol
     When I ask the graph for references to "Login"
     Then I get every location that references it

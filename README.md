@@ -270,6 +270,10 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
   resolution, so a usage in one repo links to its definition in another). Standard options:
   **SCIP** (Sourcegraph) with per-language indexers, or **stack-graphs** (GitHub) to stay
   within the Tree-sitter toolchain. Until then, `graph --all` is a per-repo fan-out only.
+- **Graph query filters.** Grow `graph` beyond the MVP's `--file`: `--kind`
+  (function/type/module), `--lang`, `--path <glob>`, and `--depth <n>` to bound
+  `deps`/`dependents` traversal — making ambiguity-as-data progressively more precise
+  without introducing a query language.
 - **GitHub support (close second forge).** Promote GitHub from secondary to fully
   supported behind the existing provider interface — GitHub PAT credentials and the GitHub
   PR REST API. Git transport already works unchanged.

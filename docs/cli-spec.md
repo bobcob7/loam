@@ -303,7 +303,7 @@ state (precondition failed); exit `3` if it does not exist.
 #### list
 List work branches across all enrolled repos.
 
-**Synopsis:** `loam work list [--repo <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state <state>]`
+**Synopsis:** `loam work list [--repo <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state <state>] [--limit <n>]`
 
 **Input:**
 
@@ -314,15 +314,17 @@ List work branches across all enrolled repos.
   agent's verdict.
 - `--state <state>` *(optional)* — `draft` / `reviewable` / `reviewed` / `complete` /
   `closed`; defaults to `reviewable`.
+- `--limit <n>` *(optional)* — maximum results; defaults to `100`.
 
 With no flags, lists all reviewable work branches across all enrolled repos.
 
 **Behavior:** Returns matching work branches, each identified by its `repo` and `name`.
 
-**Output** (JSON array):
+**Output** (JSON) — `truncated` is set when `--limit` capped the results:
 
 ```json
-[ { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "author": "grace-hopper-3-author", "state": "reviewable" } ]
+{ "truncated": false,
+  "results": [ { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "author": "grace-hopper-3-author", "state": "reviewable" } ] }
 ```
 
 **Errors:** exit `2` on a bad filter value. An empty result is a normal exit `0`.
@@ -513,7 +515,7 @@ when that PR merges.
 Structural queries over the Tree-sitter graph (see README → Graph DB). A fixed set of
 subqueries rather than a query language.
 
-**Synopsis:** `loam graph <subquery> <target> [--repo <repo>] [--all]`
+**Synopsis:** `loam graph <subquery> <target> [--repo <repo>] [--all] [--file <path>] [--limit <n>]`
 
 **Subqueries:**
 
@@ -522,6 +524,27 @@ subqueries rather than a query language.
 - `deps <file|symbol>` — what the target depends on.
 - `dependents <file|symbol>` — what depends on the target (blast radius).
 - `history <symbol>` — the symbol's commit/ref history.
+
+**Ambiguity:** symbol targets are name-based and approximate by design, so an ambiguous
+target (three `Login`s in three files) is **data, not an error**: the query operates on
+every matching symbol and returns the union, each result row naming its match in `of`
+(`{ symbol, file, kind }`, present only when the target was ambiguous). `--file <path>`
+narrows the target to the definition in one file. Richer filters are Future Work
+(see README).
+
+**Limit:** `--limit <n>` caps the result rows (default `50`). A capped response sets
+`truncated: true` in the envelope, so an agent never mistakes a partial answer for a
+complete one.
+
+**Result shapes** — the `results` rows per subquery:
+
+| Subquery | Row |
+| --- | --- |
+| `def` | `{ repo, file, line, symbol, kind }` — one per matching definition |
+| `refs` | `{ repo, file, line, symbol }` |
+| `deps` | `{ repo, symbol, file, line, kind }` — what the target depends on |
+| `dependents` | `{ repo, symbol, file, line, kind }` — the transitive blast radius |
+| `history` | `{ repo, symbol, file, commit, ref, message }` |
 
 **Scope:** defaults to the repo inferred from the current directory; `--repo <repo>` targets
 a specific enrolled repo; `--all` runs the query across all enrolled repos. If run outside a
@@ -540,6 +563,7 @@ branch tip:
 
 ```json
 { "ingested": [ { "repo": "bobcob7/doc-server", "target": "main", "ref": "a1b2c3d", "at": "2026-07-25T12:00:00Z" } ],
+  "truncated": false,
   "results": [ { "repo": "bobcob7/doc-server", "file": "auth.go", "line": 42, "symbol": "Login" } ] }
 ```
 
@@ -565,11 +589,12 @@ Natural-language semantic search over ingested docs/code (see README → RAG).
 **Behavior:** Embeds `query` and returns the most relevant ingested doc/code chunks with
 provenance.
 
-**Output** (JSON) — the same `ingested` envelope as `graph`, so staleness is visible per
-queried repo:
+**Output** (JSON) — the same envelope as `graph` (`ingested` for staleness per queried
+repo, `truncated` when `--limit` capped the results):
 
 ```json
 { "ingested": [ { "repo": "bobcob7/doc-server", "target": "main", "ref": "a1b2c3d", "at": "2026-07-25T12:00:00Z" } ],
+  "truncated": false,
   "results": [ { "repo": "bobcob7/doc-server", "file": "auth.go", "lines": [40, 58], "score": 0.82, "snippet": "…" } ] }
 ```
 
