@@ -9,9 +9,14 @@ tasks:
       - task: proto:lint
 
   tools:
-    desc: Download the pinned Go tools (buf, protoc-gen-go, protoc-gen-connect-go)
+    desc: Download the pinned Go tools (buf, protoc-gen-go, protoc-gen-connect-go, moq)
     cmds:
       - go mod download
+
+  generate:
+    desc: Regenerate moq mocks (go:generate directives) across the module
+    cmds:
+      - go generate ./...
 
   proto:lint:
     desc: Lint the protobuf schema
