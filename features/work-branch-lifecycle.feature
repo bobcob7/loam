@@ -54,6 +54,11 @@ Feature: Work branch lifecycle
     Given a work branch in state "reviewed"
     Then there is no author action that sets it "complete"
 
+  Scenario: A terminal work branch cannot be edited
+    Given a work branch in state "closed"
+    When I try to update its title
+    Then the attempt is rejected as a failed precondition
+
   Scenario: A clean target advance leaves the work branch untouched
     Given a work branch in state "reviewable"
     When the target branch advances with changes that merge cleanly

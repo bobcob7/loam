@@ -55,6 +55,18 @@ Feature: Reviewing a work branch
     Then each reviewer appears once with their latest outcome
     And none are marked stale
 
+  Scenario: A verdict cannot be submitted before review is requested
+    Given a work branch in state "draft"
+    When I try to submit a verdict on it
+    Then the attempt is rejected as a failed precondition
+
+  Scenario: Staged comments survive a new review round
+    Given I have staged two comments
+    And another reviewer's verdict has marked the work branch "reviewed"
+    And the author requests review again
+    When I submit a verdict with outcome "neutral"
+    Then my comments are published in the new round
+
   Scenario: Verdicts and comments record their review round
     Given the work branch is on its second review round
     When I stage a comment and submit a verdict with outcome "approve"

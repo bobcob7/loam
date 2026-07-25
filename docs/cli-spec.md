@@ -194,6 +194,27 @@ Commands that act on an existing work branch take `<repo>` and `<work-branch>` (
 positional arguments; both are optional when run from inside the repo directory (inferred
 per the Workspace rules above) and required otherwise.
 
+#### State gates
+
+Reads always work; writes require a state where the write means something:
+
+| Command | Allowed states | Rejected (exit `2`, `precondition_failed`) |
+| --- | --- | --- |
+| `set` | `draft`, `reviewable`, `reviewed` | `complete`, `closed` |
+| `request-review` | `draft`, `reviewed` | `reviewable`, `complete`, `closed` |
+| `verdict` | `reviewable`, `reviewed` | `draft` (no round exists yet), `complete`, `closed` |
+| `reply` | `draft`, `reviewable`, `reviewed` | `complete`, `closed` |
+| `show`, `diff`, `comments`, `verdicts`, `list` | any state | — |
+
+Two supporting rules:
+
+- `comment` stages **locally** and is state-ungated: the CLI checks that the work branch
+  exists, nothing more — the state gate lives at the only server boundary, `verdict`.
+- Staged comments are inert local data and **survive round changes** (anchors may drift,
+  as in any review tool; review them with `comments --staged` before submitting). Against
+  a terminal branch, `verdict` fails with the precondition error and the staged items
+  remain until `--discard`ed — no automatic cleanup.
+
 A reviewer contributes a **verdict**: a batch of new-thread comments plus an outcome
 (`approve` / `disapprove` / `neutral`), published atomically by `verdict`. Verdicts are
 tracked per unique agent and marked **stale** when a new review is requested; only non-stale
@@ -248,8 +269,8 @@ Both must be present before the work branch can be made `reviewable`.
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login", "state": "draft" }
 ```
 
-**Errors:** exit `2` if neither title nor description is provided; exit `3` if the work
-branch does not exist.
+**Errors:** exit `2` if neither title nor description is provided, or the work branch is
+in a terminal state; exit `3` if it does not exist.
 
 #### request-review
 Request review of a work branch — the signal that puts it up for review, or asks for another
@@ -449,8 +470,8 @@ responds to review feedback; reviewers raise threads via `verdict`, not here.
 { "author": "grace-hopper-3-author", "body": "…" }
 ```
 
-**Errors:** exit `3` if the work branch or thread does not exist; exit `2` if the identifier
-cannot be resolved.
+**Errors:** exit `3` if the work branch or thread does not exist; exit `2` if the
+identifier cannot be resolved or the work branch is in a terminal state.
 
 #### verdict
 Publish the caller's staged comments on a work branch atomically, as a verdict with an
@@ -478,7 +499,8 @@ agent's verdict for the round.
 { "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "outcome": "approve", "published": 3 }
 ```
 
-**Errors:** exit `2` on a missing or invalid outcome; exit `3` if the work branch does not
+**Errors:** exit `2` on a missing or invalid outcome, or if the work branch is not open
+for review (`draft` or a terminal state — see State gates); exit `3` if it does not
 exist.
 
 Once a work branch is `reviewed` with at least one approve verdict, it becomes a proposal in

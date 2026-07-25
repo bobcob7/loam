@@ -31,6 +31,11 @@ Feature: Replying to review threads
     Then my reply is recorded against the second round
     And the thread still shows it was raised in the first round
 
+  Scenario: Replying on a completed work branch is rejected
+    Given the work branch is in state "complete"
+    When I reply to the thread
+    Then the reply is rejected as a failed precondition
+
   Scenario: Replying to a missing thread is rejected
     When I reply to a thread that does not exist
     Then the reply is rejected as not found
