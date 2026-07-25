@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	gitPathPrefix    = "/git"
-	gitCommitName    = "fakeforge-bot"
-	gitCommitEmail   = "fakeforge@example.invalid"
+	gitPathPrefix  = "/git"
+	gitCommitName  = "fakeforge-bot"
+	gitCommitEmail = "fakeforge@example.invalid"
 )
 
 // Server is the fake forge: an http.Handler serving bare repos over smart
@@ -36,7 +36,7 @@ type Server struct {
 	gitPath string
 	mux     *http.ServeMux
 	tokMu   sync.Mutex
-	tokens  map[string]struct{}
+	tokens  map[string]bool // token -> read-only
 	prs     *prRegistry
 	baseMu  sync.Mutex
 	baseURL string
@@ -56,7 +56,7 @@ func New(logger *slog.Logger) (*Server, error) {
 		logger:  logger,
 		root:    root,
 		gitPath: gitPath,
-		tokens:  make(map[string]struct{}),
+		tokens:  make(map[string]bool),
 		prs:     newPRRegistry(),
 	}
 	s.mux = s.newMux()
@@ -99,20 +99,42 @@ func (s *Server) GitURL(repoName string) string {
 	return fmt.Sprintf("%s%s/%s.git", s.baseURL, gitPathPrefix, strings.Trim(repoName, "/"))
 }
 
-// AddToken registers token as valid for both git smart-HTTP basic auth and
-// the provider REST API's Authorization header.
+// AddToken registers token as valid, with full read and write access, for
+// both git smart-HTTP basic auth and the provider REST API's Authorization
+// header.
 func (s *Server) AddToken(token string) {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	s.tokens[token] = struct{}{}
+	s.tokens[token] = false
 }
 
-// hasToken reports whether token was registered with AddToken.
+// AddReadOnlyToken registers token as valid for reads (git-upload-pack,
+// ValidateToken) but denied for writes (git-receive-pack, CheckRepo's write
+// probe), mirroring a real forge token missing push scope so callers can
+// exercise the read-ok-write-denied distinction from sync-spec's Upstream
+// Transport section without a real forge.
+func (s *Server) AddReadOnlyToken(token string) {
+	s.tokMu.Lock()
+	defer s.tokMu.Unlock()
+	s.tokens[token] = true
+}
+
+// hasToken reports whether token was registered with AddToken or
+// AddReadOnlyToken.
 func (s *Server) hasToken(token string) bool {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
 	_, ok := s.tokens[token]
 	return ok
+}
+
+// tokenReadOnly reports whether token was registered with AddReadOnlyToken.
+// It assumes hasToken(token) is already true; an unregistered token reads as
+// full access here since callers gate on hasToken first.
+func (s *Server) tokenReadOnly(token string) bool {
+	s.tokMu.Lock()
+	defer s.tokMu.Unlock()
+	return s.tokens[token]
 }
 
 func (s *Server) newMux() *http.ServeMux {
