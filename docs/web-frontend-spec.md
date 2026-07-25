@@ -89,9 +89,10 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
   credential status.
   - Queries: `RepoAdminService.GetRepo`, `CredentialService.GetCredentialStatus` (repo's host).
   - Actions: `SetTargetBranches`, `SetDescriptionSchema`, `RemoveRepo`.
-- **`/credentials` → Credentials.** Per-forge-host tokens and SSH keys.
+- **`/credentials` → Credentials.** Per-forge-host tokens (one token covers REST and
+  git; see `docs/sync-spec.md` → Upstream Transport).
   - Queries: `CredentialService.ListCredentials`.
-  - Actions: `SetUpstreamToken`, `GenerateSSHKeyPair` (shows the public key to copy).
+  - Actions: `SetUpstreamToken`.
 - **`/roles` → Roles.** Agent role editor.
   - Queries: `RoleService.ListRoles`.
   - Actions: `CreateRole` / `UpdateRole` (operation checkboxes + instructions text),
@@ -145,7 +146,7 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 - **TypeScript strict**; no `any` in app code (generated code excepted).
 - **Hand-rolled components** on native elements with basic accessibility (labeled inputs,
   focus-trapped dialogs, keyboard-dismiss): `Button`, `Table`, `Dialog`, `Field`/`Form`,
-  `ErrorBanner`, `Pager`, `CopyField` (for the SSH public key).
+  `ErrorBanner`, `Pager`.
 - **CSS Modules** per component; global `reset.css` + `tokens.css` (spacing, color, radius as
   CSS variables). **Dark theme only** — a single theme, no light mode or toggle.
 - No client-side secrets or config — the SPA is same-origin and unconfigured; everything

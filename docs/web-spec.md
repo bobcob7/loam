@@ -83,18 +83,17 @@ string error }`, with `state` one of `idle` / `syncing` / `error`. `IngestJob` i
 ### CredentialService
 Manage the credentials the server uses to reach each upstream forge. Credentials are keyed by
 **forge host** (e.g. `github.com`, `forgejo.example.com`) and shared by all repos on that
-host. Two kinds may be set per host: a REST **token** (opens upstream PRs) and an **SSH key**
-(git transport to upstream) — see README's provider-interface note.
+host. One credential per host: a **token** (Forgejo token / GitHub PAT) covering both the
+REST calls that open upstream PRs and git-over-HTTPS transport to the upstream (see
+`docs/sync-spec.md` → Upstream Transport).
 
 - `SetUpstreamToken(string host, string token) → { CredentialStatus }` — set/replace the
-  forge token (Forgejo token / GitHub PAT); the server validates it.
-- `GenerateSSHKeyPair(string host) → { string public_key }` — generate a keypair server-side
-  and return the public key for the admin to install on the forge. The private key never
-  leaves the server.
+  forge token; the server validates the REST side immediately (git access is proven per
+  repo at enrollment).
 - `GetCredentialStatus(string host) → { CredentialStatus }` / `ListCredentials() →
   { CredentialStatus[] }` — presence and validation state per host.
 
-`CredentialStatus` is `{ string host, bool has_token, bool has_ssh_key, bool validated }`.
+`CredentialStatus` is `{ string host, bool has_token, bool validated }`.
 
 ### RoleService
 Configure agent roles (see README → Agent Identity & Roles). A role grants a set of
@@ -140,7 +139,9 @@ Target Advances & Catch-Up).
   title/description, and records `pr_url` on the work branch. On a re-accept after a
   conflict catch-up, the existing PR's branch is fast-forwarded instead — the PR updates
   in place and no new PR is created. The work branch **stays REVIEWED**; it flips to COMPLETE only when the server's sync sees the upstream PR merge (or
-  to CLOSED if the upstream PR is closed). Requires ≥1 non-stale approve verdict.
+  to CLOSED if the upstream PR is closed). Requires ≥1 non-stale approve verdict and no
+  outstanding conflict flag — a branch behind a conflicting target must be caught up and
+  re-reviewed first (`docs/sync-spec.md` → Mergeability Check).
 - `CloseWorkBranch(repo, work_branch, string body) → { WorkBranch }` — closes a work branch
   (→ CLOSED). Admin-only; the server also closes a work branch on sync when its upstream PR
   is closed.
@@ -161,8 +162,7 @@ codegen, routing, build/embed) is designed in [`docs/web-frontend-spec.md`](web-
 - **Login** — the browser's basic-auth prompt; no dedicated page.
 - **Repos** — list enrolled repos with sync status; enroll form (upstream URL + target
   branches); per-repo settings (target branches, description schema, credentials).
-- **Credentials** — set the upstream token, or generate and show an SSH public key to
-  install upstream.
+- **Credentials** — set and validate the upstream token per forge host.
 - **Roles** — edit agent roles: granted operations, instructions, defaults.
 - **Proposals** — the queue of reviewed work branches: view one (title/description/diff/
   verdicts), then accept (create the upstream PR), request a re-review, or close.

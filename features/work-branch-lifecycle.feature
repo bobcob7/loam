@@ -57,8 +57,8 @@ Feature: Work branch lifecycle
   Scenario: A clean target advance leaves the work branch untouched
     Given a work branch in state "reviewable"
     When the target branch advances with changes that merge cleanly
-    Then the server merges the target into the work branch
-    And the work branch keeps its state "reviewable"
+    Then the work branch's commits are unchanged
+    And it keeps its state "reviewable"
 
   Scenario: A conflicting target advance resets the work branch to draft
     Given a work branch in state "reviewed" with one "approve" verdict

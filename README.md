@@ -18,9 +18,9 @@ target**; **GitHub is a close-behind secondary**. Provider-specific details live
 interface so the agent-facing workflow is identical regardless of forge.
 
 The provider interface only needs to abstract two things: the **access token** (each forge
-issues and scopes its own) and the **REST API** used to open upstream PRs. Git transport
-itself is forge-agnostic — SSH key auth and clone/fetch/push work the same everywhere — so
-it sits outside the provider interface.
+issues and scopes its own) and the **REST API** used to open upstream PRs. Git transport to
+the forge rides the same token over HTTPS, so a single credential per forge host covers
+everything Loam does against it (see [`docs/sync-spec.md`](docs/sync-spec.md)).
 
 ### Components at a glance
 
@@ -168,10 +168,11 @@ Upstream is authoritative. When the server polls upstream and a mirrored branch 
 diverged, it always takes upstream — the local copy is reset to match, with no
 local-vs-upstream merge or conflict resolution. This is also how merged work flows back:
 once an upstream PR is merged, the next sync advances the target branch in the mirror,
-which is what triggers graph/RAG ingest. A target advance is also merged automatically
-into every open work branch; if the merge conflicts, the work branch falls back to `draft`
-until an agent catches it up (see [`docs/git-spec.md`](docs/git-spec.md) → Target Advances
-& Catch-Up).
+which is what triggers graph/RAG ingest. Each target advance is also checked for
+mergeability against every open work branch; on a conflict, the work branch falls back to
+`draft` until an agent catches it up (see [`docs/git-spec.md`](docs/git-spec.md) → Target
+Advances & Catch-Up). The server never authors commits — work branches advance only by
+agent pushes.
 
 #### Enrollment
 
@@ -224,12 +225,12 @@ MVP; multiple admin accounts are future work.
 
 ##### Auth
 
-Admin will be able to set an upstream access token (Forgejo token for MVP, GitHub PAT for GH) or generate an SSH key pair and give a public key to install upstream.
+Admin will be able to set an upstream access token (Forgejo token for MVP, GitHub PAT for GH).
 
-The token is what varies by forge and is the only credential the provider interface cares
-about — it authorizes the REST calls that open upstream PRs. The SSH key pair is
-forge-agnostic and only covers git transport (clone/fetch/push); it is not part of the
-provider interface.
+The token is the only upstream credential: it authorizes both the REST calls that open
+upstream PRs and git-over-HTTPS transport (clone/fetch/push) to the forge. It must carry
+both scopes; enrollment verifies git access against the actual repo (see
+[`docs/sync-spec.md`](docs/sync-spec.md) → Upstream Transport).
 
 ##### Enroll
 

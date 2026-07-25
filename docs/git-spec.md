@@ -9,9 +9,10 @@ Status: **draft — transport and policy settled.** This spec adopts **git smart
 (no agent-facing SSH endpoint) with agents using **plain git** against a clone that
 `loam clone` bootstraps — there are no CLI git wrappers and no client-side hook guard.
 The root `README.md`, `docs/cli-spec.md`, `docs/web-spec.md`, `docs/persistence-spec.md`,
-and the `features/` files are aligned with this document. The server↔upstream SSH key
-pair managed by `CredentialService` is unaffected (it covers transport to the forge, not
-to agents). Implementation details (socket protocol, hook stub) firm up during build.
+and the `features/` files are aligned with this document. Upstream transport to the forge
+is likewise token-authenticated HTTPS (`docs/sync-spec.md` → Upstream Transport) — there
+is no SSH anywhere in Loam. Implementation details (socket protocol, hook stub) firm up
+during build.
 
 ## Division of Labor: git's Plumbing, Loam's Policy
 
@@ -161,30 +162,29 @@ Work branches race their target: upstream keeps moving while a branch is written
 reviewed, and decided. Conflicts are inevitable, and the server — whose sync sees the
 advance — notices before any agent does. The behavior, as it shapes transport:
 
-- On every target-branch advance, the server **attempts to merge the new target into
-  each open (non-terminal) work branch** on the mirror.
-  - **Clean merge** → a server-authored merge commit lands on the work branch; the
-    branch's state is untouched.
-  - **Conflict** → nothing is committed. A `reviewable` or `reviewed` branch (including
-    an accepted proposal with an open PR) is **reset to `draft`** and flagged as
-    conflicted; its verdicts go stale, since they judged content the target has
-    invalidated. A `draft` branch just gains the flag.
+- On every target-branch advance, the server **tests each open (non-terminal) work
+  branch against the new tip** — a mergeability check only. The server is a broker and a
+  store: it never authors commits, and work-branch refs advance **only by agent pushes**.
+  - **Merges cleanly** → nothing happens. Behind-but-mergeable is a normal state; the
+    *forge* performs the actual merge when the accepted PR merges.
+  - **Conflict** → a `reviewable` or `reviewed` branch (including an accepted proposal
+    with an open PR) is **reset to `draft`** and flagged as conflicted; its verdicts go
+    stale, since they judged content the target has invalidated. A `draft` branch just
+    gains the flag.
 - A flagged branch recovers **by push**: when an agent pushes commits that bring the
   branch up to date (its history contains the current target tip), the server clears the
   flag, and a conflict-reset branch flips **directly back to `reviewable`** — no
   `request-review` needed; the round was interrupted, not abandoned.
-- Catching up is **ordinary git**: `git pull`, then `git fetch origin <target>` and merge
-  it into the work branch, resolve the conflicts, commit, push. No Loam verb is involved;
-  conflict resolution is the thing git is best at.
-- Server-authored merge commits mean a branch can advance **under** an agent's clone; the
-  agent's next push is rejected as non-fast-forward, and the remedy is `git pull` —
-  plain git again, no special handling.
+- Catching up is **ordinary git**: `git fetch origin <target>`, merge it into the work
+  branch, resolve the conflicts, commit, push. No Loam verb is involved; conflict
+  resolution is the thing git is best at. An agent may do the same merge at any time on a
+  cleanly-mergeable branch, on its own schedule — nothing forces it.
 - **The upstream PR is never touched** during this cycle — not closed, not updated.
   Because history only gains commits, when the admin re-accepts the caught-up branch,
   refreshing the existing PR's branch is a plain fast-forward push and the PR updates in
   place (mechanics owned by the upstream sync spec).
 
-The merge scheduling, flag storage, and PR-refresh flow belong to the upstream sync spec;
+The check scheduling, flag storage, and PR-refresh flow belong to the upstream sync spec;
 they appear here because they define the push rules above.
 
 ## Enforcement Mechanics

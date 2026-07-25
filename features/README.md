@@ -46,11 +46,14 @@ Each file covers one area (see the specs for detail):
 - `admin-proposals.feature` — admin accepts / requests re-review / closes; the proposal queue.
 - `enrollment.feature` — admin enrolls repos, sets target branches and description schema,
   removes repos.
-- `credentials.feature` — admin sets upstream tokens / generates SSH keys, per forge host.
+- `credentials.feature` — admin sets upstream tokens per forge host; one token covers
+  REST and git.
 - `roles.feature` — role definitions, defaults, and authorization (author vs reviewer).
 - `code-intelligence.feature` — graph queries and RAG search, including `--all` fan-out.
 - `ingestion.feature` — indexing on enrollment and target-branch advance, edge freshness,
   admin reindex, the Jobs view, and failure handling.
+- `sync.feature` — the mirror follows upstream (upstream-wins, pruning, work-branch refs
+  untouched), sync errors and retry, accept pushes the `loam/` branch, PR attribution.
 - `clone-and-push.feature` — clone bootstrap for plain git; server-side push policy
   (read-only targets, author-only, terminal states, force pushes, identity).
 - `instructions.feature` — agent orientation (`instructions` / `whoami`).

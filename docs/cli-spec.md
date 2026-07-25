@@ -161,8 +161,7 @@ There are no `loam commit` or `loam push` commands and no client-side hook guard
 server authorizes each push at receive time from the identity in the clone's config and
 its ref policy: pushes land only on the caller's own, non-terminal work branch; target
 branches are read-only; force pushes and deletions are rejected (see `docs/git-spec.md` →
-Ref Policy). If the branch has advanced on the server (a target auto-merge), `git pull`
-first.
+Ref Policy).
 
 **Output** (JSON):
 

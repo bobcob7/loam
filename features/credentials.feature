@@ -1,6 +1,6 @@
 Feature: Managing upstream credentials
   As an admin
-  I want to configure credentials per forge host
+  I want to configure a token per forge host
   So that the server can clone, sync, and open PRs upstream
 
   Background:
@@ -15,11 +15,15 @@ Feature: Managing upstream credentials
     When I set an invalid upstream token for "github.com"
     Then the credential is rejected as invalid
 
-  Scenario: Generating an SSH key pair returns only the public key
-    When I generate an SSH key pair for "github.com"
-    Then I receive the public key to install upstream
-    And the private key never leaves the server
-    And the credential status for "github.com" shows an SSH key is present
+  Scenario: One token covers REST and git
+    Given a credential exists for "github.com"
+    When I enroll "https://github.com/bobcob7/doc-server"
+    Then the server proves git read and write access with the token before cloning
+
+  Scenario: A token without git access fails enrollment
+    Given a credential exists for "github.com" whose token lacks git access
+    When I enroll "https://github.com/bobcob7/doc-server"
+    Then the enrollment is rejected because the token cannot access the repo over git
 
   Scenario: Credentials are shared by all repos on a host
     Given a credential exists for "github.com"

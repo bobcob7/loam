@@ -28,6 +28,12 @@ Feature: Deciding on proposals
     When I try to accept it
     Then the attempt is rejected as a failed precondition
 
+  Scenario: A conflicted work branch cannot be accepted
+    Given a work branch flagged as conflicted with its target
+    And it is in state "reviewed" with one "approve" verdict
+    When I try to accept it
+    Then the attempt is rejected as a failed precondition
+
   Scenario: Requesting a re-review sends the work branch back
     Given a proposal in state "reviewed" with one "approve" verdict
     When I request a re-review with a comment

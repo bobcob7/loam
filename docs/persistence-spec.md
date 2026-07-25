@@ -45,9 +45,9 @@ Work.
 work-branch targets.
 
 ### credentials
-`id`, `host` (unique, e.g. `github.com`), `token_ciphertext` (bytea, null),
-`ssh_private_key_ciphertext` (bytea, null), `ssh_public_key` (null), `validated` (bool),
-timestamps. Secrets encrypted at rest (§Secrets).
+`id`, `host` (unique, e.g. `github.com`), `token_ciphertext` (bytea, null), `validated`
+(bool), timestamps. The token covers both forge REST calls and git-over-HTTPS transport
+to the upstream (`docs/sync-spec.md`). Secrets encrypted at rest (§Secrets).
 
 ### roles
 `id`, `name` (unique), `instructions` (text), `builtin` (bool), timestamps. Built-in `author`
@@ -61,11 +61,15 @@ and `reviewer` are seeded by migration and cannot be deleted.
 `id`, `repo_id` (fk → repos), `name` (the randomly generated branch name), `target`, `title`
 (null until set), `description` (null), `state`
 (`draft`/`reviewable`/`reviewed`/`complete`/`closed`), `author` (agent identifier),
-`upstream_pr_url` (null), `conflicted` (bool), timestamps.
+`upstream_pr_url` (null), `upstream_pr_number` (null), `conflict`
+(`none`/`flagged`/`reset`), timestamps.
 - `UNIQUE (repo_id, name)` — identity is `(repo, name)`.
-- `conflicted` is set when a target advance fails to auto-merge into the branch and
-  cleared by the catch-up push that brings it up to date (`docs/git-spec.md` → Target
-  Advances & Catch-Up).
+- `conflict` tracks the mergeability check (`docs/git-spec.md` → Target Advances &
+  Catch-Up): `flagged` when a target advance no longer merges cleanly into the branch,
+  `reset` when that demoted a `reviewable`/`reviewed` branch to `draft`. A catch-up push
+  returns it to `none` — and flips a `reset` branch back to `reviewable`.
+- `upstream_pr_number` is the forge-native PR number the sync uses to poll PR state;
+  `upstream_pr_url` is display-only (`docs/sync-spec.md`).
 - The diff is **not** stored; it is computed from git (`target...name`). The row only points
   at the git ref by `name`.
 
@@ -155,10 +159,9 @@ The mirror is the source of truth for code:
 
 ## Secrets
 
-`credentials.token_ciphertext` and `ssh_private_key_ciphertext` are encrypted at rest with an
-app-level key (AES-GCM), the key supplied to the server via config/env (`LOAM_ENCRYPTION_KEY`)
-or a KMS. Only ciphertext is stored; the SSH **public** key and validation status are stored
-in the clear.
+`credentials.token_ciphertext` is encrypted at rest with an app-level key (AES-GCM), the
+key supplied to the server via config/env (`LOAM_ENCRYPTION_KEY`) or a KMS. Only
+ciphertext is stored; validation status is stored in the clear.
 
 ## Migrations, Queries & Testing
 
