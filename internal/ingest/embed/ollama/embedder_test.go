@@ -215,8 +215,74 @@ func TestEmbed_ContextTimeoutMidRequest_ReturnsPromptlyWithDeadlineExceeded(t *t
 	vectors, err := e.Embed(ctx, []string{"hello"})
 	elapsed := time.Since(start)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	// The ctx-preference branch (embedder.go, after httpClient.Do fails)
+	// must classify this as a context error, not a connectivity failure:
+	// without it, a timed-out ingest would be indistinguishable from an
+	// unreachable embedder to the caller's retry-vs-hard-fail decision
+	// (loam-c94.13). net/http's *url.Error already unwraps to
+	// context.DeadlineExceeded on its own, so require.ErrorIs above holds
+	// even with that branch deleted; this assertion is what actually pins
+	// the classification.
+	assert.NotErrorIs(t, err, errRequestFailed)
 	assert.Nil(t, vectors)
 	assert.Lessf(t, elapsed, 400*time.Millisecond, "Embed should return promptly on context deadline, not wait for the slow handler")
+}
+
+// TestEmbed_ContextCanceledMidRequest exercises genuine mid-flight
+// cancellation (cancel() called from another goroutine after the request
+// has reached the server), as opposed to TestEmbed_AlreadyCanceledContext
+// (canceled before Embed is ever called). It must still classify as
+// context.Canceled, not errRequestFailed.
+func TestEmbed_ContextCanceledMidRequest_ReturnsCanceledNotRequestFailed(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"embeddings":[[0]]}`))
+	}))
+	t.Cleanup(server.Close)
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		<-started
+		cancel()
+	}()
+	vectors, err := e.Embed(ctx, []string{"hello"})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, errRequestFailed)
+	assert.Nil(t, vectors)
+}
+
+// TestEmbed_ContextTimeoutDuringBodyRead covers the equivalent
+// ctx-preference branch on the io.ReadAll path (embedder.go, after the
+// body-read fails): headers are flushed immediately so httpClient.Do
+// succeeds, then the body write is delayed past the context deadline, so
+// the failure surfaces from reading resp.Body rather than from Do itself.
+func TestEmbed_ContextTimeoutDuringBodyRead_ReturnsDeadlineExceededNotRequestFailed(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"embeddings":[[0]]}`))
+	}))
+	t.Cleanup(server.Close)
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	vectors, err := e.Embed(ctx, []string{"hello"})
+	elapsed := time.Since(start)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, errRequestFailed)
+	assert.Nil(t, vectors)
+	assert.Lessf(t, elapsed, 250*time.Millisecond, "Embed should return promptly on context deadline during body read")
 }
 
 func TestEmbed_EmptyInput_ReturnsEmptySliceWithoutRequest(t *testing.T) {
