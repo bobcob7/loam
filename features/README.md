@@ -21,7 +21,9 @@ These are executable-ready: the intent is to run them as acceptance tests with
 [godog](https://github.com/cucumber/godog) (Cucumber for Go) against the real CLI + server.
 They live in the top-level `features/` directory — godog's default search path — so a
 step-definition suite picks them up without extra configuration. For now they are the
-specification of record.
+specification of record. The harness, actor drivers, and step-vocabulary rules are
+specified in [`docs/testing-spec.md`](../docs/testing-spec.md), along with the
+integration and e2e layers above this suite.
 
 ## Actors (ubiquitous language)
 

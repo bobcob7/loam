@@ -185,7 +185,8 @@ ciphertext is stored; validation status is stored in the clear.
   strings.
 - **Testing**: integration and godog acceptance tests bring up real Postgres (and the git
   server) via `testcontainers-go`, so specs run against actual infrastructure and the
-  sqlc-generated queries.
+  sqlc-generated queries. The full test strategy — layers, doubles, harness — is
+  `docs/testing-spec.md`.
 
 ## Future Work
 
