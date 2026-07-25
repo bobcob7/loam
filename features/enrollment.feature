@@ -45,6 +45,15 @@ Feature: Enrolling and managing repos
 
   Scenario: Removing a repo drops its data
     Given "bobcob7/doc-server" is enrolled
+    And it has no open work branches
     When I remove it
     Then it is no longer enrolled
     And its mirror, graph, and vector data are dropped
+    And its work branch history is gone
+
+  Scenario: Removal is blocked by open work branches
+    Given "bobcob7/doc-server" is enrolled
+    And a work branch on it is in state "reviewable"
+    When I try to remove it
+    Then the removal is rejected as a failed precondition
+    And I am told exactly which work branches block the removal

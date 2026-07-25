@@ -46,6 +46,13 @@ Feature: Deciding on proposals
     Given a work branch in state "reviewed"
     When I close it with a reason
     Then the work branch is in state "closed"
+    And the reason is recorded on the work branch
+
+  Scenario: Closing a work branch closes its upstream PR
+    Given a work branch in state "reviewed" whose upstream PR has been created
+    When I close it with a reason
+    Then the work branch is in state "closed"
+    And the upstream PR is closed
 
   Scenario: A closed upstream PR closes the work branch
     Given a work branch in state "reviewed" whose upstream PR has been created

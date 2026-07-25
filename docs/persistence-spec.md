@@ -64,7 +64,8 @@ and `reviewer` are seeded by migration and cannot be deleted.
 (null until set), `description` (null), `state`
 (`draft`/`reviewable`/`reviewed`/`complete`/`closed`), `author` (agent identifier),
 `upstream_pr_url` (null), `upstream_pr_number` (null), `conflict`
-(`none`/`flagged`/`reset`), timestamps.
+(`none`/`flagged`/`reset`), `close_reason` (null — set by the admin's `CloseWorkBranch`),
+timestamps.
 - `UNIQUE (repo_id, name)` — identity is `(repo, name)`.
 - `conflict` tracks the mergeability check (`docs/git-spec.md` → Target Advances &
   Catch-Up): `flagged` when a target advance no longer merges cleanly into the branch,

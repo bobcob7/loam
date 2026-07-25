@@ -89,7 +89,9 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 - **`/repos/:repo` → Repo detail.** Target branches, the indexed branch, and the repo's
   credential status.
   - Queries: `RepoAdminService.GetRepo`, `CredentialService.GetCredentialStatus` (repo's host).
-  - Actions: `SetTargetBranches` (including designating the indexed branch), `RemoveRepo`.
+  - Actions: `SetTargetBranches` (including designating the indexed branch), `RemoveRepo`
+    (blocked while open work branches exist — the error lists them; render as a
+    what's-blocking panel, not a generic banner).
 - **`/credentials` → Credentials.** Per-forge-host tokens (one token covers REST and
   git; see `docs/sync-spec.md` → Upstream Transport).
   - Queries: `CredentialService.ListCredentials`.

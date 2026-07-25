@@ -67,7 +67,12 @@ Enroll and manage repos. The admin's repo view is richer than the CLI's read-onl
   URL's forge host (see CredentialService).
 - `ListRepos(Page) → { EnrolledRepo[], PageInfo }` — enrolled repos with status.
 - `GetRepo(repo) → { EnrolledRepo }` — one repo with full status.
-- `RemoveRepo(repo) → { }` — unenroll and drop the local mirror, graph, and vector data.
+- `RemoveRepo(repo) → { }` — unenroll: drop the mirror, the derived indexes, and the
+  repo's metadata (work branches, rounds, verdicts, threads — unenrollment removes
+  history; re-enrolling starts fresh). Queued/running ingest jobs are deleted. **Fails
+  with `failed_precondition` while any non-terminal work branch exists**, and the error
+  enumerates every blocking work branch (name, title, state) so the admin knows exactly
+  what to wind down — accept or close each, then remove.
 - `SetTargetBranches(repo, string[] target_branches, string indexed_branch) →
   { EnrolledRepo }` — replace the branches eligible as work-branch targets and designate
   which one is indexed. Changing `indexed_branch` triggers a full ingest of the new
@@ -146,8 +151,9 @@ Target Advances & Catch-Up).
   outstanding conflict flag — a branch behind a conflicting target must be caught up and
   re-reviewed first (`docs/sync-spec.md` → Mergeability Check).
 - `CloseWorkBranch(repo, work_branch, string body) → { WorkBranch }` — closes a work branch
-  (→ CLOSED). Admin-only; the server also closes a work branch on sync when its upstream PR
-  is closed.
+  (→ CLOSED), recording `body` as the close reason. If the branch has an open upstream PR,
+  Loam closes that too, best-effort — Loam opened it, Loam closes it. Admin-only; the
+  server also closes a work branch on sync when its upstream PR is closed.
 
 To send a reviewed branch back for another round, the admin calls
 `WorkBranchService.RequestReview` — the same operation an author uses — which returns it

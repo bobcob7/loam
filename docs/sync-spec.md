@@ -29,6 +29,8 @@ Operations (Go interface, one implementation per forge):
   { pr_url, pr_number }` — opens the upstream PR.
 - `GetPRState(repo, pr_number) → open | merged | closed` — backs completion and
   closure detection.
+- `ClosePR(repo, pr_number) → error` — backs the admin's `CloseWorkBranch` on a
+  branch with an open PR (best-effort; Loam opened the PR, Loam closes it).
 - `GitCredentials(token) → { username, password }` — the forge's convention for
   token-authenticated HTTPS git (e.g. GitHub uses `x-access-token` as the
   username; Forgejo takes the token as the password with any username).
@@ -166,6 +168,9 @@ still-open PR (a handful of REST calls at most):
 - On either terminal state, the server **best-effort deletes** the upstream
   `loam/…` branch (a push of an empty ref); failures are ignored — forges with
   auto-delete-on-merge make this a no-op.
+- The reverse direction also holds: the admin's `CloseWorkBranch` on a branch
+  with an open PR closes the PR via `ClosePR` (best-effort), and the branch
+  cleanup above follows.
 
 ## Future Work
 
