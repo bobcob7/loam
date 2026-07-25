@@ -1,6 +1,9 @@
 package cli
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // exitUsage is the fixed exit code for routing/usage failures (see
 // docs/cli-spec.md -> Exit Codes & Errors). It is not delegated to the
@@ -16,10 +19,11 @@ func Run(ctx context.Context, router *Router, args []string) int {
 	if err == nil {
 		return 0
 	}
-	if ue, ok := err.(*usageError); ok {
-		_ = router.deps.Encoder.Encode(errorPayload{Error: errorDetail{Code: "usage", Message: ue.Error()}})
+	var ue *usageError
+	if errors.As(err, &ue) {
+		_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: "usage", Message: ue.Error()}})
 		return exitUsage
 	}
-	_ = router.deps.Encoder.Encode(errorPayload{Error: errorDetail{Code: "internal", Message: err.Error()}})
-	return router.deps.Errors.ExitCode(err)
+	_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: "internal", Message: err.Error()}})
+	return router.deps.errorMapper.ExitCode(err)
 }

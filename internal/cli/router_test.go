@@ -4,6 +4,8 @@ import (
 	"flag"
 	"io"
 	"log/slog"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,8 +14,13 @@ import (
 
 func testLogger() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
 
+// fakeConnect is a trivial ConnectClient test double. It is declared here
+// (not as a package stub) precisely so deleting internal/cli's placeholder
+// collaborators later never breaks these tests.
+type fakeConnect struct{}
+
 func newTestDeps() *Deps {
-	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, &NoopConnectClient{})
+	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{})
 }
 
 func TestRouterDispatch_NoArgs_ReturnsUsageError(t *testing.T) {
@@ -53,9 +60,9 @@ func TestRouterDispatch_GroupWithNoSubcommand_ReturnsUsageError(t *testing.T) {
 }
 
 // TestRouterDispatch_EveryCommandIsReachable proves every command named in
-// docs/cli-spec.md (as corrected by loam-0pj.1's NOTES) is registered and
-// dispatchable: given plausible args, each resolves to its stub handler and
-// returns errNotImplemented rather than a routing usageError.
+// docs/cli-spec.md is registered and dispatchable: given plausible args,
+// each resolves to its stub handler and returns errNotImplemented rather
+// than a routing usageError.
 func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -100,32 +107,46 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 	}
 }
 
-// TestCommandTree_RemovedCommandsAreAbsent guards the NOTES spec correction:
-// commit and push must not appear in the tree.
-func TestCommandTree_RemovedCommandsAreAbsent(t *testing.T) {
+// TestCommandTree_ExactCommandSet pins the exact command surface: every
+// top-level command, every work subcommand, and every graph subquery,
+// named exactly (not just "commit/push absent"). A drift in either
+// direction — a missing command or a stray extra one — fails this test.
+func TestCommandTree_ExactCommandSet(t *testing.T) {
 	t.Parallel()
 	tree := commandTree()
-	_, hasCommit := tree["commit"]
-	_, hasPush := tree["push"]
-	assert.False(t, hasCommit, "commit must be removed per NOTES spec correction")
-	assert.False(t, hasPush, "push must be removed per NOTES spec correction")
+	assert.ElementsMatch(t, []string{"instructions", "whoami", "clone", "work", "graph", "search"}, keysOf(tree))
+	require.Contains(t, tree, "work")
+	require.NotNil(t, tree["work"].subcommands)
+	assert.ElementsMatch(t, []string{
+		"start", "set", "request-review", "list", "show", "diff",
+		"comments", "verdicts", "comment", "reply", "verdict",
+	}, keysOf(tree["work"].subcommands))
+	require.Contains(t, tree, "graph")
+	require.NotNil(t, tree["graph"].subcommands)
+	assert.ElementsMatch(t, []string{"def", "refs", "deps", "dependents", "history"}, keysOf(tree["graph"].subcommands))
+	require.Contains(t, tree, "search")
+	assert.Nil(t, tree["search"].subcommands)
+}
+
+func keysOf(m map[string]*command) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestRouter_RegistersZeroGlobalFlags asserts no command handler defines a
 // flag on the package-level flag.CommandLine set: every flag must live on a
 // per-command flag.FlagSet instead (see docs/cli-spec.md -> Conventions:
-// "the CLI has no global flags"). It compares the flag.CommandLine flag
-// count before and after dispatch, rather than asserting it is exactly
-// zero, because `go test` itself registers flags (-test.run, -test.v, ...)
-// on that same global set.
+// "the CLI has no global flags"). It asserts every flag on
+// flag.CommandLine carries the "test." prefix go test itself registers
+// (-test.run, -test.v, ...) — a before/after count would miss a
+// package-level `var _ = flag.Bool(...)` registered at init time, since
+// that flag would already be present in "before".
 func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	t.Parallel()
-	countFlags := func() int {
-		count := 0
-		flag.CommandLine.VisitAll(func(*flag.Flag) { count++ })
-		return count
-	}
-	before := countFlags()
 	router := NewRouter(newTestDeps())
 	for _, args := range [][]string{
 		{"work", "set", "a", "b", "--title", "T"},
@@ -136,6 +157,7 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 		err := router.Dispatch(t.Context(), args)
 		assert.ErrorIs(t, err, errNotImplemented)
 	}
-	after := countFlags()
-	require.Equal(t, before, after, "dispatching commands with per-command flags must not add flags to flag.CommandLine")
+	flag.CommandLine.VisitAll(func(f *flag.Flag) {
+		assert.True(t, strings.HasPrefix(f.Name, "test."), "flag.CommandLine must contain only go test's own flags, found %q", f.Name)
+	})
 }

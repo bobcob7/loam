@@ -1,6 +1,9 @@
 package cli
 
-import "context"
+import (
+	"context"
+	"flag"
+)
 
 // requireWorkBranchArgs validates the [repo] [work-branch] positional
 // convention shared by most `work` subcommands (see docs/cli-spec.md ->
@@ -27,11 +30,18 @@ func runWorkStart(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
+// newWorkSetFlags builds the flag.FlagSet for `loam work set [repo]
+// [work-branch] [--title <title>]`.
+func newWorkSetFlags() *flag.FlagSet {
+	fs := newFlagSet("work set")
+	fs.String("title", "", "new title for the work branch")
+	return fs
+}
+
 // runWorkSet implements `loam work set [repo] [work-branch] [--title
 // <title>]`.
 func runWorkSet(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("work set")
-	fs.String("title", "", "new title for the work branch")
+	fs := newWorkSetFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -56,10 +66,10 @@ func runWorkRequestReview(ctx context.Context, deps *Deps, args []string) error 
 	return errNotImplemented
 }
 
-// runWorkList implements `loam work list [--repo <repo>] [--author <id>]
-// [--target <branch>] [--awaiting-review] [--state <state>] [--limit <n>]`
-// (see docs/cli-spec.md -> work list; --limit defaults to 100).
-func runWorkList(ctx context.Context, deps *Deps, args []string) error {
+// newWorkListFlags builds the flag.FlagSet for `loam work list [--repo
+// <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state
+// <state>] [--limit <n>]` (see docs/cli-spec.md -> work list).
+func newWorkListFlags() *flag.FlagSet {
 	fs := newFlagSet("work list")
 	fs.String("repo", "", "limit to one enrolled repo")
 	fs.String("author", "", "limit to work branches authored by this agent identifier")
@@ -67,6 +77,12 @@ func runWorkList(ctx context.Context, deps *Deps, args []string) error {
 	fs.Bool("awaiting-review", false, "limit to work branches awaiting the caller's verdict")
 	fs.String("state", "reviewable", "draft, reviewable, reviewed, complete, or closed")
 	fs.Int("limit", 100, "maximum number of work branches to return")
+	return fs
+}
+
+// runWorkList implements `loam work list`.
+func runWorkList(ctx context.Context, deps *Deps, args []string) error {
+	fs := newWorkListFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -103,11 +119,18 @@ func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
+// newWorkCommentsFlags builds the flag.FlagSet for `loam work comments
+// [repo] [work-branch] [--staged]`.
+func newWorkCommentsFlags() *flag.FlagSet {
+	fs := newFlagSet("work comments")
+	fs.Bool("staged", false, "return the caller's staged comments instead of published threads")
+	return fs
+}
+
 // runWorkComments implements `loam work comments [repo] [work-branch]
 // [--staged]`.
 func runWorkComments(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("work comments")
-	fs.Bool("staged", false, "return the caller's staged comments instead of published threads")
+	fs := newWorkCommentsFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -131,16 +154,24 @@ func runWorkVerdicts(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
-// runWorkComment implements `loam work comment [repo] [work-branch]
-// [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>]
-// [--discard <staged-id>]`.
-func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
+// newWorkCommentFlags builds the flag.FlagSet for `loam work comment
+// [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>]
+// [--edit <staged-id>] [--discard <staged-id>]`.
+func newWorkCommentFlags() *flag.FlagSet {
 	fs := newFlagSet("work comment")
 	fs.String("file", "", "anchor the new thread to this file")
 	fs.Int("line", 0, "anchor the new thread to this line")
 	fs.String("resolve", "", "mark this thread id resolved")
 	fs.String("edit", "", "replace the body of this staged comment id")
 	fs.String("discard", "", "remove this staged comment id")
+	return fs
+}
+
+// runWorkComment implements `loam work comment [repo] [work-branch]
+// [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>]
+// [--discard <staged-id>]`.
+func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
+	fs := newWorkCommentFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -151,11 +182,18 @@ func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
+// newWorkReplyFlags builds the flag.FlagSet for `loam work reply [repo]
+// [work-branch] --thread <thread-id>`, plus the parsed --thread value.
+func newWorkReplyFlags() (*flag.FlagSet, *string) {
+	fs := newFlagSet("work reply")
+	thread := fs.String("thread", "", "the thread to reply to")
+	return fs, thread
+}
+
 // runWorkReply implements `loam work reply [repo] [work-branch] --thread
 // <thread-id>`. --thread is required.
 func runWorkReply(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("work reply")
-	thread := fs.String("thread", "", "the thread to reply to")
+	fs, thread := newWorkReplyFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -169,11 +207,19 @@ func runWorkReply(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
+// newWorkVerdictFlags builds the flag.FlagSet for `loam work verdict
+// [repo] [work-branch] --outcome <approve|disapprove|neutral>`, plus the
+// parsed --outcome value.
+func newWorkVerdictFlags() (*flag.FlagSet, *string) {
+	fs := newFlagSet("work verdict")
+	outcome := fs.String("outcome", "", "approve, disapprove, or neutral")
+	return fs, outcome
+}
+
 // runWorkVerdict implements `loam work verdict [repo] [work-branch]
 // --outcome <approve|disapprove|neutral>`. --outcome is required.
 func runWorkVerdict(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("work verdict")
-	outcome := fs.String("outcome", "", "approve, disapprove, or neutral")
+	fs, outcome := newWorkVerdictFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())

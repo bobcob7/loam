@@ -2,6 +2,7 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -15,34 +16,54 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
-// parseCommandArgs reorders args so every flag registered on fs precedes
-// positional arguments, then parses it. The stdlib flag package stops
-// scanning at the first non-flag token, but several synopses in
-// docs/cli-spec.md place flags after positionals (e.g. "work set [repo]
-// [work-branch] [--title <title>]"), so handlers call this instead of
-// fs.Parse directly.
+// parseCommandArgs splits args into flag tokens and positional tokens via
+// splitArgs, parses the flag tokens with fs, and returns the positional
+// tokens. Handlers call this instead of fs.Parse directly because several
+// synopses in docs/cli-spec.md place flags after positionals (e.g. "work
+// set [repo] [work-branch] [--title <title>]"), which fs.Parse alone
+// cannot handle: it stops scanning at the first non-flag token.
 func parseCommandArgs(fs *flag.FlagSet, args []string) ([]string, error) {
-	reordered := reorderArgs(fs, args)
-	if err := fs.Parse(reordered); err != nil {
+	flagArgs, positional, err := splitArgs(fs, args)
+	if err != nil {
 		return nil, err
 	}
-	return fs.Args(), nil
+	if err := fs.Parse(flagArgs); err != nil {
+		return nil, err
+	}
+	return positional, nil
 }
 
-// reorderArgs walks args, moving every token fs recognizes as a flag (and
-// its value, if the flag takes one) to the front, and returns everything
-// else — the positionals — after them, preserving relative order within
-// each group.
-func reorderArgs(fs *flag.FlagSet, args []string) []string {
-	flags := make([]string, 0, len(args))
-	positional := make([]string, 0, len(args))
+// splitArgs partitions args into the flag tokens (each flag immediately
+// followed by its value token when it takes one, in original relative
+// order) and the positional tokens — everything else. fs.Parse is only
+// ever handed the flag tokens; parseCommandArgs returns the positional
+// tokens itself rather than relying on fs.Args().
+//
+// This sidesteps two accidents of feeding a naively reordered
+// "flags-then-positionals" slice straight to fs.Parse: it stops at the
+// first non-flag token (so a positional preceding a flag would hide
+// everything after it from fs.Parse, including later flags), and it only
+// recognizes "--" as a terminator when nothing unparsed precedes it (so
+// reordering a "--" next to hoisted flags can silently invert or defeat
+// its meaning).
+//
+// "--" itself ends flag scanning immediately here: it is dropped, and
+// every token after it — even one that looks like a flag — is taken as a
+// literal positional. A recognized non-boolean flag with no following
+// token is a usage error ("flag needs an argument"), never a silent
+// reinterpretation of the next positional as that flag's value.
+func splitArgs(fs *flag.FlagSet, args []string) (flagArgs, positional []string, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "-" || arg == "--" || !strings.HasPrefix(arg, "-") {
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
 			positional = append(positional, arg)
 			continue
 		}
-		flags = append(flags, arg)
+		flagArgs = append(flagArgs, arg)
 		name := strings.TrimLeft(arg, "-")
 		if strings.ContainsRune(name, '=') {
 			continue
@@ -54,10 +75,11 @@ func reorderArgs(fs *flag.FlagSet, args []string) []string {
 		if boolFlag, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
 			continue
 		}
-		if i+1 < len(args) {
-			i++
-			flags = append(flags, args[i])
+		if i+1 >= len(args) {
+			return nil, nil, fmt.Errorf("flag needs an argument: -%s", name)
 		}
+		i++
+		flagArgs = append(flagArgs, args[i])
 	}
-	return append(flags, positional...)
+	return flagArgs, positional, nil
 }

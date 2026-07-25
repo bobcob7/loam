@@ -13,14 +13,7 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	deps := cli.NewDeps(
-		logger,
-		cli.NewEnvConfig(),
-		cli.NewJSONEncoder(os.Stdout),
-		cli.NewCoarseErrorMapper(),
-		cli.NewUnresolvedWorkspace(),
-		cli.NewNoopConnectClient(),
-	)
+	deps := cli.NewPlaceholderDeps(logger, os.Stdout)
 	router := cli.NewRouter(deps)
 	os.Exit(cli.Run(context.Background(), router, os.Args[1:]))
 }

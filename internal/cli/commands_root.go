@@ -3,12 +3,17 @@ package cli
 import "context"
 
 // runInstructions implements `loam instructions [command]` (see
-// docs/cli-spec.md -> instructions). No flags; the optional trailing
-// arguments name the command to fetch focused help for.
+// docs/cli-spec.md -> instructions). No flags; the single optional
+// argument names the command to fetch focused help for instead of the full
+// orientation.
 func runInstructions(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("instructions")
-	if _, err := parseCommandArgs(fs, args); err != nil {
+	positional, err := parseCommandArgs(fs, args)
+	if err != nil {
 		return newUsageError(err.Error())
+	}
+	if len(positional) > 1 {
+		return newUsageError("instructions takes at most one command argument")
 	}
 	return errNotImplemented
 }
