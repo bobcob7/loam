@@ -24,11 +24,23 @@ import (
 // is unnecessary: there is nothing to lease, since nothing mutable is held
 // between calls.
 //
+// The Tree passed to Captures is a different story: Tree-sitter's own C API
+// documents that a syntax tree is not safe to use from more than one thread
+// at a time without copying it first (tree_sitter/api.h: "You need to copy a
+// syntax tree in order to use it on more than one thread at a time, as
+// syntax trees are not thread safe."). So while one *Query may be shared
+// across concurrent Captures calls, each of those calls must pass its own
+// *Tree -- concurrent callers should each hold a Parser (or lease one from a
+// ParserPool) and parse their own Tree, never share one Tree across
+// goroutines even for read-only querying.
+//
 // Close still needs external discipline, but less than Parser/Tree require:
 // Captures and Close synchronize with each other, so a Close racing with an
 // in-flight Captures call is a checked ErrQueryClosed, not a silent
 // use-after-free. Close must still only be called once the caller is done
-// with the Query -- there is no way to "reopen" it.
+// with the Query -- there is no way to "reopen" it, and the underlying
+// ts.Query.Close has no double-close guard of its own, so this package's
+// closed flag is load-bearing against a double-free.
 type Query struct {
 	mu     sync.RWMutex
 	closed bool
@@ -43,6 +55,21 @@ type Query struct {
 type Capture struct {
 	Name string
 	Node Node
+}
+
+// Match groups every Capture produced by one occurrence of a Query's
+// pattern matching within a Tree. Captures within the same Match came from
+// the same pattern instance and can safely be associated with one another
+// -- e.g. pairing a "name" capture with the "decl" capture that encloses it
+// for the same declaration. Captures from two different Matches must never
+// be paired by adjacency: Tree-sitter does not guarantee Matches arrive in
+// document order (only that each Match's own Captures are internally
+// consistent), so on nested constructs (a function inside a function) two
+// Matches can complete in either order and interleaving by position alone
+// silently mis-pairs an inner declaration's name with an outer one's, or
+// vice versa.
+type Match struct {
+	Captures []Capture
 }
 
 // NewQuery compiles source as a Tree-sitter query against lang's registered
@@ -84,30 +111,37 @@ func (q *Query) Close() {
 	q.inner.Close()
 }
 
-// Captures runs q over tree's root node and returns every capture in
-// document order, as a flat (name, Node) sequence. Callers that need to
-// know which pattern produced a capture should compile one query per
-// construct rather than inspecting pattern indices, which this package does
-// not expose alongside captures.
+// Captures runs q over tree's root node and returns every Match -- one per
+// pattern occurrence, each carrying its own Captures -- in the order
+// Tree-sitter's query cursor produces them.
 //
 // Captures creates and releases its own Tree-sitter query cursor for the
-// duration of this one call; no cursor is ever exposed to the caller, so
-// there is nothing beyond the Query itself for a caller to leak or
-// double-free. tree must not have been Closed -- like Parser and Tree, that
-// remains an external discipline this method does not check.
+// duration of this one call via the cursor's Matches iterator (not its
+// per-capture Captures iterator: the latter's upstream Next implementation
+// mallocs a C TSQueryMatch header on every single capture with no
+// corresponding free on any return path -- a real, measured per-capture C
+// heap leak that would grow without bound over the hundreds of millions of
+// captures a long-lived ingest worker runs across a repo. The Matches
+// iterator's Next frees its header on every call, so this package uses it
+// and flattens each match's own captures instead). No cursor is ever
+// exposed to the caller, so there is nothing beyond the Query itself for a
+// caller to leak or double-free. tree must not have been Closed -- like
+// Parser and Tree, that remains an external discipline this method does not
+// check -- and must not be shared with another concurrent Captures call
+// from a different goroutine (see Query's doc comment).
 //
 // Captures returns ctx's error, wrapped, if ctx is already done, or becomes
 // done before the query finishes; a large tree with many matches is walked
 // incrementally rather than in one uninterruptible call, so cancellation is
-// checked between every capture rather than needing Tree-sitter's C-level
+// checked between every match rather than needing Tree-sitter's C-level
 // progress callback (contrast Parser.parseBytes, which cannot check
 // incrementally because a single Tree-sitter parse call is uninterruptible).
-// It returns ErrQueryClosed if q has been Closed.
-func (q *Query) Captures(ctx context.Context, tree *Tree) ([]Capture, error) {
+// It returns a wrapped ErrQueryClosed if q has been Closed.
+func (q *Query) Captures(ctx context.Context, tree *Tree) ([]Match, error) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	if q.closed {
-		return nil, ErrQueryClosed
+		return nil, fmt.Errorf("running query for %q: %w", q.lang, ErrQueryClosed)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("running query for %q: %w", q.lang, err)
@@ -115,19 +149,22 @@ func (q *Query) Captures(ctx context.Context, tree *Tree) ([]Capture, error) {
 	cursor := ts.NewQueryCursor()
 	defer cursor.Close()
 	root := tree.inner.RootNode()
-	it := cursor.Captures(q.inner, root, tree.src)
-	var out []Capture
+	it := cursor.Matches(q.inner, root, tree.src)
+	var out []Match
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("running query for %q: %w", q.lang, err)
 		}
-		match, idx := it.Next()
+		match := it.Next()
 		if match == nil {
 			break
 		}
-		capture := match.Captures[idx]
-		node := capture.Node
-		out = append(out, Capture{Name: q.names[capture.Index], Node: Node{inner: &node, src: tree.src}})
+		captures := make([]Capture, 0, len(match.Captures))
+		for _, c := range match.Captures {
+			node := c.Node
+			captures = append(captures, Capture{Name: q.names[c.Index], Node: Node{inner: &node, src: tree.src}})
+		}
+		out = append(out, Match{Captures: captures})
 	}
 	return out, nil
 }

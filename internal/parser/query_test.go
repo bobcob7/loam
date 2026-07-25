@@ -3,6 +3,7 @@ package parser_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 
@@ -23,6 +24,18 @@ func parseFixture(t *testing.T, fixture string, lang parser.Language) *parser.Tr
 	require.NoError(t, err)
 	t.Cleanup(tree.Close)
 	return tree
+}
+
+// flatten concatenates every Match's Captures, in match order, into a
+// single slice -- useful for assertions that don't care about pattern
+// grouping (e.g. counting or collecting names), as opposed to assertions
+// that specifically need the grouping Match provides.
+func flatten(matches []parser.Match) []parser.Capture {
+	var out []parser.Capture
+	for _, m := range matches {
+		out = append(out, m.Captures...)
+	}
+	return out
 }
 
 // namesFor returns, in order, the text of every capture in captures whose
@@ -76,9 +89,13 @@ func TestQuery_CapturesFunctionDeclarationsAcrossMVPGrammars(t *testing.T) {
 			require.NoError(t, err)
 			defer q.Close()
 			assert.Equal(t, tt.lang, q.Language())
-			captures, err := q.Captures(t.Context(), tree)
+			matches, err := q.Captures(t.Context(), tree)
 			require.NoError(t, err)
-			require.Len(t, captures, len(tt.wantNames)*2, "expected one @decl and one @name capture per match")
+			require.Len(t, matches, len(tt.wantNames), "expected one Match per function declaration")
+			for _, m := range matches {
+				require.Len(t, m.Captures, 2, "expected one @decl and one @name capture per match")
+			}
+			captures := flatten(matches)
 			assert.Equal(t, tt.wantNames, namesFor(captures, "name"))
 			assert.Equal(t, len(tt.wantNames), len(namesFor(captures, "decl")))
 		})
@@ -96,10 +113,59 @@ func TestQuery_MethodDeclarationCapturesGoReceiverMethod(t *testing.T) {
 	q, err := parser.NewQuery(parser.LanguageGo, `(method_declaration name: (field_identifier) @name) @decl`)
 	require.NoError(t, err)
 	defer q.Close()
-	captures, err := q.Captures(t.Context(), tree)
+	matches, err := q.Captures(t.Context(), tree)
 	require.NoError(t, err)
-	require.Len(t, captures, 2)
-	assert.Equal(t, []string{"Greet"}, namesFor(captures, "name"))
+	require.Len(t, matches, 1)
+	require.Len(t, matches[0].Captures, 2)
+	assert.Equal(t, []string{"Greet"}, namesFor(matches[0].Captures, "name"))
+}
+
+func TestQuery_MatchesGroupCapturesFromTheSamePatternInstanceEvenWhenNested(t *testing.T) {
+	t.Parallel()
+	// A synthetic fixture with a function nested inside another: on nested
+	// constructs, Tree-sitter's Matches iterator does not guarantee the
+	// outer function's Match completes before the inner one's (or vice
+	// versa), so pairing a "name" capture with a "decl" capture by adjacency
+	// across a flattened stream can mis-pair them. Match grouping sidesteps
+	// this: whichever order the two Matches arrive in, each Match's own
+	// name+decl pair is self-consistent.
+	src := []byte("def outer():\n    def inner():\n        pass\n    return inner\n")
+	p := parser.NewParser(testLogger())
+	defer p.Close()
+	tree, err := p.Parse(t.Context(), parser.LanguagePython, src)
+	require.NoError(t, err)
+	defer tree.Close()
+	q, err := parser.NewQuery(parser.LanguagePython, `(function_definition name: (identifier) @name) @decl`)
+	require.NoError(t, err)
+	defer q.Close()
+	matches, err := q.Captures(t.Context(), tree)
+	require.NoError(t, err)
+	require.Len(t, matches, 2)
+	var names []string
+	for _, m := range matches {
+		require.Len(t, m.Captures, 2)
+		var name, decl parser.Capture
+		for _, c := range m.Captures {
+			switch c.Name {
+			case "name":
+				name = c
+			case "decl":
+				decl = c
+			}
+		}
+		require.NotEmpty(t, name.Name, "each match must carry a name capture")
+		require.NotEmpty(t, decl.Name, "each match must carry a decl capture")
+		// The name capture must fall within its OWN match's decl capture --
+		// proving the pairing is correct regardless of which order the two
+		// matches arrived in.
+		declStart, declEnd := decl.Node.ByteRange()
+		nameStart, nameEnd := name.Node.ByteRange()
+		assert.GreaterOrEqual(t, nameStart, declStart)
+		assert.LessOrEqual(t, nameEnd, declEnd)
+		names = append(names, name.Node.Text())
+	}
+	sort.Strings(names)
+	assert.Equal(t, []string{"inner", "outer"}, names, "both the outer and the nested function must be found, order aside")
 }
 
 func TestNewQuery_InvalidSyntaxReturnsClearErrorNotPanic(t *testing.T) {
@@ -125,6 +191,7 @@ func TestNewQuery_UnsupportedLanguageIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, q)
 	assert.False(t, errors.Is(err, parser.ErrNoGrammar), "unregistered Language values are a caller bug, not the no-grammar signal")
+	assert.Contains(t, err.Error(), "unsupported language", "must be the unsupported-language precondition failure, not a query-syntax error that happens to also fail")
 }
 
 func TestQuery_CapturesOverTreeWithSyntaxErrorSkipsTheBrokenConstruct(t *testing.T) {
@@ -141,9 +208,9 @@ func TestQuery_CapturesOverTreeWithSyntaxErrorSkipsTheBrokenConstruct(t *testing
 	q, err := parser.NewQuery(parser.LanguageGo, `(function_declaration name: (identifier) @name) @decl`)
 	require.NoError(t, err)
 	defer q.Close()
-	captures, err := q.Captures(t.Context(), tree)
+	matches, err := q.Captures(t.Context(), tree)
 	require.NoError(t, err, "a syntax error in the tree must not surface as a query error")
-	assert.Empty(t, captures)
+	assert.Empty(t, matches)
 }
 
 func TestQuery_Captures_AlreadyCancelledContextReturnsError(t *testing.T) {
@@ -154,9 +221,49 @@ func TestQuery_Captures_AlreadyCancelledContextReturnsError(t *testing.T) {
 	defer q.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	captures, err := q.Captures(ctx, tree)
+	matches, err := q.Captures(ctx, tree)
 	require.Error(t, err)
-	assert.Nil(t, captures)
+	assert.Nil(t, matches)
+	assert.True(t, errors.Is(err, context.Canceled))
+}
+
+// cancelAfterNCalls reports ctx.Err() as nil for its first n calls, and as
+// context.Canceled after -- letting a test force cancellation to be
+// observed mid-loop (after some real progress) rather than only on the
+// very first check before any work has happened.
+type cancelAfterNCalls struct {
+	context.Context
+	n     int
+	calls int
+}
+
+func (c *cancelAfterNCalls) Err() error {
+	c.calls++
+	if c.calls > c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestQuery_Captures_ContextCancelledMidLoopReturnsErrorNotPartialResults(t *testing.T) {
+	t.Parallel()
+	// sample.py yields 3 matches for this query (__init__, greet, add), so a
+	// context that only cancels after letting some matches through actually
+	// exercises the in-loop check between iterations, not just the
+	// pre-loop check before the cursor starts. Deleting the in-loop
+	// ctx.Err() check must fail this test: without it, the loop ignores
+	// cancellation entirely and returns all 3 matches with no error.
+	tree := parseFixture(t, "sample.py", parser.LanguagePython)
+	q, err := parser.NewQuery(parser.LanguagePython, `(function_definition name: (identifier) @name) @decl`)
+	require.NoError(t, err)
+	defer q.Close()
+	// n=2 lets the pre-loop check (call 1) and the first in-loop check
+	// (call 2) both see nil -- so the cursor advances and yields at least
+	// one match -- before the second in-loop check (call 3) cancels.
+	ctx := &cancelAfterNCalls{Context: t.Context(), n: 2}
+	matches, err := q.Captures(ctx, tree)
+	require.Error(t, err)
+	assert.Nil(t, matches, "cancellation must discard any matches accumulated so far, not return a partial result")
 	assert.True(t, errors.Is(err, context.Canceled))
 }
 
@@ -166,9 +273,9 @@ func TestQuery_CapturesAfterCloseReturnsErrQueryClosed(t *testing.T) {
 	q, err := parser.NewQuery(parser.LanguageGo, `(function_declaration) @decl`)
 	require.NoError(t, err)
 	q.Close()
-	captures, err := q.Captures(t.Context(), tree)
+	matches, err := q.Captures(t.Context(), tree)
 	require.Error(t, err)
-	assert.Nil(t, captures)
+	assert.Nil(t, matches)
 	assert.True(t, errors.Is(err, parser.ErrQueryClosed))
 }
 
@@ -194,6 +301,11 @@ func TestQuery_CapturesIsSafeForConcurrentUseAcrossGoroutines(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			// Each goroutine parses and owns its own Tree: Tree-sitter
+			// syntax trees are not safe to use from more than one thread at
+			// a time (tree_sitter/api.h), so concurrent Captures callers
+			// must never share one *Tree the way they may share one
+			// *Query.
 			p := parser.NewParser(testLogger())
 			defer p.Close()
 			tree, perr := p.Parse(t.Context(), parser.LanguageGo, src)
@@ -202,7 +314,7 @@ func TestQuery_CapturesIsSafeForConcurrentUseAcrossGoroutines(t *testing.T) {
 				return
 			}
 			defer tree.Close()
-			captures, cerr := q.Captures(t.Context(), tree)
+			matches, cerr := q.Captures(t.Context(), tree)
 			if cerr != nil {
 				errs[i] = cerr
 				return
@@ -211,7 +323,7 @@ func TestQuery_CapturesIsSafeForConcurrentUseAcrossGoroutines(t *testing.T) {
 			// defers fire before this goroutine returns): a Capture's Node
 			// is only valid while its Tree is open, and the tree is this
 			// goroutine's alone to close.
-			results[i] = namesFor(captures, "name")
+			results[i] = namesFor(flatten(matches), "name")
 		}(i)
 	}
 	wg.Wait()
@@ -223,7 +335,7 @@ func TestQuery_CapturesIsSafeForConcurrentUseAcrossGoroutines(t *testing.T) {
 
 func TestQuery_CloseDuringConcurrentCapturesDoesNotRace(t *testing.T) {
 	t.Parallel()
-	tree := parseFixture(t, "sample.go", parser.LanguageGo)
+	src := readFixture(t, "sample.go")
 	q, err := parser.NewQuery(parser.LanguageGo, `(function_declaration name: (identifier) @name) @decl`)
 	require.NoError(t, err)
 	var wg sync.WaitGroup
@@ -231,9 +343,21 @@ func TestQuery_CloseDuringConcurrentCapturesDoesNotRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Each goroutine parses its own Tree -- see the doc comment on
+			// TestQuery_CapturesIsSafeForConcurrentUseAcrossGoroutines for
+			// why sharing one Tree across goroutines would be a different,
+			// C-level bug that -race cannot see.
+			p := parser.NewParser(testLogger())
+			defer p.Close()
+			tree, perr := p.Parse(t.Context(), parser.LanguageGo, src)
+			if perr != nil {
+				return
+			}
+			defer tree.Close()
 			// Either outcome is correct here: a clean result, or
 			// ErrQueryClosed if Close won the race. The point of this test
-			// is that go test -race finds nothing to complain about.
+			// is that go test -race finds nothing to complain about on the
+			// Query side while Close and Captures run concurrently.
 			_, _ = q.Captures(t.Context(), tree)
 		}()
 	}
