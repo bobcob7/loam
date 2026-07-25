@@ -26,7 +26,6 @@ type CredentialStatus struct {
 	// Forge host, e.g. "github.com" or "forgejo.example.com".
 	Host          string `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	HasToken      bool   `protobuf:"varint,2,opt,name=has_token,json=hasToken,proto3" json:"has_token,omitempty"`
-	HasSshKey     bool   `protobuf:"varint,3,opt,name=has_ssh_key,json=hasSshKey,proto3" json:"has_ssh_key,omitempty"`
 	Validated     bool   `protobuf:"varint,4,opt,name=validated,proto3" json:"validated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -72,13 +71,6 @@ func (x *CredentialStatus) GetHost() string {
 func (x *CredentialStatus) GetHasToken() bool {
 	if x != nil {
 		return x.HasToken
-	}
-	return false
-}
-
-func (x *CredentialStatus) GetHasSshKey() bool {
-	if x != nil {
-		return x.HasSshKey
 	}
 	return false
 }
@@ -186,94 +178,6 @@ func (x *SetUpstreamTokenResponse) GetStatus() *CredentialStatus {
 	return nil
 }
 
-type GenerateSSHKeyPairRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GenerateSSHKeyPairRequest) Reset() {
-	*x = GenerateSSHKeyPairRequest{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GenerateSSHKeyPairRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GenerateSSHKeyPairRequest) ProtoMessage() {}
-
-func (x *GenerateSSHKeyPairRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GenerateSSHKeyPairRequest.ProtoReflect.Descriptor instead.
-func (*GenerateSSHKeyPairRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *GenerateSSHKeyPairRequest) GetHost() string {
-	if x != nil {
-		return x.Host
-	}
-	return ""
-}
-
-type GenerateSSHKeyPairResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PublicKey     string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GenerateSSHKeyPairResponse) Reset() {
-	*x = GenerateSSHKeyPairResponse{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GenerateSSHKeyPairResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GenerateSSHKeyPairResponse) ProtoMessage() {}
-
-func (x *GenerateSSHKeyPairResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GenerateSSHKeyPairResponse.ProtoReflect.Descriptor instead.
-func (*GenerateSSHKeyPairResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *GenerateSSHKeyPairResponse) GetPublicKey() string {
-	if x != nil {
-		return x.PublicKey
-	}
-	return ""
-}
-
 type GetCredentialStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
@@ -283,7 +187,7 @@ type GetCredentialStatusRequest struct {
 
 func (x *GetCredentialStatusRequest) Reset() {
 	*x = GetCredentialStatusRequest{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[5]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -295,7 +199,7 @@ func (x *GetCredentialStatusRequest) String() string {
 func (*GetCredentialStatusRequest) ProtoMessage() {}
 
 func (x *GetCredentialStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[5]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -308,7 +212,7 @@ func (x *GetCredentialStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetCredentialStatusRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{5}
+	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetCredentialStatusRequest) GetHost() string {
@@ -327,7 +231,7 @@ type GetCredentialStatusResponse struct {
 
 func (x *GetCredentialStatusResponse) Reset() {
 	*x = GetCredentialStatusResponse{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[6]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -339,7 +243,7 @@ func (x *GetCredentialStatusResponse) String() string {
 func (*GetCredentialStatusResponse) ProtoMessage() {}
 
 func (x *GetCredentialStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[6]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -352,7 +256,7 @@ func (x *GetCredentialStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetCredentialStatusResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{6}
+	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetCredentialStatusResponse) GetStatus() *CredentialStatus {
@@ -370,7 +274,7 @@ type ListCredentialsRequest struct {
 
 func (x *ListCredentialsRequest) Reset() {
 	*x = ListCredentialsRequest{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[7]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -382,7 +286,7 @@ func (x *ListCredentialsRequest) String() string {
 func (*ListCredentialsRequest) ProtoMessage() {}
 
 func (x *ListCredentialsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[7]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -395,7 +299,7 @@ func (x *ListCredentialsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCredentialsRequest.ProtoReflect.Descriptor instead.
 func (*ListCredentialsRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{7}
+	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{5}
 }
 
 type ListCredentialsResponse struct {
@@ -407,7 +311,7 @@ type ListCredentialsResponse struct {
 
 func (x *ListCredentialsResponse) Reset() {
 	*x = ListCredentialsResponse{}
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[8]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -419,7 +323,7 @@ func (x *ListCredentialsResponse) String() string {
 func (*ListCredentialsResponse) ProtoMessage() {}
 
 func (x *ListCredentialsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_credential_proto_msgTypes[8]
+	mi := &file_loam_admin_v1_credential_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -432,7 +336,7 @@ func (x *ListCredentialsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCredentialsResponse.ProtoReflect.Descriptor instead.
 func (*ListCredentialsResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{8}
+	return file_loam_admin_v1_credential_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListCredentialsResponse) GetStatuses() []*CredentialStatus {
@@ -446,32 +350,25 @@ var File_loam_admin_v1_credential_proto protoreflect.FileDescriptor
 
 const file_loam_admin_v1_credential_proto_rawDesc = "" +
 	"\n" +
-	"\x1eloam/admin/v1/credential.proto\x12\rloam.admin.v1\"\x81\x01\n" +
+	"\x1eloam/admin/v1/credential.proto\x12\rloam.admin.v1\"g\n" +
 	"\x10CredentialStatus\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x1b\n" +
-	"\thas_token\x18\x02 \x01(\bR\bhasToken\x12\x1e\n" +
-	"\vhas_ssh_key\x18\x03 \x01(\bR\thasSshKey\x12\x1c\n" +
-	"\tvalidated\x18\x04 \x01(\bR\tvalidated\"C\n" +
+	"\thas_token\x18\x02 \x01(\bR\bhasToken\x12\x1c\n" +
+	"\tvalidated\x18\x04 \x01(\bR\tvalidatedJ\x04\b\x03\x10\x04\"C\n" +
 	"\x17SetUpstreamTokenRequest\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\"S\n" +
 	"\x18SetUpstreamTokenResponse\x127\n" +
-	"\x06status\x18\x01 \x01(\v2\x1f.loam.admin.v1.CredentialStatusR\x06status\"/\n" +
-	"\x19GenerateSSHKeyPairRequest\x12\x12\n" +
-	"\x04host\x18\x01 \x01(\tR\x04host\";\n" +
-	"\x1aGenerateSSHKeyPairResponse\x12\x1d\n" +
-	"\n" +
-	"public_key\x18\x01 \x01(\tR\tpublicKey\"0\n" +
+	"\x06status\x18\x01 \x01(\v2\x1f.loam.admin.v1.CredentialStatusR\x06status\"0\n" +
 	"\x1aGetCredentialStatusRequest\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\"V\n" +
 	"\x1bGetCredentialStatusResponse\x127\n" +
 	"\x06status\x18\x01 \x01(\v2\x1f.loam.admin.v1.CredentialStatusR\x06status\"\x18\n" +
 	"\x16ListCredentialsRequest\"V\n" +
 	"\x17ListCredentialsResponse\x12;\n" +
-	"\bstatuses\x18\x01 \x03(\v2\x1f.loam.admin.v1.CredentialStatusR\bstatuses2\xb3\x03\n" +
+	"\bstatuses\x18\x01 \x03(\v2\x1f.loam.admin.v1.CredentialStatusR\bstatuses2\xc8\x02\n" +
 	"\x11CredentialService\x12c\n" +
-	"\x10SetUpstreamToken\x12&.loam.admin.v1.SetUpstreamTokenRequest\x1a'.loam.admin.v1.SetUpstreamTokenResponse\x12i\n" +
-	"\x12GenerateSSHKeyPair\x12(.loam.admin.v1.GenerateSSHKeyPairRequest\x1a).loam.admin.v1.GenerateSSHKeyPairResponse\x12l\n" +
+	"\x10SetUpstreamToken\x12&.loam.admin.v1.SetUpstreamTokenRequest\x1a'.loam.admin.v1.SetUpstreamTokenResponse\x12l\n" +
 	"\x13GetCredentialStatus\x12).loam.admin.v1.GetCredentialStatusRequest\x1a*.loam.admin.v1.GetCredentialStatusResponse\x12`\n" +
 	"\x0fListCredentials\x12%.loam.admin.v1.ListCredentialsRequest\x1a&.loam.admin.v1.ListCredentialsResponseB\xb6\x01\n" +
 	"\x11com.loam.admin.v1B\x0fCredentialProtoP\x01Z:github.com/bobcob7/loam/internal/gen/loam/admin/v1;adminv1\xa2\x02\x03LAX\xaa\x02\rLoam.Admin.V1\xca\x02\rLoam\\Admin\\V1\xe2\x02\x19Loam\\Admin\\V1\\GPBMetadata\xea\x02\x0fLoam::Admin::V1b\x06proto3"
@@ -488,32 +385,28 @@ func file_loam_admin_v1_credential_proto_rawDescGZIP() []byte {
 	return file_loam_admin_v1_credential_proto_rawDescData
 }
 
-var file_loam_admin_v1_credential_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_loam_admin_v1_credential_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_loam_admin_v1_credential_proto_goTypes = []any{
 	(*CredentialStatus)(nil),            // 0: loam.admin.v1.CredentialStatus
 	(*SetUpstreamTokenRequest)(nil),     // 1: loam.admin.v1.SetUpstreamTokenRequest
 	(*SetUpstreamTokenResponse)(nil),    // 2: loam.admin.v1.SetUpstreamTokenResponse
-	(*GenerateSSHKeyPairRequest)(nil),   // 3: loam.admin.v1.GenerateSSHKeyPairRequest
-	(*GenerateSSHKeyPairResponse)(nil),  // 4: loam.admin.v1.GenerateSSHKeyPairResponse
-	(*GetCredentialStatusRequest)(nil),  // 5: loam.admin.v1.GetCredentialStatusRequest
-	(*GetCredentialStatusResponse)(nil), // 6: loam.admin.v1.GetCredentialStatusResponse
-	(*ListCredentialsRequest)(nil),      // 7: loam.admin.v1.ListCredentialsRequest
-	(*ListCredentialsResponse)(nil),     // 8: loam.admin.v1.ListCredentialsResponse
+	(*GetCredentialStatusRequest)(nil),  // 3: loam.admin.v1.GetCredentialStatusRequest
+	(*GetCredentialStatusResponse)(nil), // 4: loam.admin.v1.GetCredentialStatusResponse
+	(*ListCredentialsRequest)(nil),      // 5: loam.admin.v1.ListCredentialsRequest
+	(*ListCredentialsResponse)(nil),     // 6: loam.admin.v1.ListCredentialsResponse
 }
 var file_loam_admin_v1_credential_proto_depIdxs = []int32{
 	0, // 0: loam.admin.v1.SetUpstreamTokenResponse.status:type_name -> loam.admin.v1.CredentialStatus
 	0, // 1: loam.admin.v1.GetCredentialStatusResponse.status:type_name -> loam.admin.v1.CredentialStatus
 	0, // 2: loam.admin.v1.ListCredentialsResponse.statuses:type_name -> loam.admin.v1.CredentialStatus
 	1, // 3: loam.admin.v1.CredentialService.SetUpstreamToken:input_type -> loam.admin.v1.SetUpstreamTokenRequest
-	3, // 4: loam.admin.v1.CredentialService.GenerateSSHKeyPair:input_type -> loam.admin.v1.GenerateSSHKeyPairRequest
-	5, // 5: loam.admin.v1.CredentialService.GetCredentialStatus:input_type -> loam.admin.v1.GetCredentialStatusRequest
-	7, // 6: loam.admin.v1.CredentialService.ListCredentials:input_type -> loam.admin.v1.ListCredentialsRequest
-	2, // 7: loam.admin.v1.CredentialService.SetUpstreamToken:output_type -> loam.admin.v1.SetUpstreamTokenResponse
-	4, // 8: loam.admin.v1.CredentialService.GenerateSSHKeyPair:output_type -> loam.admin.v1.GenerateSSHKeyPairResponse
-	6, // 9: loam.admin.v1.CredentialService.GetCredentialStatus:output_type -> loam.admin.v1.GetCredentialStatusResponse
-	8, // 10: loam.admin.v1.CredentialService.ListCredentials:output_type -> loam.admin.v1.ListCredentialsResponse
-	7, // [7:11] is the sub-list for method output_type
-	3, // [3:7] is the sub-list for method input_type
+	3, // 4: loam.admin.v1.CredentialService.GetCredentialStatus:input_type -> loam.admin.v1.GetCredentialStatusRequest
+	5, // 5: loam.admin.v1.CredentialService.ListCredentials:input_type -> loam.admin.v1.ListCredentialsRequest
+	2, // 6: loam.admin.v1.CredentialService.SetUpstreamToken:output_type -> loam.admin.v1.SetUpstreamTokenResponse
+	4, // 7: loam.admin.v1.CredentialService.GetCredentialStatus:output_type -> loam.admin.v1.GetCredentialStatusResponse
+	6, // 8: loam.admin.v1.CredentialService.ListCredentials:output_type -> loam.admin.v1.ListCredentialsResponse
+	6, // [6:9] is the sub-list for method output_type
+	3, // [3:6] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name
 	3, // [3:3] is the sub-list for extension extendee
 	0, // [0:3] is the sub-list for field type_name
@@ -530,7 +423,7 @@ func file_loam_admin_v1_credential_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_admin_v1_credential_proto_rawDesc), len(file_loam_admin_v1_credential_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

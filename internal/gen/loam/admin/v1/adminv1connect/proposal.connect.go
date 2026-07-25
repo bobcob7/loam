@@ -56,7 +56,7 @@ type ProposalServiceClient interface {
 	AcceptProposal(context.Context, *connect.Request[v1.AcceptProposalRequest]) (*connect.Response[v1.AcceptProposalResponse], error)
 	// Close a work branch (-> CLOSED). Admin-only; the server also closes on sync when
 	// the upstream PR is closed. (To send a branch back for another round, the admin
-	// calls loam.v1.WorkBranchService.RequestReview with a comment.)
+	// calls loam.v1.WorkBranchService.RequestReview.)
 	CloseWorkBranch(context.Context, *connect.Request[v1.CloseWorkBranchRequest]) (*connect.Response[v1.CloseWorkBranchResponse], error)
 }
 
@@ -126,7 +126,7 @@ type ProposalServiceHandler interface {
 	AcceptProposal(context.Context, *connect.Request[v1.AcceptProposalRequest]) (*connect.Response[v1.AcceptProposalResponse], error)
 	// Close a work branch (-> CLOSED). Admin-only; the server also closes on sync when
 	// the upstream PR is closed. (To send a branch back for another round, the admin
-	// calls loam.v1.WorkBranchService.RequestReview with a comment.)
+	// calls loam.v1.WorkBranchService.RequestReview.)
 	CloseWorkBranch(context.Context, *connect.Request[v1.CloseWorkBranchRequest]) (*connect.Response[v1.CloseWorkBranchResponse], error)
 }
 

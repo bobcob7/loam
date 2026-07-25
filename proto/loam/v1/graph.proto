@@ -25,6 +25,8 @@ message QueryRequest {
     DependentsQuery dependents = 6; // -> dependencies
     HistoryQuery history = 7; // -> history
   }
+  // Restrict results to this file (the CLI's --file filter). Absent = unfiltered.
+  optional string file = 8;
 }
 
 // Where a symbol is defined.
@@ -62,6 +64,20 @@ message QueryResponse {
     HistoryList history = 3; // history
   }
   PageInfo page_info = 4;
+  // The ingest state (repo/branch/commit/time) each queried repo's index was built
+  // from, one entry per repo in scope, so the caller can judge how current these
+  // results are.
+  repeated Ingested ingested = 5;
+  // True if the result list was cut short by a server-enforced cap.
+  bool truncated = 6;
+}
+
+// Detail on which symbol/file/kind a result row matched, present only when a query
+// is ambiguous over multiple candidates.
+message MatchInfo {
+  string symbol = 1;
+  string file = 2;
+  string kind = 3;
 }
 
 message Location {
@@ -69,6 +85,11 @@ message Location {
   FileLine file_line = 2;
   // Absent when the location refers to a file rather than a specific symbol.
   optional string symbol = 3;
+  // The kind of the matched symbol/file (e.g. "function", "struct", "file").
+  string kind = 4;
+  // Present only when the query was ambiguous over multiple candidates; names which
+  // one this row matched.
+  optional MatchInfo of = 5;
 }
 
 message DependencyEdge {
