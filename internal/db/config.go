@@ -8,11 +8,13 @@ import (
 	"os"
 )
 
-// errMissingDatabaseURL is returned when DATABASE_URL is unset or empty.
-var errMissingDatabaseURL = errors.New("DATABASE_URL is required")
+// ErrMissingDatabaseURL is returned when DATABASE_URL is unset or empty.
+// Exported so callers (e.g. cmd/server) can match it with errors.Is.
+var ErrMissingDatabaseURL = errors.New("DATABASE_URL is required")
 
-// errMissingEncryptionKey is returned when LOAM_ENCRYPTION_KEY is unset or empty.
-var errMissingEncryptionKey = errors.New("LOAM_ENCRYPTION_KEY is required")
+// ErrMissingEncryptionKey is returned when LOAM_ENCRYPTION_KEY is unset or
+// empty. Exported so callers (e.g. cmd/server) can match it with errors.Is.
+var ErrMissingEncryptionKey = errors.New("LOAM_ENCRYPTION_KEY is required")
 
 // Config holds the database-layer settings read from the environment: the
 // Postgres DSN and the app-level secret-encryption key. Length and encoding
@@ -37,10 +39,10 @@ func LoadConfig() (Config, error) {
 func loadConfig(getenv func(string) string) (Config, error) {
 	cfg := Config{DatabaseURL: getenv("DATABASE_URL"), EncryptionKey: getenv("LOAM_ENCRYPTION_KEY")}
 	if cfg.DatabaseURL == "" {
-		return Config{}, fmt.Errorf("loading config: %w", errMissingDatabaseURL)
+		return Config{}, fmt.Errorf("loading config: %w", ErrMissingDatabaseURL)
 	}
 	if cfg.EncryptionKey == "" {
-		return Config{}, fmt.Errorf("loading config: %w", errMissingEncryptionKey)
+		return Config{}, fmt.Errorf("loading config: %w", ErrMissingEncryptionKey)
 	}
 	return cfg, nil
 }

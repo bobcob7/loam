@@ -20,9 +20,9 @@ func TestLoadConfig(t *testing.T) {
 		wantErr       error
 	}{
 		{name: "both set", databaseURL: "postgres://localhost/db", encryptionKey: "a-secret-key", wantErr: nil},
-		{name: "missing database url", databaseURL: "", encryptionKey: "a-secret-key", wantErr: errMissingDatabaseURL},
-		{name: "missing encryption key", databaseURL: "postgres://localhost/db", encryptionKey: "", wantErr: errMissingEncryptionKey},
-		{name: "both missing", databaseURL: "", encryptionKey: "", wantErr: errMissingDatabaseURL},
+		{name: "missing database url", databaseURL: "", encryptionKey: "a-secret-key", wantErr: ErrMissingDatabaseURL},
+		{name: "missing encryption key", databaseURL: "postgres://localhost/db", encryptionKey: "", wantErr: ErrMissingEncryptionKey},
+		{name: "both missing", databaseURL: "", encryptionKey: "", wantErr: ErrMissingDatabaseURL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -17,7 +17,7 @@ func TestNewPoolEmptyDatabaseURL(t *testing.T) {
 	t.Parallel()
 	pool, err := NewPool(t.Context(), Config{DatabaseURL: "", EncryptionKey: "key"}, testLogger())
 	assert.Nil(t, pool)
-	assert.ErrorIs(t, err, errMissingDatabaseURL)
+	assert.ErrorIs(t, err, ErrMissingDatabaseURL)
 }
 
 func TestNewPoolUnparseableDSN(t *testing.T) {
