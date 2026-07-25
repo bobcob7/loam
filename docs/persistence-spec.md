@@ -41,10 +41,13 @@ Work.
   enrollment).
 
 ### repo_target_branches
-`repo_id` (fk → repos), `branch`, `ingested_ref` (null), `ingested_at` (null). PK
-`(repo_id, branch)`. The branches eligible as work-branch targets. `ingested_ref` is the
-commit the derived indexes reflect for this branch — written inside the ingest
-transaction (`docs/ingestion-spec.md`), null until first ingest.
+`repo_id` (fk → repos), `branch`, `ingested_ref` (null), `ingested_at` (null),
+`ingested_versions` (jsonb, null). PK `(repo_id, branch)`. The branches eligible as
+work-branch targets. `ingested_ref` is the commit the derived indexes reflect for this
+branch — written inside the ingest transaction (`docs/ingestion-spec.md`), null until
+first ingest. `ingested_versions` records the grammar/pipeline/embedding-model versions
+the current index was built with; the ingest planner compares them against the binary's
+versions to trigger the full-rebuild fallback.
 
 ### credentials
 `id`, `host` (unique, e.g. `github.com`), `token_ciphertext` (bytea, null), `validated`
