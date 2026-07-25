@@ -89,6 +89,12 @@ a bead requires exactly those tags removed with the gate green. "Done" becomes a
 diff plus a green run — checkable, not a judgment call — and `git log` over the
 feature files doubles as the MVP burn-down.
 
+**Step definitions are distributed the same way.** The harness work owns the actor
+drivers and the core step vocabulary (the tables above); beyond that, the bead that
+removes a scenario's tag also contributes whatever step definitions that scenario still
+needs. Test code grows with the feature it validates — there is no separate
+test-writing phase and no bead that owns "make all the scenarios pass."
+
 ## Layer 2 — Integration (Go test packages, per-PR)
 
 Focused suites where a real boundary is crossed; testify + table-driven per repo
