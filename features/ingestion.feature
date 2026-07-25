@@ -40,4 +40,5 @@ Feature: Code ingestion
     When the next ingestion fails
     Then the job is shown as failed with its error
     And graph and search queries still return the previous index
+    And the reported ingested commit is unchanged
     And the job is retried

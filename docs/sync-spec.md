@@ -62,8 +62,8 @@ The provider needs the PR **number** to poll state, so `work_branches` carries
 ## Mirror Sync
 
 Each enrolled repo is polled on a fixed interval (`LOAM_SYNC_INTERVAL`,
-server-wide, default `60s`; the server-config spec will consolidate the
-environment surface). Syncs are **serialized per repo** — the same pattern as
+server-wide, default `60s`; see `docs/server-spec.md`). Syncs are
+**serialized per repo** — the same pattern as
 ingest jobs — and one sync cycle runs, in order:
 
 1. **Fetch** all upstream refs into the mirror, forced, with pruning —
@@ -142,8 +142,8 @@ Proposed via Loam.
 ```
 
 The footer is on by default and disabled with server config
-(`LOAM_PR_ATTRIBUTION=false`; the server-config spec will consolidate the
-environment surface). When disabled, the body is the description alone.
+(`LOAM_PR_ATTRIBUTION=false`; see `docs/server-spec.md`). When disabled, the
+body is the description alone.
 
 The RPC is synchronous and **idempotent by construction**: the push is
 fast-forward-or-noop, and step 2 is skipped whenever a PR is already recorded —

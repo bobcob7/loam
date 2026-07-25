@@ -217,7 +217,8 @@ smart HTTP under `/git/*` (see [`docs/git-spec.md`](docs/git-spec.md)). Full det
 #### Auth
 
 The interface is never intended for agents to access.
-The admin will provide username and password on server startup.
+The admin will provide username and password on server startup (via the server's
+environment — see [`docs/server-spec.md`](docs/server-spec.md)).
 These credentials will use basic HTTP Auth. A single admin credential is sufficient for the
 MVP; multiple admin accounts are future work.
 

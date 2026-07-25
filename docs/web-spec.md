@@ -76,7 +76,8 @@ Enroll and manage repos. The admin's repo view is richer than the CLI's read-onl
   — recent and active ingest jobs across repos, for the Jobs view (see `docs/ingestion-spec.md`).
 
 `EnrolledRepo` is `{ repo, upstream_url, target_branches[], default_target, SyncStatus sync,
-bool has_description_schema }`. `SyncStatus` is `{ SyncState state, string last_synced_at,
+bool has_description_schema, string ingested_ref }` — `ingested_ref` is the default
+target's last ingested commit, empty until first ingest. `SyncStatus` is `{ SyncState state, string last_synced_at,
 string error }`, with `state` one of `idle` / `syncing` / `error`. `IngestJob` is
 `{ repo, target_branch, kind, status, attempts, error, queued_at, started_at, finished_at }`.
 

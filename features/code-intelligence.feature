@@ -12,6 +12,12 @@ Feature: Querying code intelligence
     When I ask the graph where "Login" is defined
     Then I get the file and line of its definition
 
+  Scenario: Results name the commit they were built from
+    Given "main" has advanced past the last ingested commit
+    When I run a graph query
+    Then the response names the commit the index was built from
+    And I can tell the results predate the tip of "main"
+
   Scenario: Finding references to a symbol
     When I ask the graph for references to "Login"
     Then I get every location that references it

@@ -97,6 +97,14 @@ cheap enough to keep simple.
 ## Consistency & Failure
 
 - Each ingest is one transaction; readers see the prior index until it commits.
+- **Stale-but-consistent** is the rule: on any failure — including an unreachable
+  embedder — nothing commits, so the graph and the chunks never disagree about which
+  commit they reflect. The previous index stays live until a retry succeeds; there is no
+  partial-degrade mode.
+- The transaction also records the **ingested ref** — the commit the index now reflects —
+  in `repo_target_branches.ingested_ref` (`docs/persistence-spec.md`). Graph and search
+  responses surface it (`docs/cli-spec.md`) so a client can compare it against the
+  branch tip and know exactly how stale an answer is.
 - On failure the job is marked `failed` with the error recorded, the previous index is left
   intact, and the job is retried with backoff.
 - `repos.sync_state` reflects the latest outcome (`idle` / `syncing` / `error`).

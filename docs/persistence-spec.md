@@ -41,8 +41,10 @@ Work.
   enrollment).
 
 ### repo_target_branches
-`repo_id` (fk → repos), `branch`. PK `(repo_id, branch)`. The branches eligible as
-work-branch targets.
+`repo_id` (fk → repos), `branch`, `ingested_ref` (null), `ingested_at` (null). PK
+`(repo_id, branch)`. The branches eligible as work-branch targets. `ingested_ref` is the
+commit the derived indexes reflect for this branch — written inside the ingest
+transaction (`docs/ingestion-spec.md`), null until first ingest.
 
 ### credentials
 `id`, `host` (unique, e.g. `github.com`), `token_ciphertext` (bytea, null), `validated`

@@ -506,10 +506,14 @@ in isolation, so a usage in one repo is not linked to a definition in another. T
 cross-repo dependency resolution (global symbol identity + import resolution) is Future Work
 (see README).
 
-**Output** (JSON array) — shape depends on the subquery; e.g. `refs`:
+**Output** (JSON) — `results` shape depends on the subquery (e.g. `refs` below). Every
+response carries `ingested`: the commit each queried repo's index was built from
+(`docs/ingestion-spec.md`), so an agent can tell how stale an answer is relative to the
+branch tip:
 
 ```json
-[ { "repo": "bobcob7/doc-server", "file": "auth.go", "line": 42, "symbol": "Login" } ]
+{ "ingested": [ { "repo": "bobcob7/doc-server", "target": "main", "ref": "a1b2c3d", "at": "2026-07-25T12:00:00Z" } ],
+  "results": [ { "repo": "bobcob7/doc-server", "file": "auth.go", "line": 42, "symbol": "Login" } ] }
 ```
 
 **Errors:** exit `2` on an unknown subquery or unresolvable scope; exit `3` if the target
@@ -534,10 +538,12 @@ Natural-language semantic search over ingested docs/code (see README → RAG).
 **Behavior:** Embeds `query` and returns the most relevant ingested doc/code chunks with
 provenance.
 
-**Output** (JSON array):
+**Output** (JSON) — the same `ingested` envelope as `graph`, so staleness is visible per
+queried repo:
 
 ```json
-[ { "repo": "bobcob7/doc-server", "file": "auth.go", "lines": [40, 58], "score": 0.82, "snippet": "…" } ]
+{ "ingested": [ { "repo": "bobcob7/doc-server", "target": "main", "ref": "a1b2c3d", "at": "2026-07-25T12:00:00Z" } ],
+  "results": [ { "repo": "bobcob7/doc-server", "file": "auth.go", "lines": [40, 58], "score": 0.82, "snippet": "…" } ] }
 ```
 
 **Errors:** exit `2` on bad arguments or unresolvable scope.
