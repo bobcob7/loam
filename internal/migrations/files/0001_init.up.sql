@@ -1,0 +1,12 @@
+-- Bootstrap migration for the golang-migrate harness (bead loam-54o.2).
+--
+-- Intentionally trivial: this migration owns no schema. It exists to prove
+-- the embed.FS + iofs + pgx/v5 wiring end to end (source parses, the pgx
+-- driver connects and executes a statement, schema_migrations records the
+-- version) without making any of the schema calls that belong to later
+-- beads:
+--   - metadata tables (repos, credentials, roles, work_branches, ...)
+--     land in loam-54o.3, per docs/persistence-spec.md "Metadata".
+--   - derived code-intelligence tables + the pgvector extension land in
+--     loam-54o.4, per docs/persistence-spec.md "Code intelligence".
+SELECT 1;
