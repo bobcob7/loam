@@ -99,6 +99,7 @@ func TestMigrateEmptyDSN(t *testing.T) {
 }
 
 func TestMigrateUnparseableDSN(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		dsn  string
