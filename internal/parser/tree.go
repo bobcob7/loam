@@ -2,9 +2,17 @@
 // wraps Tree-sitter's C library behind a small, pure-Go-facing surface:
 // callers get a Language lookup, a Parse call, and a minimal Tree/Node view
 // with just enough of the syntax tree (kind, byte/line ranges, source text,
-// child/field navigation) for the symbol extractor and the chunker to do
-// their work. The underlying Tree-sitter tree, node, and language types
-// never leak past this package.
+// child/field/sibling navigation) for the symbol extractor and the chunker
+// to do their work. The underlying Tree-sitter tree, node, and language
+// types never leak past this package.
+//
+// Build requirement: this package, and any package that imports it, needs
+// CGO_ENABLED=1 and a C toolchain (e.g. gcc/clang) to build or test — there
+// is no `-tags` gate on that, since the per-language grammar modules
+// (github.com/tree-sitter/tree-sitter-{go,python,javascript,typescript})
+// each vendor their own generated C parser sources and compile them via
+// cgo. No external C library (no system libtree-sitter) needs to be
+// installed; the grammars are ordinary Go module dependencies.
 package parser
 
 import ts "github.com/tree-sitter/go-tree-sitter"
@@ -149,4 +157,68 @@ func (n Node) Parent() (Node, bool) {
 		return Node{}, false
 	}
 	return Node{inner: p, src: n.src}, true
+}
+
+// NextSibling returns the next sibling in n's parent's children, and false
+// if n is the last child (or has no parent). Chunking a symbol together
+// with a doc comment that precedes it as a separate sibling node — as
+// tree-sitter-go does for Go doc comments — is reached through
+// PrevSibling/PrevNamedSibling, not through Parent's children.
+func (n Node) NextSibling() (Node, bool) {
+	s := n.inner.NextSibling()
+	if s == nil {
+		return Node{}, false
+	}
+	return Node{inner: s, src: n.src}, true
+}
+
+// PrevSibling returns the previous sibling in n's parent's children, and
+// false if n is the first child (or has no parent).
+func (n Node) PrevSibling() (Node, bool) {
+	s := n.inner.PrevSibling()
+	if s == nil {
+		return Node{}, false
+	}
+	return Node{inner: s, src: n.src}, true
+}
+
+// NextNamedSibling returns the next named sibling, skipping anonymous
+// tokens, and false if there is none.
+func (n Node) NextNamedSibling() (Node, bool) {
+	s := n.inner.NextNamedSibling()
+	if s == nil {
+		return Node{}, false
+	}
+	return Node{inner: s, src: n.src}, true
+}
+
+// PrevNamedSibling returns the previous named sibling, skipping anonymous
+// tokens, and false if there is none.
+func (n Node) PrevNamedSibling() (Node, bool) {
+	s := n.inner.PrevNamedSibling()
+	if s == nil {
+		return Node{}, false
+	}
+	return Node{inner: s, src: n.src}, true
+}
+
+// Equals reports whether n and other refer to the same syntax node. Use it
+// (together with a parent's Child/NamedChild) to locate a node's own index
+// among its siblings, since this package does not expose Tree-sitter's
+// numeric node Id.
+func (n Node) Equals(other Node) bool {
+	return n.inner.Equals(*other.inner)
+}
+
+// HasError reports whether n or any of its descendants contains a syntax
+// error, letting a caller skip just the broken subtree rather than the
+// whole tree (see Tree.HasError for the whole-tree check).
+func (n Node) HasError() bool {
+	return n.inner.HasError()
+}
+
+// ToSexp returns the node's S-expression representation, useful for
+// debugging and tests that need to see a grammar's exact shape.
+func (n Node) ToSexp() string {
+	return n.inner.ToSexp()
 }

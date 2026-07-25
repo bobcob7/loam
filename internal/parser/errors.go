@@ -14,5 +14,6 @@ var ErrNoGrammar = errors.New("parser: no grammar registered for file")
 var errUnsupportedLanguage = errors.New("parser: unsupported language")
 
 // errParseFailed is returned when Tree-sitter produces no tree for a reason
-// other than context cancellation (e.g. it made no parsing progress).
+// other than context cancellation. A canceled or expired ctx is detected
+// first and reported as that ctx error instead — see Parser.parseBytes.
 var errParseFailed = errors.New("parser: tree-sitter returned no tree")
