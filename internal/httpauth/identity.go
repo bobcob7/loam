@@ -56,3 +56,11 @@ func IsAdmin(ctx context.Context) bool {
 	admin, _ := ctx.Value(adminContextKey).(bool)
 	return admin
 }
+
+// withoutAdmin returns a copy of ctx explicitly marked as not an admin
+// superuser, overriding any WithAdmin set by an ancestor context. Used by
+// GitIdentity so /git/* can never inherit admin status regardless of how
+// a future mux nests these wrappers.
+func withoutAdmin(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adminContextKey, false)
+}

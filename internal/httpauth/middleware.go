@@ -44,7 +44,7 @@ func New(adminUser, adminPassword string) *Auth {
 // marked admin (see IsAdmin).
 func (a *Auth) AdminOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !a.validBasicAuth(r) {
+		if _, valid := a.checkBasicAuth(r); !valid {
 			w.Header().Set("WWW-Authenticate", wwwAuthenticateRealm)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -54,20 +54,31 @@ func (a *Auth) AdminOnly(next http.Handler) http.Handler {
 }
 
 // CLI wraps /loam.v1.* (docs/web-spec.md -> Auth). Valid admin basic auth
-// takes priority and marks the context admin, so the web UI reuses these
-// same CLI services as a superuser; any other value in the Authorization
-// header (missing, malformed, or simply wrong) falls back to the agent
-// identity headers rather than rejecting the request, per the bead
-// design's "otherwise fall back to agent identity headers". If neither is
-// present the request still proceeds with no identity in context — the
-// MVP trusts (does not require) the agent headers on this path group, as
-// documented in the bead's acceptance criteria; a gated RPC then has
-// nothing to authorize against and requireCapability denies it.
+// takes priority and marks the context admin (with no agent identity set
+// alongside it), so the web UI reuses these same CLI services as a
+// superuser. A *presented but wrong* Basic credential fails closed with
+// the same 401 + WWW-Authenticate as AdminOnly — docs/web-spec.md says the
+// CLI API never prompts for basic auth, so agents never send one, and
+// silently downgrading a rejected admin credential to anonymous would turn
+// a typo'd password into a much harder to diagnose CodePermissionDenied
+// further down the stack instead of a 401. Only when no Basic credential
+// was presented at all does the request fall back to the agent identity
+// headers; if neither is present it still proceeds with no identity in
+// context — the MVP trusts (does not require) the agent headers on this
+// path group, as documented in the bead's acceptance criteria — a gated
+// RPC then has nothing to authorize against and requireCapability denies
+// it.
 func (a *Auth) CLI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented, valid := a.checkBasicAuth(r)
+		if presented && !valid {
+			w.Header().Set("WWW-Authenticate", wwwAuthenticateRealm)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		ctx := r.Context()
 		switch {
-		case a.validBasicAuth(r):
+		case valid:
 			ctx = WithAdmin(ctx)
 		default:
 			if identity, ok := agentIdentityFromHeaders(r); ok {
@@ -81,13 +92,19 @@ func (a *Auth) CLI(next http.Handler) http.Handler {
 // GitIdentity wraps /git/* (docs/web-spec.md -> Auth, NOTES spec
 // correction). Admin basic auth is never accepted here — even valid
 // credentials confer nothing, since this wrapper never inspects the
-// Authorization header — so a request presenting basic auth in place of
-// agent identity headers is rejected exactly like one presenting no
-// credentials at all. A request must carry all three Loam-Agent-* headers;
+// Authorization header at all — so a request presenting basic auth in
+// place of agent identity headers is rejected exactly like one presenting
+// no credentials. A request must carry all three Loam-Agent-* headers;
 // otherwise it is rejected 403 (not 401 — docs/git-spec.md: "so
 // unconfigured git clients fail fast instead of prompting for
-// credentials"). Role-based enforcement on top of the resolved identity is
-// loam-ofg.17's job; this wrapper only establishes identity.
+// credentials"). It also defensively clears any admin marker already on
+// the incoming context via withoutAdmin: nothing sets one before this
+// wrapper today, but if a future mux ever nests GitIdentity inside an
+// admin wrapper, RequireCapability's IsAdmin bypass must not silently
+// grant every git role gate — this path never carries superuser status,
+// regardless of wrapper ordering. Role-based enforcement on top of the
+// resolved identity is loam-ofg.17's job; this wrapper only establishes
+// identity.
 func (a *Auth) GitIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := agentIdentityFromHeaders(r)
@@ -95,7 +112,8 @@ func (a *Auth) GitIdentity(next http.Handler) http.Handler {
 			http.Error(w, "forbidden: missing agent identity", http.StatusForbidden)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), identity)))
+		ctx := WithIdentity(withoutAdmin(r.Context()), identity)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -112,15 +130,20 @@ func agentIdentityFromHeaders(r *http.Request) (Identity, bool) {
 	return Identity{Name: name, ID: id, Role: role}, true
 }
 
-// validBasicAuth reports whether r carries the configured admin
-// credentials, compared constant-time (docs/server-spec.md:
-// "LOAM_ADMIN_PASSWORD ... compared constant-time").
-func (a *Auth) validBasicAuth(r *http.Request) bool {
+// checkBasicAuth reports whether r carried an Authorization: Basic
+// credential at all (presented) and, separately, whether it matched the
+// configured admin credentials (valid), compared constant-time
+// (docs/server-spec.md: "LOAM_ADMIN_PASSWORD ... compared constant-time").
+// Callers that need to fail closed on a presented-but-wrong credential
+// (CLI) check presented independently of valid; AdminOnly only needs
+// valid. A non-Basic Authorization scheme (e.g. Bearer) leaves presented
+// false, so it falls through to agent-header handling unchanged.
+func (a *Auth) checkBasicAuth(r *http.Request) (presented, valid bool) {
 	user, password, ok := r.BasicAuth()
 	if !ok {
-		return false
+		return false, false
 	}
-	return constantTimeEqual(user, a.adminUser) && constantTimeEqual(password, a.adminPassword)
+	return true, constantTimeEqual(user, a.adminUser) && constantTimeEqual(password, a.adminPassword)
 }
 
 // constantTimeEqual compares two strings in constant time regardless of
