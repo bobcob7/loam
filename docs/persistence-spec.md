@@ -61,16 +61,20 @@ and `reviewer` are seeded by migration and cannot be deleted.
 `id`, `repo_id` (fk → repos), `name` (the randomly generated branch name), `target`, `title`
 (null until set), `description` (null), `state`
 (`draft`/`reviewable`/`reviewed`/`complete`/`closed`), `author` (agent identifier),
-`upstream_pr_url` (null), timestamps.
+`upstream_pr_url` (null), `conflicted` (bool), timestamps.
 - `UNIQUE (repo_id, name)` — identity is `(repo, name)`.
+- `conflicted` is set when a target advance fails to auto-merge into the branch and
+  cleared by the catch-up push that brings it up to date (`docs/git-spec.md` → Target
+  Advances & Catch-Up).
 - The diff is **not** stored; it is computed from git (`target...name`). The row only points
   at the git ref by `name`.
 
 ### verdicts
 `id`, `work_branch_id` (fk → work_branches), `reviewer` (agent identifier), `outcome`
 (`approve`/`disapprove`/`neutral`), `stale` (bool), timestamps.
-- A reviewer has at most one **live** verdict per work branch; requesting review marks the
-  round's verdicts stale (retained for history). Enforced with a partial unique index:
+- A reviewer has at most one **live** verdict per work branch; requesting review — or a
+  conflicting target advance resetting the branch (`docs/git-spec.md`) — marks the round's
+  verdicts stale (retained for history). Enforced with a partial unique index:
 
 ```sql
 CREATE UNIQUE INDEX verdicts_live_reviewer
@@ -86,8 +90,8 @@ CREATE UNIQUE INDEX verdicts_live_reviewer
 ### comments
 `id`, `thread_id` (fk → threads), `author` (agent identifier), `body`, `created_at`. The
 opening comment creates the thread; replies add comments.
-- **Staged comments are not here** — they live locally in the CLI's `.loam` until a verdict
-  (reviewer) or a reply (author) publishes them.
+- **Staged comments are not here** — they live locally in the CLI's `.loam` until the
+  reviewer's verdict publishes them (replies are immediate and never staged).
 
 > There is no `agents` table in the MVP: agent identity is trusted from the environment, so
 > `author`/`reviewer` are stored as identifier strings, not foreign keys. Server-issued agent
@@ -141,7 +145,10 @@ CREATE INDEX chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops)
 Each enrolled repo is a bare mirror on the PersistentVolume (path derived from `repos.name`).
 The mirror is the source of truth for code:
 
-- Work branches are git refs; commits arrive via the SSH git endpoint.
+- Work branches are git refs; commits arrive via the smart-HTTP git endpoint
+  (`docs/git-spec.md`). Each mirror carries the server-written pre-receive hook and
+  `receive.denyNonFastForwards` / `receive.denyDeletes` config that enforce push policy,
+  rewritten idempotently at enrollment and startup.
 - Diffs, blame, and file contents are read from git, not the DB.
 - The server syncs from upstream (upstream-wins) and, on target-branch advance, triggers
   ingestion (`docs/ingestion-spec.md`) to update the derived indexes above.

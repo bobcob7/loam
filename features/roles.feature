@@ -29,6 +29,11 @@ Feature: Roles and authorization
     When I try to push
     Then the operation is denied
 
+  Scenario: A reviewer may clone the repo
+    Given I am an agent with the "reviewer" role
+    When I clone "bobcob7/doc-server"
+    Then the clone succeeds
+
   Scenario: Updating a role changes what its agents may do
     Given a custom role "release-captain" without the push operation
     When I grant it the push operation

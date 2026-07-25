@@ -28,20 +28,23 @@ it sits outside the provider interface.
   Postgres store for metadata, the code graph, and RAG vectors (see
   [`docs/persistence-spec.md`](docs/persistence-spec.md)). It is the only git remote agents
   ever see.
-- **CLI tool** — the agent-facing interface. One binary that talks to the server; all
-  workflow, querying, and authorization flow through it.
+- **CLI tool** — the agent-facing interface. One binary that talks to the server for the
+  Loam-native workflow and querying; git itself runs plain against server-bootstrapped
+  clones (see [`docs/git-spec.md`](docs/git-spec.md)).
 - **Web interface** — the admin-facing interface. Never used by agents. Used to enroll
   repos, manage upstream credentials, and approve proposed upstream PRs.
 
 ### CLI Tool
 
-Local CLI tool that sets up the Git repo and enables consistent workflow and querying and enforces authorization.
+Local CLI tool that bootstraps clones and carries the Loam-native workflow: work branches,
+review, verdicts, and code-intelligence queries.
 
-A single tool talks to the central server and is the only path agents use to reach it,
-which keeps the workflow (clone → branch → commit → open review → verdict) consistent and auditable.
-Every call carries the agent's identity and role (below), which the server uses to
-authorize the requested operation. Its command surface is specified in
-[`docs/cli-spec.md`](docs/cli-spec.md).
+The CLI talks to the central server for everything Loam-native; source control itself is
+**plain git**, run against a clone the CLI bootstraps with the server as its only remote —
+the server enforces push policy at receive time (see
+[`docs/git-spec.md`](docs/git-spec.md)). Every call — RPC and git push alike — carries the
+agent's identity and role (below), which the server uses to authorize the requested
+operation. The CLI's command surface is specified in [`docs/cli-spec.md`](docs/cli-spec.md).
 
 #### Agent Identity & Roles
 
@@ -158,13 +161,17 @@ The CLI tool can be used to clone in a repo from the main server with the main s
 
 The server keeps a mirror of each enrolled upstream repo. Agents clone from the server and
 push back to it; the server is their sole remote. Syncing with the real upstream is the
-server's job, not the agent's, so agents work in a closed, controlled loop.
+server's job, not the agent's, so agents work in a closed, controlled loop. Transport and
+push policy are specified in [`docs/git-spec.md`](docs/git-spec.md).
 
 Upstream is authoritative. When the server polls upstream and a mirrored branch has
 diverged, it always takes upstream — the local copy is reset to match, with no
 local-vs-upstream merge or conflict resolution. This is also how merged work flows back:
 once an upstream PR is merged, the next sync advances the target branch in the mirror,
-which is what triggers graph/RAG ingest.
+which is what triggers graph/RAG ingest. A target advance is also merged automatically
+into every open work branch; if the merge conflicts, the work branch falls back to `draft`
+until an agent catches it up (see [`docs/git-spec.md`](docs/git-spec.md) → Target Advances
+& Catch-Up).
 
 #### Enrollment
 
@@ -202,8 +209,9 @@ above).
 ### Web Interface
 
 The admin-facing interface. Loam ships as a single binary: one HTTP port serves the CLI
-Connect API, the admin Connect API, and a generated SPA embedded via `go:embed`; git
-transport runs separately over SSH. Full detail in [`docs/web-spec.md`](docs/web-spec.md).
+Connect API, the admin Connect API, a generated SPA embedded via `go:embed`, and git
+smart HTTP under `/git/*` (see [`docs/git-spec.md`](docs/git-spec.md)). Full detail in
+[`docs/web-spec.md`](docs/web-spec.md).
 
 #### Auth
 
@@ -242,7 +250,7 @@ Target branches can be specified. These branches are eligible as targets for rev
 #### Work & Review
 1. Work is defined by the user.
 2. The agent starts a work branch from a target branch. Its name is randomly generated — a work branch's identity is its title and description, not its name.
-3. The agent clones the repo at the work branch, then does the work, committing and pushing as it goes.
+3. The agent clones the repo at the work branch via the CLI (which bootstraps identity), then does the work with plain git, committing and pushing as it goes.
 4. The agent gives the work branch a title and description, refining them as the work takes shape. They belong to the work branch and can be updated at any time.
 5. When the work is ready, the agent **requests review** — the signal that puts the work branch up for review. There is no separate PR or review object; "review" is simply a state of the work branch.
 6. Other agents review it and submit **verdicts**: staged comments plus an approve / disapprove / neutral outcome. The first verdict marks the work branch **reviewed**.
@@ -270,7 +278,8 @@ Post-MVP directions, roughly in priority order. None are required for the MVP to
   repository seams as scale demands. See `docs/persistence-spec.md`.
 - **Authentication.** Replace the MVP's trusted-environment identity model with
   server-issued agent credentials so identity and role can be verified rather than asserted —
-  including per-agent auth for the git SSH endpoint, which the MVP accesses with a shared key.
+  on git, via a standard credential helper; the MVP trusts the identity headers a clone
+  carries.
 - **Per-repo / per-branch authorization.** Move beyond global role-based access to scope
   what a role may do on a per-repo and per-branch basis.
 - **Reviewer sub-roles.** Split the single reviewer role into specialized types (e.g.

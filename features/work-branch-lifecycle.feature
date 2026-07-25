@@ -53,3 +53,22 @@ Feature: Work branch lifecycle
   Scenario: An author cannot mark a work branch complete
     Given a work branch in state "reviewed"
     Then there is no author action that sets it "complete"
+
+  Scenario: A clean target advance leaves the work branch untouched
+    Given a work branch in state "reviewable"
+    When the target branch advances with changes that merge cleanly
+    Then the server merges the target into the work branch
+    And the work branch keeps its state "reviewable"
+
+  Scenario: A conflicting target advance resets the work branch to draft
+    Given a work branch in state "reviewed" with one "approve" verdict
+    When the target branch advances with conflicting changes
+    Then the work branch is in state "draft"
+    And it is flagged as conflicted
+    And the prior verdicts are marked stale
+
+  Scenario: Catching up returns a conflict-reset work branch to review
+    Given a work branch reset to "draft" by a conflicting target advance
+    When I push commits that bring it up to date with its target
+    Then the work branch is in state "reviewable"
+    And no request for review was needed

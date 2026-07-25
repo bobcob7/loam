@@ -45,3 +45,17 @@ Feature: Deciding on proposals
     Given a work branch in state "reviewed" whose upstream PR has been created
     When the upstream PR is closed without merging
     Then the next sync sets the work branch to state "closed"
+
+  Scenario: A conflicting target advance removes a proposal from the queue
+    Given a proposal in state "reviewed" with one "approve" verdict
+    When its target branch advances with conflicting changes
+    Then the work branch is in state "draft"
+    And it no longer appears in the proposal queue
+
+  Scenario: Re-accepting a caught-up work branch updates the existing PR
+    Given a work branch whose upstream PR has been created
+    And a conflicting target advance reset it to "draft"
+    And it was caught up, re-reviewed, and approved again
+    When I accept it
+    Then the existing upstream PR is updated in place
+    And no new upstream PR is created

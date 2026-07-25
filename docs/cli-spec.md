@@ -1,7 +1,10 @@
 # CLI Spec
 
-Specification for the Loam CLI — the single agent-facing tool that talks to the
-server (see the root `README.md`). This document specifies its command surface.
+Specification for the Loam CLI — the agent-facing tool that talks to the server (see the
+root `README.md`). The CLI carries the Loam-native workflow: work branches, review,
+verdicts, and code-intelligence queries. Source control itself is **plain git**, run
+against a clone that `loam clone` bootstraps; the server enforces push policy at receive
+time (see `docs/git-spec.md`). This document specifies the CLI's command surface.
 
 Status: **draft.** The command surface below is specified; remaining spec-level open
 questions are tracked at the end.
@@ -44,16 +47,16 @@ Identity & Roles. Names are provisional.
 
 | Variable | Purpose | Required | Default |
 | --- | --- | --- | --- |
-| `LOAM_SERVER_URL` | Base URL of the Loam RPC (HTTP) endpoint — the CLI and admin Connect API. A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
-| `LOAM_GIT_URL` | Base SSH URL for git transport (clone/fetch/push), e.g. `ssh://git@host:port`. `clone` composes `<LOAM_GIT_URL>/<group>/<repo>.git`. | yes | — |
+| `LOAM_SERVER_URL` | Base URL of the Loam server — the Connect APIs and the git smart-HTTP endpoint (`clone` composes `<LOAM_SERVER_URL>/git/<group>/<repo>.git`). A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
 | `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes | — |
 | `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes | — |
 | `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes | — |
 | `LOAM_OUTPUT_FORMAT` | Output format: `json`, `yaml`, `xml`, or `human`. Unknown values fall back to `json`. | no | `json` |
 
-The CLI also sets `LOAM_INTERNAL` itself when it invokes git (read by the clone-installed
-git hooks to tell loam-invoked git from direct git); it is not an operator-configured
-variable.
+On the wire, the `LOAM_AGENT_*` values travel as the request headers `Loam-Agent-Name`,
+`Loam-Agent-Id`, and `Loam-Agent-Role` — attached by the CLI to every RPC, and written
+into a clone's git config by `clone` so plain git carries them too (see
+`docs/git-spec.md`).
 
 ### Exit Codes & Errors
 
@@ -132,7 +135,8 @@ identity. Local only — no server call.
 ### Git
 
 #### clone
-Clone an enrolled repo from the server (server as sole remote), optionally at a branch.
+Clone an enrolled repo from the server (server as sole remote), optionally at a branch,
+and bootstrap it so plain git works from then on.
 
 **Synopsis:** `loam clone <repo> [branch]`
 
@@ -143,24 +147,22 @@ Clone an enrolled repo from the server (server as sole remote), optionally at a 
 - `branch` *(optional)* — branch to check out (typically a work branch created via
   `work start`); defaults to the repo's target branch.
 
-**Behavior:** Clones the repo over SSH from the git endpoint
-(`<LOAM_GIT_URL>/<group>/<repo>.git`) into `./<repo_name>` — always the final path segment of
-the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`). The clone's
-only remote is that endpoint, and its git author (`user.name` / `user.email`) is set to the
-agent identity so commits are attributed to the agent. Checks out `branch` if
-given, and **pins** the clone to that branch: `commit` and `push` operate only on it, and
-switching work branches means cloning again.
+**Behavior:** Clones the repo over smart HTTP from
+`<LOAM_SERVER_URL>/git/<group>/<repo>.git` into `./<repo_name>` — always the final path
+segment of the identifier, with no override (e.g. `bobcob7/doc-server` → `./doc-server`).
+The clone's only remote is that endpoint. Checks out `branch` if given, as a
+single-branch clone — a convenient default, not an enforcement. `clone` then bootstraps
+the clone for plain git: it sets the git author (`user.name` / `user.email`) to the agent
+identity so commits are attributed, and writes the agent identity headers into the
+clone's git config so every subsequent git operation carries them.
 
-To steer agents through the CLI, `clone` also installs `pre-commit` and `pre-push` git hooks
-in the clone that reject direct `git commit` / `git push`. `loam commit` and `loam push` set
-a sentinel environment variable (`LOAM_INTERNAL`) when they invoke git; the hooks succeed
-only when it is present, so plain git is blocked while loam-invoked git passes.
-
-This is a **soft guard for cooperative agents, not a security boundary** — it can be
-bypassed with `git … --no-verify`, by removing the hooks, or by repointing
-`core.hooksPath`. Hard enforcement is server-side (a pre-receive check that rejects pushes
-not originating from `loam`) and is deferred alongside authentication (see README → Future
-Work).
+After the clone, **source control is plain git** — commit, push, fetch, merge, pull.
+There are no `loam commit` or `loam push` commands and no client-side hook guard. The
+server authorizes each push at receive time from the identity in the clone's config and
+its ref policy: pushes land only on the caller's own, non-terminal work branch; target
+branches are read-only; force pushes and deletions are rejected (see `docs/git-spec.md` →
+Ref Policy). If the branch has advanced on the server (a target auto-merge), `git pull`
+first.
 
 **Output** (JSON):
 
@@ -169,44 +171,6 @@ Work).
 ```
 
 **Errors:** exit `3` if the repo is not enrolled; exit `2` if `branch` does not exist.
-
-#### commit
-Commit the working copy's changes on the clone's work branch.
-
-**Synopsis:** `loam commit` (commit message read from stdin)
-
-**Behavior:** Commits all changes in the working copy on the clone's work branch, authored
-as the agent identity (configured by `clone`). Operates **only** on the work branch the
-clone was created for — if HEAD is on any other branch, it errors. Switching to a different
-work branch requires a fresh `loam clone`.
-
-**Output** (JSON):
-
-```json
-{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "commit": "a1b2c3d" }
-```
-
-**Errors:** exit `2` if HEAD is not on the clone's work branch or there is nothing to
-commit; exit `3` if not run inside a clone.
-
-#### push
-Push the work branch's commits to the server.
-
-**Synopsis:** `loam push`
-
-**Behavior:** Pushes the clone's work branch to the Loam server (its only remote), attaching
-the agent identity/role so the server can authorize the push (role-level in the MVP — see
-README → Agent Identity & Roles). Operates **only** on the clone's work branch; if HEAD is
-on any other branch, it errors. Switching branches requires a fresh `loam clone`.
-
-**Output** (JSON):
-
-```json
-{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "pushed": 3 }
-```
-
-**Errors:** exit `2` if HEAD is not on the clone's work branch or the push is not authorized
-for the caller's role; exit `3` if not run inside a clone.
 
 ### Work Branches
 
@@ -219,7 +183,10 @@ Its lifecycle: `draft` → (**request-review**) → `reviewable` → (**first ve
 `reviewed`. A re-review returns it to `reviewable` (marking the prior round's verdicts
 stale), requested by the author (`request-review`) or by the admin. The terminal states are
 `complete` (set by the server when the upstream PR merges) and `closed` (admin-only, or when
-the upstream PR is closed) — neither is an agent action.
+the upstream PR is closed) — neither is an agent action. A conflicting target advance
+resets a `reviewable`/`reviewed` branch to `draft` (marking its verdicts stale); a push
+that catches the branch up to its target returns it to `reviewable` automatically, with no
+`request-review` (see `docs/git-spec.md` → Target Advances & Catch-Up).
 
 Commands that act on an existing work branch take `<repo>` and `<work-branch>` (its name) as
 positional arguments; both are optional when run from inside the repo directory (inferred

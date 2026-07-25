@@ -39,7 +39,7 @@ Key terms — **work branch**, **review** (a state, not an object), **verdict**,
 Each file covers one area (see the specs for detail):
 
 - `work-branch-lifecycle.feature` — start → reviewable → reviewed → complete/closed, verdict
-  staleness (author + state transitions).
+  staleness, conflict resets and catch-up (author + state transitions).
 - `reviewing.feature` — reviewer stages comments, submits a verdict, resolves own threads,
   lists verdicts.
 - `replies.feature` — author replies to review threads (immediate).
@@ -51,5 +51,6 @@ Each file covers one area (see the specs for detail):
 - `code-intelligence.feature` — graph queries and RAG search, including `--all` fan-out.
 - `ingestion.feature` — indexing on enrollment and target-branch advance, edge freshness,
   admin reindex, the Jobs view, and failure handling.
-- `clone-and-push.feature` — clone at a work branch; commit/push pinned to it; hook guard.
+- `clone-and-push.feature` — clone bootstrap for plain git; server-side push policy
+  (read-only targets, author-only, terminal states, force pushes, identity).
 - `instructions.feature` — agent orientation (`instructions` / `whoami`).

@@ -9,13 +9,14 @@ message-level detail is filled in iteratively. Sections marked TODO are not yet 
 
 ## Hosting & Routing
 
-Loam is a single self-contained binary. One HTTP listener serves three things, dispatched by
-path; git transport is separate (SSH).
+Loam is a single self-contained binary. One HTTP listener serves four things, dispatched by
+path.
 
 | Path | Handler | Auth |
 | --- | --- | --- |
 | `/loam.v1.*` | CLI Connect services (WorkBranch, Repo, Graph, Search, Meta) | agent identity headers (MVP: trusted) **or** admin basic auth |
 | `/loam.admin.v1.*` | admin-only Connect services | admin basic auth |
+| `/git/*` | git smart HTTP — clone/fetch/push (`docs/git-spec.md`) | agent identity headers **only** (MVP: trusted) |
 | everything else (`/`, assets) | embedded static SPA (fallback to `index.html`) | admin basic auth |
 
 The admin is a **superuser**: admin basic auth is accepted on `/loam.v1.*` too, so the web UI
@@ -26,10 +27,9 @@ request-review) rather than duplicating them. Agents (identity headers only) can
 - **Static content** is a generated single-page app, built at compile time and embedded in
   the binary via Go `go:embed`. There is no separate web server and no runtime file
   dependency; the frontend framework is an implementation detail left open here.
-- **Git transport** (clone/fetch/push between agents and the server) is **not** on this
-  port — it runs over SSH on its own port (`ssh://git@<host>/<group>/<repo>.git`). The CLI is
-  pointed at it by `LOAM_GIT_URL`, separate from the HTTP `LOAM_SERVER_URL`. The HTTP port
-  carries only RPC + web + static.
+- **Git transport** (clone/fetch/push between agents and the server) runs on this same
+  port as git smart HTTP under `/git/<group>/<repo>.git` — there is no separate git port
+  or URL; the CLI composes the git URL from `LOAM_SERVER_URL`. See `docs/git-spec.md`.
 
 ## Auth
 
@@ -42,11 +42,12 @@ request-review) rather than duplicating them. Agents (identity headers only) can
   auth so the web UI (a superuser) can call them.
 - The two regimes are split purely by path prefix: the web is unreachable to an agent that
   only carries identity headers, and the CLI API never prompts for basic auth.
-- **Git (SSH)**: agents authenticate to the git endpoint with an SSH key from their
-  environment. In the MVP this is a **shared key granting transport access only** — it does
-  not identify the agent; attribution comes from the commit author (set by `loam clone`) and
-  the RPC identity headers. Per-agent git auth is deferred with authentication (see README →
-  Future Work).
+- **Git (`/git/*`)**: the same trusted agent identity headers as `/loam.v1.*`, written
+  into each clone's config by `loam clone` so plain git carries them; the server's ref
+  policy authorizes pushes at receive time (`docs/git-spec.md`). Admin basic auth is
+  **not** accepted here — the admin administers the process, not the code. Verified
+  per-agent git credentials (a standard credential helper) are deferred with
+  authentication (see README → Future Work).
 
 ## Admin API
 
@@ -108,15 +109,16 @@ operations and carries the instruction text returned by `MetaService.GetInstruct
 Operations are a fixed capability vocabulary at the command-group level: `work.start`,
 `work.set`, `work.request_review`, `work.reply`, `work.verdict`, `work.read`, `git.clone`,
 `git.push`, `graph.query`, `search`. (`instructions` and `whoami` are always available and
-ungated; `commit` is local.) `work.verdict` covers publishing staged new-thread comments,
+ungated.) `work.verdict` covers publishing staged new-thread comments,
 outcomes, and thread resolutions; `work.reply` covers immediate replies. Loam ships built-in
 defaults:
 
 - **author** — `work.start`, `work.set`, `work.request_review`, `work.reply`, `git.clone`,
   `git.push`, `work.read`, `graph.query`, `search`; cannot submit verdicts or open review
   threads.
-- **reviewer** — `work.read`, `work.reply`, `work.verdict`, `graph.query`, `search`; cannot
-  start work branches or push.
+- **reviewer** — `work.read`, `work.reply`, `work.verdict`, `git.clone`, `graph.query`,
+  `search`; cannot start work branches or push. Clone access lets a reviewer run their own
+  tools against the branch under review (see `docs/git-spec.md`).
 
 ### ProposalService
 Only the genuinely admin-exclusive actions on work branches. Everything shared — viewing
@@ -125,16 +127,19 @@ branch back (`RequestReview`, with a comment) — is the CLI's `WorkBranchServic
 `loam.v1`, which the admin reaches as a superuser. Admin protos reuse `WorkBranch`, `Page`,
 and `PageInfo` from `loam.v1` (they import `loam/v1/common.proto`).
 
-A proposal is a **REVIEWED** work branch with ≥1 non-stale approve verdict and no upstream PR
-yet.
+A proposal is a **REVIEWED** work branch with ≥1 non-stale approve verdict awaiting an
+admin decision — either it has no upstream PR yet, or its existing PR's branch is behind
+the work branch (a conflict catch-up that has been re-reviewed; see `docs/git-spec.md` →
+Target Advances & Catch-Up).
 
 - `ListProposals(Page) → { Proposal[] proposals, PageInfo }` — proposals awaiting an admin
   decision, across all repos, paginated. Each `Proposal` is `{ WorkBranch, VerdictSummary[]
   verdicts }` so the admin sees who approved without a second call.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
-  title/description, and records `pr_url` on the work branch. The work branch **stays
-  REVIEWED**; it flips to COMPLETE only when the server's sync sees the upstream PR merge (or
+  title/description, and records `pr_url` on the work branch. On a re-accept after a
+  conflict catch-up, the existing PR's branch is fast-forwarded instead — the PR updates
+  in place and no new PR is created. The work branch **stays REVIEWED**; it flips to COMPLETE only when the server's sync sees the upstream PR merge (or
   to CLOSED if the upstream PR is closed). Requires ≥1 non-stale approve verdict.
 - `CloseWorkBranch(repo, work_branch, string body) → { WorkBranch }` — closes a work branch
   (→ CLOSED). Admin-only; the server also closes a work branch on sync when its upstream PR
