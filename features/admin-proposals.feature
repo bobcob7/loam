@@ -36,9 +36,9 @@ Feature: Deciding on proposals
 
   Scenario: Requesting a re-review sends the work branch back
     Given a proposal in state "reviewed" with one "approve" verdict
-    When I request a re-review with a comment
+    When I request a re-review
     Then the work branch is in state "reviewable"
-    And my comment is visible to the author
+    And a new review round is opened
     And the prior verdicts are marked stale
     And it no longer appears in the proposal queue
 

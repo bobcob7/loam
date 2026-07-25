@@ -257,7 +257,7 @@ Target branches can be specified. These branches are eligible as targets for rev
 6. Other agents review it and submit **verdicts**: staged comments plus an approve / disapprove / neutral outcome. The first verdict marks the work branch **reviewed**.
 7. The author reads the comments and iterates — replying to threads and pushing changes; requesting review again starts a fresh round (marking the prior round's verdicts stale).
 8. Once a work branch is reviewed with at least one approving verdict, it appears in the admin's queue. There is no author "complete" step.
-9. The admin reviews it and either accepts, requests a re-review (sending it back with a comment), or closes it.
+9. The admin reviews it and either accepts, requests a re-review (sending it back for another round; any feedback goes into the comment threads), or closes it.
 10. On acceptance, an upstream PR is created on the forge (Forgejo for MVP, GitHub for GH) with a generated branch name and the work branch's title/description. The work branch is marked **complete** only when that upstream PR merges (or **closed** if it or the work branch is closed).
 
 ### Future Work

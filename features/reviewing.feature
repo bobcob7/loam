@@ -54,3 +54,9 @@ Feature: Reviewing a work branch
     When I list the verdicts
     Then each reviewer appears once with their latest outcome
     And none are marked stale
+
+  Scenario: Verdicts and comments record their review round
+    Given the work branch is on its second review round
+    When I stage a comment and submit a verdict with outcome "approve"
+    Then the verdict is recorded against the second round
+    And the published comment is recorded against the second round

@@ -75,27 +75,33 @@ and `reviewer` are seeded by migration and cannot be deleted.
 - The diff is **not** stored; it is computed from git (`target...name`). The row only points
   at the git ref by `name`.
 
+### review_rounds
+`id`, `work_branch_id` (fk → work_branches), `number` (1, 2, …), `requested_by` (agent
+identifier, the admin, or the server for a conflict catch-up restore), `created_at`.
+`UNIQUE (work_branch_id, number)`. A row is created on **every** transition into
+`reviewable` — author `request-review`, admin send-back, and the catch-up auto-restore
+(`docs/git-spec.md`). The branch's **current round** is its highest `number`. There is no
+request comment — discussion lives in threads and replies, each tied to its round.
+
 ### verdicts
-`id`, `work_branch_id` (fk → work_branches), `reviewer` (agent identifier), `outcome`
-(`approve`/`disapprove`/`neutral`), `stale` (bool), timestamps.
-- A reviewer has at most one **live** verdict per work branch; requesting review — or a
-  conflicting target advance resetting the branch (`docs/git-spec.md`) — marks the round's
-  verdicts stale (retained for history). Enforced with a partial unique index:
-
-```sql
-CREATE UNIQUE INDEX verdicts_live_reviewer
-  ON verdicts (work_branch_id, reviewer) WHERE NOT stale;
-```
-
-- The proposal queue and approval bar count only `WHERE NOT stale AND outcome = 'approve'`.
+`id`, `round_id` (fk → review_rounds), `reviewer` (agent identifier), `outcome`
+(`approve`/`disapprove`/`neutral`), timestamps.
+- `UNIQUE (round_id, reviewer)` — one verdict per reviewer per round; re-submitting
+  replaces it.
+- **Staleness is derived, not stored**: a verdict is stale iff its round is not the work
+  branch's current round. The proposal queue and approval bar count only current-round
+  `approve` verdicts.
 
 ### threads
-`id`, `work_branch_id` (fk → work_branches), `author` (who opened it), `file` (null),
-`line` (null), `resolved` (bool), timestamps. `file`/`line` are the optional anchor.
+`id`, `work_branch_id` (fk → work_branches), `round_id` (fk → review_rounds — the round
+the thread was raised in), `author` (who opened it), `file` (null), `line` (null),
+`resolved` (bool), timestamps. `file`/`line` are the optional anchor.
 
 ### comments
-`id`, `thread_id` (fk → threads), `author` (agent identifier), `body`, `created_at`. The
-opening comment creates the thread; replies add comments.
+`id`, `thread_id` (fk → threads), `round_id` (fk → review_rounds — the branch's round
+when the comment was posted; a reply can land in a later round than its thread),
+`author` (agent identifier), `body`, `created_at`. The opening comment creates the
+thread; replies add comments.
 - **Staged comments are not here** — they live locally in the CLI's `.loam` until the
   reviewer's verdict publishes them (replies are immediate and never staged).
 

@@ -24,6 +24,13 @@ Feature: Replying to review threads
     Then the verdicts are unchanged
     And none are marked stale
 
+  Scenario: A reply records the round it was made in
+    Given the work branch is on its second review round
+    And the thread was raised in the first round
+    When I reply to the thread
+    Then my reply is recorded against the second round
+    And the thread still shows it was raised in the first round
+
   Scenario: Replying to a missing thread is rejected
     When I reply to a thread that does not exist
     Then the reply is rejected as not found

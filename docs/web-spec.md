@@ -150,12 +150,14 @@ Target Advances & Catch-Up).
   is closed.
 
 To send a reviewed branch back for another round, the admin calls
-`WorkBranchService.RequestReview` with a comment — the same operation an author uses — which
-returns it to REVIEWABLE, marking the prior round's verdicts stale.
+`WorkBranchService.RequestReview` — the same operation an author uses — which returns it
+to REVIEWABLE, opening a fresh review round and thereby marking the prior round's
+verdicts stale. There is no send-back comment; the admin's feedback, like anyone's,
+lives in the work branch's threads (e.g. a reply to the relevant thread).
 
 `VerdictSummary` (defined in `loam.v1`, also returned by `WorkBranchService.ListVerdicts`) is
-`{ reviewer, outcome, stale }` — each unique reviewer's recorded `SubmitVerdict`; a verdict
-becomes `stale` once a later review is requested.
+`{ reviewer, outcome, round, stale }` — each reviewer's recorded `SubmitVerdict` per round;
+`stale` is derived (the verdict's round is not the branch's current round).
 
 ## Screens
 

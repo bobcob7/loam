@@ -181,7 +181,9 @@ identity. "Review" is simply activity on a work branch, not a separate object.
 
 Its lifecycle: `draft` → (**request-review**) → `reviewable` → (**first verdict**) →
 `reviewed`. A re-review returns it to `reviewable` (marking the prior round's verdicts
-stale), requested by the author (`request-review`) or by the admin. The terminal states are
+stale), requested by the author (`request-review`) or by the admin. Each transition into
+`reviewable` opens a numbered **review round**; threads, comments, and verdicts are
+recorded against their round. The terminal states are
 `complete` (set by the server when the upstream PR merges) and `closed` (admin-only, or when
 the upstream PR is closed) — neither is an agent action. A conflicting target advance
 resets a `reviewable`/`reviewed` branch to `draft` (marking its verdicts stale); a push
@@ -253,20 +255,20 @@ branch does not exist.
 Request review of a work branch — the signal that puts it up for review, or asks for another
 round.
 
-**Synopsis:** `loam work request-review [repo] [work-branch]` (optional comment read from stdin)
+**Synopsis:** `loam work request-review [repo] [work-branch]`
 
-**Input:**
-
-- `repo`, `work-branch` positional — identify the work branch (see the convention above).
-- **stdin** *(optional)* — a comment attached to the request, surfaced to the author on the
-  work branch.
+**Input:** `repo`, `work-branch` positional — identify the work branch (see the convention
+above). There is no request comment — feedback and discussion live in comment threads and
+replies, each recorded against its review round.
 
 **Behavior:** Transitions the work branch to `reviewable` — from `draft` (first review) or
-from `reviewed` (a re-review, which marks the prior round's verdicts stale) — making it
-visible to reviewers via `list`. Requires a title and description to already be set (via
-`set`). This is a single operation with two callers: the author (this command) and the admin
-sending a reviewed branch back with a comment (a button in the web UI, reaching the same RPC
-as a superuser — see `docs/web-spec.md`).
+from `reviewed` (a re-review, which opens a fresh round and marks the prior round's
+verdicts stale) — making it visible to reviewers via `list`. Every transition into
+`reviewable` opens a numbered **review round**; threads, comments, and verdicts record the
+round they belong to. Requires a title and description to already be set (via `set`).
+This is a single operation with two callers: the author (this command) and the admin
+sending a reviewed branch back (a button in the web UI, reaching the same RPC as a
+superuser — see `docs/web-spec.md`).
 
 **Output** (JSON) — the work branch:
 
@@ -317,7 +319,8 @@ convention above).
 
 ```json
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login",
-  "description": "…", "state": "reviewable", "author": "grace-hopper-3-author" }
+  "description": "…", "state": "reviewable", "author": "grace-hopper-3-author",
+  "round": { "number": 2, "requested_by": "grace-hopper-3-author" } }
 ```
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
@@ -357,8 +360,8 @@ submit.
 **Output** (JSON array) — published threads by default:
 
 ```json
-[ { "id": "t1", "resolved": false, "file": "auth.go", "line": 42,
-    "comments": [ { "author": "ada-lovelace-7-reviewer", "body": "…" } ] } ]
+[ { "id": "t1", "resolved": false, "file": "auth.go", "line": 42, "round": 1,
+    "comments": [ { "author": "ada-lovelace-7-reviewer", "body": "…", "round": 1 } ] } ]
 ```
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
@@ -379,7 +382,7 @@ approval bar.
 **Output** (JSON array):
 
 ```json
-[ { "reviewer": "ada-lovelace-7-reviewer", "outcome": "approve", "stale": false } ]
+[ { "reviewer": "ada-lovelace-7-reviewer", "outcome": "approve", "round": 2, "stale": false } ]
 ```
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be

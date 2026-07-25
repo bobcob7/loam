@@ -115,7 +115,8 @@ only a branch that was *demoted from review* auto-returns to `reviewable`.
 **Catch-up detection** runs on every accepted push to a flagged branch: if the
 pushed history now contains the current target tip, `conflicted` clears, and a
 `conflict_reset` branch flips to `reviewable` (git-spec → Target Advances &
-Catch-Up). If the target has advanced again since the reset, the flag simply
+Catch-Up) — opening a fresh review round with `requested_by` = the server
+(`docs/persistence-spec.md` → review_rounds). If the target has advanced again since the reset, the flag simply
 stays until a push catches up to the newer tip.
 
 ## Proposal Acceptance
