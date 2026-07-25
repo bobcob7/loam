@@ -59,12 +59,18 @@ connect-web client.
 Enroll and manage repos. The admin's repo view is richer than the CLI's read-only
 `RepoService.GetRepo`.
 
+- `ProbeRepo(string upstream_url) → { string[] branches, string head }` — pre-enrollment
+  probe: an authenticated `ls-remote` against the upstream using the URL's host
+  credential (`docs/sync-spec.md` → Upstream Transport). Returns the branch list and the
+  upstream `HEAD` so the enroll form offers a branch picker and pre-fills
+  `indexed_branch` — and doubles as early validation that the credential can read the
+  repo before enrollment is attempted. Read-only; `EnrollRepo`'s `CheckRepo` (read +
+  write probes) remains the authoritative gate.
 - `EnrollRepo(string upstream_url, string[] target_branches, string indexed_branch) →
   { EnrolledRepo }` — enroll by upstream URL; the server derives the `<group>/<repo_name>`
   identifier, clones the repo, and begins periodic sync + ingest of the indexed branch.
-  `indexed_branch` must be one of `target_branches`; the enrollment form pre-fills it from
-  upstream's `HEAD` (free from the `ls-remote` access probe). Uses the credential for the
-  URL's forge host (see CredentialService).
+  `indexed_branch` must be one of `target_branches`; the enrollment form pre-fills it via
+  `ProbeRepo`. Uses the credential for the URL's forge host (see CredentialService).
 - `ListRepos(Page) → { EnrolledRepo[], PageInfo }` — enrolled repos with status.
 - `GetRepo(repo) → { EnrolledRepo }` — one repo with full status.
 - `RemoveRepo(repo) → { }` — unenroll: drop the mirror, the derived indexes, and the
@@ -72,7 +78,10 @@ Enroll and manage repos. The admin's repo view is richer than the CLI's read-onl
   history; re-enrolling starts fresh). Queued/running ingest jobs are deleted. **Fails
   with `failed_precondition` while any non-terminal work branch exists**, and the error
   enumerates every blocking work branch (name, title, state) so the admin knows exactly
-  what to wind down — accept or close each, then remove.
+  what to wind down — accept or close each, then remove. The enumeration travels as a
+  **typed Connect error detail** so the UI renders it structurally, never by parsing the
+  message: `RemovalBlocked { BlockedWorkBranch[] blockers }` with
+  `BlockedWorkBranch { name, title, state }`, defined in `loam.admin.v1`.
 - `SetTargetBranches(repo, string[] target_branches, string indexed_branch) →
   { EnrolledRepo }` — replace the branches eligible as work-branch targets and designate
   which one is indexed. Changing `indexed_branch` triggers a full ingest of the new

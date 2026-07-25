@@ -83,8 +83,9 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 
 - **`/` → Repos** (default). List enrolled repos with sync status.
   - Queries: `RepoAdminService.ListRepos`.
-  - Actions: `EnrollRepo` (form: upstream URL + target branches + indexed branch,
-    pre-filled from upstream's `HEAD`).
+  - Actions: `EnrollRepo` (form: upstream URL, then `ProbeRepo` on the URL loads a
+    branch picker and pre-fills the indexed branch from upstream `HEAD` — with manual
+    entry as the fallback if the probe fails; submit via `EnrollRepo`).
   - States: loading / empty ("no repos enrolled") / error.
 - **`/repos/:repo` → Repo detail.** Target branches, the indexed branch, and the repo's
   credential status.
@@ -124,7 +125,9 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 - **Error mapping** from Connect codes to UI: `unauthenticated` → auth state;
   `permission_denied` → "not allowed"; `invalid_argument` → inline form errors;
   `failed_precondition` → action-specific message (e.g. accepting without an approve
-  verdict); `not_found` → empty/404 state. A shared `ErrorBanner` renders the rest.
+  verdict) — and `RemoveRepo`'s `RemovalBlocked` typed detail renders as a structured
+  blocking-work-branches panel via `ConnectError.findDetails`, never message parsing;
+  `not_found` → empty/404 state. A shared `ErrorBanner` renders the rest.
 
 ## Build & Embed
 

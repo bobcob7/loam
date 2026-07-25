@@ -19,6 +19,12 @@ Feature: Enrolling and managing repos
     Then its identifier is "bobcob7/doc-server"
 
   @wip
+  Scenario: Probing a repo before enrollment lists its branches
+    When I probe "https://github.com/bobcob7/doc-server"
+    Then I see its branches and its default branch
+    And the default branch is offered as the indexed branch
+
+  @wip
   Scenario: Updating the target branches
     Given "bobcob7/doc-server" is enrolled with target branch "main"
     When I set its target branches to "main" and "release"
