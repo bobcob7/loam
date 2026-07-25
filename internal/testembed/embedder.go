@@ -13,10 +13,12 @@
 // embedding-model behavior are explicitly out of scope (docs/testing-spec.md,
 // "Out of Scope"): this double only exercises plumbing and ranking mechanics.
 //
-// Dimension is fixed at 256. This value pins the test Postgres schema's
-// chunks.embedding vector(N) column (docs/persistence-spec.md) for the life
-// of the suite: changing it is a model swap in every sense that matters to
-// the ingest pipeline, and forces the same full-rebuild rule as swapping the
+// Dimension is fixed at 768 — the same width as the production Ollama model
+// (nomic-embed-text, docs/ingestion-spec.md), so the test Postgres schema's
+// chunks.embedding vector(N) column (docs/persistence-spec.md) is
+// byte-identical to production. This value must stay fixed for the life of
+// the suite: changing it is a model swap in every sense that matters to the
+// ingest pipeline, and forces the same full-rebuild rule as swapping the
 // real embedding model (docs/ingestion-spec.md).
 package testembed
 
@@ -25,15 +27,17 @@ import (
 	"hash/fnv"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 // Dimension is the fixed vector width this Embedder produces.
-const Dimension = 256
+const Dimension = 768
 
-// modelID identifies this double's projection so a change to it (including a
-// Dimension change) is detectable as a model change by the ingest pipeline.
-const modelID = "testembed-bow-v1"
+// modelIDPrefix identifies this double's projection. ModelID appends
+// Dimension to it, so a Dimension change is detectable as a model change by
+// the ingest pipeline, the same as it would be for the real embedding model.
+const modelIDPrefix = "testembed-bow-v1-d"
 
 var tokenPattern = regexp.MustCompile(`[a-z0-9]+`)
 
@@ -46,9 +50,12 @@ func New() *Embedder {
 }
 
 // Embed returns one L2-normalized bag-of-words vector per input text, in the
-// same order as texts. It never errors and never calls out to anything
-// external.
+// same order as texts. It never calls out to anything external; the only
+// error it can return is ctx's cancellation/deadline error.
 func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	vectors := make([][]float32, len(texts))
 	for i, text := range texts {
 		vectors[i] = embedOne(text)
@@ -61,9 +68,9 @@ func (e *Embedder) Dimension() int {
 	return Dimension
 }
 
-// ModelID identifies this double's projection version.
+// ModelID identifies this double's projection version, including Dimension.
 func (e *Embedder) ModelID() string {
-	return modelID
+	return modelIDPrefix + strconv.Itoa(Dimension)
 }
 
 func embedOne(text string) []float32 {

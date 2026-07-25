@@ -1,7 +1,10 @@
 package testembed
 
 import (
+	"context"
 	"math"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bobcob7/loam/internal/ingest/embed"
@@ -81,25 +84,48 @@ func TestEmbed_L2Normalized(t *testing.T) {
 	assert.InDelta(t, 1.0, math.Sqrt(sumSq), 1e-6)
 }
 
-func TestEmbed_EmptyTextYieldsZeroVector(t *testing.T) {
+func TestEmbed_TextWithNoTokensYieldsZeroVector(t *testing.T) {
 	t.Parallel()
-	e := New()
-	vectors, err := e.Embed(t.Context(), []string{""})
-	require.NoError(t, err)
-	require.Len(t, vectors[0], Dimension)
-	for _, v := range vectors[0] {
-		assert.Zero(t, v)
+	cases := map[string]string{
+		"empty string":               "",
+		"no alphanumeric characters": "--- !!! ???",
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := New()
+			vectors, err := e.Embed(t.Context(), []string{text})
+			require.NoError(t, err)
+			require.Len(t, vectors[0], Dimension)
+			for _, v := range vectors[0] {
+				assert.Zero(t, v)
+			}
+		})
 	}
 }
 
-func TestEmbed_ReturnsOneVectorPerInputInOrder(t *testing.T) {
+func TestEmbed_BatchMatchesIndividualEmbeddingsInOrder(t *testing.T) {
 	t.Parallel()
 	e := New()
-	vectors, err := e.Embed(t.Context(), []string{"alpha", "beta", "gamma"})
+	texts := []string{"alpha", "beta", "gamma"}
+	batch, err := e.Embed(t.Context(), texts)
 	require.NoError(t, err)
-	require.Len(t, vectors, 3)
-	assert.NotEqual(t, vectors[0], vectors[1])
-	assert.NotEqual(t, vectors[1], vectors[2])
+	require.Len(t, batch, len(texts))
+	for i, text := range texts {
+		individual, err := e.Embed(t.Context(), []string{text})
+		require.NoError(t, err)
+		assert.Equalf(t, individual[0], batch[i], "batch[%d] should equal the individual embedding of %q", i, text)
+	}
+}
+
+func TestEmbed_ReturnsErrorOnCanceledContext(t *testing.T) {
+	t.Parallel()
+	e := New()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	vectors, err := e.Embed(ctx, []string{"anything"})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, vectors)
 }
 
 func TestDimension_IsStableAndMatchesVectorWidth(t *testing.T) {
@@ -118,4 +144,11 @@ func TestModelID_IsStable(t *testing.T) {
 	second := New().ModelID()
 	assert.Equal(t, first, second)
 	assert.NotEmpty(t, first)
+}
+
+func TestModelID_EncodesDimension(t *testing.T) {
+	t.Parallel()
+	e := New()
+	assert.Contains(t, e.ModelID(), strconv.Itoa(Dimension))
+	assert.True(t, strings.HasSuffix(e.ModelID(), strconv.Itoa(Dimension)))
 }
