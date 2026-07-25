@@ -41,20 +41,17 @@ var (
 type cliError struct {
 	code    string
 	message string
-	cause   error // the raw external cause, if any; nil when there is none
 	unwrap  error // sentinel, or sentinel-plus-cause, for errors.Is/errors.As
 }
 
-// Error returns the message, plus the external cause's own message when
-// one was given (e.g. the underlying Connect error mapped at the handler
-// boundary) — never the internal classification sentinel, which exists
-// only for errors.Is matching.
-func (e *cliError) Error() string {
-	if e.cause != nil {
-		return fmt.Sprintf("%s: %s", e.message, e.cause.Error())
-	}
-	return e.message
-}
+// Error returns message verbatim — never the classification sentinel or
+// the underlying cause passed to newCLIError. Both exist purely so
+// errors.Is/errors.As can identify the failure; the caller-supplied
+// message is already the complete, self-sufficient text (e.g.
+// classifyConnectError uses the *connect.Error's own Message(), and the
+// code already travels separately in errorDetail.Code), so appending the
+// cause's own Error() text here would only duplicate it.
+func (e *cliError) Error() string { return e.message }
 
 // Unwrap exposes the sentinel (and cause, when present) so errors.Is and
 // errors.As traverse into either.
@@ -63,15 +60,17 @@ func (e *cliError) Unwrap() error { return e.unwrap }
 // newCLIError builds a cliError of the given code, wrapping sentinel (one
 // of the errFoo sentinels above) so errors.Is(err, sentinel) matches. cause
 // is the original error being classified (e.g. a *connect.Error), or nil
-// when there is no separate underlying cause. Wrapping both sentinel and
-// cause with a single fmt.Errorf("%w: %w", ...) — Go's multi-error
-// wrapping — lets errors.Is/errors.As reach either one.
+// when there is no separate underlying cause; it is reachable via
+// errors.As on the returned error but never rendered by Error() (see its
+// doc comment). Wrapping both sentinel and cause with a single
+// fmt.Errorf("%w: %w", ...) — Go's multi-error wrapping — lets
+// errors.Is/errors.As reach either one.
 func newCLIError(code, message string, sentinel, cause error) *cliError {
 	unwrap := sentinel
 	if cause != nil && !errors.Is(cause, sentinel) {
 		unwrap = fmt.Errorf("%w: %w", sentinel, cause)
 	}
-	return &cliError{code: code, message: message, cause: cause, unwrap: unwrap}
+	return &cliError{code: code, message: message, unwrap: unwrap}
 }
 
 // newUsageCLIError builds a command-level usage error (exit 2, code

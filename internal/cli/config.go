@@ -18,11 +18,6 @@ const (
 	envOutputFormat = "LOAM_OUTPUT_FORMAT"
 )
 
-// validOutputFormats is the set LOAM_OUTPUT_FORMAT recognizes; any other
-// value (including unset/empty) silently falls back to "json" (see
-// docs/cli-spec.md -> Output).
-var validOutputFormats = map[string]bool{"json": true, "yaml": true, "xml": true, "human": true}
-
 // envConfig is the loaded, validated LOAM_* configuration (see
 // docs/cli-spec.md -> Environment Variables). Immutable once returned by
 // loadConfig; there is no package-level mutable state.
@@ -62,11 +57,12 @@ func (c *envConfig) Identifier() string { return c.identifier }
 // config is valid, so a config error can still be reported in the right
 // format.
 func resolveOutputFormat() string {
-	format := os.Getenv(envOutputFormat)
-	if !validOutputFormats[format] {
+	switch format := os.Getenv(envOutputFormat); format {
+	case "json", "yaml", "xml", "human":
+		return format
+	default:
 		return "json"
 	}
-	return format
 }
 
 // loadConfig reads and validates every LOAM_* environment variable (see

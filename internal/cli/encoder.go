@@ -4,12 +4,13 @@
 // field names — those already carry `json:"..."` tags — without requiring
 // yaml/xml struct tags to be added anywhere else in the codebase. YAML uses
 // gopkg.in/yaml.v3: it is already present in this module's dependency graph
-// (pulled in transitively by the buf tooling) and is the de facto standard
-// Go YAML library, so promoting it to a direct dependency adds no new
-// module.
+// (pulled in transitively by testify and the buf tooling) and is the de
+// facto standard Go YAML library, so promoting it to a direct dependency
+// adds no new module.
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -45,16 +46,23 @@ type jsonEncoder struct{ w io.Writer }
 func (e *jsonEncoder) Encode(v any) error { return json.NewEncoder(e.w).Encode(v) }
 
 // toGeneric round-trips v through JSON into a plain map[string]any /
-// []any / float64 / string / bool / nil tree, so the yaml/xml/human
+// []any / json.Number / string / bool / nil tree, so the yaml/xml/human
 // encoders below render the same shape and field names as jsonEncoder
-// without needing their own struct tags.
+// without needing their own struct tags. Decoding with UseNumber keeps
+// every number as its original literal text (json.Number) instead of
+// collapsing it to float64: a plain json.Unmarshal into `any` would
+// re-render, say, line 1000000 as "1e+06" and silently lose precision on
+// any integer beyond 2^53 — scalarString below renders a json.Number
+// verbatim via its Stringer.
 func toGeneric(v any) (any, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("encoding value: %w", err)
 	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
 	var generic any
-	if err := json.Unmarshal(b, &generic); err != nil {
+	if err := dec.Decode(&generic); err != nil {
 		return nil, fmt.Errorf("decoding value: %w", err)
 	}
 	return generic, nil
@@ -69,7 +77,39 @@ func (e *yamlEncoder) Encode(v any) error {
 	if err != nil {
 		return err
 	}
-	return yaml.NewEncoder(e.w).Encode(generic)
+	return yaml.NewEncoder(e.w).Encode(yamlNumbers(generic))
+}
+
+// yamlNumbers converts every json.Number leaf in a generic JSON-shaped
+// value (see toGeneric) into an int64, or a float64 when it does not fit
+// one, before handing the tree to yaml.v3. Without this, yaml.v3 sees a
+// json.Number's underlying string kind and emits it as a quoted string
+// scalar instead of a native YAML number.
+func yamlNumbers(v any) any {
+	switch val := v.(type) {
+	case json.Number:
+		if i, err := val.Int64(); err == nil {
+			return i
+		}
+		if f, err := val.Float64(); err == nil {
+			return f
+		}
+		return val.String()
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = yamlNumbers(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = yamlNumbers(item)
+		}
+		return out
+	default:
+		return val
+	}
 }
 
 // xmlEncoder writes v as XML. encoding/xml cannot marshal an arbitrary
@@ -97,7 +137,7 @@ func (e *xmlEncoder) Encode(v any) error {
 }
 
 // writeXMLValue recursively encodes a generic JSON-shaped value
-// (map[string]any, []any, float64, string, bool, or nil) under start,
+// (map[string]any, []any, json.Number, string, bool, or nil) under start,
 // sorting map keys for deterministic output.
 func writeXMLValue(enc *xml.Encoder, start xml.StartElement, v any) error {
 	m, ok := v.(map[string]any)
@@ -155,8 +195,9 @@ func writeXMLNonObject(enc *xml.Encoder, start xml.StartElement, v any) error {
 	return enc.EncodeToken(start.End())
 }
 
-// scalarString renders a generic JSON leaf value (float64, string, bool, or
-// nil) as plain text.
+// scalarString renders a generic JSON leaf value (json.Number, string,
+// bool, or nil) as plain text; json.Number's String() method returns the
+// original literal text verbatim.
 func scalarString(v any) string {
 	if v == nil {
 		return ""

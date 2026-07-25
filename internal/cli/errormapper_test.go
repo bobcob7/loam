@@ -136,11 +136,21 @@ func TestMapCommandError_UnclassifiableError_ReturnsNil(t *testing.T) {
 	assert.Nil(t, mapCommandError(errors.New("boom")))
 }
 
-func TestCLIError_Error_IncludesCauseWhenDistinctFromMessage(t *testing.T) {
+// TestCLIError_Error_NeverRendersCause proves the cause passed to
+// newCLIError (here a plain error distinct from the classification
+// sentinel — e.g. what a real underlying-store error might look like) is
+// reachable for errors.Is/errors.As but never leaks into the rendered
+// message: the message is the caller's, already complete on its own, and
+// run.go writes Error() verbatim into the agent-visible error payload, so
+// any auto-appended cause text would double up there (see FIX 1/2 in the
+// loam-0pj.4 review).
+func TestCLIError_Error_NeverRendersCause(t *testing.T) {
 	t.Parallel()
-	err := newNotFoundError("work branch wb-1 not found", errors.New("row not found"))
-	assert.Contains(t, err.Error(), "work branch wb-1 not found")
-	assert.Contains(t, err.Error(), "row not found")
+	cause := errors.New("row not found")
+	err := newNotFoundError("work branch wb-1 not found", cause)
+	assert.Equal(t, "work branch wb-1 not found", err.Error())
+	assert.ErrorIs(t, err, errNotFound)
+	assert.NotContains(t, err.Error(), "row not found")
 }
 
 func TestCLIError_Error_NoCause_IsJustMessage(t *testing.T) {
@@ -149,11 +159,45 @@ func TestCLIError_Error_NoCause_IsJustMessage(t *testing.T) {
 	assert.Equal(t, "bad flag", err.Error())
 }
 
-// TestCLIError_Error_CauseEqualToSentinel_NoDoubleWrapping proves passing
-// the sentinel itself as cause (rather than nil) still renders a clean
-// message, not a duplicated "sentinel: sentinel" string.
-func TestCLIError_Error_CauseEqualToSentinel_NoDoubleWrapping(t *testing.T) {
+// TestCLIError_Error_CauseEqualToSentinel_MessageUnaffected proves passing
+// the sentinel itself as cause (rather than nil) still renders exactly the
+// caller's message — not "missing: not found" — since Error() never
+// consults cause at all.
+func TestCLIError_Error_CauseEqualToSentinel_MessageUnaffected(t *testing.T) {
 	t.Parallel()
 	err := newCLIError(codeNotFound, "missing", errNotFound, errNotFound)
+	assert.Equal(t, "missing", err.Error())
 	assert.ErrorIs(t, err, errNotFound)
+}
+
+// TestClassifyConnectError_MessageIsNotDuplicated proves the specific bug
+// from the loam-0pj.4 review (FIX 1): connect.Error.Error() already
+// prepends its own code ("not_found: work branch wb-1 not found"), so
+// using connect.Error.Message() (the clean text) as both the cliError's
+// message AND — before the Error()-never-renders-cause fix — its cause
+// used to render the code-prefixed text a second time. Verifies the final
+// rendered string an agent parses (run.go writes Error() into
+// errorDetail.Message) has no duplication.
+func TestClassifyConnectError_MessageIsNotDuplicated(t *testing.T) {
+	t.Parallel()
+	connErr := connect.NewError(connect.CodeNotFound, errors.New("work branch wb-1 not found"))
+	classified := classifyConnectError(connErr)
+	require.NotNil(t, classified)
+	assert.Equal(t, "work branch wb-1 not found", classified.Error())
+}
+
+// TestLoadConfig_MissingRequiredVar_MessageOmitsSentinelText proves the
+// loam-0pj.4 review's FIX 2: the errMissingEnv sentinel text
+// ("missing required environment variable") must not leak into the
+// rendered message an agent sees, even though it is still reachable via
+// errors.Is for programmatic matching.
+func TestLoadConfig_MissingRequiredVar_MessageOmitsSentinelText(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	baseEnv(t)
+	t.Setenv(envServerURL, "")
+	_, err := loadConfig()
+	require.Error(t, err)
+	require.ErrorIs(t, err, errMissingEnv)
+	assert.NotContains(t, err.Error(), "missing required environment variable")
+	assert.Equal(t, "LOAM_SERVER_URL is required but not set", err.Error())
 }

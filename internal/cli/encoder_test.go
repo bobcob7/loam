@@ -27,6 +27,19 @@ func samplePayload() testPayload {
 	return testPayload{Repo: "acme/repo", Count: 2, Tags: []string{"a", "b"}, Nested: testNested{Value: 0.5}}
 }
 
+// bigNumberPayload exercises numbers a naive float64 round-trip mangles: a
+// six-digit integer that %g renders in scientific notation, and an int64
+// past 2^53 (float64's exact-integer limit) that silently loses precision
+// once it round-trips through float64 (see loam-0pj.4 review FIX 4).
+type bigNumberPayload struct {
+	Line int   `json:"line"`
+	Big  int64 `json:"big"`
+}
+
+func bigNumberSample() bigNumberPayload {
+	return bigNumberPayload{Line: 1000000, Big: 9007199254740993}
+}
+
 func TestNewEncoder_JSON_WritesJSON(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
@@ -114,4 +127,51 @@ func TestNewEncoder_EachFormat_WrittenToProvidedWriter(t *testing.T) {
 			assert.NotEmpty(t, buf.String(), "encoder must write to the provided writer")
 		})
 	}
+}
+
+// TestNewEncoder_XML_PreservesLargeNumbersExactly proves the fix for
+// loam-0pj.4 review FIX 4: toGeneric used to decode every JSON number into
+// float64, which %g-formats a six-digit integer in scientific notation and
+// silently loses precision on an int64 beyond 2^53. XML (and human) must
+// render the original literal digits, verbatim, with no exponent.
+func TestNewEncoder_XML_PreservesLargeNumbersExactly(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("xml", &buf)
+	require.NoError(t, enc.Encode(bigNumberSample()))
+	got := buf.String()
+	assert.Contains(t, got, "<line>1000000</line>")
+	assert.Contains(t, got, "<big>9007199254740993</big>")
+	assert.NotContains(t, got, "e+", "a large integer must not render in scientific notation")
+}
+
+// TestNewEncoder_Human_PreservesLargeNumbersExactly is the human-mode
+// counterpart to the XML case above.
+func TestNewEncoder_Human_PreservesLargeNumbersExactly(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("human", &buf)
+	require.NoError(t, enc.Encode(bigNumberSample()))
+	got := buf.String()
+	assert.Contains(t, got, "line: 1000000")
+	assert.Contains(t, got, "big: 9007199254740993")
+	assert.NotContains(t, got, "e+")
+}
+
+// TestNewEncoder_YAML_PreservesLargeNumbersAsNativeIntegers proves both
+// halves of the fix: the digits are exact (unlike a float64 round-trip)
+// and yaml.v3 emits them as native YAML numbers, not quoted strings — a
+// json.Number's underlying string Kind would otherwise cause yaml.v3 to
+// quote it.
+func TestNewEncoder_YAML_PreservesLargeNumbersAsNativeIntegers(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("yaml", &buf)
+	require.NoError(t, enc.Encode(bigNumberSample()))
+	raw := buf.String()
+	assert.NotContains(t, raw, `"`, "numbers must not be rendered as quoted strings")
+	var decoded map[string]any
+	require.NoError(t, yaml.Unmarshal(buf.Bytes(), &decoded))
+	assert.EqualValues(t, 1000000, decoded["line"])
+	assert.EqualValues(t, 9007199254740993, decoded["big"])
 }
