@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 )
@@ -12,10 +11,6 @@ import (
 type validateTokenRequest struct {
 	Host  string `json:"host"`
 	Token string `json:"token"`
-}
-
-type checkRepoRequest struct {
-	UpstreamURL string `json:"upstream_url"`
 }
 
 type createPRRequest struct {
@@ -37,16 +32,14 @@ type prStateResponse struct {
 
 // requireProviderAuth checks the Authorization: token <token> header used
 // by the provider REST surface (distinct from the git surface's Basic
-// auth), writing a 401 and returning ok=false on failure. On success it
-// returns the token so callers needing the read/write distinction (e.g.
-// handleCheckRepo) can consult tokenReadOnly.
-func (s *Server) requireProviderAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
+// auth), writing a 401 and returning false on failure.
+func (s *Server) requireProviderAuth(w http.ResponseWriter, r *http.Request) bool {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "token ")
 	if !ok || !s.hasToken(token) {
 		writeJSONError(w, http.StatusUnauthorized, errUnauthorized)
-		return "", false
+		return false
 	}
-	return token, true
+	return true
 }
 
 func (s *Server) handleValidateToken(w http.ResponseWriter, r *http.Request) {
@@ -58,41 +51,15 @@ func (s *Server) handleValidateToken(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-}
-
-// handleCheckRepo mirrors sync-spec's Upstream Transport probe: it confirms
-// the repo exists (404 if not, matching ErrRepoNotFound), then that the
-// credential has write access (403 if read-only, matching ErrNoWriteAccess)
-// since CheckRepo backs EnrollRepo and a token that can only read fails at
-// enrollment rather than at first accept.
-func (s *Server) handleCheckRepo(w http.ResponseWriter, r *http.Request) {
-	token, ok := s.requireProviderAuth(w, r)
-	if !ok {
-		return
-	}
-	var req checkRepoRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	repo, err := parseUpstreamRepo(req.UpstreamURL)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err)
-		return
-	}
-	if _, err := os.Stat(s.repoDir(repo)); err != nil {
-		writeJSONError(w, http.StatusNotFound, errRepoNotFound)
-		return
-	}
-	if s.tokenReadOnly(token) {
-		writeJSONError(w, http.StatusForbidden, errNoWriteAccess)
+	if !s.tokenHasPRScope(req.Token) {
+		writeJSONError(w, http.StatusForbidden, errMissingScope)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireProviderAuth(w, r); !ok {
+	if !s.requireProviderAuth(w, r) {
 		return
 	}
 	var req createPRRequest
@@ -108,7 +75,7 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireProviderAuth(w, r); !ok {
+	if !s.requireProviderAuth(w, r) {
 		return
 	}
 	var req prActionRequest
@@ -124,7 +91,7 @@ func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireProviderAuth(w, r); !ok {
+	if !s.requireProviderAuth(w, r) {
 		return
 	}
 	var req prActionRequest
@@ -137,25 +104,6 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	}
 	s.prs.setState(req.Repo, req.Number, "closed")
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// parseUpstreamRepo extracts "<group>/<repo_name>" from a fake forge clone
-// URL of the form "http://host/git/<group>/<repo_name>.git" (the path
-// split docs/sync-spec.md → Provider Interface calls out as living outside
-// the interface, in the core; the fake's Client does it itself since it
-// has no core to delegate to).
-func parseUpstreamRepo(upstreamURL string) (string, error) {
-	u, err := url.Parse(upstreamURL)
-	if err != nil {
-		return "", fmt.Errorf("parsing upstream url %q: %w", upstreamURL, errInvalidUpstream)
-	}
-	path := strings.TrimPrefix(u.Path, gitPathPrefix)
-	path = strings.Trim(path, "/")
-	path = strings.TrimSuffix(path, ".git")
-	if path == "" {
-		return "", fmt.Errorf("parsing upstream url %q: %w", upstreamURL, errInvalidUpstream)
-	}
-	return path, nil
 }
 
 // Client is a Provider-shaped REST client for one fake forge Server. Its
@@ -188,10 +136,41 @@ func (c *Client) ValidateToken(ctx context.Context, host, token string) error {
 }
 
 // CheckRepo confirms upstreamURL exists and is accessible with the
-// Client's own credential.
+// Client's own credential, the same way a real forge's provider does it
+// (docs/sync-spec.md → Upstream Transport): an authenticated ls-remote-
+// style probe against the git surface for read, and a receive-pack probe
+// for write, rather than a side-channel REST call. From outside, a read
+// probe that fails for any reason (missing repo, bad credential) is
+// indistinguishable from a repo that doesn't exist, so it is classified
+// the same way; a read that succeeds but a write probe that is denied
+// means the repo exists but the token lacks push access.
 func (c *Client) CheckRepo(ctx context.Context, upstreamURL string) error {
-	if err := c.call(ctx, http.MethodPost, "/provider/check-repo", checkRepoRequest{UpstreamURL: upstreamURL}, nil, true); err != nil {
-		return fmt.Errorf("checking repo %s: %w", upstreamURL, err)
+	if err := c.probeInfoRefs(ctx, upstreamURL, "git-upload-pack"); err != nil {
+		return fmt.Errorf("checking repo %s: %w", upstreamURL, errRepoNotFound)
+	}
+	if err := c.probeInfoRefs(ctx, upstreamURL, "git-receive-pack"); err != nil {
+		return fmt.Errorf("checking repo %s: %w", upstreamURL, errNoWriteAccess)
+	}
+	return nil
+}
+
+// probeInfoRefs issues the smart-HTTP ref advertisement request for
+// service against upstreamURL, authenticated with the Client's token as
+// the Basic password (any username, per Forgejo's convention), returning
+// an error unless the forge answers 200 OK.
+func (c *Client) probeInfoRefs(ctx context.Context, upstreamURL, service string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL+"/info/refs?service="+service, nil)
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	req.SetBasicAuth("fakeforge-client", c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("probing %s: status %d", service, resp.StatusCode)
 	}
 	return nil
 }

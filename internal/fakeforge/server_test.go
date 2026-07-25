@@ -34,29 +34,25 @@ func TestAddTokenThenHasToken(t *testing.T) {
 	assert.True(t, srv.hasToken("secret"))
 }
 
-func TestParseUpstreamRepo(t *testing.T) {
+func TestTokenScopeAxesAreIndependent(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {
-		url     string
-		want    string
-		wantErr bool
+		register     func(srv *Server, token string)
+		wantReadOnly bool
+		wantPRScope  bool
 	}{
-		"group and repo with dot git": {url: "http://host/git/acme/widgets.git", want: "acme/widgets"},
-		"no dot git suffix":           {url: "http://host/git/acme/widgets", want: "acme/widgets"},
-		"single segment repo":         {url: "http://host/git/widgets.git", want: "widgets"},
-		"empty path is invalid":       {url: "http://host/git/", wantErr: true},
-		"malformed url is invalid":    {url: "http://host/git/\x7f", wantErr: true},
+		"full access token can push and open PRs":      {register: (*Server).AddToken, wantReadOnly: false, wantPRScope: true},
+		"read-only token cannot push but can open PRs": {register: (*Server).AddReadOnlyToken, wantReadOnly: true, wantPRScope: true},
+		"push-only token can push but not open PRs":    {register: (*Server).AddTokenWithoutPRScope, wantReadOnly: false, wantPRScope: false},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseUpstreamRepo(tc.url)
-			if tc.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
+			srv, _ := newTestServer(t)
+			tc.register(srv, "tok")
+			require.True(t, srv.hasToken("tok"))
+			assert.Equal(t, tc.wantReadOnly, srv.tokenReadOnly("tok"))
+			assert.Equal(t, tc.wantPRScope, srv.tokenHasPRScope("tok"))
 		})
 	}
 }

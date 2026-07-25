@@ -18,7 +18,10 @@ func postControl(t *testing.T, ts *httptest.Server, path string, body any) *http
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
-	resp, err := http.Post(ts.URL+path, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+path, bytes.NewReader(b))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
@@ -35,6 +38,8 @@ func TestControlAdvanceBranchOverHTTP(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	after := branchSHA(t, srv, "acme/widgets", "main")
 	assert.NotEqual(t, before, after)
+	_, err := srv.runGit(ctx, "", "--git-dir="+srv.repoDir("acme/widgets"), "merge-base", "--is-ancestor", before, after)
+	assert.NoError(t, err, "advance must append to history, not rewrite it")
 }
 
 func TestControlAdvanceBranchUnknownRepoNotFound(t *testing.T) {

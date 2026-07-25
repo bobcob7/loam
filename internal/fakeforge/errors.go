@@ -15,6 +15,7 @@ var (
 	errGitUnavailable  = errors.New("fakeforge: git binary not available")
 	errInvalidUpstream = errors.New("fakeforge: invalid upstream url")
 	errNoWriteAccess   = errors.New("fakeforge: token has no write access")
+	errMissingScope    = errors.New("fakeforge: token missing required scope")
 )
 
 // errorCodes maps sentinel errors to the stable string codes carried over
@@ -33,6 +34,7 @@ var errorCodes = []struct {
 	{errGitUnavailable, "git_unavailable"},
 	{errInvalidUpstream, "invalid_upstream"},
 	{errNoWriteAccess, "no_write_access"},
+	{errMissingScope, "missing_scope"},
 }
 
 // codeForError returns the wire code for a known sentinel, or "" if err

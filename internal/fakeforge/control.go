@@ -31,7 +31,13 @@ type ForcePushOptions struct {
 
 // AdvanceBranch simulates an ordinary upstream push: it appends one commit
 // to branch's current tip. repo must already contain branch.
-func (s *Server) AdvanceBranch(ctx context.Context, repo, branch string, opts AdvanceOptions) error {
+func (s *Server) AdvanceBranch(ctx context.Context, repo, branch string, opts AdvanceOptions) (err error) {
+	s.logger.Info("fakeforge: control advance-branch", "repo", repo, "branch", branch)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control advance-branch failed", "repo", repo, "branch", branch, "error", err)
+		}
+	}()
 	repoDir := s.repoDir(repo)
 	if err := s.requireRepo(repoDir); err != nil {
 		return fmt.Errorf("advancing %s/%s: %w", repo, branch, err)
@@ -63,7 +69,13 @@ func (s *Server) AdvanceBranch(ctx context.Context, repo, branch string, opts Ad
 // ForcePushBranch simulates a rewritten upstream history: branch is reset
 // to opts.ToRef (if set) or to a synthesized divergent commit, and pushed
 // with --force. repo must already contain branch.
-func (s *Server) ForcePushBranch(ctx context.Context, repo, branch string, opts ForcePushOptions) error {
+func (s *Server) ForcePushBranch(ctx context.Context, repo, branch string, opts ForcePushOptions) (err error) {
+	s.logger.Info("fakeforge: control force-push-branch", "repo", repo, "branch", branch)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control force-push-branch failed", "repo", repo, "branch", branch, "error", err)
+		}
+	}()
 	repoDir := s.repoDir(repo)
 	if err := s.requireRepo(repoDir); err != nil {
 		return fmt.Errorf("force-pushing %s/%s: %w", repo, branch, err)
@@ -102,7 +114,13 @@ func (s *Server) ForcePushBranch(ctx context.Context, repo, branch string, opts 
 }
 
 // DeleteBranch simulates an upstream branch deletion.
-func (s *Server) DeleteBranch(ctx context.Context, repo, branch string) error {
+func (s *Server) DeleteBranch(ctx context.Context, repo, branch string) (err error) {
+	s.logger.Info("fakeforge: control delete-branch", "repo", repo, "branch", branch)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control delete-branch failed", "repo", repo, "branch", branch, "error", err)
+		}
+	}()
 	repoDir := s.repoDir(repo)
 	if err := s.requireRepo(repoDir); err != nil {
 		return fmt.Errorf("deleting branch %s/%s: %w", repo, branch, err)
@@ -117,7 +135,13 @@ func (s *Server) DeleteBranch(ctx context.Context, repo, branch string) error {
 // "wb-" prefix Loam uses for its own work branches) at fromRef, or at the
 // repo's default branch tip if fromRef is empty. This simulates the forge
 // independently growing a branch whose name collides with one of Loam's.
-func (s *Server) CreateCollidingBranch(ctx context.Context, repo, name, fromRef string) error {
+func (s *Server) CreateCollidingBranch(ctx context.Context, repo, name, fromRef string) (err error) {
+	s.logger.Info("fakeforge: control create-branch", "repo", repo, "name", name, "from", fromRef)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control create-branch failed", "repo", repo, "name", name, "error", err)
+		}
+	}()
 	if !strings.HasPrefix(name, "wb-") {
 		return fmt.Errorf("creating branch %s/%s: %w", repo, name, errInvalidBranch)
 	}
@@ -149,7 +173,13 @@ func (s *Server) CreateCollidingBranch(ctx context.Context, repo, name, fromRef 
 // "git merge-tree", never touching a working tree) and marks it merged.
 // This is the forge-side event a real merge produces; Loam's own sync
 // observes the resulting target-branch advance independently.
-func (s *Server) MergePR(ctx context.Context, repo string, number int) error {
+func (s *Server) MergePR(ctx context.Context, repo string, number int) (err error) {
+	s.logger.Info("fakeforge: control merge-pr", "repo", repo, "number", number)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control merge-pr failed", "repo", repo, "number", number, "error", err)
+		}
+	}()
 	pr, err := s.lookupPR(repo, number)
 	if err != nil {
 		return err
@@ -192,7 +222,13 @@ func (s *Server) MergePR(ctx context.Context, repo string, number int) error {
 // ClosePR marks a recorded PR closed without merging, simulating someone
 // closing it directly on the forge (as opposed to Client.ClosePR, which is
 // Loam asking the forge to close a PR it opened).
-func (s *Server) ClosePR(_ context.Context, repo string, number int) error {
+func (s *Server) ClosePR(_ context.Context, repo string, number int) (err error) {
+	s.logger.Info("fakeforge: control close-pr", "repo", repo, "number", number)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control close-pr failed", "repo", repo, "number", number, "error", err)
+		}
+	}()
 	if _, err := s.lookupPR(repo, number); err != nil {
 		return err
 	}
@@ -385,7 +421,7 @@ func statusForErr(err error) int {
 		return http.StatusBadRequest
 	case "unauthorized":
 		return http.StatusUnauthorized
-	case "no_write_access":
+	case "no_write_access", "missing_scope":
 		return http.StatusForbidden
 	case "merge_conflict":
 		return http.StatusConflict

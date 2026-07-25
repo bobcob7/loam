@@ -16,6 +16,19 @@ func TestClientValidateToken(t *testing.T) {
 	assert.ErrorIs(t, client.ValidateToken(t.Context(), "example.invalid", "bad-token"), errUnauthorized)
 }
 
+// TestClientValidateTokenMissingPRScope covers ValidateToken's "the token
+// authenticates but lacks the scopes needed to open PRs" case (loam-li0.9's
+// design names this as a required ValidateToken scenario), distinct from an
+// entirely unregistered token.
+func TestClientValidateTokenMissingPRScope(t *testing.T) {
+	t.Parallel()
+	srv, ts := newTestServer(t)
+	srv.AddTokenWithoutPRScope("push-only-token")
+	client := NewClient(ts.URL, "push-only-token")
+	err := client.ValidateToken(t.Context(), "example.invalid", "push-only-token")
+	assert.ErrorIs(t, err, errMissingScope)
+}
+
 func TestClientCheckRepo(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
@@ -31,14 +44,22 @@ func TestClientCheckRepo(t *testing.T) {
 	assert.ErrorIs(t, rw.CheckRepo(ctx, srv.GitURL("acme/nope")), errRepoNotFound)
 }
 
-func TestClientCheckRepoRequiresAuth(t *testing.T) {
+// TestClientCheckRepoUnregisteredTokenLooksLikeRepoNotFound documents that
+// CheckRepo probes the git surface directly (docs/sync-spec.md → Upstream
+// Transport: an authenticated ls-remote for read, a receive-pack probe for
+// write) rather than a side-channel REST call. From outside, a read probe
+// that 401s because the credential is garbage is indistinguishable from one
+// that 404s because the repo doesn't exist, so both are classified as
+// errRepoNotFound — matching the real provider's behavior verified against
+// this fake by the loam-li0.9 contract suite.
+func TestClientCheckRepoUnregisteredTokenLooksLikeRepoNotFound(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
 	srv, ts := newTestServer(t)
 	ctx := t.Context()
 	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
 	unauthed := NewClient(ts.URL, "never-registered")
-	assert.ErrorIs(t, unauthed.CheckRepo(ctx, srv.GitURL("acme/widgets")), errUnauthorized)
+	assert.ErrorIs(t, unauthed.CheckRepo(ctx, srv.GitURL("acme/widgets")), errRepoNotFound)
 }
 
 func TestClientCreatePRGetStateClosePR(t *testing.T) {

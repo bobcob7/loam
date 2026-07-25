@@ -36,7 +36,7 @@ type Server struct {
 	gitPath string
 	mux     *http.ServeMux
 	tokMu   sync.Mutex
-	tokens  map[string]bool // token -> read-only
+	tokens  map[string]tokenScope
 	prs     *prRegistry
 	baseMu  sync.Mutex
 	baseURL string
@@ -56,7 +56,7 @@ func New(logger *slog.Logger) (*Server, error) {
 		logger:  logger,
 		root:    root,
 		gitPath: gitPath,
-		tokens:  make(map[string]bool),
+		tokens:  make(map[string]tokenScope),
 		prs:     newPRRegistry(),
 	}
 	s.mux = s.newMux()
@@ -99,13 +99,24 @@ func (s *Server) GitURL(repoName string) string {
 	return fmt.Sprintf("%s%s/%s.git", s.baseURL, gitPathPrefix, strings.Trim(repoName, "/"))
 }
 
-// AddToken registers token as valid, with full read and write access, for
-// both git smart-HTTP basic auth and the provider REST API's Authorization
-// header.
+// tokenScope models the two independent axes a real forge token's scopes
+// can vary on (docs/sync-spec.md → Upstream Transport: "a token's REST
+// scopes don't prove its git scopes"): whether it can push over git, and
+// whether it can open PRs over the provider REST surface. A token missing
+// PR scope can still authenticate (ValidateToken's "the token works" half)
+// but fails the "has the scopes needed to open PRs" half.
+type tokenScope struct {
+	canPush bool
+	canPR   bool
+}
+
+// AddToken registers token as valid, with full push and PR-opening scope,
+// for both git smart-HTTP basic auth and the provider REST API's
+// Authorization header.
 func (s *Server) AddToken(token string) {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	s.tokens[token] = false
+	s.tokens[token] = tokenScope{canPush: true, canPR: true}
 }
 
 // AddReadOnlyToken registers token as valid for reads (git-upload-pack,
@@ -116,11 +127,21 @@ func (s *Server) AddToken(token string) {
 func (s *Server) AddReadOnlyToken(token string) {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	s.tokens[token] = true
+	s.tokens[token] = tokenScope{canPush: false, canPR: true}
 }
 
-// hasToken reports whether token was registered with AddToken or
-// AddReadOnlyToken.
+// AddTokenWithoutPRScope registers token as valid and able to push, but
+// missing the REST scope needed to open PRs, so ValidateToken can exercise
+// "the token authenticates but lacks the scopes needed to open PRs" without
+// a real forge.
+func (s *Server) AddTokenWithoutPRScope(token string) {
+	s.tokMu.Lock()
+	defer s.tokMu.Unlock()
+	s.tokens[token] = tokenScope{canPush: true, canPR: false}
+}
+
+// hasToken reports whether token was registered with any of the Add*Token
+// constructors.
 func (s *Server) hasToken(token string) bool {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
@@ -128,20 +149,27 @@ func (s *Server) hasToken(token string) bool {
 	return ok
 }
 
-// tokenReadOnly reports whether token was registered with AddReadOnlyToken.
-// It assumes hasToken(token) is already true; an unregistered token reads as
+// tokenReadOnly reports whether token is registered without push scope. It
+// assumes hasToken(token) is already true; an unregistered token reads as
 // full access here since callers gate on hasToken first.
 func (s *Server) tokenReadOnly(token string) bool {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	return s.tokens[token]
+	return !s.tokens[token].canPush
+}
+
+// tokenHasPRScope reports whether token is registered with PR-opening
+// scope. It assumes hasToken(token) is already true.
+func (s *Server) tokenHasPRScope(token string) bool {
+	s.tokMu.Lock()
+	defer s.tokMu.Unlock()
+	return s.tokens[token].canPR
 }
 
 func (s *Server) newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle(gitPathPrefix+"/", s.authenticatedGitHandler())
 	mux.HandleFunc("POST /provider/validate-token", s.handleValidateToken)
-	mux.HandleFunc("POST /provider/check-repo", s.handleCheckRepo)
 	mux.HandleFunc("POST /provider/create-pr", s.handleCreatePR)
 	mux.HandleFunc("POST /provider/pr-state", s.handleGetPRState)
 	mux.HandleFunc("POST /provider/close-pr", s.handleProviderClosePR)
@@ -206,6 +234,7 @@ func (s *Server) runGit(ctx context.Context, dir string, args ...string) ([]byte
 		"GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		s.logger.Warn("fakeforge: git subprocess failed", "args", args, "error", err, "output", strings.TrimSpace(string(out)))
 		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
