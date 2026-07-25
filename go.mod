@@ -5,6 +5,7 @@ go 1.26.5
 tool (
 	connectrpc.com/connect/cmd/protoc-gen-connect-go
 	github.com/bufbuild/buf/cmd/buf
+	github.com/matryer/moq
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
 
@@ -58,6 +59,7 @@ require (
 	github.com/jdx/go-netrc v1.0.0 // indirect
 	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
+	github.com/matryer/moq v0.7.1 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.23 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
@@ -99,6 +101,7 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/tools v0.48.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260715232425-e75dac1f907d // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

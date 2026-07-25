@@ -42,4 +42,4 @@ type Provider interface {
 	GitCredentials(ctx context.Context, token string) (username, password string, err error)
 }
 
-//go:generate moq -out moq_test.go . Provider
+//go:generate go tool moq -out moq_test.go . Provider

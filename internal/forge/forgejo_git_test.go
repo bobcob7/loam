@@ -1,9 +1,11 @@
 package forge
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,7 +57,10 @@ func TestForgejo_CheckRepo_RepoNotFound(t *testing.T) {
 	requireGit(t)
 	tmp := t.TempDir()
 	missing := "file://" + filepath.Join(tmp, "does-not-exist.git")
-	f := NewForgejo("unused-host", "", http.DefaultClient, testLogger())
+	// A file:// URL has no host component, so the bound host is "" too —
+	// CheckRepo's host-match check (forgejo_git.go) compares against
+	// url.Parse(missing).Host, which is empty for this scheme.
+	f := NewForgejo("", "", http.DefaultClient, testLogger())
 	err := f.CheckRepo(t.Context(), missing)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrRepoNotFound)
@@ -129,11 +134,13 @@ func TestForgejo_CheckRepo_ReadOkWriteOk(t *testing.T) {
 	bare := newBareRepoWithCommit(t)
 	server := httptest.NewServer(&gitSmartHTTPHandler{bareDir: bare, receivePackAllowed: true})
 	defer server.Close()
-	f := NewForgejo("unused-host", "some-token", server.Client(), testLogger())
+	f := NewForgejo(server.URL, "some-token", server.Client(), testLogger())
 	err := f.CheckRepo(t.Context(), server.URL)
 	assert.NoError(t, err)
 }
 
+// DEFERRED-WIP: A token without git access fails enrollment -> TestForgejo_CheckRepo_ReadOkWriteDenied (provider half only; "enrollment is rejected" owned by loam-ofg.12)
+//
 // TestForgejo_CheckRepo_ReadOkWriteDenied covers the credentials.feature
 // scenario "A token without git access fails enrollment": the token can
 // read the repo (ls-remote succeeds) but the receive-pack probe is
@@ -145,17 +152,22 @@ func TestForgejo_CheckRepo_ReadOkWriteDenied(t *testing.T) {
 	bare := newBareRepoWithCommit(t)
 	server := httptest.NewServer(&gitSmartHTTPHandler{bareDir: bare, receivePackAllowed: false})
 	defer server.Close()
-	f := NewForgejo("unused-host", "read-only-token", server.Client(), testLogger())
+	f := NewForgejo(server.URL, "read-only-token", server.Client(), testLogger())
 	err := f.CheckRepo(t.Context(), server.URL)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrNoWriteAccess)
 	assert.False(t, errors.Is(err, ErrRepoNotFound), "write-denied must not also report not-found")
 }
 
+// DEFERRED-WIP: One token covers REST and git -> TestForgejo_OneTokenCoversRESTAndGit (provider half only; "before cloning" ordering owned by loam-ofg.12)
+//
 // TestForgejo_OneTokenCoversRESTAndGit covers the credentials.feature
 // scenario "One token covers REST and git": a single token value drives
 // ValidateToken (REST), GitCredentials (the git-over-HTTPS convention),
-// and CheckRepo's git read+write probes, all successfully.
+// and CheckRepo's git read+write probes, all successfully. The Forgejo
+// instance is bound to gitServer's host (what CheckRepo enforces);
+// ValidateToken targets restServer explicitly, since it takes host as a
+// call parameter independent of the bound instance.
 func TestForgejo_OneTokenCoversRESTAndGit(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
@@ -174,7 +186,7 @@ func TestForgejo_OneTokenCoversRESTAndGit(t *testing.T) {
 		handler: &gitSmartHTTPHandler{bareDir: bare, receivePackAllowed: true},
 	})
 	defer gitServer.Close()
-	f := NewForgejo(restServer.URL, token, gitServer.Client(), testLogger())
+	f := NewForgejo(gitServer.URL, token, gitServer.Client(), testLogger())
 	require.NoError(t, f.ValidateToken(t.Context(), restServer.URL, token))
 	username, password, err := f.GitCredentials(t.Context(), token)
 	require.NoError(t, err)
@@ -186,7 +198,7 @@ func TestForgejo_OneTokenCoversRESTAndGit(t *testing.T) {
 // authenticatingGitHandler wraps gitSmartHTTPHandler, rejecting requests
 // that don't carry the expected token as the Basic-auth password (any
 // username), matching GitCredentials' convention and CheckRepo's
-// gitAuthArgs/receivePackProbe auth injection.
+// gitAuthEnv/receivePackProbe auth injection.
 type authenticatingGitHandler struct {
 	token   string
 	handler http.Handler
@@ -199,4 +211,91 @@ func (h *authenticatingGitHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	h.handler.ServeHTTP(w, r)
+}
+
+// TestForgejo_CheckRepo_HostMismatch_Rejected is the security regression
+// test for the token-leak fix: a Forgejo instance bound to one host must
+// never send its token to an upstreamURL naming a different host, no
+// matter what the caller passes in.
+func TestForgejo_CheckRepo_HostMismatch_Rejected(t *testing.T) {
+	t.Parallel()
+	var sawAuth bool
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			sawAuth = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer attacker.Close()
+	f := NewForgejo("forgejo.example.com", "super-secret-token", attacker.Client(), testLogger())
+	err := f.CheckRepo(t.Context(), attacker.URL+"/group/repo")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrRepoNotFound))
+	assert.False(t, errors.Is(err, ErrNoWriteAccess))
+	assert.False(t, sawAuth, "the bound token must never be sent to a host other than the one it was bound to")
+}
+
+// TestForgejo_ReceivePackProbe_ServerError_NotClassified covers the
+// review fix that a non-auth failure (a 503, a rate limit, ...) from the
+// receive-pack probe must not be mistaken for "token lacks write
+// access" — only an explicit 401/403 means that.
+func TestForgejo_ReceivePackProbe_ServerError_NotClassified(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	f := NewForgejo(server.URL, "token", server.Client(), testLogger())
+	err = f.receivePackProbe(t.Context(), u)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoWriteAccess)
+}
+
+// TestForgejo_ReceivePackProbe_Unreachable_NotClassified covers the
+// review fix that a transport-level failure (host unreachable) must not
+// be mistaken for a write-access denial either.
+func TestForgejo_ReceivePackProbe_Unreachable_NotClassified(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	unreachableURL := server.URL
+	server.Close() // nothing is listening here anymore
+	u, err := url.Parse(unreachableURL)
+	require.NoError(t, err)
+	f := NewForgejo(unreachableURL, "token", http.DefaultClient, testLogger())
+	err = f.receivePackProbe(t.Context(), u)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoWriteAccess)
+	assert.NotErrorIs(t, err, ErrRepoNotFound)
+}
+
+// TestForgejo_LsRemoteProbe_ContextCanceled_NotClassified covers the
+// review fix that a cancelled/deadline-exceeded context must not be
+// mistaken for "repo not found".
+func TestForgejo_LsRemoteProbe_ContextCanceled_NotClassified(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	f := NewForgejo("", "", http.DefaultClient, testLogger())
+	err := f.lsRemoteProbe(ctx, "file:///does-not-matter.git")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoNotFound)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestForgejo_LsRemoteProbe_GitBinaryMissing_NotClassified covers the
+// review fix that a missing git executable must not be mistaken for
+// "repo not found" either. Not parallel: it mutates the process PATH,
+// which t.Setenv restores before this test function returns — by
+// construction that happens before any parallel sibling test (which
+// needs a working git) starts running.
+func TestForgejo_LsRemoteProbe_GitBinaryMissing_NotClassified(t *testing.T) {
+	t.Setenv("PATH", "")
+	f := NewForgejo("", "", http.DefaultClient, testLogger())
+	err := f.lsRemoteProbe(t.Context(), "file:///does-not-matter.git")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoNotFound)
+	assert.ErrorIs(t, err, exec.ErrNotFound)
 }

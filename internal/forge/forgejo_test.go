@@ -36,7 +36,7 @@ func TestForgejo_ValidateToken(t *testing.T) {
 				w.WriteHeader(tt.statusCode)
 			}))
 			defer server.Close()
-			f := NewForgejo(server.URL, "unused", server.Client(), testLogger())
+			f := NewForgejo(server.URL, "", server.Client(), testLogger())
 			err := f.ValidateToken(t.Context(), server.URL, "good-token")
 			if tt.wantErr == nil {
 				require.NoError(t, err)
@@ -49,7 +49,7 @@ func TestForgejo_ValidateToken(t *testing.T) {
 
 func TestForgejo_ValidateToken_NetworkFailure(t *testing.T) {
 	t.Parallel()
-	f := NewForgejo("http://127.0.0.1:0", "unused", http.DefaultClient, testLogger())
+	f := NewForgejo("http://127.0.0.1:0", "", http.DefaultClient, testLogger())
 	err := f.ValidateToken(t.Context(), "http://127.0.0.1:0", "token")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrInvalidToken)

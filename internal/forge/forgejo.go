@@ -30,10 +30,18 @@ type Forgejo struct {
 
 // NewForgejo constructs a Provider for the Forgejo instance at host,
 // authenticated with token for repo and pull-request operations.
-// httpClient must not be nil.
+// httpClient must not be nil. host and token may be empty when the
+// instance is only ever used for ValidateToken and GitCredentials,
+// which take their own host/token explicitly and never read these
+// bound fields.
 func NewForgejo(host, token string, httpClient *http.Client, logger *slog.Logger) *Forgejo {
 	return &Forgejo{host: host, token: token, httpClient: httpClient, logger: logger}
 }
+
+// Ensure *Forgejo satisfies Provider at compile time — the only such
+// assertion outside test code, since no consumer package exists yet to
+// catch drift.
+var _ Provider = (*Forgejo)(nil)
 
 // apiBaseURL builds the Forgejo REST API root for host. host may be a
 // bare domain ("forgejo.example.com") or include a scheme (used by
@@ -57,7 +65,7 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 	if err != nil {
 		return fmt.Errorf("validating token for %s: %w", host, err)
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("validating token for %s: %w", host, ErrInvalidToken)
 	}
@@ -149,12 +157,12 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	if err != nil {
 		return nil, fmt.Errorf("calling %s %s: %w", method, url, err)
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w", ErrRepoNotFound)
+		return nil, ErrRepoNotFound
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%w", ErrInvalidToken)
+		return nil, ErrInvalidToken
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("unexpected status %s", resp.Status)
