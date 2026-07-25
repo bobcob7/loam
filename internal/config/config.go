@@ -31,7 +31,11 @@ type Config struct {
 // Load reads and validates every LOAM_* environment variable, applying the
 // documented defaults where a variable is optional. It fails fast, returning
 // on the first problem it finds: a missing required variable, an invalid
-// value, or an unwritable data directory.
+// value, or an unwritable data directory. The only filesystem write Load
+// performs is creating LOAM_DATA_DIR (mode 0o700) if it does not already
+// exist, as an unavoidable part of probing it for writability; that probe
+// runs last, after every other variable has validated, so a config that is
+// ultimately rejected never touches the filesystem.
 func Load() (Config, error) {
 	var cfg Config
 	if err := loadRequired(&cfg); err != nil {
@@ -78,9 +82,6 @@ func loadOptional(cfg *Config) error {
 	cfg.HTTPAddr = lookupDefault("LOAM_HTTP_ADDR", ":8080")
 	cfg.AdminUser = lookupDefault("LOAM_ADMIN_USER", "admin")
 	cfg.DataDir = lookupDefault("LOAM_DATA_DIR", "/var/lib/loam")
-	if err := checkDataDirWritable(cfg.DataDir); err != nil {
-		return err
-	}
 	syncInterval, err := parseDurationEnv("LOAM_SYNC_INTERVAL", 60*time.Second)
 	if err != nil {
 		return err
@@ -103,5 +104,8 @@ func loadOptional(cfg *Config) error {
 		return err
 	}
 	cfg.LogLevel = logLevel
+	if err := checkDataDirWritable(cfg.DataDir); err != nil {
+		return err
+	}
 	return nil
 }

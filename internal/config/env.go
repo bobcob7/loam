@@ -21,11 +21,17 @@ func lookupDefault(key, def string) string {
 }
 
 // lookupRequired returns the value of the named environment variable, or an
-// error wrapping errMissingEnv if it is unset or empty.
+// error wrapping errMissingEnv if it is unset or empty. The message
+// distinguishes the two cases for diagnosability: an unset variable and a
+// secretRef that resolved to an empty string look identical to an operator
+// unless the error says which one happened.
 func lookupRequired(key string) (string, error) {
 	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return "", fmt.Errorf("%s: %w", key, errMissingEnv)
+	if ok && v == "" {
+		return "", fmt.Errorf("%s: %w (set but empty)", key, errMissingEnv)
+	}
+	if !ok {
+		return "", fmt.Errorf("%s: %w (not set)", key, errMissingEnv)
 	}
 	return v, nil
 }
@@ -102,9 +108,15 @@ func parseLogLevel(v string) (slog.Level, error) {
 }
 
 // validateDatabaseURL parses the DSN string and checks it looks like a
-// Postgres connection URL. It never opens a connection — reachability is
-// validated later in the startup sequence.
+// Postgres connection string, in either of pgx's two accepted forms: a URL
+// (postgres://... or postgresql://...) or libpq keyword/value pairs
+// (host=... user=... dbname=...), which carry no scheme at all. It never
+// opens a connection — reachability is validated later in the startup
+// sequence.
 func validateDatabaseURL(raw string) error {
+	if !strings.Contains(raw, "://") {
+		return nil
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("LOAM_DATABASE_URL: %w: %w", errInvalidDatabaseURL, err)
@@ -116,9 +128,10 @@ func validateDatabaseURL(raw string) error {
 }
 
 // checkDataDirWritable probes dir for writability by creating and removing a
-// temp file inside it, creating dir first if it does not yet exist.
+// temp file inside it, creating dir first (mode 0o700, since mirrors under it
+// hold private repo content) if it does not yet exist.
 func checkDataDirWritable(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("LOAM_DATA_DIR: %w: %w", errDataDirNotWritable, err)
 	}
 	f, err := os.CreateTemp(dir, ".loam-write-check-*")
