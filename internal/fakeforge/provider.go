@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/forge"
 )
 
 type validateTokenRequest struct {
@@ -108,14 +110,20 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 
 // Client is a Provider-shaped REST client for one fake forge Server. Its
 // method set mirrors internal/forge's real Provider interface exactly
-// (ValidateToken/CheckRepo/CreatePR/GetPRState/ClosePR/GitCredentials) so
-// tests can use a Client wherever code expects a Provider, without either
-// package importing the other.
+// (ValidateToken/CheckRepo/CreatePR/GetPRState/ClosePR/GitCredentials) and
+// is compile-time asserted against forge.Provider below, so tests can use
+// a Client wherever code expects a Provider. fakeforge imports forge for
+// this; forge does not import fakeforge, so there is no cycle.
 type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
 }
+
+// Ensure *Client satisfies forge.Provider at compile time, so tests can
+// hand a *Client anywhere a forge.Provider is expected (loam-li0.9's
+// shared contract suite; see loam-4k7).
+var _ forge.Provider = (*Client)(nil)
 
 // NewClient builds a Client bound to one fake forge Server at baseURL
 // (e.g. an httptest.Server's URL), authenticating provider REST calls with
