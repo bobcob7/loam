@@ -34,13 +34,18 @@ env:
 
 jobs:
   ci:
-    name: gofmt, build, vet, test, buf
-    runs-on: ubuntu-latest
+    name: gofmt, build, vet, test, buf (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Install C toolchain (cgo, for internal/parser's tree-sitter grammars)
+      - name: Install C toolchain (Linux; macOS runners ship Apple clang already)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
@@ -52,6 +57,7 @@ jobs:
           cache: true
 
       - name: gofmt (must produce no output)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           fmt_out="$(gofmt -l .)"
           if [ -n "$fmt_out" ]; then
@@ -70,13 +76,17 @@ jobs:
         run: go test ./... -race
 
       - name: go tool buf lint
+        if: matrix.os == 'ubuntu-latest'
         run: go tool buf lint
 
-      - name: Verify generated code has no drift (go tool buf generate)
+      - name: Verify generated code has no drift (buf generate + go generate)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go tool buf generate
-          if [ -n "$(git status --porcelain -- internal/gen)" ]; then
-            echo "::error::go tool buf generate produced a diff — commit the regenerated code in internal/gen."
-            git diff -- internal/gen
+          go generate ./...
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::go tool buf generate / go generate ./... produced a diff — commit the regenerated code (proto in internal/gen, mocks in moq_test.go)."
+            git status --porcelain
+            git diff
             exit 1
           fi

@@ -32,7 +32,13 @@ tasks:
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:
-      - gofmt -l .
+      - |
+        fmt_out="$(gofmt -l .)"
+        if [ -n "$fmt_out" ]; then
+          echo "gofmt found unformatted files:"
+          echo "$fmt_out"
+          exit 1
+        fi
       - go tool buf lint
 
   proto:lint:
@@ -52,7 +58,9 @@ tasks:
 
   # Pre-1.0 breaking-change policy (loam-9yk): pinned to c195909, the merge
   # commit that landed the wave-1 proto reshape, rather than to the moving
-  # `main` tip. That reshape deliberately deleted GenerateSSHKeyPair (+ its 2
+  # `main` tip. Run against the pre-reshape parent (28c726d), buf reports 10
+  # breaks from that reshape, not 7: GenerateSSHKeyPair (+ its 2
+  # request/response messages), SetDescriptionSchema (+ its 2
   # request/response messages), CredentialStatus.has_ssh_key,
   # EnrolledRepo.default_target, EnrolledRepo.has_description_schema, and
   # RequestReviewRequest.comment — all reserved by number (and, except
@@ -60,7 +68,7 @@ tasks:
   # FIELD_NO_DELETE / MESSAGE_NO_DELETE / RPC_NO_DELETE regardless of
   # `reserved`, since `reserved` only prevents number/name reuse, it doesn't
   # exempt the deletion itself. Diffing against `--against '.git#branch=main'`
-  # would have reported all 7 as breaks the first time this target actually
+  # would have reported all 10 as breaks the first time this target actually
   # ran (it never had — the target pointed at a nonexistent `master` branch).
   # Rather than either (a) silently accept all future deletions by loosening
   # FILE to a wire-only category, which the has_ssh_key field can't satisfy

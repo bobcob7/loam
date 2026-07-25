@@ -3,7 +3,7 @@
 // See docs/cli-spec.md for the full command surface.
 package cli
 
-//go:generate moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver
+//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver
 
 // Config exposes the LOAM_* environment configuration every command may
 // need (see docs/cli-spec.md -> Environment Variables). Implemented by a

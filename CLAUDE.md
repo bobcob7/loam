@@ -68,13 +68,22 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Go 1.26.5. `internal/parser` (and anything importing it) needs
+`CGO_ENABLED=1` and a C compiler — see "Go standards" below before your
+first build fails on this.
 
 ```bash
-# Example:
-# npm install
-# npm test
+task generate   # regenerate proto (buf) + moq mocks — do this after editing proto/*.proto or an Iface
+task build      # go build ./...
+task test       # go test ./... -race
+task lint       # gofmt -l . (must be empty) + go tool buf lint
+task proto:breaking  # pre-1.0 breaking-change check against the pinned baseline (see Taskfile.yml)
 ```
+
+CI (`.github/workflows/ci.yml`) runs gofmt, build, vet, test -race, and buf
+lint on every push/PR, on both ubuntu-latest and macos-latest, plus a
+generated-code drift check (fails if `buf generate`/`go generate` produce
+an uncommitted diff).
 
 ## Architecture Overview
 
