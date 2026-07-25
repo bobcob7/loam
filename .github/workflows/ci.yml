@@ -1,0 +1,82 @@
+name: CI
+
+# Gate set (docs/bead-workflow.md, "Gates"): gofmt, go build, go vet, go test
+# -race, go tool buf lint, plus a generated-code drift check. All of these
+# require CGO_ENABLED=1 and a C compiler: internal/parser binds tree-sitter
+# grammars via cgo (vendored C sources, statically linked — no external
+# tree-sitter system library needed), and `./...` sweeps that package in for
+# every command below, including `go vet`. See loam-sik for the empirical
+# verification behind this constraint.
+#
+# Toolchain prerequisites:
+#   - linux: gcc or clang + libc headers (`build-essential` on Debian/Ubuntu,
+#     the "Development Tools" group on RHEL-likes). ubuntu-latest GitHub
+#     runners ship build-essential already; the install step below is a
+#     no-op safety net, not a real dependency fetch.
+#   - darwin (not run in this workflow, but required for local development):
+#     Xcode Command Line Tools (`xcode-select --install`). Apple clang is
+#     sufficient — no separate gcc/tree-sitter install needed.
+# A missing compiler fails loudly and specifically: `cgo: C compiler "..."
+# not found` — if you see that, install the toolchain above, don't disable
+# CGO.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: "1"
+
+jobs:
+  ci:
+    name: gofmt, build, vet, test, buf
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain (cgo, for internal/parser's tree-sitter grammars)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (must produce no output)
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go build ./...
+        run: go build ./...
+
+      - name: go vet ./...
+        run: go vet ./...
+
+      - name: go test ./... -race
+        run: go test ./... -race
+
+      - name: go tool buf lint
+        run: go tool buf lint
+
+      - name: Verify generated code has no drift (go tool buf generate)
+        run: |
+          go tool buf generate
+          if [ -n "$(git status --porcelain -- internal/gen)" ]; then
+            echo "::error::go tool buf generate produced a diff — commit the regenerated code in internal/gen."
+            git diff -- internal/gen
+            exit 1
+          fi

@@ -7,7 +7,7 @@ package embed
 
 import "context"
 
-//go:generate moq -out moq_test.go . Embedder
+//go:generate go tool moq -out moq_test.go . Embedder
 
 // Embedder turns text chunks into vectors for RAG search and reports the
 // metadata the ingest pipeline needs to manage the pgvector schema and

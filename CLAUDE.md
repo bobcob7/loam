@@ -82,4 +82,35 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+### Go standards
+
+- Go 1.26.5 (see `go.mod`). Tool dependencies (`buf`, `protoc-gen-go`,
+  `protoc-gen-connect-go`, `matryer/moq`) are pinned in **go.mod's native
+  `tool (...)` directive** (Go 1.24+) and invoked as `go tool <name>` — e.g.
+  `go tool buf lint`, `go tool moq -out moq_test.go . Iface`. This is
+  hermetic: no GOBIN, no globally-installed binaries, no version drift
+  between contributors.
+- **Do not add `internal/tools/tools.go` with a `//go:build tools` tag.**
+  That blank-import idiom predates Go 1.24's first-class tool directive and
+  is superseded by it in this repo. If you're tempted to reach for it
+  because it's a common convention elsewhere, it's the wrong call here —
+  use the `tool (...)` block in `go.mod` instead.
+- Every `//go:generate` directive that shells out to a pinned tool uses the
+  `go tool` form (e.g. `//go:generate go tool moq -out moq_test.go . Iface`),
+  never a bare binary name. `task generate` (`Taskfile.yml`) regenerates
+  everything — proto (`go tool buf generate`) and mocks (`go generate
+  ./...`) — from a clean checkout with no other setup.
+- Interfaces are defined where consumed, all in one `interfaces.go` per
+  package. Mocks are moq-generated into `moq_test.go` in the same package —
+  never hand-written.
+- `internal/parser` (and anything importing it) requires `CGO_ENABLED=1`
+  plus a C compiler, because its tree-sitter grammar bindings vendor and
+  statically link C sources. This applies to every `./...` invocation,
+  since the wildcard sweeps `internal/parser` in — including `go vet`, not
+  just `go build`/`go test`. No external tree-sitter library is needed.
+  - linux: `gcc` or `clang` + libc headers (`build-essential` on
+    Debian/Ubuntu).
+  - darwin: Xcode Command Line Tools (`xcode-select --install`); Apple
+    clang is sufficient, no separate gcc needed.
+  - A missing compiler fails as `cgo: C compiler "..." not found` — install
+    the toolchain above rather than disabling CGO.

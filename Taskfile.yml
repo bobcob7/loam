@@ -14,9 +14,26 @@ tasks:
       - go mod download
 
   generate:
-    desc: Regenerate moq mocks (go:generate directives) across the module
+    desc: Regenerate everything (proto + moq mocks) — the single codegen entry point
     cmds:
+      - task: proto:generate
       - go generate ./...
+
+  build:
+    desc: Build all packages (needs CGO_ENABLED=1 + a C toolchain — see loam-sik)
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run the test suite with the race detector
+    cmds:
+      - go test ./... -race
+
+  lint:
+    desc: Run all lint gates (gofmt + buf lint)
+    cmds:
+      - gofmt -l .
+      - go tool buf lint
 
   proto:lint:
     desc: Lint the protobuf schema
@@ -33,7 +50,26 @@ tasks:
     cmds:
       - go tool buf generate
 
+  # Pre-1.0 breaking-change policy (loam-9yk): pinned to c195909, the merge
+  # commit that landed the wave-1 proto reshape, rather than to the moving
+  # `main` tip. That reshape deliberately deleted GenerateSSHKeyPair (+ its 2
+  # request/response messages), CredentialStatus.has_ssh_key,
+  # EnrolledRepo.default_target, EnrolledRepo.has_description_schema, and
+  # RequestReviewRequest.comment — all reserved by number (and, except
+  # has_ssh_key, by name too) but buf's FILE breaking category still flags
+  # FIELD_NO_DELETE / MESSAGE_NO_DELETE / RPC_NO_DELETE regardless of
+  # `reserved`, since `reserved` only prevents number/name reuse, it doesn't
+  # exempt the deletion itself. Diffing against `--against '.git#branch=main'`
+  # would have reported all 7 as breaks the first time this target actually
+  # ran (it never had — the target pointed at a nonexistent `master` branch).
+  # Rather than either (a) silently accept all future deletions by loosening
+  # FILE to a wire-only category, which the has_ssh_key field can't satisfy
+  # anyway since it deliberately reserves by number only, or (b) permanently
+  # exempt the check, this pins the baseline to the commit *right after* that
+  # one deliberate reshape. Every change from here forward is held to full
+  # FILE-category compatibility; a future deliberate pre-1.0 break requires
+  # bumping this ref in the same commit, with the same rationale treatment.
   proto:breaking:
-    desc: Check the schema for breaking changes against the master branch
+    desc: Check the schema for breaking changes since the post-reshape baseline (see comment above)
     cmds:
-      - go tool buf breaking --against '.git#branch=master'
+      - go tool buf breaking --against '.git#ref=c195909'
