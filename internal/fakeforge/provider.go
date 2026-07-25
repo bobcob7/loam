@@ -110,9 +110,10 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 
 // Client is a Provider-shaped REST client for one fake forge Server. Its
 // method set mirrors internal/forge's real Provider interface exactly
-// (ValidateToken/CheckRepo/CreatePR/GetPRState/ClosePR/GitCredentials) so
-// tests can use a Client wherever code expects a Provider, without either
-// package importing the other.
+// (ValidateToken/CheckRepo/CreatePR/GetPRState/ClosePR/GitCredentials) and
+// is compile-time asserted against forge.Provider below, so tests can use
+// a Client wherever code expects a Provider. fakeforge imports forge for
+// this; forge does not import fakeforge, so there is no cycle.
 type Client struct {
 	baseURL string
 	token   string

@@ -88,3 +88,79 @@ func TestClientCreatePRRepoNotFoundIsForgeErrRepoNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, forge.ErrRepoNotFound)
 }
+
+// TestClientAuthedActionBadTokenIsForgeErrInvalidToken covers
+// requireProviderAuth rejecting an unregistered client token on each of the
+// provider REST surface's three authed actions (CreatePR/GetPRState/
+// ClosePR). Nothing else in this file exercises call's authed=true branch:
+// ValidateToken and CheckRepo above never send the Client's own
+// Authorization header down this path.
+func TestClientAuthedActionBadTokenIsForgeErrInvalidToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{"CreatePR", func(c *Client) error {
+			_, _, err := c.CreatePR(t.Context(), "acme/widgets", "wb-x", "main", "t", "d")
+			return err
+		}},
+		{"GetPRState", func(c *Client) error {
+			_, err := c.GetPRState(t.Context(), "acme/widgets", 1)
+			return err
+		}},
+		{"ClosePR", func(c *Client) error {
+			return c.ClosePR(t.Context(), "acme/widgets", 1)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, ts := newTestServer(t)
+			client := NewClient(ts.URL, "never-registered")
+			err := tt.call(client)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, forge.ErrInvalidToken)
+		})
+	}
+}
+
+// TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass guards the errors.go var
+// block against a future edit silently blurring which forge.* sentinel each
+// fakeforge sentinel maps to. A wrong-class match here would not fail this
+// package's own tests above (they only assert the positive case) — it would
+// surface only as a silently-wrong-class PASS inside loam-li0.9's shared
+// suite, which is exactly the failure mode loam-4k7 exists to prevent.
+func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want error // the one forge sentinel this fakeforge sentinel should match, or nil for none
+	}{
+		{"errUnauthorized", errUnauthorized, forge.ErrInvalidToken},
+		{"errMissingScope", errMissingScope, forge.ErrInvalidToken},
+		{"errRepoNotFound", errRepoNotFound, forge.ErrRepoNotFound},
+		{"errNoWriteAccess", errNoWriteAccess, forge.ErrNoWriteAccess},
+		{"errRepoExists", errRepoExists, nil},
+		{"errBranchNotFound", errBranchNotFound, nil},
+		{"errPRNotFound", errPRNotFound, nil},
+		{"errInvalidBranch", errInvalidBranch, nil},
+		{"errMergeConflict", errMergeConflict, nil},
+		{"errGitUnavailable", errGitUnavailable, nil},
+		{"errInvalidUpstream", errInvalidUpstream, nil},
+	}
+	forgeSentinels := []error{forge.ErrInvalidToken, forge.ErrRepoNotFound, forge.ErrNoWriteAccess}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, sentinel := range forgeSentinels {
+				if tt.want == sentinel {
+					assert.ErrorIs(t, tt.err, sentinel)
+					continue
+				}
+				assert.NotErrorIs(t, tt.err, sentinel)
+			}
+		})
+	}
+}

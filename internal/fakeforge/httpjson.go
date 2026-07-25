@@ -72,7 +72,10 @@ func decodeError(resp *http.Response) error {
 		return fmt.Errorf("request failed with status %d", resp.StatusCode)
 	}
 	if sentinel := errorForCode(env.Code); sentinel != nil {
-		return fmt.Errorf("%s: %w", env.Error, sentinel)
+		// sentinel.Error() already carries env.Error's text (it is what the
+		// server encoded it from), so returning it bare avoids doubling the
+		// message; callers add their own request-specific context via %w.
+		return sentinel
 	}
 	return fmt.Errorf("request failed with status %d: %s", resp.StatusCode, env.Error)
 }
