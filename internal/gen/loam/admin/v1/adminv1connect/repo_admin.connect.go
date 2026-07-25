@@ -62,7 +62,7 @@ const (
 // RepoAdminServiceClient is a client for the loam.admin.v1.RepoAdminService service.
 type RepoAdminServiceClient interface {
 	// Enroll by upstream URL; the server derives the "<group>/<repo_name>" identifier,
-	// clones the repo, and begins periodic sync + ingest of the target branches.
+	// clones the repo, and begins periodic sync + ingest of the indexed branch.
 	EnrollRepo(context.Context, *connect.Request[v1.EnrollRepoRequest]) (*connect.Response[v1.EnrollRepoResponse], error)
 	// Enrolled repos with status.
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
@@ -71,7 +71,8 @@ type RepoAdminServiceClient interface {
 	// Unenroll and drop the local mirror, graph, and vector data. Guarded: fails with a
 	// RemovalBlocked error detail if the repo has non-terminal work branches.
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
-	// Replace the branches eligible as work-branch targets.
+	// Replace the branches eligible as work-branch targets and designate which one is
+	// indexed. Changing indexed_branch triggers a full ingest of the new branch.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
 	// Force a full rebuild of the repo's derived indexes (graph + vectors).
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)
@@ -199,7 +200,7 @@ func (c *repoAdminServiceClient) ProbeRepo(ctx context.Context, req *connect.Req
 // RepoAdminServiceHandler is an implementation of the loam.admin.v1.RepoAdminService service.
 type RepoAdminServiceHandler interface {
 	// Enroll by upstream URL; the server derives the "<group>/<repo_name>" identifier,
-	// clones the repo, and begins periodic sync + ingest of the target branches.
+	// clones the repo, and begins periodic sync + ingest of the indexed branch.
 	EnrollRepo(context.Context, *connect.Request[v1.EnrollRepoRequest]) (*connect.Response[v1.EnrollRepoResponse], error)
 	// Enrolled repos with status.
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
@@ -208,7 +209,8 @@ type RepoAdminServiceHandler interface {
 	// Unenroll and drop the local mirror, graph, and vector data. Guarded: fails with a
 	// RemovalBlocked error detail if the repo has non-terminal work branches.
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
-	// Replace the branches eligible as work-branch targets.
+	// Replace the branches eligible as work-branch targets and designate which one is
+	// indexed. Changing indexed_branch triggers a full ingest of the new branch.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
 	// Force a full rebuild of the repo's derived indexes (graph + vectors).
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)

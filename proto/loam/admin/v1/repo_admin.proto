@@ -9,7 +9,7 @@ import "loam/v1/common.proto";
 // loam.v1.RepoService.GetRepo.
 service RepoAdminService {
   // Enroll by upstream URL; the server derives the "<group>/<repo_name>" identifier,
-  // clones the repo, and begins periodic sync + ingest of the target branches.
+  // clones the repo, and begins periodic sync + ingest of the indexed branch.
   rpc EnrollRepo(EnrollRepoRequest) returns (EnrollRepoResponse);
 
   // Enrolled repos with status.
@@ -22,7 +22,8 @@ service RepoAdminService {
   // RemovalBlocked error detail if the repo has non-terminal work branches.
   rpc RemoveRepo(RemoveRepoRequest) returns (RemoveRepoResponse);
 
-  // Replace the branches eligible as work-branch targets.
+  // Replace the branches eligible as work-branch targets and designate which one is
+  // indexed. Changing indexed_branch triggers a full ingest of the new branch.
   rpc SetTargetBranches(SetTargetBranchesRequest) returns (SetTargetBranchesResponse);
 
   // Force a full rebuild of the repo's derived indexes (graph + vectors).
