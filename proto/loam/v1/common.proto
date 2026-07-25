@@ -122,9 +122,10 @@ message PageInfo {
   uint32 total = 1;
 }
 
-// An ingest event surfaced alongside graph/search results, so a caller can tell
-// whether the data underlying its results changed since it last synced. Shared by
-// GraphService and SearchService responses.
+// Identifies the ingest state a queried repo's graph/vector index was built from —
+// which branch, at which commit, and when — so a caller can judge how current the
+// results it was returned against are. Shared by GraphService and SearchService
+// responses, one entry per repo in scope.
 message Ingested {
   // Enrolled repo identifier, "<group>/<repo_name>".
   string repo = 1;

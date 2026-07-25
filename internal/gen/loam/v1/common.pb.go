@@ -660,9 +660,10 @@ func (x *PageInfo) GetTotal() uint32 {
 	return 0
 }
 
-// An ingest event surfaced alongside graph/search results, so a caller can tell
-// whether the data underlying its results changed since it last synced. Shared by
-// GraphService and SearchService responses.
+// Identifies the ingest state a queried repo's graph/vector index was built from —
+// which branch, at which commit, and when — so a caller can judge how current the
+// results it was returned against are. Shared by GraphService and SearchService
+// responses, one entry per repo in scope.
 type Ingested struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Enrolled repo identifier, "<group>/<repo_name>".

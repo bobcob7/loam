@@ -25,10 +25,6 @@ service RepoAdminService {
   // Replace the branches eligible as work-branch targets.
   rpc SetTargetBranches(SetTargetBranchesRequest) returns (SetTargetBranchesResponse);
 
-  // Set/replace the JSON Schema (as a JSON string) validating work-branch
-  // descriptions and comment/response formats; empty clears it.
-  rpc SetDescriptionSchema(SetDescriptionSchemaRequest) returns (SetDescriptionSchemaResponse);
-
   // Force a full rebuild of the repo's derived indexes (graph + vectors).
   rpc ReindexRepo(ReindexRepoRequest) returns (ReindexRepoResponse);
 
@@ -130,16 +126,6 @@ message SetTargetBranchesRequest {
 }
 
 message SetTargetBranchesResponse {
-  EnrolledRepo repo = 1;
-}
-
-message SetDescriptionSchemaRequest {
-  string repo = 1;
-  // JSON Schema document, as a JSON string. Empty clears the schema.
-  string schema = 2;
-}
-
-message SetDescriptionSchemaResponse {
   EnrolledRepo repo = 1;
 }
 

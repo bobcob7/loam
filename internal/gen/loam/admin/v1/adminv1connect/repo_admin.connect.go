@@ -48,9 +48,6 @@ const (
 	// RepoAdminServiceSetTargetBranchesProcedure is the fully-qualified name of the RepoAdminService's
 	// SetTargetBranches RPC.
 	RepoAdminServiceSetTargetBranchesProcedure = "/loam.admin.v1.RepoAdminService/SetTargetBranches"
-	// RepoAdminServiceSetDescriptionSchemaProcedure is the fully-qualified name of the
-	// RepoAdminService's SetDescriptionSchema RPC.
-	RepoAdminServiceSetDescriptionSchemaProcedure = "/loam.admin.v1.RepoAdminService/SetDescriptionSchema"
 	// RepoAdminServiceReindexRepoProcedure is the fully-qualified name of the RepoAdminService's
 	// ReindexRepo RPC.
 	RepoAdminServiceReindexRepoProcedure = "/loam.admin.v1.RepoAdminService/ReindexRepo"
@@ -76,9 +73,6 @@ type RepoAdminServiceClient interface {
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	// Replace the branches eligible as work-branch targets.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
-	// Set/replace the JSON Schema (as a JSON string) validating work-branch
-	// descriptions and comment/response formats; empty clears it.
-	SetDescriptionSchema(context.Context, *connect.Request[v1.SetDescriptionSchemaRequest]) (*connect.Response[v1.SetDescriptionSchemaResponse], error)
 	// Force a full rebuild of the repo's derived indexes (graph + vectors).
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)
 	// Recent and active ingest jobs across repos, for the web Jobs view.
@@ -129,12 +123,6 @@ func NewRepoAdminServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(repoAdminServiceMethods.ByName("SetTargetBranches")),
 			connect.WithClientOptions(opts...),
 		),
-		setDescriptionSchema: connect.NewClient[v1.SetDescriptionSchemaRequest, v1.SetDescriptionSchemaResponse](
-			httpClient,
-			baseURL+RepoAdminServiceSetDescriptionSchemaProcedure,
-			connect.WithSchema(repoAdminServiceMethods.ByName("SetDescriptionSchema")),
-			connect.WithClientOptions(opts...),
-		),
 		reindexRepo: connect.NewClient[v1.ReindexRepoRequest, v1.ReindexRepoResponse](
 			httpClient,
 			baseURL+RepoAdminServiceReindexRepoProcedure,
@@ -158,15 +146,14 @@ func NewRepoAdminServiceClient(httpClient connect.HTTPClient, baseURL string, op
 
 // repoAdminServiceClient implements RepoAdminServiceClient.
 type repoAdminServiceClient struct {
-	enrollRepo           *connect.Client[v1.EnrollRepoRequest, v1.EnrollRepoResponse]
-	listRepos            *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
-	getRepo              *connect.Client[v1.GetRepoRequest, v1.GetRepoResponse]
-	removeRepo           *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
-	setTargetBranches    *connect.Client[v1.SetTargetBranchesRequest, v1.SetTargetBranchesResponse]
-	setDescriptionSchema *connect.Client[v1.SetDescriptionSchemaRequest, v1.SetDescriptionSchemaResponse]
-	reindexRepo          *connect.Client[v1.ReindexRepoRequest, v1.ReindexRepoResponse]
-	listIngestJobs       *connect.Client[v1.ListIngestJobsRequest, v1.ListIngestJobsResponse]
-	probeRepo            *connect.Client[v1.ProbeRepoRequest, v1.ProbeRepoResponse]
+	enrollRepo        *connect.Client[v1.EnrollRepoRequest, v1.EnrollRepoResponse]
+	listRepos         *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
+	getRepo           *connect.Client[v1.GetRepoRequest, v1.GetRepoResponse]
+	removeRepo        *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
+	setTargetBranches *connect.Client[v1.SetTargetBranchesRequest, v1.SetTargetBranchesResponse]
+	reindexRepo       *connect.Client[v1.ReindexRepoRequest, v1.ReindexRepoResponse]
+	listIngestJobs    *connect.Client[v1.ListIngestJobsRequest, v1.ListIngestJobsResponse]
+	probeRepo         *connect.Client[v1.ProbeRepoRequest, v1.ProbeRepoResponse]
 }
 
 // EnrollRepo calls loam.admin.v1.RepoAdminService.EnrollRepo.
@@ -192,11 +179,6 @@ func (c *repoAdminServiceClient) RemoveRepo(ctx context.Context, req *connect.Re
 // SetTargetBranches calls loam.admin.v1.RepoAdminService.SetTargetBranches.
 func (c *repoAdminServiceClient) SetTargetBranches(ctx context.Context, req *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error) {
 	return c.setTargetBranches.CallUnary(ctx, req)
-}
-
-// SetDescriptionSchema calls loam.admin.v1.RepoAdminService.SetDescriptionSchema.
-func (c *repoAdminServiceClient) SetDescriptionSchema(ctx context.Context, req *connect.Request[v1.SetDescriptionSchemaRequest]) (*connect.Response[v1.SetDescriptionSchemaResponse], error) {
-	return c.setDescriptionSchema.CallUnary(ctx, req)
 }
 
 // ReindexRepo calls loam.admin.v1.RepoAdminService.ReindexRepo.
@@ -228,9 +210,6 @@ type RepoAdminServiceHandler interface {
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	// Replace the branches eligible as work-branch targets.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
-	// Set/replace the JSON Schema (as a JSON string) validating work-branch
-	// descriptions and comment/response formats; empty clears it.
-	SetDescriptionSchema(context.Context, *connect.Request[v1.SetDescriptionSchemaRequest]) (*connect.Response[v1.SetDescriptionSchemaResponse], error)
 	// Force a full rebuild of the repo's derived indexes (graph + vectors).
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)
 	// Recent and active ingest jobs across repos, for the web Jobs view.
@@ -277,12 +256,6 @@ func NewRepoAdminServiceHandler(svc RepoAdminServiceHandler, opts ...connect.Han
 		connect.WithSchema(repoAdminServiceMethods.ByName("SetTargetBranches")),
 		connect.WithHandlerOptions(opts...),
 	)
-	repoAdminServiceSetDescriptionSchemaHandler := connect.NewUnaryHandler(
-		RepoAdminServiceSetDescriptionSchemaProcedure,
-		svc.SetDescriptionSchema,
-		connect.WithSchema(repoAdminServiceMethods.ByName("SetDescriptionSchema")),
-		connect.WithHandlerOptions(opts...),
-	)
 	repoAdminServiceReindexRepoHandler := connect.NewUnaryHandler(
 		RepoAdminServiceReindexRepoProcedure,
 		svc.ReindexRepo,
@@ -313,8 +286,6 @@ func NewRepoAdminServiceHandler(svc RepoAdminServiceHandler, opts ...connect.Han
 			repoAdminServiceRemoveRepoHandler.ServeHTTP(w, r)
 		case RepoAdminServiceSetTargetBranchesProcedure:
 			repoAdminServiceSetTargetBranchesHandler.ServeHTTP(w, r)
-		case RepoAdminServiceSetDescriptionSchemaProcedure:
-			repoAdminServiceSetDescriptionSchemaHandler.ServeHTTP(w, r)
 		case RepoAdminServiceReindexRepoProcedure:
 			repoAdminServiceReindexRepoHandler.ServeHTTP(w, r)
 		case RepoAdminServiceListIngestJobsProcedure:
@@ -348,10 +319,6 @@ func (UnimplementedRepoAdminServiceHandler) RemoveRepo(context.Context, *connect
 
 func (UnimplementedRepoAdminServiceHandler) SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.RepoAdminService.SetTargetBranches is not implemented"))
-}
-
-func (UnimplementedRepoAdminServiceHandler) SetDescriptionSchema(context.Context, *connect.Request[v1.SetDescriptionSchemaRequest]) (*connect.Response[v1.SetDescriptionSchemaResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.RepoAdminService.SetDescriptionSchema is not implemented"))
 }
 
 func (UnimplementedRepoAdminServiceHandler) ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error) {

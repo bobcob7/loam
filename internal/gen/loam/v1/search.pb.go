@@ -170,7 +170,9 @@ type SearchResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Results  []*SearchResult        `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
 	PageInfo *PageInfo              `protobuf:"bytes,2,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
-	// Repos ingested since the caller last synced, so it can tell results may be stale.
+	// The ingest state (repo/branch/commit/time) each queried repo's index was built
+	// from, one entry per repo in scope, so the caller can judge how current these
+	// results are.
 	Ingested []*Ingested `protobuf:"bytes,3,rep,name=ingested,proto3" json:"ingested,omitempty"`
 	// True if the result list was cut short by a server-enforced cap.
 	Truncated     bool `protobuf:"varint,4,opt,name=truncated,proto3" json:"truncated,omitempty"`
