@@ -87,9 +87,17 @@ func tokenize(text string) []string {
 }
 
 func tokenIndex(token string) int {
+	return tokenIndexAt(token, Dimension)
+}
+
+// tokenIndexAt is tokenIndex parameterized by dimension. It exists so the
+// collision guard (collision.go) can search for and verify collisions at a
+// dimension other than the fixed production Dimension, while embedOne and
+// the guard still go through the exact same FNV-1a hash.
+func tokenIndexAt(token string, dimension int) int {
 	h := fnv.New32a()
 	h.Write([]byte(token))
-	return int(h.Sum32() % uint32(Dimension))
+	return int(h.Sum32() % uint32(dimension))
 }
 
 func l2Normalize(vec []float32) {
