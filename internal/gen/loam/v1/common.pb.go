@@ -491,7 +491,10 @@ type VerdictSummary struct {
 	Reviewer string         `protobuf:"bytes,1,opt,name=reviewer,proto3" json:"reviewer,omitempty"`
 	Outcome  VerdictOutcome `protobuf:"varint,2,opt,name=outcome,proto3,enum=loam.v1.VerdictOutcome" json:"outcome,omitempty"`
 	// True once a review has been requested since this verdict was submitted.
-	Stale         bool `protobuf:"varint,3,opt,name=stale,proto3" json:"stale,omitempty"`
+	Stale bool `protobuf:"varint,3,opt,name=stale,proto3" json:"stale,omitempty"`
+	// The review round this verdict was submitted in; incremented each time review
+	// is requested.
+	Round         uint32 `protobuf:"varint,4,opt,name=round,proto3" json:"round,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -545,6 +548,13 @@ func (x *VerdictSummary) GetStale() bool {
 		return x.Stale
 	}
 	return false
+}
+
+func (x *VerdictSummary) GetRound() uint32 {
+	if x != nil {
+		return x.Round
+	}
+	return 0
 }
 
 // Offset-based pagination for list-returning requests.
@@ -650,6 +660,81 @@ func (x *PageInfo) GetTotal() uint32 {
 	return 0
 }
 
+// An ingest event surfaced alongside graph/search results, so a caller can tell
+// whether the data underlying its results changed since it last synced. Shared by
+// GraphService and SearchService responses.
+type Ingested struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Enrolled repo identifier, "<group>/<repo_name>".
+	Repo string `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
+	// Target branch that was ingested.
+	Target string `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	// Commit/ref ingested.
+	Ref string `protobuf:"bytes,3,opt,name=ref,proto3" json:"ref,omitempty"`
+	// RFC 3339 timestamp of the ingest.
+	At            string `protobuf:"bytes,4,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ingested) Reset() {
+	*x = Ingested{}
+	mi := &file_loam_v1_common_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ingested) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ingested) ProtoMessage() {}
+
+func (x *Ingested) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_v1_common_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ingested.ProtoReflect.Descriptor instead.
+func (*Ingested) Descriptor() ([]byte, []int) {
+	return file_loam_v1_common_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Ingested) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *Ingested) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *Ingested) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *Ingested) GetAt() string {
+	if x != nil {
+		return x.At
+	}
+	return ""
+}
+
 var File_loam_v1_common_proto protoreflect.FileDescriptor
 
 const file_loam_v1_common_proto_rawDesc = "" +
@@ -681,16 +766,22 @@ const file_loam_v1_common_proto_rawDesc = "" +
 	"\bresolved\x18\x02 \x01(\bR\bresolved\x12.\n" +
 	"\x06anchor\x18\x03 \x01(\v2\x11.loam.v1.FileLineH\x00R\x06anchor\x88\x01\x01\x12,\n" +
 	"\bcomments\x18\x04 \x03(\v2\x10.loam.v1.CommentR\bcommentsB\t\n" +
-	"\a_anchor\"u\n" +
+	"\a_anchor\"\x8b\x01\n" +
 	"\x0eVerdictSummary\x12\x1a\n" +
 	"\breviewer\x18\x01 \x01(\tR\breviewer\x121\n" +
 	"\aoutcome\x18\x02 \x01(\x0e2\x17.loam.v1.VerdictOutcomeR\aoutcome\x12\x14\n" +
-	"\x05stale\x18\x03 \x01(\bR\x05stale\"4\n" +
+	"\x05stale\x18\x03 \x01(\bR\x05stale\x12\x14\n" +
+	"\x05round\x18\x04 \x01(\rR\x05round\"4\n" +
 	"\x04Page\x12\x14\n" +
 	"\x05limit\x18\x01 \x01(\rR\x05limit\x12\x16\n" +
 	"\x06offset\x18\x02 \x01(\rR\x06offset\" \n" +
 	"\bPageInfo\x12\x14\n" +
-	"\x05total\x18\x01 \x01(\rR\x05total*\x8b\x01\n" +
+	"\x05total\x18\x01 \x01(\rR\x05total\"X\n" +
+	"\bIngested\x12\x12\n" +
+	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12\x10\n" +
+	"\x03ref\x18\x03 \x01(\tR\x03ref\x12\x0e\n" +
+	"\x02at\x18\x04 \x01(\tR\x02at*\x8b\x01\n" +
 	"\x0eVerdictOutcome\x12\x1f\n" +
 	"\x1bVERDICT_OUTCOME_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17VERDICT_OUTCOME_APPROVE\x10\x01\x12\x1e\n" +
@@ -718,7 +809,7 @@ func file_loam_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_loam_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_loam_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_loam_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_loam_v1_common_proto_goTypes = []any{
 	(VerdictOutcome)(0),    // 0: loam.v1.VerdictOutcome
 	(WorkBranchState)(0),   // 1: loam.v1.WorkBranchState
@@ -730,6 +821,7 @@ var file_loam_v1_common_proto_goTypes = []any{
 	(*VerdictSummary)(nil), // 7: loam.v1.VerdictSummary
 	(*Page)(nil),           // 8: loam.v1.Page
 	(*PageInfo)(nil),       // 9: loam.v1.PageInfo
+	(*Ingested)(nil),       // 10: loam.v1.Ingested
 }
 var file_loam_v1_common_proto_depIdxs = []int32{
 	1, // 0: loam.v1.WorkBranch.state:type_name -> loam.v1.WorkBranchState
@@ -757,7 +849,7 @@ func file_loam_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_v1_common_proto_rawDesc), len(file_loam_v1_common_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

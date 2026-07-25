@@ -36,9 +36,6 @@ const (
 	// CredentialServiceSetUpstreamTokenProcedure is the fully-qualified name of the CredentialService's
 	// SetUpstreamToken RPC.
 	CredentialServiceSetUpstreamTokenProcedure = "/loam.admin.v1.CredentialService/SetUpstreamToken"
-	// CredentialServiceGenerateSSHKeyPairProcedure is the fully-qualified name of the
-	// CredentialService's GenerateSSHKeyPair RPC.
-	CredentialServiceGenerateSSHKeyPairProcedure = "/loam.admin.v1.CredentialService/GenerateSSHKeyPair"
 	// CredentialServiceGetCredentialStatusProcedure is the fully-qualified name of the
 	// CredentialService's GetCredentialStatus RPC.
 	CredentialServiceGetCredentialStatusProcedure = "/loam.admin.v1.CredentialService/GetCredentialStatus"
@@ -51,9 +48,6 @@ const (
 type CredentialServiceClient interface {
 	// Set/replace the forge token (Forgejo token / GitHub PAT); the server validates it.
 	SetUpstreamToken(context.Context, *connect.Request[v1.SetUpstreamTokenRequest]) (*connect.Response[v1.SetUpstreamTokenResponse], error)
-	// Generate a keypair server-side and return the public key for the admin to install
-	// on the forge. The private key never leaves the server.
-	GenerateSSHKeyPair(context.Context, *connect.Request[v1.GenerateSSHKeyPairRequest]) (*connect.Response[v1.GenerateSSHKeyPairResponse], error)
 	// Presence and validation state for one host.
 	GetCredentialStatus(context.Context, *connect.Request[v1.GetCredentialStatusRequest]) (*connect.Response[v1.GetCredentialStatusResponse], error)
 	// Presence and validation state across all hosts.
@@ -77,12 +71,6 @@ func NewCredentialServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(credentialServiceMethods.ByName("SetUpstreamToken")),
 			connect.WithClientOptions(opts...),
 		),
-		generateSSHKeyPair: connect.NewClient[v1.GenerateSSHKeyPairRequest, v1.GenerateSSHKeyPairResponse](
-			httpClient,
-			baseURL+CredentialServiceGenerateSSHKeyPairProcedure,
-			connect.WithSchema(credentialServiceMethods.ByName("GenerateSSHKeyPair")),
-			connect.WithClientOptions(opts...),
-		),
 		getCredentialStatus: connect.NewClient[v1.GetCredentialStatusRequest, v1.GetCredentialStatusResponse](
 			httpClient,
 			baseURL+CredentialServiceGetCredentialStatusProcedure,
@@ -101,7 +89,6 @@ func NewCredentialServiceClient(httpClient connect.HTTPClient, baseURL string, o
 // credentialServiceClient implements CredentialServiceClient.
 type credentialServiceClient struct {
 	setUpstreamToken    *connect.Client[v1.SetUpstreamTokenRequest, v1.SetUpstreamTokenResponse]
-	generateSSHKeyPair  *connect.Client[v1.GenerateSSHKeyPairRequest, v1.GenerateSSHKeyPairResponse]
 	getCredentialStatus *connect.Client[v1.GetCredentialStatusRequest, v1.GetCredentialStatusResponse]
 	listCredentials     *connect.Client[v1.ListCredentialsRequest, v1.ListCredentialsResponse]
 }
@@ -109,11 +96,6 @@ type credentialServiceClient struct {
 // SetUpstreamToken calls loam.admin.v1.CredentialService.SetUpstreamToken.
 func (c *credentialServiceClient) SetUpstreamToken(ctx context.Context, req *connect.Request[v1.SetUpstreamTokenRequest]) (*connect.Response[v1.SetUpstreamTokenResponse], error) {
 	return c.setUpstreamToken.CallUnary(ctx, req)
-}
-
-// GenerateSSHKeyPair calls loam.admin.v1.CredentialService.GenerateSSHKeyPair.
-func (c *credentialServiceClient) GenerateSSHKeyPair(ctx context.Context, req *connect.Request[v1.GenerateSSHKeyPairRequest]) (*connect.Response[v1.GenerateSSHKeyPairResponse], error) {
-	return c.generateSSHKeyPair.CallUnary(ctx, req)
 }
 
 // GetCredentialStatus calls loam.admin.v1.CredentialService.GetCredentialStatus.
@@ -130,9 +112,6 @@ func (c *credentialServiceClient) ListCredentials(ctx context.Context, req *conn
 type CredentialServiceHandler interface {
 	// Set/replace the forge token (Forgejo token / GitHub PAT); the server validates it.
 	SetUpstreamToken(context.Context, *connect.Request[v1.SetUpstreamTokenRequest]) (*connect.Response[v1.SetUpstreamTokenResponse], error)
-	// Generate a keypair server-side and return the public key for the admin to install
-	// on the forge. The private key never leaves the server.
-	GenerateSSHKeyPair(context.Context, *connect.Request[v1.GenerateSSHKeyPairRequest]) (*connect.Response[v1.GenerateSSHKeyPairResponse], error)
 	// Presence and validation state for one host.
 	GetCredentialStatus(context.Context, *connect.Request[v1.GetCredentialStatusRequest]) (*connect.Response[v1.GetCredentialStatusResponse], error)
 	// Presence and validation state across all hosts.
@@ -152,12 +131,6 @@ func NewCredentialServiceHandler(svc CredentialServiceHandler, opts ...connect.H
 		connect.WithSchema(credentialServiceMethods.ByName("SetUpstreamToken")),
 		connect.WithHandlerOptions(opts...),
 	)
-	credentialServiceGenerateSSHKeyPairHandler := connect.NewUnaryHandler(
-		CredentialServiceGenerateSSHKeyPairProcedure,
-		svc.GenerateSSHKeyPair,
-		connect.WithSchema(credentialServiceMethods.ByName("GenerateSSHKeyPair")),
-		connect.WithHandlerOptions(opts...),
-	)
 	credentialServiceGetCredentialStatusHandler := connect.NewUnaryHandler(
 		CredentialServiceGetCredentialStatusProcedure,
 		svc.GetCredentialStatus,
@@ -174,8 +147,6 @@ func NewCredentialServiceHandler(svc CredentialServiceHandler, opts ...connect.H
 		switch r.URL.Path {
 		case CredentialServiceSetUpstreamTokenProcedure:
 			credentialServiceSetUpstreamTokenHandler.ServeHTTP(w, r)
-		case CredentialServiceGenerateSSHKeyPairProcedure:
-			credentialServiceGenerateSSHKeyPairHandler.ServeHTTP(w, r)
 		case CredentialServiceGetCredentialStatusProcedure:
 			credentialServiceGetCredentialStatusHandler.ServeHTTP(w, r)
 		case CredentialServiceListCredentialsProcedure:
@@ -191,10 +162,6 @@ type UnimplementedCredentialServiceHandler struct{}
 
 func (UnimplementedCredentialServiceHandler) SetUpstreamToken(context.Context, *connect.Request[v1.SetUpstreamTokenRequest]) (*connect.Response[v1.SetUpstreamTokenResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.CredentialService.SetUpstreamToken is not implemented"))
-}
-
-func (UnimplementedCredentialServiceHandler) GenerateSSHKeyPair(context.Context, *connect.Request[v1.GenerateSSHKeyPairRequest]) (*connect.Response[v1.GenerateSSHKeyPairResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.CredentialService.GenerateSSHKeyPair is not implemented"))
 }
 
 func (UnimplementedCredentialServiceHandler) GetCredentialStatus(context.Context, *connect.Request[v1.GetCredentialStatusRequest]) (*connect.Response[v1.GetCredentialStatusResponse], error) {

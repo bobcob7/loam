@@ -101,6 +101,9 @@ message VerdictSummary {
   VerdictOutcome outcome = 2;
   // True once a review has been requested since this verdict was submitted.
   bool stale = 3;
+  // The review round this verdict was submitted in; incremented each time review
+  // is requested.
+  uint32 round = 4;
 }
 
 // Offset-based pagination for list-returning requests.
@@ -117,4 +120,18 @@ message Page {
 message PageInfo {
   // Total records matching the request across all pages.
   uint32 total = 1;
+}
+
+// An ingest event surfaced alongside graph/search results, so a caller can tell
+// whether the data underlying its results changed since it last synced. Shared by
+// GraphService and SearchService responses.
+message Ingested {
+  // Enrolled repo identifier, "<group>/<repo_name>".
+  string repo = 1;
+  // Target branch that was ingested.
+  string target = 2;
+  // Commit/ref ingested.
+  string ref = 3;
+  // RFC 3339 timestamp of the ingest.
+  string at = 4;
 }

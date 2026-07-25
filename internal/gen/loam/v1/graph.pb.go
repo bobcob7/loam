@@ -34,7 +34,9 @@ type QueryRequest struct {
 	//	*QueryRequest_Dependencies
 	//	*QueryRequest_Dependents
 	//	*QueryRequest_History
-	Query         isQueryRequest_Query `protobuf_oneof:"query"`
+	Query isQueryRequest_Query `protobuf_oneof:"query"`
+	// Restrict results to this file (the CLI's --file filter). Absent = unfiltered.
+	File          *string `protobuf:"bytes,8,opt,name=file,proto3,oneof" json:"file,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -133,6 +135,13 @@ func (x *QueryRequest) GetHistory() *HistoryQuery {
 		}
 	}
 	return nil
+}
+
+func (x *QueryRequest) GetFile() string {
+	if x != nil && x.File != nil {
+		return *x.File
+	}
+	return ""
 }
 
 type isQueryRequest_Query interface {
@@ -404,8 +413,12 @@ type QueryResponse struct {
 	//	*QueryResponse_Locations
 	//	*QueryResponse_Dependencies
 	//	*QueryResponse_History
-	Result        isQueryResponse_Result `protobuf_oneof:"result"`
-	PageInfo      *PageInfo              `protobuf:"bytes,4,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	Result   isQueryResponse_Result `protobuf_oneof:"result"`
+	PageInfo *PageInfo              `protobuf:"bytes,4,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	// Repos ingested since the caller last synced, so it can tell results may be stale.
+	Ingested []*Ingested `protobuf:"bytes,5,rep,name=ingested,proto3" json:"ingested,omitempty"`
+	// True if the result list was cut short by a server-enforced cap.
+	Truncated     bool `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -481,6 +494,20 @@ func (x *QueryResponse) GetPageInfo() *PageInfo {
 	return nil
 }
 
+func (x *QueryResponse) GetIngested() []*Ingested {
+	if x != nil {
+		return x.Ingested
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
 type isQueryResponse_Result interface {
 	isQueryResponse_Result()
 }
@@ -503,19 +530,86 @@ func (*QueryResponse_Dependencies) isQueryResponse_Result() {}
 
 func (*QueryResponse_History) isQueryResponse_Result() {}
 
+// Detail on which symbol/file/kind a result row matched, present only when a query
+// is ambiguous over multiple candidates.
+type MatchInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Symbol        string                 `protobuf:"bytes,1,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	File          string                 `protobuf:"bytes,2,opt,name=file,proto3" json:"file,omitempty"`
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MatchInfo) Reset() {
+	*x = MatchInfo{}
+	mi := &file_loam_v1_graph_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MatchInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatchInfo) ProtoMessage() {}
+
+func (x *MatchInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_v1_graph_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatchInfo.ProtoReflect.Descriptor instead.
+func (*MatchInfo) Descriptor() ([]byte, []int) {
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *MatchInfo) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *MatchInfo) GetFile() string {
+	if x != nil {
+		return x.File
+	}
+	return ""
+}
+
+func (x *MatchInfo) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
 type Location struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Repo     string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	FileLine *FileLine              `protobuf:"bytes,2,opt,name=file_line,json=fileLine,proto3" json:"file_line,omitempty"`
 	// Absent when the location refers to a file rather than a specific symbol.
-	Symbol        *string `protobuf:"bytes,3,opt,name=symbol,proto3,oneof" json:"symbol,omitempty"`
+	Symbol *string `protobuf:"bytes,3,opt,name=symbol,proto3,oneof" json:"symbol,omitempty"`
+	// The kind of the matched symbol/file (e.g. "function", "struct", "file").
+	Kind string `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Present only when the query was ambiguous over multiple candidates; names which
+	// one this row matched.
+	Of            *MatchInfo `protobuf:"bytes,5,opt,name=of,proto3,oneof" json:"of,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Location) Reset() {
 	*x = Location{}
-	mi := &file_loam_v1_graph_proto_msgTypes[7]
+	mi := &file_loam_v1_graph_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -527,7 +621,7 @@ func (x *Location) String() string {
 func (*Location) ProtoMessage() {}
 
 func (x *Location) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[7]
+	mi := &file_loam_v1_graph_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -540,7 +634,7 @@ func (x *Location) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Location.ProtoReflect.Descriptor instead.
 func (*Location) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{7}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Location) GetRepo() string {
@@ -564,6 +658,20 @@ func (x *Location) GetSymbol() string {
 	return ""
 }
 
+func (x *Location) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Location) GetOf() *MatchInfo {
+	if x != nil {
+		return x.Of
+	}
+	return nil
+}
+
 type DependencyEdge struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The dependent endpoint (what has the dependency).
@@ -577,7 +685,7 @@ type DependencyEdge struct {
 
 func (x *DependencyEdge) Reset() {
 	*x = DependencyEdge{}
-	mi := &file_loam_v1_graph_proto_msgTypes[8]
+	mi := &file_loam_v1_graph_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -589,7 +697,7 @@ func (x *DependencyEdge) String() string {
 func (*DependencyEdge) ProtoMessage() {}
 
 func (x *DependencyEdge) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[8]
+	mi := &file_loam_v1_graph_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -602,7 +710,7 @@ func (x *DependencyEdge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DependencyEdge.ProtoReflect.Descriptor instead.
 func (*DependencyEdge) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{8}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DependencyEdge) GetFrom() *Location {
@@ -631,7 +739,7 @@ type HistoryEntry struct {
 
 func (x *HistoryEntry) Reset() {
 	*x = HistoryEntry{}
-	mi := &file_loam_v1_graph_proto_msgTypes[9]
+	mi := &file_loam_v1_graph_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -643,7 +751,7 @@ func (x *HistoryEntry) String() string {
 func (*HistoryEntry) ProtoMessage() {}
 
 func (x *HistoryEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[9]
+	mi := &file_loam_v1_graph_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -656,7 +764,7 @@ func (x *HistoryEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryEntry.ProtoReflect.Descriptor instead.
 func (*HistoryEntry) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{9}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *HistoryEntry) GetRepo() string {
@@ -696,7 +804,7 @@ type LocationList struct {
 
 func (x *LocationList) Reset() {
 	*x = LocationList{}
-	mi := &file_loam_v1_graph_proto_msgTypes[10]
+	mi := &file_loam_v1_graph_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -708,7 +816,7 @@ func (x *LocationList) String() string {
 func (*LocationList) ProtoMessage() {}
 
 func (x *LocationList) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[10]
+	mi := &file_loam_v1_graph_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -721,7 +829,7 @@ func (x *LocationList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocationList.ProtoReflect.Descriptor instead.
 func (*LocationList) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{10}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *LocationList) GetLocations() []*Location {
@@ -740,7 +848,7 @@ type DependencyList struct {
 
 func (x *DependencyList) Reset() {
 	*x = DependencyList{}
-	mi := &file_loam_v1_graph_proto_msgTypes[11]
+	mi := &file_loam_v1_graph_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -752,7 +860,7 @@ func (x *DependencyList) String() string {
 func (*DependencyList) ProtoMessage() {}
 
 func (x *DependencyList) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[11]
+	mi := &file_loam_v1_graph_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -765,7 +873,7 @@ func (x *DependencyList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DependencyList.ProtoReflect.Descriptor instead.
 func (*DependencyList) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{11}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DependencyList) GetEdges() []*DependencyEdge {
@@ -784,7 +892,7 @@ type HistoryList struct {
 
 func (x *HistoryList) Reset() {
 	*x = HistoryList{}
-	mi := &file_loam_v1_graph_proto_msgTypes[12]
+	mi := &file_loam_v1_graph_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -796,7 +904,7 @@ func (x *HistoryList) String() string {
 func (*HistoryList) ProtoMessage() {}
 
 func (x *HistoryList) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_v1_graph_proto_msgTypes[12]
+	mi := &file_loam_v1_graph_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -809,7 +917,7 @@ func (x *HistoryList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryList.ProtoReflect.Descriptor instead.
 func (*HistoryList) Descriptor() ([]byte, []int) {
-	return file_loam_v1_graph_proto_rawDescGZIP(), []int{12}
+	return file_loam_v1_graph_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *HistoryList) GetEntries() []*HistoryEntry {
@@ -823,7 +931,7 @@ var File_loam_v1_graph_proto protoreflect.FileDescriptor
 
 const file_loam_v1_graph_proto_rawDesc = "" +
 	"\n" +
-	"\x13loam/v1/graph.proto\x12\aloam.v1\x1a\x14loam/v1/common.proto\"\x8e\x03\n" +
+	"\x13loam/v1/graph.proto\x12\aloam.v1\x1a\x14loam/v1/common.proto\"\xb0\x03\n" +
 	"\fQueryRequest\x12)\n" +
 	"\x05scope\x18\x01 \x01(\v2\x13.loam.v1.QueryScopeR\x05scope\x12!\n" +
 	"\x04page\x18\x02 \x01(\v2\r.loam.v1.PageR\x04page\x12:\n" +
@@ -837,8 +945,10 @@ const file_loam_v1_graph_proto_rawDesc = "" +
 	"\n" +
 	"dependents\x18\x06 \x01(\v2\x18.loam.v1.DependentsQueryH\x00R\n" +
 	"dependents\x121\n" +
-	"\ahistory\x18\a \x01(\v2\x15.loam.v1.HistoryQueryH\x00R\ahistoryB\a\n" +
-	"\x05query\")\n" +
+	"\ahistory\x18\a \x01(\v2\x15.loam.v1.HistoryQueryH\x00R\ahistory\x12\x17\n" +
+	"\x04file\x18\b \x01(\tH\x01R\x04file\x88\x01\x01B\a\n" +
+	"\x05queryB\a\n" +
+	"\x05_file\")\n" +
 	"\x0fDefinitionQuery\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\")\n" +
 	"\x0fReferencesQuery\x12\x16\n" +
@@ -848,18 +958,27 @@ const file_loam_v1_graph_proto_rawDesc = "" +
 	"\x0fDependentsQuery\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\"&\n" +
 	"\fHistoryQuery\x12\x16\n" +
-	"\x06symbol\x18\x01 \x01(\tR\x06symbol\"\xf1\x01\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\"\xbe\x02\n" +
 	"\rQueryResponse\x125\n" +
 	"\tlocations\x18\x01 \x01(\v2\x15.loam.v1.LocationListH\x00R\tlocations\x12=\n" +
 	"\fdependencies\x18\x02 \x01(\v2\x17.loam.v1.DependencyListH\x00R\fdependencies\x120\n" +
 	"\ahistory\x18\x03 \x01(\v2\x14.loam.v1.HistoryListH\x00R\ahistory\x12.\n" +
-	"\tpage_info\x18\x04 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfoB\b\n" +
-	"\x06result\"v\n" +
+	"\tpage_info\x18\x04 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo\x12-\n" +
+	"\bingested\x18\x05 \x03(\v2\x11.loam.v1.IngestedR\bingested\x12\x1c\n" +
+	"\ttruncated\x18\x06 \x01(\bR\ttruncatedB\b\n" +
+	"\x06result\"K\n" +
+	"\tMatchInfo\x12\x16\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x12\n" +
+	"\x04file\x18\x02 \x01(\tR\x04file\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\"\xba\x01\n" +
 	"\bLocation\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12.\n" +
 	"\tfile_line\x18\x02 \x01(\v2\x11.loam.v1.FileLineR\bfileLine\x12\x1b\n" +
-	"\x06symbol\x18\x03 \x01(\tH\x00R\x06symbol\x88\x01\x01B\t\n" +
-	"\a_symbol\"Z\n" +
+	"\x06symbol\x18\x03 \x01(\tH\x00R\x06symbol\x88\x01\x01\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\x12'\n" +
+	"\x02of\x18\x05 \x01(\v2\x12.loam.v1.MatchInfoH\x01R\x02of\x88\x01\x01B\t\n" +
+	"\a_symbolB\x05\n" +
+	"\x03_of\"Z\n" +
 	"\x0eDependencyEdge\x12%\n" +
 	"\x04from\x18\x01 \x01(\v2\x11.loam.v1.LocationR\x04from\x12!\n" +
 	"\x02to\x18\x02 \x01(\v2\x11.loam.v1.LocationR\x02to\"f\n" +
@@ -891,7 +1010,7 @@ func file_loam_v1_graph_proto_rawDescGZIP() []byte {
 	return file_loam_v1_graph_proto_rawDescData
 }
 
-var file_loam_v1_graph_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_loam_v1_graph_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_loam_v1_graph_proto_goTypes = []any{
 	(*QueryRequest)(nil),      // 0: loam.v1.QueryRequest
 	(*DefinitionQuery)(nil),   // 1: loam.v1.DefinitionQuery
@@ -900,42 +1019,46 @@ var file_loam_v1_graph_proto_goTypes = []any{
 	(*DependentsQuery)(nil),   // 4: loam.v1.DependentsQuery
 	(*HistoryQuery)(nil),      // 5: loam.v1.HistoryQuery
 	(*QueryResponse)(nil),     // 6: loam.v1.QueryResponse
-	(*Location)(nil),          // 7: loam.v1.Location
-	(*DependencyEdge)(nil),    // 8: loam.v1.DependencyEdge
-	(*HistoryEntry)(nil),      // 9: loam.v1.HistoryEntry
-	(*LocationList)(nil),      // 10: loam.v1.LocationList
-	(*DependencyList)(nil),    // 11: loam.v1.DependencyList
-	(*HistoryList)(nil),       // 12: loam.v1.HistoryList
-	(*QueryScope)(nil),        // 13: loam.v1.QueryScope
-	(*Page)(nil),              // 14: loam.v1.Page
-	(*PageInfo)(nil),          // 15: loam.v1.PageInfo
-	(*FileLine)(nil),          // 16: loam.v1.FileLine
+	(*MatchInfo)(nil),         // 7: loam.v1.MatchInfo
+	(*Location)(nil),          // 8: loam.v1.Location
+	(*DependencyEdge)(nil),    // 9: loam.v1.DependencyEdge
+	(*HistoryEntry)(nil),      // 10: loam.v1.HistoryEntry
+	(*LocationList)(nil),      // 11: loam.v1.LocationList
+	(*DependencyList)(nil),    // 12: loam.v1.DependencyList
+	(*HistoryList)(nil),       // 13: loam.v1.HistoryList
+	(*QueryScope)(nil),        // 14: loam.v1.QueryScope
+	(*Page)(nil),              // 15: loam.v1.Page
+	(*PageInfo)(nil),          // 16: loam.v1.PageInfo
+	(*Ingested)(nil),          // 17: loam.v1.Ingested
+	(*FileLine)(nil),          // 18: loam.v1.FileLine
 }
 var file_loam_v1_graph_proto_depIdxs = []int32{
-	13, // 0: loam.v1.QueryRequest.scope:type_name -> loam.v1.QueryScope
-	14, // 1: loam.v1.QueryRequest.page:type_name -> loam.v1.Page
+	14, // 0: loam.v1.QueryRequest.scope:type_name -> loam.v1.QueryScope
+	15, // 1: loam.v1.QueryRequest.page:type_name -> loam.v1.Page
 	1,  // 2: loam.v1.QueryRequest.definition:type_name -> loam.v1.DefinitionQuery
 	2,  // 3: loam.v1.QueryRequest.references:type_name -> loam.v1.ReferencesQuery
 	3,  // 4: loam.v1.QueryRequest.dependencies:type_name -> loam.v1.DependenciesQuery
 	4,  // 5: loam.v1.QueryRequest.dependents:type_name -> loam.v1.DependentsQuery
 	5,  // 6: loam.v1.QueryRequest.history:type_name -> loam.v1.HistoryQuery
-	10, // 7: loam.v1.QueryResponse.locations:type_name -> loam.v1.LocationList
-	11, // 8: loam.v1.QueryResponse.dependencies:type_name -> loam.v1.DependencyList
-	12, // 9: loam.v1.QueryResponse.history:type_name -> loam.v1.HistoryList
-	15, // 10: loam.v1.QueryResponse.page_info:type_name -> loam.v1.PageInfo
-	16, // 11: loam.v1.Location.file_line:type_name -> loam.v1.FileLine
-	7,  // 12: loam.v1.DependencyEdge.from:type_name -> loam.v1.Location
-	7,  // 13: loam.v1.DependencyEdge.to:type_name -> loam.v1.Location
-	7,  // 14: loam.v1.LocationList.locations:type_name -> loam.v1.Location
-	8,  // 15: loam.v1.DependencyList.edges:type_name -> loam.v1.DependencyEdge
-	9,  // 16: loam.v1.HistoryList.entries:type_name -> loam.v1.HistoryEntry
-	0,  // 17: loam.v1.GraphService.Query:input_type -> loam.v1.QueryRequest
-	6,  // 18: loam.v1.GraphService.Query:output_type -> loam.v1.QueryResponse
-	18, // [18:19] is the sub-list for method output_type
-	17, // [17:18] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	11, // 7: loam.v1.QueryResponse.locations:type_name -> loam.v1.LocationList
+	12, // 8: loam.v1.QueryResponse.dependencies:type_name -> loam.v1.DependencyList
+	13, // 9: loam.v1.QueryResponse.history:type_name -> loam.v1.HistoryList
+	16, // 10: loam.v1.QueryResponse.page_info:type_name -> loam.v1.PageInfo
+	17, // 11: loam.v1.QueryResponse.ingested:type_name -> loam.v1.Ingested
+	18, // 12: loam.v1.Location.file_line:type_name -> loam.v1.FileLine
+	7,  // 13: loam.v1.Location.of:type_name -> loam.v1.MatchInfo
+	8,  // 14: loam.v1.DependencyEdge.from:type_name -> loam.v1.Location
+	8,  // 15: loam.v1.DependencyEdge.to:type_name -> loam.v1.Location
+	8,  // 16: loam.v1.LocationList.locations:type_name -> loam.v1.Location
+	9,  // 17: loam.v1.DependencyList.edges:type_name -> loam.v1.DependencyEdge
+	10, // 18: loam.v1.HistoryList.entries:type_name -> loam.v1.HistoryEntry
+	0,  // 19: loam.v1.GraphService.Query:input_type -> loam.v1.QueryRequest
+	6,  // 20: loam.v1.GraphService.Query:output_type -> loam.v1.QueryResponse
+	20, // [20:21] is the sub-list for method output_type
+	19, // [19:20] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_loam_v1_graph_proto_init() }
@@ -956,14 +1079,14 @@ func file_loam_v1_graph_proto_init() {
 		(*QueryResponse_Dependencies)(nil),
 		(*QueryResponse_History)(nil),
 	}
-	file_loam_v1_graph_proto_msgTypes[7].OneofWrappers = []any{}
+	file_loam_v1_graph_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_v1_graph_proto_rawDesc), len(file_loam_v1_graph_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

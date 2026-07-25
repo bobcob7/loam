@@ -29,4 +29,8 @@ message SearchResult {
 message SearchResponse {
   repeated SearchResult results = 1;
   PageInfo page_info = 2;
+  // Repos ingested since the caller last synced, so it can tell results may be stale.
+  repeated Ingested ingested = 3;
+  // True if the result list was cut short by a server-enforced cap.
+  bool truncated = 4;
 }

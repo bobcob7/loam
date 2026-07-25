@@ -167,9 +167,13 @@ func (x *SearchResult) GetSnippet() string {
 }
 
 type SearchResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Results       []*SearchResult        `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
-	PageInfo      *PageInfo              `protobuf:"bytes,2,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Results  []*SearchResult        `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	PageInfo *PageInfo              `protobuf:"bytes,2,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	// Repos ingested since the caller last synced, so it can tell results may be stale.
+	Ingested []*Ingested `protobuf:"bytes,3,rep,name=ingested,proto3" json:"ingested,omitempty"`
+	// True if the result list was cut short by a server-enforced cap.
+	Truncated     bool `protobuf:"varint,4,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -218,6 +222,20 @@ func (x *SearchResponse) GetPageInfo() *PageInfo {
 	return nil
 }
 
+func (x *SearchResponse) GetIngested() []*Ingested {
+	if x != nil {
+		return x.Ingested
+	}
+	return nil
+}
+
+func (x *SearchResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
 var File_loam_v1_search_proto protoreflect.FileDescriptor
 
 const file_loam_v1_search_proto_rawDesc = "" +
@@ -234,10 +252,12 @@ const file_loam_v1_search_proto_rawDesc = "" +
 	"start_line\x18\x03 \x01(\rR\tstartLine\x12\x19\n" +
 	"\bend_line\x18\x04 \x01(\rR\aendLine\x12\x14\n" +
 	"\x05score\x18\x05 \x01(\x02R\x05score\x12\x18\n" +
-	"\asnippet\x18\x06 \x01(\tR\asnippet\"q\n" +
+	"\asnippet\x18\x06 \x01(\tR\asnippet\"\xbe\x01\n" +
 	"\x0eSearchResponse\x12/\n" +
 	"\aresults\x18\x01 \x03(\v2\x15.loam.v1.SearchResultR\aresults\x12.\n" +
-	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo2J\n" +
+	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo\x12-\n" +
+	"\bingested\x18\x03 \x03(\v2\x11.loam.v1.IngestedR\bingested\x12\x1c\n" +
+	"\ttruncated\x18\x04 \x01(\bR\ttruncated2J\n" +
 	"\rSearchService\x129\n" +
 	"\x06Search\x12\x16.loam.v1.SearchRequest\x1a\x17.loam.v1.SearchResponseB\x8c\x01\n" +
 	"\vcom.loam.v1B\vSearchProtoP\x01Z3github.com/bobcob7/loam/internal/gen/loam/v1;loamv1\xa2\x02\x03LXX\xaa\x02\aLoam.V1\xca\x02\aLoam\\V1\xe2\x02\x13Loam\\V1\\GPBMetadata\xea\x02\bLoam::V1b\x06proto3"
@@ -262,19 +282,21 @@ var file_loam_v1_search_proto_goTypes = []any{
 	(*QueryScope)(nil),     // 3: loam.v1.QueryScope
 	(*Page)(nil),           // 4: loam.v1.Page
 	(*PageInfo)(nil),       // 5: loam.v1.PageInfo
+	(*Ingested)(nil),       // 6: loam.v1.Ingested
 }
 var file_loam_v1_search_proto_depIdxs = []int32{
 	3, // 0: loam.v1.SearchRequest.scope:type_name -> loam.v1.QueryScope
 	4, // 1: loam.v1.SearchRequest.page:type_name -> loam.v1.Page
 	1, // 2: loam.v1.SearchResponse.results:type_name -> loam.v1.SearchResult
 	5, // 3: loam.v1.SearchResponse.page_info:type_name -> loam.v1.PageInfo
-	0, // 4: loam.v1.SearchService.Search:input_type -> loam.v1.SearchRequest
-	2, // 5: loam.v1.SearchService.Search:output_type -> loam.v1.SearchResponse
-	5, // [5:6] is the sub-list for method output_type
-	4, // [4:5] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	6, // 4: loam.v1.SearchResponse.ingested:type_name -> loam.v1.Ingested
+	0, // 5: loam.v1.SearchService.Search:input_type -> loam.v1.SearchRequest
+	2, // 6: loam.v1.SearchService.Search:output_type -> loam.v1.SearchResponse
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_loam_v1_search_proto_init() }

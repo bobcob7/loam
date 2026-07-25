@@ -243,14 +243,18 @@ func (x *SyncStatus) GetError() string {
 type EnrolledRepo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Enrolled repo identifier, "<group>/<repo_name>".
-	Repo                 string      `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
-	UpstreamUrl          string      `protobuf:"bytes,2,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
-	TargetBranches       []string    `protobuf:"bytes,3,rep,name=target_branches,json=targetBranches,proto3" json:"target_branches,omitempty"`
-	DefaultTarget        string      `protobuf:"bytes,4,opt,name=default_target,json=defaultTarget,proto3" json:"default_target,omitempty"`
-	Sync                 *SyncStatus `protobuf:"bytes,5,opt,name=sync,proto3" json:"sync,omitempty"`
-	HasDescriptionSchema bool        `protobuf:"varint,6,opt,name=has_description_schema,json=hasDescriptionSchema,proto3" json:"has_description_schema,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	Repo           string      `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
+	UpstreamUrl    string      `protobuf:"bytes,2,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
+	TargetBranches []string    `protobuf:"bytes,3,rep,name=target_branches,json=targetBranches,proto3" json:"target_branches,omitempty"`
+	Sync           *SyncStatus `protobuf:"bytes,5,opt,name=sync,proto3" json:"sync,omitempty"`
+	// Branch whose content is ingested into the graph/vector indexes; must be one of
+	// target_branches.
+	IndexedBranch string `protobuf:"bytes,7,opt,name=indexed_branch,json=indexedBranch,proto3" json:"indexed_branch,omitempty"`
+	// Commit/ref last ingested for indexed_branch. Empty until the first ingest
+	// completes.
+	IngestedRef   string `protobuf:"bytes,8,opt,name=ingested_ref,json=ingestedRef,proto3" json:"ingested_ref,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrolledRepo) Reset() {
@@ -304,13 +308,6 @@ func (x *EnrolledRepo) GetTargetBranches() []string {
 	return nil
 }
 
-func (x *EnrolledRepo) GetDefaultTarget() string {
-	if x != nil {
-		return x.DefaultTarget
-	}
-	return ""
-}
-
 func (x *EnrolledRepo) GetSync() *SyncStatus {
 	if x != nil {
 		return x.Sync
@@ -318,19 +315,29 @@ func (x *EnrolledRepo) GetSync() *SyncStatus {
 	return nil
 }
 
-func (x *EnrolledRepo) GetHasDescriptionSchema() bool {
+func (x *EnrolledRepo) GetIndexedBranch() string {
 	if x != nil {
-		return x.HasDescriptionSchema
+		return x.IndexedBranch
 	}
-	return false
+	return ""
+}
+
+func (x *EnrolledRepo) GetIngestedRef() string {
+	if x != nil {
+		return x.IngestedRef
+	}
+	return ""
 }
 
 type EnrollRepoRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	UpstreamUrl    string                 `protobuf:"bytes,1,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
 	TargetBranches []string               `protobuf:"bytes,2,rep,name=target_branches,json=targetBranches,proto3" json:"target_branches,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Branch whose content is ingested into the graph/vector indexes; validated as
+	// one of target_branches by the handler.
+	IndexedBranch string `protobuf:"bytes,3,opt,name=indexed_branch,json=indexedBranch,proto3" json:"indexed_branch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollRepoRequest) Reset() {
@@ -375,6 +382,13 @@ func (x *EnrollRepoRequest) GetTargetBranches() []string {
 		return x.TargetBranches
 	}
 	return nil
+}
+
+func (x *EnrollRepoRequest) GetIndexedBranch() string {
+	if x != nil {
+		return x.IndexedBranch
+	}
+	return ""
 }
 
 type EnrollRepoResponse struct {
@@ -685,17 +699,127 @@ func (*RemoveRepoResponse) Descriptor() ([]byte, []int) {
 	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{9}
 }
 
+// Typed error detail attached to a FAILED_PRECONDITION RemoveRepo response when the
+// repo has non-terminal (not COMPLETE/CLOSED) work branches (see docs/web-spec.md).
+type RemovalBlocked struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Blockers      []*BlockedWorkBranch   `protobuf:"bytes,1,rep,name=blockers,proto3" json:"blockers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemovalBlocked) Reset() {
+	*x = RemovalBlocked{}
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemovalBlocked) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemovalBlocked) ProtoMessage() {}
+
+func (x *RemovalBlocked) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemovalBlocked.ProtoReflect.Descriptor instead.
+func (*RemovalBlocked) Descriptor() ([]byte, []int) {
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RemovalBlocked) GetBlockers() []*BlockedWorkBranch {
+	if x != nil {
+		return x.Blockers
+	}
+	return nil
+}
+
+// One work branch blocking a RemoveRepo call.
+type BlockedWorkBranch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	State         v1.WorkBranchState     `protobuf:"varint,3,opt,name=state,proto3,enum=loam.v1.WorkBranchState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockedWorkBranch) Reset() {
+	*x = BlockedWorkBranch{}
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockedWorkBranch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockedWorkBranch) ProtoMessage() {}
+
+func (x *BlockedWorkBranch) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockedWorkBranch.ProtoReflect.Descriptor instead.
+func (*BlockedWorkBranch) Descriptor() ([]byte, []int) {
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *BlockedWorkBranch) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *BlockedWorkBranch) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *BlockedWorkBranch) GetState() v1.WorkBranchState {
+	if x != nil {
+		return x.State
+	}
+	return v1.WorkBranchState(0)
+}
+
 type SetTargetBranchesRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Repo           string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	TargetBranches []string               `protobuf:"bytes,2,rep,name=target_branches,json=targetBranches,proto3" json:"target_branches,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Branch whose content is ingested into the graph/vector indexes; validated as
+	// one of target_branches by the handler.
+	IndexedBranch string `protobuf:"bytes,3,opt,name=indexed_branch,json=indexedBranch,proto3" json:"indexed_branch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SetTargetBranchesRequest) Reset() {
 	*x = SetTargetBranchesRequest{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[10]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -707,7 +831,7 @@ func (x *SetTargetBranchesRequest) String() string {
 func (*SetTargetBranchesRequest) ProtoMessage() {}
 
 func (x *SetTargetBranchesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[10]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -720,7 +844,7 @@ func (x *SetTargetBranchesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTargetBranchesRequest.ProtoReflect.Descriptor instead.
 func (*SetTargetBranchesRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{10}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SetTargetBranchesRequest) GetRepo() string {
@@ -737,6 +861,13 @@ func (x *SetTargetBranchesRequest) GetTargetBranches() []string {
 	return nil
 }
 
+func (x *SetTargetBranchesRequest) GetIndexedBranch() string {
+	if x != nil {
+		return x.IndexedBranch
+	}
+	return ""
+}
+
 type SetTargetBranchesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Repo          *EnrolledRepo          `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
@@ -746,7 +877,7 @@ type SetTargetBranchesResponse struct {
 
 func (x *SetTargetBranchesResponse) Reset() {
 	*x = SetTargetBranchesResponse{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[11]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -758,7 +889,7 @@ func (x *SetTargetBranchesResponse) String() string {
 func (*SetTargetBranchesResponse) ProtoMessage() {}
 
 func (x *SetTargetBranchesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[11]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -771,7 +902,7 @@ func (x *SetTargetBranchesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTargetBranchesResponse.ProtoReflect.Descriptor instead.
 func (*SetTargetBranchesResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{11}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetTargetBranchesResponse) GetRepo() *EnrolledRepo {
@@ -792,7 +923,7 @@ type SetDescriptionSchemaRequest struct {
 
 func (x *SetDescriptionSchemaRequest) Reset() {
 	*x = SetDescriptionSchemaRequest{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[12]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -804,7 +935,7 @@ func (x *SetDescriptionSchemaRequest) String() string {
 func (*SetDescriptionSchemaRequest) ProtoMessage() {}
 
 func (x *SetDescriptionSchemaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[12]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -817,7 +948,7 @@ func (x *SetDescriptionSchemaRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDescriptionSchemaRequest.ProtoReflect.Descriptor instead.
 func (*SetDescriptionSchemaRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{12}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SetDescriptionSchemaRequest) GetRepo() string {
@@ -843,7 +974,7 @@ type SetDescriptionSchemaResponse struct {
 
 func (x *SetDescriptionSchemaResponse) Reset() {
 	*x = SetDescriptionSchemaResponse{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[13]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -855,7 +986,7 @@ func (x *SetDescriptionSchemaResponse) String() string {
 func (*SetDescriptionSchemaResponse) ProtoMessage() {}
 
 func (x *SetDescriptionSchemaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[13]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -868,7 +999,7 @@ func (x *SetDescriptionSchemaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDescriptionSchemaResponse.ProtoReflect.Descriptor instead.
 func (*SetDescriptionSchemaResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{13}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SetDescriptionSchemaResponse) GetRepo() *EnrolledRepo {
@@ -898,7 +1029,7 @@ type IngestJob struct {
 
 func (x *IngestJob) Reset() {
 	*x = IngestJob{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[14]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -910,7 +1041,7 @@ func (x *IngestJob) String() string {
 func (*IngestJob) ProtoMessage() {}
 
 func (x *IngestJob) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[14]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -923,7 +1054,7 @@ func (x *IngestJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestJob.ProtoReflect.Descriptor instead.
 func (*IngestJob) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{14}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *IngestJob) GetRepo() string {
@@ -998,7 +1129,7 @@ type ReindexRepoRequest struct {
 
 func (x *ReindexRepoRequest) Reset() {
 	*x = ReindexRepoRequest{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[15]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1010,7 +1141,7 @@ func (x *ReindexRepoRequest) String() string {
 func (*ReindexRepoRequest) ProtoMessage() {}
 
 func (x *ReindexRepoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[15]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1023,7 +1154,7 @@ func (x *ReindexRepoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReindexRepoRequest.ProtoReflect.Descriptor instead.
 func (*ReindexRepoRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{15}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ReindexRepoRequest) GetRepo() string {
@@ -1042,7 +1173,7 @@ type ReindexRepoResponse struct {
 
 func (x *ReindexRepoResponse) Reset() {
 	*x = ReindexRepoResponse{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[16]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1054,7 +1185,7 @@ func (x *ReindexRepoResponse) String() string {
 func (*ReindexRepoResponse) ProtoMessage() {}
 
 func (x *ReindexRepoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[16]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1067,7 +1198,7 @@ func (x *ReindexRepoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReindexRepoResponse.ProtoReflect.Descriptor instead.
 func (*ReindexRepoResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{16}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ReindexRepoResponse) GetJob() *IngestJob {
@@ -1089,7 +1220,7 @@ type ListIngestJobsRequest struct {
 
 func (x *ListIngestJobsRequest) Reset() {
 	*x = ListIngestJobsRequest{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[17]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1101,7 +1232,7 @@ func (x *ListIngestJobsRequest) String() string {
 func (*ListIngestJobsRequest) ProtoMessage() {}
 
 func (x *ListIngestJobsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[17]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1114,7 +1245,7 @@ func (x *ListIngestJobsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIngestJobsRequest.ProtoReflect.Descriptor instead.
 func (*ListIngestJobsRequest) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{17}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ListIngestJobsRequest) GetPage() *v1.Page {
@@ -1148,7 +1279,7 @@ type ListIngestJobsResponse struct {
 
 func (x *ListIngestJobsResponse) Reset() {
 	*x = ListIngestJobsResponse{}
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[18]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1160,7 +1291,7 @@ func (x *ListIngestJobsResponse) String() string {
 func (*ListIngestJobsResponse) ProtoMessage() {}
 
 func (x *ListIngestJobsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[18]
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1173,7 +1304,7 @@ func (x *ListIngestJobsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIngestJobsResponse.ProtoReflect.Descriptor instead.
 func (*ListIngestJobsResponse) Descriptor() ([]byte, []int) {
-	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{18}
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListIngestJobsResponse) GetJobs() []*IngestJob {
@@ -1190,6 +1321,104 @@ func (x *ListIngestJobsResponse) GetPageInfo() *v1.PageInfo {
 	return nil
 }
 
+type ProbeRepoRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UpstreamUrl   string                 `protobuf:"bytes,1,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeRepoRequest) Reset() {
+	*x = ProbeRepoRequest{}
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeRepoRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeRepoRequest) ProtoMessage() {}
+
+func (x *ProbeRepoRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeRepoRequest.ProtoReflect.Descriptor instead.
+func (*ProbeRepoRequest) Descriptor() ([]byte, []int) {
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ProbeRepoRequest) GetUpstreamUrl() string {
+	if x != nil {
+		return x.UpstreamUrl
+	}
+	return ""
+}
+
+type ProbeRepoResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Branches available on the upstream, for choosing target/indexed branches.
+	Branches []string `protobuf:"bytes,1,rep,name=branches,proto3" json:"branches,omitempty"`
+	// Ref currently at HEAD upstream.
+	Head          string `protobuf:"bytes,2,opt,name=head,proto3" json:"head,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeRepoResponse) Reset() {
+	*x = ProbeRepoResponse{}
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeRepoResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeRepoResponse) ProtoMessage() {}
+
+func (x *ProbeRepoResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_admin_v1_repo_admin_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeRepoResponse.ProtoReflect.Descriptor instead.
+func (*ProbeRepoResponse) Descriptor() ([]byte, []int) {
+	return file_loam_admin_v1_repo_admin_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ProbeRepoResponse) GetBranches() []string {
+	if x != nil {
+		return x.Branches
+	}
+	return nil
+}
+
+func (x *ProbeRepoResponse) GetHead() string {
+	if x != nil {
+		return x.Head
+	}
+	return ""
+}
+
 var File_loam_admin_v1_repo_admin_proto protoreflect.FileDescriptor
 
 const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
@@ -1199,17 +1428,18 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"SyncStatus\x12.\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x18.loam.admin.v1.SyncStateR\x05state\x12$\n" +
 	"\x0elast_synced_at\x18\x02 \x01(\tR\flastSyncedAt\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"\xfa\x01\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\x9b\x02\n" +
 	"\fEnrolledRepo\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12!\n" +
 	"\fupstream_url\x18\x02 \x01(\tR\vupstreamUrl\x12'\n" +
-	"\x0ftarget_branches\x18\x03 \x03(\tR\x0etargetBranches\x12%\n" +
-	"\x0edefault_target\x18\x04 \x01(\tR\rdefaultTarget\x12-\n" +
-	"\x04sync\x18\x05 \x01(\v2\x19.loam.admin.v1.SyncStatusR\x04sync\x124\n" +
-	"\x16has_description_schema\x18\x06 \x01(\bR\x14hasDescriptionSchema\"_\n" +
+	"\x0ftarget_branches\x18\x03 \x03(\tR\x0etargetBranches\x12-\n" +
+	"\x04sync\x18\x05 \x01(\v2\x19.loam.admin.v1.SyncStatusR\x04sync\x12%\n" +
+	"\x0eindexed_branch\x18\a \x01(\tR\rindexedBranch\x12!\n" +
+	"\fingested_ref\x18\b \x01(\tR\vingestedRefJ\x04\b\x04\x10\x05J\x04\b\x06\x10\aR\x0edefault_targetR\x16has_description_schema\"\x86\x01\n" +
 	"\x11EnrollRepoRequest\x12!\n" +
 	"\fupstream_url\x18\x01 \x01(\tR\vupstreamUrl\x12'\n" +
-	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\"E\n" +
+	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\x12%\n" +
+	"\x0eindexed_branch\x18\x03 \x01(\tR\rindexedBranch\"E\n" +
 	"\x12EnrollRepoResponse\x12/\n" +
 	"\x04repo\x18\x01 \x01(\v2\x1b.loam.admin.v1.EnrolledRepoR\x04repo\"5\n" +
 	"\x10ListReposRequest\x12!\n" +
@@ -1223,10 +1453,17 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\x04repo\x18\x01 \x01(\v2\x1b.loam.admin.v1.EnrolledRepoR\x04repo\"'\n" +
 	"\x11RemoveRepoRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\"\x14\n" +
-	"\x12RemoveRepoResponse\"W\n" +
+	"\x12RemoveRepoResponse\"N\n" +
+	"\x0eRemovalBlocked\x12<\n" +
+	"\bblockers\x18\x01 \x03(\v2 .loam.admin.v1.BlockedWorkBranchR\bblockers\"m\n" +
+	"\x11BlockedWorkBranch\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12.\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x18.loam.v1.WorkBranchStateR\x05state\"~\n" +
 	"\x18SetTargetBranchesRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12'\n" +
-	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\"L\n" +
+	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\x12%\n" +
+	"\x0eindexed_branch\x18\x03 \x01(\tR\rindexedBranch\"L\n" +
 	"\x19SetTargetBranchesResponse\x12/\n" +
 	"\x04repo\x18\x01 \x01(\v2\x1b.loam.admin.v1.EnrolledRepoR\x04repo\"I\n" +
 	"\x1bSetDescriptionSchemaRequest\x12\x12\n" +
@@ -1258,7 +1495,12 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\a_status\"v\n" +
 	"\x16ListIngestJobsResponse\x12,\n" +
 	"\x04jobs\x18\x01 \x03(\v2\x18.loam.admin.v1.IngestJobR\x04jobs\x12.\n" +
-	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo*j\n" +
+	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo\"5\n" +
+	"\x10ProbeRepoRequest\x12!\n" +
+	"\fupstream_url\x18\x01 \x01(\tR\vupstreamUrl\"C\n" +
+	"\x11ProbeRepoResponse\x12\x1a\n" +
+	"\bbranches\x18\x01 \x03(\tR\bbranches\x12\x12\n" +
+	"\x04head\x18\x02 \x01(\tR\x04head*j\n" +
 	"\tSyncState\x12\x1a\n" +
 	"\x16SYNC_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fSYNC_STATE_IDLE\x10\x01\x12\x16\n" +
@@ -1274,7 +1516,7 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\x14INGEST_STATUS_QUEUED\x10\x01\x12\x19\n" +
 	"\x15INGEST_STATUS_RUNNING\x10\x02\x12\x1b\n" +
 	"\x17INGEST_STATUS_SUCCEEDED\x10\x03\x12\x18\n" +
-	"\x14INGEST_STATUS_FAILED\x10\x042\xe0\x05\n" +
+	"\x14INGEST_STATUS_FAILED\x10\x042\xb0\x06\n" +
 	"\x10RepoAdminService\x12Q\n" +
 	"\n" +
 	"EnrollRepo\x12 .loam.admin.v1.EnrollRepoRequest\x1a!.loam.admin.v1.EnrollRepoResponse\x12N\n" +
@@ -1285,7 +1527,8 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\x11SetTargetBranches\x12'.loam.admin.v1.SetTargetBranchesRequest\x1a(.loam.admin.v1.SetTargetBranchesResponse\x12o\n" +
 	"\x14SetDescriptionSchema\x12*.loam.admin.v1.SetDescriptionSchemaRequest\x1a+.loam.admin.v1.SetDescriptionSchemaResponse\x12T\n" +
 	"\vReindexRepo\x12!.loam.admin.v1.ReindexRepoRequest\x1a\".loam.admin.v1.ReindexRepoResponse\x12]\n" +
-	"\x0eListIngestJobs\x12$.loam.admin.v1.ListIngestJobsRequest\x1a%.loam.admin.v1.ListIngestJobsResponseB\xb5\x01\n" +
+	"\x0eListIngestJobs\x12$.loam.admin.v1.ListIngestJobsRequest\x1a%.loam.admin.v1.ListIngestJobsResponse\x12N\n" +
+	"\tProbeRepo\x12\x1f.loam.admin.v1.ProbeRepoRequest\x1a .loam.admin.v1.ProbeRepoResponseB\xb5\x01\n" +
 	"\x11com.loam.admin.v1B\x0eRepoAdminProtoP\x01Z:github.com/bobcob7/loam/internal/gen/loam/admin/v1;adminv1\xa2\x02\x03LAX\xaa\x02\rLoam.Admin.V1\xca\x02\rLoam\\Admin\\V1\xe2\x02\x19Loam\\Admin\\V1\\GPBMetadata\xea\x02\x0fLoam::Admin::V1b\x06proto3"
 
 var (
@@ -1301,7 +1544,7 @@ func file_loam_admin_v1_repo_admin_proto_rawDescGZIP() []byte {
 }
 
 var file_loam_admin_v1_repo_admin_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_loam_admin_v1_repo_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_loam_admin_v1_repo_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_loam_admin_v1_repo_admin_proto_goTypes = []any{
 	(SyncState)(0),                       // 0: loam.admin.v1.SyncState
 	(IngestKind)(0),                      // 1: loam.admin.v1.IngestKind
@@ -1316,56 +1559,65 @@ var file_loam_admin_v1_repo_admin_proto_goTypes = []any{
 	(*GetRepoResponse)(nil),              // 10: loam.admin.v1.GetRepoResponse
 	(*RemoveRepoRequest)(nil),            // 11: loam.admin.v1.RemoveRepoRequest
 	(*RemoveRepoResponse)(nil),           // 12: loam.admin.v1.RemoveRepoResponse
-	(*SetTargetBranchesRequest)(nil),     // 13: loam.admin.v1.SetTargetBranchesRequest
-	(*SetTargetBranchesResponse)(nil),    // 14: loam.admin.v1.SetTargetBranchesResponse
-	(*SetDescriptionSchemaRequest)(nil),  // 15: loam.admin.v1.SetDescriptionSchemaRequest
-	(*SetDescriptionSchemaResponse)(nil), // 16: loam.admin.v1.SetDescriptionSchemaResponse
-	(*IngestJob)(nil),                    // 17: loam.admin.v1.IngestJob
-	(*ReindexRepoRequest)(nil),           // 18: loam.admin.v1.ReindexRepoRequest
-	(*ReindexRepoResponse)(nil),          // 19: loam.admin.v1.ReindexRepoResponse
-	(*ListIngestJobsRequest)(nil),        // 20: loam.admin.v1.ListIngestJobsRequest
-	(*ListIngestJobsResponse)(nil),       // 21: loam.admin.v1.ListIngestJobsResponse
-	(*v1.Page)(nil),                      // 22: loam.v1.Page
-	(*v1.PageInfo)(nil),                  // 23: loam.v1.PageInfo
+	(*RemovalBlocked)(nil),               // 13: loam.admin.v1.RemovalBlocked
+	(*BlockedWorkBranch)(nil),            // 14: loam.admin.v1.BlockedWorkBranch
+	(*SetTargetBranchesRequest)(nil),     // 15: loam.admin.v1.SetTargetBranchesRequest
+	(*SetTargetBranchesResponse)(nil),    // 16: loam.admin.v1.SetTargetBranchesResponse
+	(*SetDescriptionSchemaRequest)(nil),  // 17: loam.admin.v1.SetDescriptionSchemaRequest
+	(*SetDescriptionSchemaResponse)(nil), // 18: loam.admin.v1.SetDescriptionSchemaResponse
+	(*IngestJob)(nil),                    // 19: loam.admin.v1.IngestJob
+	(*ReindexRepoRequest)(nil),           // 20: loam.admin.v1.ReindexRepoRequest
+	(*ReindexRepoResponse)(nil),          // 21: loam.admin.v1.ReindexRepoResponse
+	(*ListIngestJobsRequest)(nil),        // 22: loam.admin.v1.ListIngestJobsRequest
+	(*ListIngestJobsResponse)(nil),       // 23: loam.admin.v1.ListIngestJobsResponse
+	(*ProbeRepoRequest)(nil),             // 24: loam.admin.v1.ProbeRepoRequest
+	(*ProbeRepoResponse)(nil),            // 25: loam.admin.v1.ProbeRepoResponse
+	(*v1.Page)(nil),                      // 26: loam.v1.Page
+	(*v1.PageInfo)(nil),                  // 27: loam.v1.PageInfo
+	(v1.WorkBranchState)(0),              // 28: loam.v1.WorkBranchState
 }
 var file_loam_admin_v1_repo_admin_proto_depIdxs = []int32{
 	0,  // 0: loam.admin.v1.SyncStatus.state:type_name -> loam.admin.v1.SyncState
 	3,  // 1: loam.admin.v1.EnrolledRepo.sync:type_name -> loam.admin.v1.SyncStatus
 	4,  // 2: loam.admin.v1.EnrollRepoResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
-	22, // 3: loam.admin.v1.ListReposRequest.page:type_name -> loam.v1.Page
+	26, // 3: loam.admin.v1.ListReposRequest.page:type_name -> loam.v1.Page
 	4,  // 4: loam.admin.v1.ListReposResponse.repos:type_name -> loam.admin.v1.EnrolledRepo
-	23, // 5: loam.admin.v1.ListReposResponse.page_info:type_name -> loam.v1.PageInfo
+	27, // 5: loam.admin.v1.ListReposResponse.page_info:type_name -> loam.v1.PageInfo
 	4,  // 6: loam.admin.v1.GetRepoResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
-	4,  // 7: loam.admin.v1.SetTargetBranchesResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
-	4,  // 8: loam.admin.v1.SetDescriptionSchemaResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
-	1,  // 9: loam.admin.v1.IngestJob.kind:type_name -> loam.admin.v1.IngestKind
-	2,  // 10: loam.admin.v1.IngestJob.status:type_name -> loam.admin.v1.IngestStatus
-	17, // 11: loam.admin.v1.ReindexRepoResponse.job:type_name -> loam.admin.v1.IngestJob
-	22, // 12: loam.admin.v1.ListIngestJobsRequest.page:type_name -> loam.v1.Page
-	2,  // 13: loam.admin.v1.ListIngestJobsRequest.status:type_name -> loam.admin.v1.IngestStatus
-	17, // 14: loam.admin.v1.ListIngestJobsResponse.jobs:type_name -> loam.admin.v1.IngestJob
-	23, // 15: loam.admin.v1.ListIngestJobsResponse.page_info:type_name -> loam.v1.PageInfo
-	5,  // 16: loam.admin.v1.RepoAdminService.EnrollRepo:input_type -> loam.admin.v1.EnrollRepoRequest
-	7,  // 17: loam.admin.v1.RepoAdminService.ListRepos:input_type -> loam.admin.v1.ListReposRequest
-	9,  // 18: loam.admin.v1.RepoAdminService.GetRepo:input_type -> loam.admin.v1.GetRepoRequest
-	11, // 19: loam.admin.v1.RepoAdminService.RemoveRepo:input_type -> loam.admin.v1.RemoveRepoRequest
-	13, // 20: loam.admin.v1.RepoAdminService.SetTargetBranches:input_type -> loam.admin.v1.SetTargetBranchesRequest
-	15, // 21: loam.admin.v1.RepoAdminService.SetDescriptionSchema:input_type -> loam.admin.v1.SetDescriptionSchemaRequest
-	18, // 22: loam.admin.v1.RepoAdminService.ReindexRepo:input_type -> loam.admin.v1.ReindexRepoRequest
-	20, // 23: loam.admin.v1.RepoAdminService.ListIngestJobs:input_type -> loam.admin.v1.ListIngestJobsRequest
-	6,  // 24: loam.admin.v1.RepoAdminService.EnrollRepo:output_type -> loam.admin.v1.EnrollRepoResponse
-	8,  // 25: loam.admin.v1.RepoAdminService.ListRepos:output_type -> loam.admin.v1.ListReposResponse
-	10, // 26: loam.admin.v1.RepoAdminService.GetRepo:output_type -> loam.admin.v1.GetRepoResponse
-	12, // 27: loam.admin.v1.RepoAdminService.RemoveRepo:output_type -> loam.admin.v1.RemoveRepoResponse
-	14, // 28: loam.admin.v1.RepoAdminService.SetTargetBranches:output_type -> loam.admin.v1.SetTargetBranchesResponse
-	16, // 29: loam.admin.v1.RepoAdminService.SetDescriptionSchema:output_type -> loam.admin.v1.SetDescriptionSchemaResponse
-	19, // 30: loam.admin.v1.RepoAdminService.ReindexRepo:output_type -> loam.admin.v1.ReindexRepoResponse
-	21, // 31: loam.admin.v1.RepoAdminService.ListIngestJobs:output_type -> loam.admin.v1.ListIngestJobsResponse
-	24, // [24:32] is the sub-list for method output_type
-	16, // [16:24] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	14, // 7: loam.admin.v1.RemovalBlocked.blockers:type_name -> loam.admin.v1.BlockedWorkBranch
+	28, // 8: loam.admin.v1.BlockedWorkBranch.state:type_name -> loam.v1.WorkBranchState
+	4,  // 9: loam.admin.v1.SetTargetBranchesResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
+	4,  // 10: loam.admin.v1.SetDescriptionSchemaResponse.repo:type_name -> loam.admin.v1.EnrolledRepo
+	1,  // 11: loam.admin.v1.IngestJob.kind:type_name -> loam.admin.v1.IngestKind
+	2,  // 12: loam.admin.v1.IngestJob.status:type_name -> loam.admin.v1.IngestStatus
+	19, // 13: loam.admin.v1.ReindexRepoResponse.job:type_name -> loam.admin.v1.IngestJob
+	26, // 14: loam.admin.v1.ListIngestJobsRequest.page:type_name -> loam.v1.Page
+	2,  // 15: loam.admin.v1.ListIngestJobsRequest.status:type_name -> loam.admin.v1.IngestStatus
+	19, // 16: loam.admin.v1.ListIngestJobsResponse.jobs:type_name -> loam.admin.v1.IngestJob
+	27, // 17: loam.admin.v1.ListIngestJobsResponse.page_info:type_name -> loam.v1.PageInfo
+	5,  // 18: loam.admin.v1.RepoAdminService.EnrollRepo:input_type -> loam.admin.v1.EnrollRepoRequest
+	7,  // 19: loam.admin.v1.RepoAdminService.ListRepos:input_type -> loam.admin.v1.ListReposRequest
+	9,  // 20: loam.admin.v1.RepoAdminService.GetRepo:input_type -> loam.admin.v1.GetRepoRequest
+	11, // 21: loam.admin.v1.RepoAdminService.RemoveRepo:input_type -> loam.admin.v1.RemoveRepoRequest
+	15, // 22: loam.admin.v1.RepoAdminService.SetTargetBranches:input_type -> loam.admin.v1.SetTargetBranchesRequest
+	17, // 23: loam.admin.v1.RepoAdminService.SetDescriptionSchema:input_type -> loam.admin.v1.SetDescriptionSchemaRequest
+	20, // 24: loam.admin.v1.RepoAdminService.ReindexRepo:input_type -> loam.admin.v1.ReindexRepoRequest
+	22, // 25: loam.admin.v1.RepoAdminService.ListIngestJobs:input_type -> loam.admin.v1.ListIngestJobsRequest
+	24, // 26: loam.admin.v1.RepoAdminService.ProbeRepo:input_type -> loam.admin.v1.ProbeRepoRequest
+	6,  // 27: loam.admin.v1.RepoAdminService.EnrollRepo:output_type -> loam.admin.v1.EnrollRepoResponse
+	8,  // 28: loam.admin.v1.RepoAdminService.ListRepos:output_type -> loam.admin.v1.ListReposResponse
+	10, // 29: loam.admin.v1.RepoAdminService.GetRepo:output_type -> loam.admin.v1.GetRepoResponse
+	12, // 30: loam.admin.v1.RepoAdminService.RemoveRepo:output_type -> loam.admin.v1.RemoveRepoResponse
+	16, // 31: loam.admin.v1.RepoAdminService.SetTargetBranches:output_type -> loam.admin.v1.SetTargetBranchesResponse
+	18, // 32: loam.admin.v1.RepoAdminService.SetDescriptionSchema:output_type -> loam.admin.v1.SetDescriptionSchemaResponse
+	21, // 33: loam.admin.v1.RepoAdminService.ReindexRepo:output_type -> loam.admin.v1.ReindexRepoResponse
+	23, // 34: loam.admin.v1.RepoAdminService.ListIngestJobs:output_type -> loam.admin.v1.ListIngestJobsResponse
+	25, // 35: loam.admin.v1.RepoAdminService.ProbeRepo:output_type -> loam.admin.v1.ProbeRepoResponse
+	27, // [27:36] is the sub-list for method output_type
+	18, // [18:27] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_loam_admin_v1_repo_admin_proto_init() }
@@ -1373,14 +1625,14 @@ func file_loam_admin_v1_repo_admin_proto_init() {
 	if File_loam_admin_v1_repo_admin_proto != nil {
 		return
 	}
-	file_loam_admin_v1_repo_admin_proto_msgTypes[17].OneofWrappers = []any{}
+	file_loam_admin_v1_repo_admin_proto_msgTypes[19].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_admin_v1_repo_admin_proto_rawDesc), len(file_loam_admin_v1_repo_admin_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   19,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

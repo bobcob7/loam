@@ -75,8 +75,8 @@ type WorkBranchServiceClient interface {
 	// Request review of a work branch: DRAFT -> REVIEWABLE, or REVIEWED -> REVIEWABLE
 	// for a re-review (which marks the prior round's verdicts stale). Requires title +
 	// description to be set. This is a single operation with two callers: the author
-	// (`loam work request-review`) and the admin sending a reviewed branch back with a
-	// comment. The admin reaches it as a superuser (see docs/web-spec.md).
+	// (`loam work request-review`) and the admin sending a reviewed branch back. The
+	// admin reaches it as a superuser (see docs/web-spec.md).
 	RequestReview(context.Context, *connect.Request[v1.RequestReviewRequest]) (*connect.Response[v1.RequestReviewResponse], error)
 	// List work branches across all enrolled repos, filtered by the request fields.
 	ListWorkBranches(context.Context, *connect.Request[v1.ListWorkBranchesRequest]) (*connect.Response[v1.ListWorkBranchesResponse], error)
@@ -249,8 +249,8 @@ type WorkBranchServiceHandler interface {
 	// Request review of a work branch: DRAFT -> REVIEWABLE, or REVIEWED -> REVIEWABLE
 	// for a re-review (which marks the prior round's verdicts stale). Requires title +
 	// description to be set. This is a single operation with two callers: the author
-	// (`loam work request-review`) and the admin sending a reviewed branch back with a
-	// comment. The admin reaches it as a superuser (see docs/web-spec.md).
+	// (`loam work request-review`) and the admin sending a reviewed branch back. The
+	// admin reaches it as a superuser (see docs/web-spec.md).
 	RequestReview(context.Context, *connect.Request[v1.RequestReviewRequest]) (*connect.Response[v1.RequestReviewResponse], error)
 	// List work branches across all enrolled repos, filtered by the request fields.
 	ListWorkBranches(context.Context, *connect.Request[v1.ListWorkBranchesRequest]) (*connect.Response[v1.ListWorkBranchesResponse], error)

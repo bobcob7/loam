@@ -20,8 +20,8 @@ service WorkBranchService {
   // Request review of a work branch: DRAFT -> REVIEWABLE, or REVIEWED -> REVIEWABLE
   // for a re-review (which marks the prior round's verdicts stale). Requires title +
   // description to be set. This is a single operation with two callers: the author
-  // (`loam work request-review`) and the admin sending a reviewed branch back with a
-  // comment. The admin reaches it as a superuser (see docs/web-spec.md).
+  // (`loam work request-review`) and the admin sending a reviewed branch back. The
+  // admin reaches it as a superuser (see docs/web-spec.md).
   rpc RequestReview(RequestReviewRequest) returns (RequestReviewResponse);
 
   // List work branches across all enrolled repos, filtered by the request fields.
@@ -79,9 +79,8 @@ message UpdateWorkBranchResponse {
 message RequestReviewRequest {
   string repo = 1;
   string work_branch = 2;
-  // Optional comment attached to the request, surfaced to the author on the work
-  // branch. Typically used by the admin when sending a reviewed branch back.
-  optional string comment = 3;
+  reserved 3;
+  reserved "comment";
 }
 
 message RequestReviewResponse {
@@ -103,6 +102,8 @@ message ListWorkBranchesRequest {
 message ListWorkBranchesResponse {
   repeated WorkBranch work_branches = 1;
   PageInfo page_info = 2;
+  // True if the result list was cut short by a server-enforced cap.
+  bool truncated = 3;
 }
 
 message GetWorkBranchRequest {

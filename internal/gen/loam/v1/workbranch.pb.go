@@ -233,12 +233,9 @@ func (x *UpdateWorkBranchResponse) GetWorkBranch() *WorkBranch {
 }
 
 type RequestReviewRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Repo       string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
-	WorkBranch string                 `protobuf:"bytes,2,opt,name=work_branch,json=workBranch,proto3" json:"work_branch,omitempty"`
-	// Optional comment attached to the request, surfaced to the author on the work
-	// branch. Typically used by the admin when sending a reviewed branch back.
-	Comment       *string `protobuf:"bytes,3,opt,name=comment,proto3,oneof" json:"comment,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Repo          string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
+	WorkBranch    string                 `protobuf:"bytes,2,opt,name=work_branch,json=workBranch,proto3" json:"work_branch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -283,13 +280,6 @@ func (x *RequestReviewRequest) GetRepo() string {
 func (x *RequestReviewRequest) GetWorkBranch() string {
 	if x != nil {
 		return x.WorkBranch
-	}
-	return ""
-}
-
-func (x *RequestReviewRequest) GetComment() string {
-	if x != nil && x.Comment != nil {
-		return *x.Comment
 	}
 	return ""
 }
@@ -426,9 +416,11 @@ func (x *ListWorkBranchesRequest) GetPage() *Page {
 }
 
 type ListWorkBranchesResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkBranches  []*WorkBranch          `protobuf:"bytes,1,rep,name=work_branches,json=workBranches,proto3" json:"work_branches,omitempty"`
-	PageInfo      *PageInfo              `protobuf:"bytes,2,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	WorkBranches []*WorkBranch          `protobuf:"bytes,1,rep,name=work_branches,json=workBranches,proto3" json:"work_branches,omitempty"`
+	PageInfo     *PageInfo              `protobuf:"bytes,2,opt,name=page_info,json=pageInfo,proto3" json:"page_info,omitempty"`
+	// True if the result list was cut short by a server-enforced cap.
+	Truncated     bool `protobuf:"varint,3,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -475,6 +467,13 @@ func (x *ListWorkBranchesResponse) GetPageInfo() *PageInfo {
 		return x.PageInfo
 	}
 	return nil
+}
+
+func (x *ListWorkBranchesResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
 }
 
 type GetWorkBranchRequest struct {
@@ -1200,14 +1199,11 @@ const file_loam_v1_workbranch_proto_rawDesc = "" +
 	"\f_description\"P\n" +
 	"\x18UpdateWorkBranchResponse\x124\n" +
 	"\vwork_branch\x18\x01 \x01(\v2\x13.loam.v1.WorkBranchR\n" +
-	"workBranch\"v\n" +
+	"workBranch\"Z\n" +
 	"\x14RequestReviewRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x1f\n" +
 	"\vwork_branch\x18\x02 \x01(\tR\n" +
-	"workBranch\x12\x1d\n" +
-	"\acomment\x18\x03 \x01(\tH\x00R\acomment\x88\x01\x01B\n" +
-	"\n" +
-	"\b_comment\"M\n" +
+	"workBranchJ\x04\b\x03\x10\x04R\acomment\"M\n" +
 	"\x15RequestReviewResponse\x124\n" +
 	"\vwork_branch\x18\x01 \x01(\v2\x13.loam.v1.WorkBranchR\n" +
 	"workBranch\"\x96\x02\n" +
@@ -1221,10 +1217,11 @@ const file_loam_v1_workbranch_proto_rawDesc = "" +
 	"\x05_repoB\t\n" +
 	"\a_authorB\t\n" +
 	"\a_targetB\b\n" +
-	"\x06_state\"\x84\x01\n" +
+	"\x06_state\"\xa2\x01\n" +
 	"\x18ListWorkBranchesResponse\x128\n" +
 	"\rwork_branches\x18\x01 \x03(\v2\x13.loam.v1.WorkBranchR\fworkBranches\x12.\n" +
-	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo\"K\n" +
+	"\tpage_info\x18\x02 \x01(\v2\x11.loam.v1.PageInfoR\bpageInfo\x12\x1c\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"K\n" +
 	"\x14GetWorkBranchRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x1f\n" +
 	"\vwork_branch\x18\x02 \x01(\tR\n" +
@@ -1385,7 +1382,6 @@ func file_loam_v1_workbranch_proto_init() {
 	file_loam_v1_common_proto_init()
 	file_loam_v1_workbranch_proto_msgTypes[0].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[2].OneofWrappers = []any{}
-	file_loam_v1_workbranch_proto_msgTypes[4].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[6].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[16].OneofWrappers = []any{}
 	type x struct{}

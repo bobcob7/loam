@@ -57,6 +57,9 @@ const (
 	// RepoAdminServiceListIngestJobsProcedure is the fully-qualified name of the RepoAdminService's
 	// ListIngestJobs RPC.
 	RepoAdminServiceListIngestJobsProcedure = "/loam.admin.v1.RepoAdminService/ListIngestJobs"
+	// RepoAdminServiceProbeRepoProcedure is the fully-qualified name of the RepoAdminService's
+	// ProbeRepo RPC.
+	RepoAdminServiceProbeRepoProcedure = "/loam.admin.v1.RepoAdminService/ProbeRepo"
 )
 
 // RepoAdminServiceClient is a client for the loam.admin.v1.RepoAdminService service.
@@ -68,7 +71,8 @@ type RepoAdminServiceClient interface {
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
 	// One repo with full status.
 	GetRepo(context.Context, *connect.Request[v1.GetRepoRequest]) (*connect.Response[v1.GetRepoResponse], error)
-	// Unenroll and drop the local mirror, graph, and vector data.
+	// Unenroll and drop the local mirror, graph, and vector data. Guarded: fails with a
+	// RemovalBlocked error detail if the repo has non-terminal work branches.
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	// Replace the branches eligible as work-branch targets.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
@@ -79,6 +83,9 @@ type RepoAdminServiceClient interface {
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)
 	// Recent and active ingest jobs across repos, for the web Jobs view.
 	ListIngestJobs(context.Context, *connect.Request[v1.ListIngestJobsRequest]) (*connect.Response[v1.ListIngestJobsResponse], error)
+	// Probe an upstream URL before enrolling: list its branches and current HEAD, so
+	// the admin can pick target/indexed branches without enrolling first.
+	ProbeRepo(context.Context, *connect.Request[v1.ProbeRepoRequest]) (*connect.Response[v1.ProbeRepoResponse], error)
 }
 
 // NewRepoAdminServiceClient constructs a client for the loam.admin.v1.RepoAdminService service. By
@@ -140,6 +147,12 @@ func NewRepoAdminServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(repoAdminServiceMethods.ByName("ListIngestJobs")),
 			connect.WithClientOptions(opts...),
 		),
+		probeRepo: connect.NewClient[v1.ProbeRepoRequest, v1.ProbeRepoResponse](
+			httpClient,
+			baseURL+RepoAdminServiceProbeRepoProcedure,
+			connect.WithSchema(repoAdminServiceMethods.ByName("ProbeRepo")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -153,6 +166,7 @@ type repoAdminServiceClient struct {
 	setDescriptionSchema *connect.Client[v1.SetDescriptionSchemaRequest, v1.SetDescriptionSchemaResponse]
 	reindexRepo          *connect.Client[v1.ReindexRepoRequest, v1.ReindexRepoResponse]
 	listIngestJobs       *connect.Client[v1.ListIngestJobsRequest, v1.ListIngestJobsResponse]
+	probeRepo            *connect.Client[v1.ProbeRepoRequest, v1.ProbeRepoResponse]
 }
 
 // EnrollRepo calls loam.admin.v1.RepoAdminService.EnrollRepo.
@@ -195,6 +209,11 @@ func (c *repoAdminServiceClient) ListIngestJobs(ctx context.Context, req *connec
 	return c.listIngestJobs.CallUnary(ctx, req)
 }
 
+// ProbeRepo calls loam.admin.v1.RepoAdminService.ProbeRepo.
+func (c *repoAdminServiceClient) ProbeRepo(ctx context.Context, req *connect.Request[v1.ProbeRepoRequest]) (*connect.Response[v1.ProbeRepoResponse], error) {
+	return c.probeRepo.CallUnary(ctx, req)
+}
+
 // RepoAdminServiceHandler is an implementation of the loam.admin.v1.RepoAdminService service.
 type RepoAdminServiceHandler interface {
 	// Enroll by upstream URL; the server derives the "<group>/<repo_name>" identifier,
@@ -204,7 +223,8 @@ type RepoAdminServiceHandler interface {
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
 	// One repo with full status.
 	GetRepo(context.Context, *connect.Request[v1.GetRepoRequest]) (*connect.Response[v1.GetRepoResponse], error)
-	// Unenroll and drop the local mirror, graph, and vector data.
+	// Unenroll and drop the local mirror, graph, and vector data. Guarded: fails with a
+	// RemovalBlocked error detail if the repo has non-terminal work branches.
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	// Replace the branches eligible as work-branch targets.
 	SetTargetBranches(context.Context, *connect.Request[v1.SetTargetBranchesRequest]) (*connect.Response[v1.SetTargetBranchesResponse], error)
@@ -215,6 +235,9 @@ type RepoAdminServiceHandler interface {
 	ReindexRepo(context.Context, *connect.Request[v1.ReindexRepoRequest]) (*connect.Response[v1.ReindexRepoResponse], error)
 	// Recent and active ingest jobs across repos, for the web Jobs view.
 	ListIngestJobs(context.Context, *connect.Request[v1.ListIngestJobsRequest]) (*connect.Response[v1.ListIngestJobsResponse], error)
+	// Probe an upstream URL before enrolling: list its branches and current HEAD, so
+	// the admin can pick target/indexed branches without enrolling first.
+	ProbeRepo(context.Context, *connect.Request[v1.ProbeRepoRequest]) (*connect.Response[v1.ProbeRepoResponse], error)
 }
 
 // NewRepoAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -272,6 +295,12 @@ func NewRepoAdminServiceHandler(svc RepoAdminServiceHandler, opts ...connect.Han
 		connect.WithSchema(repoAdminServiceMethods.ByName("ListIngestJobs")),
 		connect.WithHandlerOptions(opts...),
 	)
+	repoAdminServiceProbeRepoHandler := connect.NewUnaryHandler(
+		RepoAdminServiceProbeRepoProcedure,
+		svc.ProbeRepo,
+		connect.WithSchema(repoAdminServiceMethods.ByName("ProbeRepo")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/loam.admin.v1.RepoAdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case RepoAdminServiceEnrollRepoProcedure:
@@ -290,6 +319,8 @@ func NewRepoAdminServiceHandler(svc RepoAdminServiceHandler, opts ...connect.Han
 			repoAdminServiceReindexRepoHandler.ServeHTTP(w, r)
 		case RepoAdminServiceListIngestJobsProcedure:
 			repoAdminServiceListIngestJobsHandler.ServeHTTP(w, r)
+		case RepoAdminServiceProbeRepoProcedure:
+			repoAdminServiceProbeRepoHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -329,4 +360,8 @@ func (UnimplementedRepoAdminServiceHandler) ReindexRepo(context.Context, *connec
 
 func (UnimplementedRepoAdminServiceHandler) ListIngestJobs(context.Context, *connect.Request[v1.ListIngestJobsRequest]) (*connect.Response[v1.ListIngestJobsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.RepoAdminService.ListIngestJobs is not implemented"))
+}
+
+func (UnimplementedRepoAdminServiceHandler) ProbeRepo(context.Context, *connect.Request[v1.ProbeRepoRequest]) (*connect.Response[v1.ProbeRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("loam.admin.v1.RepoAdminService.ProbeRepo is not implemented"))
 }
