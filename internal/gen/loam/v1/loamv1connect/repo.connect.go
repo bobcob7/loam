@@ -39,7 +39,7 @@ const (
 
 // RepoServiceClient is a client for the loam.v1.RepoService service.
 type RepoServiceClient interface {
-	// Resolve an enrolled repo: its target branches and the default target.
+	// Resolve an enrolled repo and the branches eligible as work-branch targets.
 	// Backs the metadata lookup in `loam clone`.
 	GetRepo(context.Context, *connect.Request[v1.GetRepoRequest]) (*connect.Response[v1.GetRepoResponse], error)
 }
@@ -76,7 +76,7 @@ func (c *repoServiceClient) GetRepo(ctx context.Context, req *connect.Request[v1
 
 // RepoServiceHandler is an implementation of the loam.v1.RepoService service.
 type RepoServiceHandler interface {
-	// Resolve an enrolled repo: its target branches and the default target.
+	// Resolve an enrolled repo and the branches eligible as work-branch targets.
 	// Backs the metadata lookup in `loam clone`.
 	GetRepo(context.Context, *connect.Request[v1.GetRepoRequest]) (*connect.Response[v1.GetRepoResponse], error)
 }
