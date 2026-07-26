@@ -12,6 +12,26 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
+const deleteChunksByFile = `-- name: DeleteChunksByFile :exec
+DELETE FROM chunks
+WHERE repo_id = $1 AND target_branch = $2 AND file = $3
+`
+
+type DeleteChunksByFileParams struct {
+	RepoID       pgtype.UUID
+	TargetBranch string
+	File         string
+}
+
+// Per-file delete-and-replace (loam-54o.15, docs/persistence-spec.md
+// "chunks"): scoped by repo_id, target_branch, file so only the changed
+// file's rows are replaced on an incremental re-embed; every other file's
+// chunks (and embeddings) are left untouched.
+func (q *Queries) DeleteChunksByFile(ctx context.Context, arg DeleteChunksByFileParams) error {
+	_, err := q.db.Exec(ctx, deleteChunksByFile, arg.RepoID, arg.TargetBranch, arg.File)
+	return err
+}
+
 const insertChunk = `-- name: InsertChunk :one
 INSERT INTO chunks (id, repo_id, target_branch, file, start_line, end_line, content, embedding)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -77,6 +97,71 @@ type SearchChunksByEmbeddingParams struct {
 func (q *Queries) SearchChunksByEmbedding(ctx context.Context, arg SearchChunksByEmbeddingParams) ([]Chunk, error) {
 	rows, err := q.db.Query(ctx, searchChunksByEmbedding,
 		arg.RepoID,
+		arg.TargetBranch,
+		arg.Embedding,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chunk
+	for rows.Next() {
+		var i Chunk
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.TargetBranch,
+			&i.File,
+			&i.StartLine,
+			&i.EndLine,
+			&i.Content,
+			&i.Embedding,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchChunksByEmbeddingScoped = `-- name: SearchChunksByEmbeddingScoped :many
+SELECT id, repo_id, target_branch, file, start_line, end_line, content, embedding, created_at
+FROM chunks
+WHERE repo_id = ANY($1::uuid[]) AND target_branch = $2
+ORDER BY embedding <=> $3
+LIMIT $4
+`
+
+type SearchChunksByEmbeddingScopedParams struct {
+	Column1      []pgtype.UUID
+	TargetBranch string
+	Embedding    pgvector.Vector
+	Limit        int32
+}
+
+// RAG search scoped to a caller-supplied set of repo ids (loam-54o.15,
+// docs/persistence-spec.md "chunks": "filtered by the scope's repo ids"),
+// still nearest-neighbour ordered by cosine distance over the
+// chunks_embedding HNSW index. Distinct from SearchChunksByEmbedding (single
+// repo_id) above, which loam-54o.5 added to prove the sqlc pgvector override
+// compiles and runs -- this is the real multi-repo scoped search the store
+// layer exposes.
+// $1 is the scope's repo ids (cast to uuid[] since it is bound as an array,
+// not a single column value); sqlc surfaces it as an anonymous Column1
+// field (github.com/sqlc-dev/sqlc#2635: sqlc.arg(...)::uuid[] cannot be
+// named under the offline/no-live-database analyzer this repo uses --
+// sqlc.yaml has no `database:` block, per loam-54o.5). The store package
+// (internal/chunkstore) is the only caller and hides this field behind
+// its own Search(ctx, repoIDs []uuid.UUID, ...) method, so the awkward name
+// never leaks past internal/db/gen.
+func (q *Queries) SearchChunksByEmbeddingScoped(ctx context.Context, arg SearchChunksByEmbeddingScopedParams) ([]Chunk, error) {
+	rows, err := q.db.Query(ctx, searchChunksByEmbeddingScoped,
+		arg.Column1,
 		arg.TargetBranch,
 		arg.Embedding,
 		arg.Limit,
