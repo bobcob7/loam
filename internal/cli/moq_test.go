@@ -402,7 +402,7 @@ var _ WorkspaceResolver = &WorkspaceResolverMock{}
 //			ResolveWorkBranchFunc: func() (string, error) {
 //				panic("mock out the ResolveWorkBranch method")
 //			},
-//			StagingPathFunc: func(repo string, workBranch string) string {
+//			StagingPathFunc: func(repo string, workBranch string) (string, error) {
 //				panic("mock out the StagingPath method")
 //			},
 //		}
@@ -419,7 +419,7 @@ type WorkspaceResolverMock struct {
 	ResolveWorkBranchFunc func() (string, error)
 
 	// StagingPathFunc mocks the StagingPath method.
-	StagingPathFunc func(repo string, workBranch string) string
+	StagingPathFunc func(repo string, workBranch string) (string, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -497,7 +497,7 @@ func (mock *WorkspaceResolverMock) ResolveWorkBranchCalls() []struct {
 }
 
 // StagingPath calls StagingPathFunc.
-func (mock *WorkspaceResolverMock) StagingPath(repo string, workBranch string) string {
+func (mock *WorkspaceResolverMock) StagingPath(repo string, workBranch string) (string, error) {
 	if mock.StagingPathFunc == nil {
 		panic("WorkspaceResolverMock.StagingPathFunc: method is nil but WorkspaceResolver.StagingPath was just called")
 	}

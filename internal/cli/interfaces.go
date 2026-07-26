@@ -81,7 +81,18 @@ type WorkspaceResolver interface {
 	// clone's parent, never inside the clone itself, so it stays the same
 	// regardless of how deep inside (or outside) a clone the caller is, and
 	// a reviewer who never clones can still stage comments.
-	StagingPath(repo, workBranch string) string
+	//
+	// repo and workBranch come from CLI positionals (explicit, or inferred
+	// from local git state — see resolveWorkBranchIdentity) and are never
+	// trusted blindly: each is validated against an explicit allowed
+	// character class before being joined onto the staging root, and the
+	// composed path is verified to still be contained under it. repo may
+	// legitimately nest ("<group>/<repo_name>"); workBranch may not. A key
+	// that fails either check is rejected with a usage error (exit 2) —
+	// never silently sanitized, since rewriting an attacker's input to
+	// something "safe" would hide the attempt and could collide two
+	// distinct keys onto the same path.
+	StagingPath(repo, workBranch string) (string, error)
 }
 
 // gitLookup resolves the git facts workspace inference depends on: the root

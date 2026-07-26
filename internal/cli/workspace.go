@@ -6,8 +6,60 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// errInvalidStagingKey is the underlying cause when a repo or work-branch
+// key given to StagingPath is not safe to join onto the staging root: it
+// contains characters outside the allowed class, an empty or "."/".."
+// segment, a segment exceeding maxStagingKeySegmentLength, or (workBranch
+// only) an interior separator. Command handlers see this wrapped in a
+// usage cliError (exit 2) via StagingPath's caller.
+var errInvalidStagingKey = errors.New("invalid staging key")
+
+// maxStagingKeySegmentLength bounds a single "/"-delimited segment of a
+// staging key, matching the common filesystem NAME_MAX (255 bytes) so an
+// oversized key fails fast with a clear usage error instead of an opaque
+// OS error once StagingPath's result is used to create a directory.
+const maxStagingKeySegmentLength = 255
+
+// stagingKeySegmentPattern is the allowed character class for one
+// "/"-delimited segment of a staging key: it must start with a letter or
+// digit (never ".", "-", or "_"), which by construction rules out an empty
+// segment, a bare "." or ".." segment, and any segment beginning with a
+// separator-adjacent character — no blacklist of specific traversal
+// strings is needed because those shapes simply cannot match.
+var stagingKeySegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validateStagingKey checks that key is safe to use as one or more path
+// segments under the staging root. label names the key in error messages
+// ("repo" or "work branch"). allowNested permits key to contain "/"
+// (repo's legitimate "<group>/<repo_name>" shape, per docs/cli-spec.md ->
+// clone); workBranch never legitimately contains one, so allowNested is
+// false there and any "/" is rejected outright rather than parsed as
+// segments. Every segment (or the whole key, when allowNested is false)
+// must match stagingKeySegmentPattern and not exceed
+// maxStagingKeySegmentLength. An invalid key is always an error, never
+// sanitized: silently rewriting attacker input would hide the attempt and
+// could collide two distinct keys onto the same path.
+func validateStagingKey(label, key string, allowNested bool) error {
+	if key == "" {
+		return fmt.Errorf("%s key %w: empty", label, errInvalidStagingKey)
+	}
+	if !allowNested && strings.Contains(key, "/") {
+		return fmt.Errorf("%s key %w: %q must not contain %q", label, errInvalidStagingKey, key, "/")
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if len(segment) > maxStagingKeySegmentLength {
+			return fmt.Errorf("%s key %w: a segment of %q exceeds %d characters", label, errInvalidStagingKey, key, maxStagingKeySegmentLength)
+		}
+		if !stagingKeySegmentPattern.MatchString(segment) {
+			return fmt.Errorf("%s key %w: %q must consist of %q-delimited segments starting with a letter or digit, followed by letters, digits, %q, %q, or %q", label, errInvalidStagingKey, key, "/", ".", "_", "-")
+		}
+	}
+	return nil
+}
 
 // errNotInClone is the underlying cause when workspace inference cannot
 // resolve a repo or work branch: the caller's current directory is not
@@ -138,8 +190,32 @@ func (w *workspace) ResolveWorkBranch() (string, error) {
 // also by the calling agent's identifier, under the workspace root's
 // .loam/ directory (see docs/cli-spec.md -> "Staging location") — the
 // clone's parent, never inside the clone itself.
-func (w *workspace) StagingPath(repo, workBranch string) string {
-	return filepath.Join(w.root, ".loam", "staging", repo, workBranch, w.agentIdentifier)
+//
+// repo and workBranch reach here from CLI positionals (see
+// resolveWorkBranchIdentity): either typed explicitly by whoever invokes
+// the CLI, or inferred from the local git clone's origin remote / current
+// branch. Both are validated against an explicit character-class allowlist
+// (validateStagingKey) before ever touching filepath.Join — repo may nest
+// ("<group>/<repo_name>"; docs/cli-spec.md -> clone), workBranch may not.
+// That allowlist alone is sufficient to keep every segment local, but the
+// composed relative path is additionally verified with filepath.IsLocal as
+// a second, structural layer: it catches anything the allowlist might miss
+// (including a malicious agent identifier, which is not itself
+// user-supplied on this path but costs nothing extra to guard) rather than
+// relying solely on rejecting specific substrings.
+func (w *workspace) StagingPath(repo, workBranch string) (string, error) {
+	if err := validateStagingKey("repo", repo, true); err != nil {
+		return "", newUsageCLIError(err.Error(), err)
+	}
+	if err := validateStagingKey("work branch", workBranch, false); err != nil {
+		return "", newUsageCLIError(err.Error(), err)
+	}
+	rel := filepath.Join(repo, workBranch, w.agentIdentifier)
+	if !filepath.IsLocal(rel) {
+		err := fmt.Errorf("staging key %w: repo %q / work branch %q escapes the workspace", errInvalidStagingKey, repo, workBranch)
+		return "", newUsageCLIError(err.Error(), err)
+	}
+	return filepath.Join(w.root, ".loam", "staging", rel), nil
 }
 
 // execGitLookup is the real gitLookup, backed by the git binary on PATH.

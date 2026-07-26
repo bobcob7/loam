@@ -60,7 +60,8 @@ func TestWorkspace_InsideCloneSubdirectory_StillInfersAndStagesOutsideClone(t *t
 	branch, err := ws.ResolveWorkBranch()
 	require.NoError(t, err)
 	assert.Equal(t, "wb-9c2f1a", branch)
-	staging := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	staging, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	require.NoError(t, err)
 	assert.False(t, strings.HasPrefix(staging, cloneRoot), "staging path %q must not be under the clone root %q (cli-spec: staging lives OUTSIDE any clone)", staging, cloneRoot)
 	assert.Equal(t, filepath.Join(filepath.Dir(cloneRoot), ".loam", "staging", "bobcob7", "doc-server", "wb-9c2f1a", "ada-lovelace-7-reviewer"), staging)
 }
@@ -150,18 +151,184 @@ func TestWorkspace_StagingPath_DiffersPerRepoWorkBranchAndAgent(t *testing.T) {
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
 	base := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
 	other := newWorkspace(filepath.FromSlash("/workspace"), "grace-hopper-3-author", lookup)
+	mustStagingPath := func(t *testing.T, ws *workspace, repo, workBranch string) string {
+		t.Helper()
+		path, err := ws.StagingPath(repo, workBranch)
+		require.NoError(t, err)
+		return path
+	}
 	paths := map[string]string{
-		"repo-a":       base.StagingPath("repo-a", "wb-1"),
-		"repo-b":       base.StagingPath("repo-b", "wb-1"),
-		"branch-b":     base.StagingPath("repo-a", "wb-2"),
-		"other-agent":  other.StagingPath("repo-a", "wb-1"),
-		"repo-a-again": base.StagingPath("repo-a", "wb-1"),
+		"repo-a":       mustStagingPath(t, base, "repo-a", "wb-1"),
+		"repo-b":       mustStagingPath(t, base, "repo-b", "wb-1"),
+		"branch-b":     mustStagingPath(t, base, "repo-a", "wb-2"),
+		"other-agent":  mustStagingPath(t, other, "repo-a", "wb-1"),
+		"repo-a-again": mustStagingPath(t, base, "repo-a", "wb-1"),
 	}
 	assert.NotEqual(t, paths["repo-a"], paths["repo-b"], "staging path must vary by repo")
 	assert.NotEqual(t, paths["repo-a"], paths["branch-b"], "staging path must vary by work branch")
 	assert.NotEqual(t, paths["repo-a"], paths["other-agent"], "staging path must vary by agent")
 	assert.Equal(t, paths["repo-a"], paths["repo-a-again"], "staging path must be stable for the same key")
 	assert.True(t, filepath.IsAbs(paths["repo-a"]))
+}
+
+// TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained
+// proves the positive case the guard must not break: a repo identifier
+// legitimately shaped "<group>/<repo_name>" (docs/cli-spec.md -> clone)
+// still nests correctly under the staging root, and the resulting path is
+// genuinely contained under it — not merely "no error was returned".
+func TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained(t *testing.T) {
+	t.Parallel()
+	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	root := filepath.Join(filepath.FromSlash("/workspace"), ".loam", "staging")
+	path, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	require.NoError(t, err)
+	assertPathContained(t, root, path)
+	assert.Equal(t, filepath.Join(root, "bobcob7", "doc-server", "wb-9c2f1a", "ada-lovelace-7-reviewer"), path)
+}
+
+// assertPathContained proves path is genuinely under root by computing
+// their relative path and requiring it neither escapes upward (a leading
+// "..") nor is itself root (an empty relative path would mean path and
+// root are the same directory, not root's staging subtree) — a structural
+// check, not merely the absence of an error.
+func assertPathContained(t *testing.T, root, path string) {
+	t.Helper()
+	rel, err := filepath.Rel(root, path)
+	require.NoError(t, err)
+	assert.Truef(t, filepath.IsLocal(rel), "path %q must resolve to a local (contained) path relative to root %q, got %q", path, root, rel)
+}
+
+// stagingPathAttack is one row of the traversal attack table below: a
+// repo or work-branch key an attacker (or a careless script) might supply,
+// which StagingPath must reject rather than silently join into an escaping
+// path.
+type stagingPathAttack struct {
+	name string
+	key  string
+}
+
+// stagingPathAttacks is the shared attack corpus for both the repo and
+// work-branch positions: parent-directory traversal in every shape, an
+// absolute path, a mixed legitimate-looking traversal, "." alone, the
+// empty string, a key of only separators, an oversized key, a key
+// containing a NUL byte, and a percent-encoded traversal attempt (inert
+// here since nothing upstream of StagingPath ever URL-decodes a CLI
+// positional, but still must not slip past the allowlist as literal text).
+var stagingPathAttacks = []stagingPathAttack{
+	{"dot-dot", ".."},
+	{"dot-dot-dot-dot", "../.."},
+	{"leading-slash", "/etc/passwd"},
+	{"mixed-legitimate-then-traversal", "a/../../b"},
+	{"single-dot", "."},
+	{"empty", ""},
+	{"only-separators", "///"},
+	{"very-long-segment", strings.Repeat("a", maxStagingKeySegmentLength+1)},
+	{"nul-byte", "wb-1\x00../../etc"},
+	{"percent-encoded-traversal", "%2e%2e%2f%2e%2e"},
+}
+
+// TestWorkspace_StagingPath_RejectsTraversalInRepoKey proves every attack
+// in stagingPathAttacks is rejected with a usage error when supplied as
+// the repo key, and never produces a staging path at all — repo's
+// legitimate "/" nesting (proven separately above) must not open a gap
+// for these.
+func TestWorkspace_StagingPath_RejectsTraversalInRepoKey(t *testing.T) {
+	t.Parallel()
+	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	for _, tt := range stagingPathAttacks {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path, err := ws.StagingPath(tt.key, "wb-9c2f1a")
+			require.Errorf(t, err, "repo key %q must be rejected", tt.key)
+			assert.ErrorIs(t, err, errInvalidStagingKey)
+			assert.ErrorIs(t, err, errUsage, "rejection must classify as a usage error (exit 2)")
+			assert.Emptyf(t, path, "a rejected key must never produce a staging path, got %q", path)
+		})
+	}
+}
+
+// TestWorkspace_StagingPath_RejectsTraversalInWorkBranchKey mirrors
+// TestWorkspace_StagingPath_RejectsTraversalInRepoKey for the work-branch
+// position, plus a case repo's allowlist alone would not catch: a
+// work-branch key containing a legitimate-looking "/" must still be
+// rejected outright, since — unlike repo — a work branch never
+// legitimately nests.
+func TestWorkspace_StagingPath_RejectsTraversalInWorkBranchKey(t *testing.T) {
+	t.Parallel()
+	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	attacks := append([]stagingPathAttack{{"legitimate-looking-nested-slash", "bobcob7/doc-server"}}, stagingPathAttacks...)
+	for _, tt := range attacks {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path, err := ws.StagingPath("bobcob7/doc-server", tt.key)
+			require.Errorf(t, err, "work-branch key %q must be rejected", tt.key)
+			assert.ErrorIs(t, err, errInvalidStagingKey)
+			assert.ErrorIs(t, err, errUsage, "rejection must classify as a usage error (exit 2)")
+			assert.Emptyf(t, path, "a rejected key must never produce a staging path, got %q", path)
+		})
+	}
+}
+
+// TestValidateStagingKey_TableOfAttacks unit-tests validateStagingKey
+// directly (independent of StagingPath's containment check), proving the
+// allowlist itself — not just the containment fallback — is what rejects
+// every attack shape. allowNested=true covers repo's shape; the "/"
+// entries under allowNested=false additionally prove workBranch's
+// stricter no-nesting rule.
+func TestValidateStagingKey_TableOfAttacks(t *testing.T) {
+	t.Parallel()
+	for _, tt := range stagingPathAttacks {
+		t.Run("nested/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateStagingKey("repo", tt.key, true)
+			require.Errorf(t, err, "key %q must be rejected even when nesting is allowed", tt.key)
+			assert.ErrorIs(t, err, errInvalidStagingKey)
+		})
+		t.Run("flat/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateStagingKey("work branch", tt.key, false)
+			require.Errorf(t, err, "key %q must be rejected when nesting is disallowed", tt.key)
+			assert.ErrorIs(t, err, errInvalidStagingKey)
+		})
+	}
+	t.Run("legitimate nested repo key is accepted", func(t *testing.T) {
+		t.Parallel()
+		assert.NoError(t, validateStagingKey("repo", "bobcob7/doc-server", true))
+	})
+	t.Run("flat key with a slash is rejected even though every segment is individually legal", func(t *testing.T) {
+		t.Parallel()
+		err := validateStagingKey("work branch", "bobcob7/doc-server", false)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidStagingKey)
+	})
+}
+
+// TestWorkspace_StagingPath_ContainmentCheckCatchesTraversalNotCoveredByAllowlist
+// proves the containment check (filepath.IsLocal) is load-bearing on its
+// own, not merely redundant with the allowlist: agentIdentifier is the
+// third segment StagingPath joins, but it is never run through
+// validateStagingKey (it is not attacker-supplied on this path — see
+// StagingPath's doc comment — it comes from local LOAM_AGENT_* environment
+// configuration). If that changes, or a future caller builds a workspace
+// with an unvalidated identifier some other way, the containment check
+// alone stands between it and an escaping path. repo ("bobcob7/doc-server",
+// 2 segments) plus workBranch ("wb-9c2f1a", 1 segment) give the composed
+// relative path 3 segments to climb before an identifier's own ".."
+// components can carry it past root; 4 climbs — one more than that — is
+// the minimum that actually escapes (filepath.Clean only cancels ".."
+// against segments already present in the path, so 3 climbs would merely
+// collapse back to root, not escape it).
+func TestWorkspace_StagingPath_ContainmentCheckCatchesTraversalNotCoveredByAllowlist(t *testing.T) {
+	t.Parallel()
+	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "../../../../etc", lookup)
+	path, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	require.Error(t, err, "an agent identifier that would escape the staging root must be rejected even though it bypassed key validation")
+	assert.ErrorIs(t, err, errInvalidStagingKey)
+	assert.Empty(t, path)
 }
 
 // TestResolveWorkBranchIdentity_ExplicitArgsWinOverInference proves an
