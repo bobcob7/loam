@@ -88,6 +88,23 @@ func (s *Store) ListRepos(ctx context.Context, page Page) (ListReposResult, erro
 	return ListReposResult{Repos: repos, Total: int(total)}, nil
 }
 
+// ListAllRepoNames returns every enrolled repo's name, unpaginated and
+// ordered by name (loam-13z). This is deliberately not ListRepos: that
+// method's LIMIT/OFFSET pagination and full Repo rows exist for the admin
+// API's list view, a human paging through a bounded screen -- a caller
+// that re-enumerates every enrolled repo on a fixed schedule (e.g.
+// mirrorsync.Scheduler, via mirrorsync.StoreRepoLister) wants the entire
+// enrollment in one call, not one page of it, and only the bare name
+// (mirrorsync.RepoID is repos.name, not repos.id -- loam-54o.7 NOTES), not
+// the full row.
+func (s *Store) ListAllRepoNames(ctx context.Context) ([]string, error) {
+	names, err := s.db.ListRepoNames(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing repo names: %w", err)
+	}
+	return names, nil
+}
+
 // UpdateRepo updates the enrollment-config fields of the repo with id
 // (upstream_url, forge_host, indexed_branch -- e.g.
 // RepoAdminService.SetTargetBranches re-pointing indexed_branch). Returns

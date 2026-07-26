@@ -41,6 +41,9 @@ var _ querier = &querierMock{}
 //			GetTargetBranchFunc: func(ctx context.Context, arg gen.GetTargetBranchParams) (gen.RepoTargetBranch, error) {
 //				panic("mock out the GetTargetBranch method")
 //			},
+//			ListRepoNamesFunc: func(ctx context.Context) ([]string, error) {
+//				panic("mock out the ListRepoNames method")
+//			},
 //			ListReposFunc: func(ctx context.Context, arg gen.ListReposParams) ([]gen.Repo, error) {
 //				panic("mock out the ListRepos method")
 //			},
@@ -80,6 +83,9 @@ type querierMock struct {
 
 	// GetTargetBranchFunc mocks the GetTargetBranch method.
 	GetTargetBranchFunc func(ctx context.Context, arg gen.GetTargetBranchParams) (gen.RepoTargetBranch, error)
+
+	// ListRepoNamesFunc mocks the ListRepoNames method.
+	ListRepoNamesFunc func(ctx context.Context) ([]string, error)
 
 	// ListReposFunc mocks the ListRepos method.
 	ListReposFunc func(ctx context.Context, arg gen.ListReposParams) ([]gen.Repo, error)
@@ -142,6 +148,11 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.GetTargetBranchParams
 		}
+		// ListRepoNames holds details about calls to the ListRepoNames method.
+		ListRepoNames []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+		}
 		// ListRepos holds details about calls to the ListRepos method.
 		ListRepos []struct {
 			// Ctx is the ctx argument value.
@@ -178,6 +189,7 @@ type querierMock struct {
 	lockGetRepoByID        sync.RWMutex
 	lockGetRepoByName      sync.RWMutex
 	lockGetTargetBranch    sync.RWMutex
+	lockListRepoNames      sync.RWMutex
 	lockListRepos          sync.RWMutex
 	lockListTargetBranches sync.RWMutex
 	lockRemoveTargetBranch sync.RWMutex
@@ -429,6 +441,38 @@ func (mock *querierMock) GetTargetBranchCalls() []struct {
 	mock.lockGetTargetBranch.RLock()
 	calls = mock.calls.GetTargetBranch
 	mock.lockGetTargetBranch.RUnlock()
+	return calls
+}
+
+// ListRepoNames calls ListRepoNamesFunc.
+func (mock *querierMock) ListRepoNames(ctx context.Context) ([]string, error) {
+	if mock.ListRepoNamesFunc == nil {
+		panic("querierMock.ListRepoNamesFunc: method is nil but querier.ListRepoNames was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+	}{
+		Ctx: ctx,
+	}
+	mock.lockListRepoNames.Lock()
+	mock.calls.ListRepoNames = append(mock.calls.ListRepoNames, callInfo)
+	mock.lockListRepoNames.Unlock()
+	return mock.ListRepoNamesFunc(ctx)
+}
+
+// ListRepoNamesCalls gets all the calls that were made to ListRepoNames.
+// Check the length with:
+//
+//	len(mockedquerier.ListRepoNamesCalls())
+func (mock *querierMock) ListRepoNamesCalls() []struct {
+	Ctx context.Context
+} {
+	var calls []struct {
+		Ctx context.Context
+	}
+	mock.lockListRepoNames.RLock()
+	calls = mock.calls.ListRepoNames
+	mock.lockListRepoNames.RUnlock()
 	return calls
 }
 

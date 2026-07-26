@@ -153,6 +153,34 @@ func TestListReposPassesThroughExplicitLimitAndOffset(t *testing.T) {
 	assert.Equal(t, int32(20), arg.Offset)
 }
 
+func TestListAllRepoNamesReturnsUnderlyingNames(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		ListRepoNamesFunc: func(ctx context.Context) ([]string, error) {
+			return []string{"group/a", "group/b"}, nil
+		},
+	}
+	store := NewStore(mock, testLogger())
+	names, err := store.ListAllRepoNames(t.Context())
+	require.NoError(t, err)
+	require.Len(t, mock.ListRepoNamesCalls(), 1)
+	assert.Equal(t, []string{"group/a", "group/b"}, names)
+}
+
+func TestListAllRepoNamesWrapsUnderlyingError(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("connection reset")
+	mock := &querierMock{
+		ListRepoNamesFunc: func(ctx context.Context) ([]string, error) {
+			return nil, wantErr
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.ListAllRepoNames(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, wantErr)
+}
+
 func TestUpdateRepoNotFoundMapsToErrNotFound(t *testing.T) {
 	t.Parallel()
 	mock := &querierMock{
