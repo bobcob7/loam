@@ -85,9 +85,12 @@ func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name stri
 // authoritative schema, not a hand-copied one) and returns a connected pool,
 // registering cleanup.
 //
-// The image must carry pgvector: Migrate applies every migration, and
-// 0002_code_intel runs CREATE EXTENSION IF NOT EXISTS vector unconditionally,
-// which a plain postgres image cannot satisfy (loam-75w).
+// The image must carry pgvector: Migrate applies every migration for every
+// caller regardless of which tables it cares about, and 0002_code_intel runs
+// CREATE EXTENSION IF NOT EXISTS vector unconditionally, which a plain
+// postgres image has no vector extension to satisfy. loam-ax1 found this
+// pre-existing breakage while adding this file's scheduler-composition test;
+// fixed repo-wide as loam-75w.
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := t.Context()

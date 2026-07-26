@@ -56,8 +56,8 @@ func (f failingMergeabilityChecker) CheckMergeability(context.Context, mirrorsyn
 
 type noopIngestEnqueuer struct{}
 
-func (noopIngestEnqueuer) EnqueueIngest(context.Context, mirrorsync.RepoID, []mirrorsync.Advance) error {
-	return nil
+func (noopIngestEnqueuer) EnqueueIngest(context.Context, mirrorsync.RepoID, []mirrorsync.Advance) (bool, error) {
+	return false, nil
 }
 
 type noopPRPoller struct{}
