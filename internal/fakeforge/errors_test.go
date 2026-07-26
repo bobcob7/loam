@@ -30,21 +30,47 @@ func TestClientValidateTokenBadTokenIsForgeErrInvalidToken(t *testing.T) {
 	assert.ErrorIs(t, err, forge.ErrInvalidToken)
 }
 
-// TestClientValidateTokenMissingPRScopeIsForgeErrInvalidToken covers a
+// TestClientValidateTokenEmptyTokenIsForgeErrInvalidToken covers loam-ddv's
+// DIVERGENCE 2: real Forgejo (Forgejo.ValidateToken, internal/forge/
+// forgejo.go) rejects an empty token with ErrInvalidToken via a client-side
+// guard before any request is sent — because an empty "Authorization: token "
+// value reads as anonymous there, 404s through the scope probe, and would
+// otherwise read as success. handleValidateToken (provider.go) reaches the
+// same ErrInvalidToken class by a different route: it treats an empty
+// req.Token as an unregistered token and returns 401 alongside every other
+// auth failure. The two sides agree on the sentinel by different mechanisms,
+// which is exactly the kind of agreement that can silently rot if only one
+// side is ever exercised — this is the verification loam-ddv's DESCRIPTION
+// asked for and the prior diff omitted. This is also the input loam-li0.9's
+// shared table would most naturally reach for as "an invalid token."
+func TestClientValidateTokenEmptyTokenIsForgeErrInvalidToken(t *testing.T) {
+	t.Parallel()
+	srv, ts := newTestServer(t)
+	srv.AddToken("good-token")
+	client := NewClient(ts.URL, "")
+	err := client.ValidateToken(t.Context(), "example.invalid", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, forge.ErrInvalidToken)
+	assert.NotErrorIs(t, err, forge.ErrInsufficientScope, "an empty token must not read as merely underscoped")
+}
+
+// TestClientValidateTokenMissingPRScopeIsForgeErrInsufficientScope covers a
 // token that authenticates but lacks PR-opening scope. forge.Provider's
-// ValidateToken contract has no separate sentinel for this case — it is
-// folded into ErrInvalidToken (see errors.go and Forgejo.ValidateToken,
-// which treats 401 and 403 identically) — so the fake must match the same
-// way rather than being indistinguishable only via a fake-internal
-// sentinel.
-func TestClientValidateTokenMissingPRScopeIsForgeErrInvalidToken(t *testing.T) {
+// ValidateToken contract has a dedicated sentinel for this case,
+// ErrInsufficientScope, distinct from ErrInvalidToken — verified
+// empirically against a real Forgejo 9.0.3 instance that a 403 (wrong
+// scope) and a 401 (no auth) are genuinely different wire responses
+// (loam-1ao) — so the fake must match on that same class, not fold it
+// into ErrInvalidToken.
+func TestClientValidateTokenMissingPRScopeIsForgeErrInsufficientScope(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
 	srv.AddTokenWithoutPRScope("push-only-token")
 	client := NewClient(ts.URL, "push-only-token")
 	err := client.ValidateToken(t.Context(), "example.invalid", "push-only-token")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, forge.ErrInvalidToken)
+	assert.ErrorIs(t, err, forge.ErrInsufficientScope)
+	assert.NotErrorIs(t, err, forge.ErrInvalidToken, "a scope failure must not also read as an auth failure")
 }
 
 // TestClientCheckRepoMissingIsForgeErrRepoNotFound covers CheckRepo against
@@ -131,6 +157,30 @@ func TestClientAuthedActionBadTokenIsForgeErrInvalidToken(t *testing.T) {
 // package's own tests above (they only assert the positive case) — it would
 // surface only as a silently-wrong-class PASS inside loam-li0.9's shared
 // suite, which is exactly the failure mode loam-4k7 exists to prevent.
+//
+// forgeSentinels is sourced from forge.AllSentinels() rather than a
+// hand-copied literal (loam-ddv): a hand-copied list is blind by
+// construction to a sentinel added to internal/forge after the list was
+// last touched, which is exactly how errMissingScope's drift to
+// ErrInvalidToken (it should have followed forge.ErrInsufficientScope)
+// passed this guard green — the three-element literal here never gave the
+// loop a chance to check the new class at all.
+//
+// The require.Len canary below is what actually catches a sentinel
+// dropped from AllSentinels(), NOT the `want`-column loop: the loop only
+// ever iterates over forgeSentinels (i.e. AllSentinels()'s own current
+// members), so if a sentinel is removed there, the row whose `want` names
+// it simply never meets it in the inner loop — its positive ErrorIs never
+// runs, and its remaining NotErrorIs checks against the sentinels that
+// ARE still present all pass trivially. Without the canary this test would
+// stay green on a straight removal. The stronger, two-sided guard against
+// AllSentinels() itself drifting (additions, removals, AND a same-count
+// duplicate silently masking a drop) is
+// forge.TestAllSentinelsDiscoversEveryExportedErrVar
+// (internal/forge/errors_sentinels_test.go); this file's canary is the
+// narrower of the two, only tripping on a length change, which is exactly
+// why it still needs a human to reconcile the `want` column by hand rather
+// than verifying anything about it automatically.
 func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -139,20 +189,22 @@ func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
 		want error // the one forge sentinel this fakeforge sentinel should match, or nil for none
 	}{
 		{"errUnauthorized", errUnauthorized, forge.ErrInvalidToken},
-		{"errMissingScope", errMissingScope, forge.ErrInvalidToken},
+		{"errMissingScope", errMissingScope, forge.ErrInsufficientScope},
 		{"errRepoNotFound", errRepoNotFound, forge.ErrRepoNotFound},
 		{"errNoWriteAccess", errNoWriteAccess, forge.ErrNoWriteAccess},
+		{"errTargetBranchNotFound", errTargetBranchNotFound, forge.ErrRepoNotFound},
+		{"errPRNotFound", errPRNotFound, forge.ErrRepoNotFound},
+		{"errPRExists", errPRExists, forge.ErrDuplicatePR},
 		{"errRepoExists", errRepoExists, nil},
 		{"errBranchNotFound", errBranchNotFound, nil},
-		{"errPRNotFound", errPRNotFound, nil},
-		{"errPRExists", errPRExists, nil},
 		{"errPRMerged", errPRMerged, nil},
 		{"errInvalidBranch", errInvalidBranch, nil},
 		{"errMergeConflict", errMergeConflict, nil},
 		{"errGitUnavailable", errGitUnavailable, nil},
 		{"errInvalidUpstream", errInvalidUpstream, nil},
 	}
-	forgeSentinels := []error{forge.ErrInvalidToken, forge.ErrRepoNotFound, forge.ErrNoWriteAccess}
+	forgeSentinels := forge.AllSentinels()
+	require.Len(t, forgeSentinels, 5, "forge.AllSentinels() grew (or shrank) a sentinel: reconcile the `want` column above against the new class, then update this count")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
