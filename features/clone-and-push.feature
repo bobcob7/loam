@@ -8,7 +8,6 @@ Feature: Cloning and pushing work
     And I am the author agent "grace-hopper-3-author"
     And I have started the work branch "wb-9c2f1a"
 
-  @wip
   Scenario: Cloning a work branch bootstraps plain git
     When I clone "bobcob7/doc-server" at "wb-9c2f1a"
     Then the clone is placed at "./doc-server"

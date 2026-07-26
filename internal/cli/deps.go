@@ -18,12 +18,15 @@ type Deps struct {
 	errorMapper ErrorMapper
 	workspace   WorkspaceResolver
 	connect     ConnectClient
+	cloner      gitCloner
 }
 
 // NewDeps constructs a Deps from its collaborators. Every field is required;
-// callers (main(), tests) supply the concrete implementations.
-func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient) *Deps {
-	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect}
+// callers (main(), tests) supply the concrete implementations. cloner is
+// only exercised by `loam clone` (see clone.go); other commands never touch
+// it.
+func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner) *Deps {
+	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner}
 }
 
 // NewErrorMapper builds the real ErrorMapper (see errormapper.go). Exported
@@ -60,7 +63,7 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
-	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient), nil
+	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner()), nil
 }
 
 // reportConstructionError encodes err through encoder in the same

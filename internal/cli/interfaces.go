@@ -11,7 +11,7 @@ import (
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver gitLookup ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
+//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver gitLookup gitCloner ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
 
 // Config exposes the LOAM_* environment configuration every command may
 // need (see docs/cli-spec.md -> Environment Variables). Implemented by
@@ -106,6 +106,31 @@ type gitLookup interface {
 	// non-nil when there is no named branch checked out (e.g. detached
 	// HEAD).
 	CurrentBranch(cloneRoot string) (string, error)
+}
+
+// gitCloner runs the git subprocess operations `loam clone` bootstraps (see
+// docs/git-spec.md -> The CLI's Role): the initial single-branch `git
+// clone`, plus the git-config writes that carry author identity and the
+// three Loam-Agent-* headers into the clone so plain `git push`/`git fetch`
+// carry them from then on with no wrapper command. Defined here,
+// consumer-side, so clone.go's tests can mock it instead of shelling out to
+// a real git binary for every case; execGitCloner in clone.go is the real
+// implementation.
+type gitCloner interface {
+	// Clone runs `git clone --branch branch --single-branch url dest`
+	// (docs/cli-spec.md -> clone: "single-branch clone -- a convenient
+	// default shape, not an enforcement"). err wraps the git process's
+	// combined output on failure, so callers can surface a missing branch
+	// or transport failure with the reason git itself gave.
+	Clone(ctx context.Context, url, branch, dest string) error
+	// SetConfig runs `git -C dest config <key> <value>`, overwriting a
+	// single-valued key. Used for user.name / user.email.
+	SetConfig(ctx context.Context, dest, key, value string) error
+	// AddConfig runs `git -C dest config --add <key> <value>`, appending to
+	// a multi-valued key. Used for the three http.extraHeader entries --
+	// SetConfig would overwrite each prior entry instead of accumulating
+	// them, leaving only the last identity header in place.
+	AddConfig(ctx context.Context, dest, key, value string) error
 }
 
 // WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs

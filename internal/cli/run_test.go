@@ -21,7 +21,7 @@ func TestRun_NoArgs_ExitsUsageAndEncodesStructuredError(t *testing.T) {
 		encoded = payload
 		return nil
 	}}
-	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{})
+	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 	router := NewRouter(deps)
 	code := Run(t.Context(), router, nil)
 	assert.Equal(t, 2, code)
@@ -36,7 +36,7 @@ func TestRun_UnknownCommand_ExitsUsage(t *testing.T) {
 	errorMapperCalled := false
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { return nil }}
 	errMapper := &ErrorMapperMock{ExitCodeFunc: func(err error) int { errorMapperCalled = true; return 1 }}
-	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{})
+	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 	router := NewRouter(deps)
 	code := Run(t.Context(), router, []string{"bogus"})
 	assert.Equal(t, 2, code)
@@ -58,7 +58,7 @@ func TestRun_WrappedUsageError_StillExitsUsage(t *testing.T) {
 	}}
 	errMapperCalled := false
 	errMapper := &ErrorMapperMock{ExitCodeFunc: func(err error) int { errMapperCalled = true; return 1 }}
-	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{})
+	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 	router := &Router{deps: deps, commands: map[string]*command{
 		"wrapped": {run: func(ctx context.Context, d *Deps, args []string) error {
 			return fmt.Errorf("dispatching wrapped: %w", newUsageError("bad args"))
@@ -86,7 +86,7 @@ func TestRun_CommandError_DelegatesToErrorMapper(t *testing.T) {
 		assert.ErrorIs(t, err, errNotImplemented)
 		return 7
 	}}
-	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{})
+	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 	router := NewRouter(deps)
 	code := Run(t.Context(), router, []string{"whoami"})
 	assert.Equal(t, 7, code)
@@ -99,7 +99,7 @@ func TestRun_Success_ReturnsZero(t *testing.T) {
 	t.Parallel()
 	encodeCalled := false
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encodeCalled = true; return nil }}
-	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{})
+	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 	router := &Router{deps: deps, commands: map[string]*command{
 		"noop": {run: func(ctx context.Context, d *Deps, args []string) error { return nil }},
 	}}

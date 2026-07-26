@@ -29,7 +29,7 @@ func (fakeConnect) Search() SearchClient         { return nil }
 func (fakeConnect) Meta() MetaClient             { return nil }
 
 func newTestDeps() *Deps {
-	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{})
+	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil)
 }
 
 func TestRouterDispatch_NoArgs_ReturnsUsageError(t *testing.T) {
@@ -68,10 +68,14 @@ func TestRouterDispatch_GroupWithNoSubcommand_ReturnsUsageError(t *testing.T) {
 	assert.ErrorAs(t, err, &ue)
 }
 
-// TestRouterDispatch_EveryCommandIsReachable proves every command named in
-// docs/cli-spec.md is registered and dispatchable: given plausible args,
-// each resolves to its stub handler and returns errNotImplemented rather
-// than a routing usageError.
+// TestRouterDispatch_EveryCommandIsReachable proves every still-stubbed
+// command named in docs/cli-spec.md is registered and dispatchable: given
+// plausible args, each resolves to its stub handler and returns
+// errNotImplemented rather than a routing usageError. clone is excluded
+// here: loam-0pj.8 gave it a real handler that no longer returns
+// errNotImplemented, so its routing coverage lives in
+// TestRouterDispatch_Clone_ReachesRealHandler (clone_test.go) instead,
+// against collaborators that do not panic when clone actually calls them.
 func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -81,7 +85,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"instructions", []string{"instructions"}},
 		{"instructions with target", []string{"instructions", "work list"}},
 		{"whoami", []string{"whoami"}},
-		{"clone", []string{"clone", "acme/repo", "wb-1"}},
 		{"work start", []string{"work", "start", "acme/repo", "main"}},
 		{"work set", []string{"work", "set", "acme/repo", "wb-1", "--title", "T"}},
 		{"work request-review", []string{"work", "request-review", "acme/repo", "wb-1"}},

@@ -162,7 +162,7 @@ func TestConnectError_NotFound_MapsToExitThreeAndEncodesCleanly(t *testing.T) {
 
 	var buf bytes.Buffer
 	encoder := newEncoder("json", &buf)
-	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, client)
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, client, nil)
 	router := &Router{deps: deps, commands: map[string]*command{
 		// This handler intentionally returns the raw RPC error unmapped —
 		// exactly the "a handler forgot to map it" case mapCommandError

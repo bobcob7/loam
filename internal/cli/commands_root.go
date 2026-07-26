@@ -44,5 +44,5 @@ func runClone(ctx context.Context, deps *Deps, args []string) error {
 	if len(positional) != 2 {
 		return newUsageError("clone requires exactly a repo and a branch argument")
 	}
-	return errNotImplemented
+	return runCloneCommand(ctx, deps, positional[0], positional[1])
 }
