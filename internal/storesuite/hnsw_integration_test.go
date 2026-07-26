@@ -52,6 +52,33 @@ func mix() []float32 {
 // dataset that reaches the index unaided ... otherwise the demo silently
 // shows the wrong thing").
 //
+// WHY THIS FIXTURE, SPECIFICALLY, LOSES TO THE BTREE: NOT because this
+// package's shared container mixes rows from several repos into one
+// selective-looking filter -- checked, not assumed: this file is the ONLY
+// place in this package that ever inserts into chunks (grep confirms it),
+// so this repo's 3 rows are the entire table, the same ~100%-of-the-table
+// shape as loam-962's own scaling experiment at its smallest sizes. The
+// real cause is that this test (like every test in this file) never runs
+// ANALYZE on those freshly-inserted rows, so the planner is working from
+// default, not-measured selectivity statistics that underestimate how many
+// rows match the repo_id + target_branch filter -- verified live during
+// loam-962: ANALYZE-ing the identical 3-row, single-repo table flips the
+// SAME query to a Seq Scan instead of this btree, because the planner's
+// row estimate corrects itself once statistics exist. Do not read "the
+// btree wins here" as "the btree wins at small scale in general" -- it is
+// this specific never-ANALYZE-d, single-digit-row fixture that wins, and it
+// is representative of neither a realistic table nor even this same table
+// post-ANALYZE. loam-962's
+// actual production question -- whether an UNFORCED query reaches
+// chunks_embedding at a realistic table size -- was answered separately, by
+// a scaling experiment that seeds a single repo up to tens of thousands of
+// chunks and ANALYZEs before every EXPLAIN; see the DECISION comment on
+// SearchChunksByEmbeddingScoped (internal/db/queries/chunks.sql) for the
+// measured numbers. This test's job is narrower and stays narrower: prove
+// the HNSW path is reachable and correct at all, deterministically, at
+// whatever size this demo fixture happens to be -- not characterize when
+// production reaches for it unaided.
+//
 // THE FIX, matching loam-962's recorded decision: force the plan explicitly
 // and say so out loud. `SET LOCAL enable_seqscan = off` ALONE is verified
 // insufficient (the btree still wins over a seq scan, so disabling seq scan

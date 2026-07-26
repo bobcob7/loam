@@ -278,17 +278,33 @@ func TestReplaceFileChunks_EmptyInputs_ClearsFile(t *testing.T) {
 // correct order -- the file names read as a result (near/mid/far), not
 // number soup.
 //
-// Calibration note, corrected after review: at this table's actual size --
-// a handful of rows shared across this package's TestMain container, since
-// every test in the package runs in parallel against sharedDSN -- Postgres
-// chooses a Seq Scan for this exact query, confirmed by EXPLAIN, not
-// assumed: the repo_id filter is highly selective and there is no btree on
-// (repo_id, target_branch), so the planner never reaches for the HNSW
-// index unaided. What THIS assertion actually proves is narrower than the
-// name first suggested: Postgres computes and sorts the <=> operator
-// correctly over the filtered rows. It is an exact sort here, not an
-// approximate HNSW traversal, and pgvector's ef_search value is irrelevant
-// to it because the index is never consulted for this query shape/size.
+// Calibration note, corrected again by loam-962 (an earlier version of this
+// comment claimed a Seq Scan and "no btree on (repo_id, target_branch)" --
+// both wrong the same way loam-962's own NOTES record a sibling comment
+// once was): chunks_repo_id_target_branch_idx DOES exist
+// (0002_code_intel.up.sql:92), and it is what Postgres actually picks here,
+// confirmed live with EXPLAIN, not assumed -- because this test (like every
+// test in this file) never runs ANALYZE on its freshly-inserted rows, so
+// the planner falls back to default, not-measured selectivity statistics
+// that underestimate how many of this table's rows match the repo_id +
+// target_branch filter, making the btree look artificially cheap. Verified
+// by adding an ANALYZE before the same EXPLAIN, live, during loam-962: the
+// identical 3-row table then flips to a Seq Scan instead, because the
+// planner's row estimate corrects from 1 to the true 3 (this repo has
+// ~100% of the table, single-repo/single-branch, same as loam-962's own
+// scaling experiment). So the plan this test happens to see is an artifact
+// of skipping ANALYZE on a tiny table, not evidence about production
+// (which does ANALYZE): loam-962's realistic-scale experiment (single repo,
+// 100 to 50,000 chunks, ANALYZE before every EXPLAIN) found the unforced
+// planner reaches for chunks_embedding well before "realistic" scale --
+// see the DECISION comment on SearchChunksByEmbeddingScoped
+// (internal/db/queries/chunks.sql) for the measured numbers. Either way,
+// neither the btree nor a Seq Scan is chunks_embedding, so what THIS
+// assertion actually proves is narrower than the name first suggested:
+// Postgres computes and sorts the <=> operator correctly over the filtered
+// rows. It is an exact sort here, not an approximate HNSW traversal, and
+// pgvector's ef_search value is irrelevant to it because the index is never
+// consulted for this query shape/size.
 // assertHNSWIndexReachable, below, is the assertion that actually exercises
 // the HNSW path: it forces the planner onto chunks_embedding with `SET
 // LOCAL enable_seqscan = off`, confirms the plan really says "Index Scan

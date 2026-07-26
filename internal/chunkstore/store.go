@@ -191,6 +191,12 @@ func (s *Store) ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetB
 // (a wasted round trip) or `LIMIT -1` (a syntax error): callers ask for "no
 // more than limit results", and asking for at most zero (or fewer) has
 // exactly one sensible answer.
+//
+// Whether an unforced call here actually reaches chunks_embedding depends
+// on table size and is measured, not assumed -- see the DECISION comment on
+// SearchChunksByEmbeddingScoped (internal/db/queries/chunks.sql) for the
+// numbers, the crossover point, and a caveat band worth knowing about
+// (loam-962, loam-l73).
 func (s *Store) Search(ctx context.Context, repoIDs []uuid.UUID, targetBranch string, embedding []float32, limit int) ([]Chunk, error) {
 	if len(repoIDs) == 0 || limit <= 0 {
 		return nil, nil
