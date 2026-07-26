@@ -15,8 +15,10 @@ package chunks
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -36,12 +38,22 @@ import (
 // plain postgres:16-alpine has no `vector` extension at all.
 const pgvectorImage = "pgvector/pgvector:pg16"
 
-// newMigratedContainer starts a real pgvector-enabled Postgres, applies the
-// production migration set against it, and returns the DSN. Callers build
-// whatever pool shape they need (registered or not) from the returned DSN.
-func newMigratedContainer(t *testing.T) string {
-	t.Helper()
-	ctx := t.Context()
+// sharedDSN is the one migrated Postgres every test in this package runs
+// against, started once in TestMain rather than one container per test.
+// Isolation between tests comes from each seeding its own repo row (and, by
+// FK, its own chunks) instead of from separate databases -- the same fix a
+// sibling store bead already used under this same shared build machine's
+// container contention: fewer concurrent testcontainers, not a shortcut on
+// coverage, since every test still runs against the real schema and a real
+// server.
+var sharedDSN string
+
+// TestMain starts one pgvector-enabled Postgres container, applies the
+// production migration set, and hands every test in this package the same
+// DSN, tearing the container down once after the whole package's tests
+// finish.
+func TestMain(m *testing.M) {
+	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	container, err := postgres.Run(ctx, pgvectorImage,
 		postgres.WithDatabase("loam"),
@@ -49,14 +61,25 @@ func newMigratedContainer(t *testing.T) string {
 		postgres.WithPassword("loam"),
 		postgres.BasicWaitStrategies(),
 	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		assert.NoError(t, container.Terminate(context.Background()))
-	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "starting shared pgvector container:", err)
+		os.Exit(1)
+	}
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-	require.NoError(t, migrations.Migrate(ctx, dsn, logger))
-	return dsn
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "resolving shared container DSN:", err)
+		os.Exit(1)
+	}
+	if err := migrations.Migrate(ctx, dsn, logger); err != nil {
+		fmt.Fprintln(os.Stderr, "migrating shared container:", err)
+		os.Exit(1)
+	}
+	sharedDSN = dsn
+	code := m.Run()
+	if err := container.Terminate(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, "terminating shared pgvector container:", err)
+	}
+	os.Exit(code)
 }
 
 // newRegisteredPool builds a pool through internal/db.NewPool, the same
@@ -139,8 +162,7 @@ func mix() []float32 {
 func TestPgvectorRegistration_ActiveOnStorePool(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 
 	conn, err := pool.Acquire(ctx)
 	require.NoError(t, err)
@@ -165,8 +187,7 @@ func TestPgvectorRegistration_ActiveOnStorePool(t *testing.T) {
 func TestPgvectorRegistration_WithoutAfterConnect_ArrayScanFails(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newUnregisteredPool(t, dsn)
+	pool := newUnregisteredPool(t, sharedDSN)
 
 	var arr []pgvector.Vector
 	err := pool.QueryRow(ctx, `SELECT ARRAY[$1::vector]`, pgvector.NewVector(unit(0))).Scan(&arr)
@@ -183,8 +204,7 @@ func TestPgvectorRegistration_WithoutAfterConnect_ArrayScanFails(t *testing.T) {
 func TestReplaceFileChunks_PerFileDeleteAndReplace(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 	repoID := insertRepo(ctx, t, pool, "group/replace-repo")
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	s := New(pool, logger)
@@ -226,8 +246,7 @@ func TestReplaceFileChunks_PerFileDeleteAndReplace(t *testing.T) {
 func TestReplaceFileChunks_EmptyInputs_ClearsFile(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 	repoID := insertRepo(ctx, t, pool, "group/clear-repo")
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	s := New(pool, logger)
@@ -274,8 +293,7 @@ func TestReplaceFileChunks_EmptyInputs_ClearsFile(t *testing.T) {
 func TestSearch_HNSWNearestNeighbourOrdering(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	s := New(pool, logger)
 	repoID := insertRepo(ctx, t, pool, "group/ordering-repo")
@@ -308,8 +326,7 @@ func TestSearch_HNSWNearestNeighbourOrdering(t *testing.T) {
 func TestSearch_ScopedByRepoIDs_ExcludesOutOfScopeRepos(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	s := New(pool, logger)
 	inScope := insertRepo(ctx, t, pool, "group/in-scope-repo")
@@ -338,8 +355,7 @@ func TestSearch_ScopedByRepoIDs_ExcludesOutOfScopeRepos(t *testing.T) {
 func TestSearch_ScopedByTargetBranch_ExcludesOtherBranches(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dsn := newMigratedContainer(t)
-	pool := newRegisteredPool(t, dsn)
+	pool := newRegisteredPool(t, sharedDSN)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	s := New(pool, logger)
 	repoID := insertRepo(ctx, t, pool, "group/branch-repo")
