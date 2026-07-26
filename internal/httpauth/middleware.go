@@ -120,7 +120,7 @@ func (a *Auth) GitIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := agentIdentityFromHeaders(r)
 		if !ok {
-			http.Error(w, "forbidden: missing agent identity", http.StatusForbidden)
+			http.Error(w, "loam: forbidden: missing agent identity", http.StatusForbidden)
 			return
 		}
 		ctx := WithIdentity(withoutAdmin(r.Context()), identity)

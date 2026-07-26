@@ -186,5 +186,6 @@ func TestRouter_GitRoleGate_MissingIdentityRejectionCarriesAReason(t *testing.T)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 	assert.False(t, ran)
 	assert.NotEmpty(t, rec.Body.String(), "a rejected push must carry a body a human can act on, not a bare 403")
+	assert.Contains(t, rec.Body.String(), "loam: ", "Demo M2 asserts the rejection carries the documented loam:-prefixed reason")
 	assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain", "git's remote-curl silently discards this body unless Content-Type is text/plain")
 }

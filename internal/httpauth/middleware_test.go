@@ -117,6 +117,7 @@ func TestAuth_Matrix(t *testing.T) {
 		wantAdmin    bool
 		wantIdentity httpauth.Identity
 		wantHasID    bool
+		wantBody     string
 	}{
 		// --- AdminOnly: /loam.admin.v1.* and static/SPA ---
 		{
@@ -284,6 +285,7 @@ func TestAuth_Matrix(t *testing.T) {
 			setReq:     withBasicAuth(testAdminUser, testAdminPassword),
 			wantStatus: http.StatusForbidden,
 			wantCalled: false,
+			wantBody:   "loam: forbidden: missing agent identity",
 		},
 		{
 			// G6: admin basic auth is not merely insufficient alone (G2) but
@@ -308,6 +310,7 @@ func TestAuth_Matrix(t *testing.T) {
 			setReq:     nil,
 			wantStatus: http.StatusForbidden,
 			wantCalled: false,
+			wantBody:   "loam: forbidden: missing agent identity",
 		},
 		{
 			name:       "git: incomplete agent headers -> 403",
@@ -315,6 +318,7 @@ func TestAuth_Matrix(t *testing.T) {
 			setReq:     withAgentHeaders("ada-lovelace", "7", ""),
 			wantStatus: http.StatusForbidden,
 			wantCalled: false,
+			wantBody:   "loam: forbidden: missing agent identity",
 		},
 	}
 	for _, tt := range tests {
@@ -325,6 +329,10 @@ func TestAuth_Matrix(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, rec.Code)
 			if tt.wantWWWAuth {
 				assert.NotEmpty(t, rec.Header().Get("WWW-Authenticate"), "expected a WWW-Authenticate challenge")
+			}
+			if tt.wantBody != "" {
+				assert.Equal(t, tt.wantBody+"\n", rec.Body.String())
+				assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"), "git's remote-curl silently discards this body unless Content-Type is text/plain")
 			}
 			require.Equal(t, tt.wantCalled, got.called, "next handler invocation mismatch")
 			if !tt.wantCalled {
