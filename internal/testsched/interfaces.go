@@ -21,52 +21,34 @@
 // package follows): the primitives below return a plain error. NewT-style
 // sugar wraps them for callers that do have a testing.TB.
 //
-// # The mirrorsync seam this package works around
+// # The mirrorsync seam, and why it lives in mirrorsync
 //
-// mirrorsync.Scheduler exposes only New and Run; the unexported tick and
-// waitIdle methods that give the scheduler itself a sleep-free
-// happens-before are not reachable from another package. Run's loop reads
-// one value from the injected tick channel, calls tick (which
-// synchronously lists repos, claims each with tryStart, and spawns one
-// goroutine per started repo), and returns to select without reporting
-// anything back to the sender -- so a caller that only writes to the tick
-// channel has no synchronous signal that the resulting cycles, let alone
-// their outcomes, have landed. Naively pairing "write a tick" with "wait
-// on some counter incremented inside a cycle's own goroutine" is exactly
-// the sleep-in-disguise this package exists to avoid: the writer's send
-// returning says only that Run's goroutine received the value, not that
-// it has reached (or finished) the code that increments the counter.
+// SyncHarness is a thin wrapper over mirrorsync.Scheduler.Tick, which
+// combines the scheduler's own unexported tick and waitIdle. That barrier
+// has to live inside internal/mirrorsync; it cannot be assembled from
+// outside, and an earlier version of this package that tried could hang.
 //
-// SyncHarness solves this without touching internal/mirrorsync, using two
-// of the exported collaborator interfaces mirrorsync.New already accepts
-// as constructor parameters -- RepoLister and SyncStateReporter -- which
-// exist precisely so orchestration is decoupled from persistence. Wrap
-// both with the harness's decorator (RepoLister/SyncStateReporter
-// accessors below) before passing them into mirrorsync.New, alongside
-// Ticks() as the tick channel:
+// The reason is the ordering around the per-repo in-flight guard. A cycle
+// makes its terminal report (ReportIdle or ReportError) and only then
+// calls finish to release the guard. A decorator built on the exported
+// RepoLister and SyncStateReporter can observe the report, but nothing
+// after it -- so it can return while the repo is still in the scheduler's
+// running map. The next tick then reaches tryStart first, skips the repo,
+// spawns no cycle, and any waiter the decorator registered for it is
+// never closed. Driving the real scheduler through back-to-back ticks
+// reproduced this 4 times out of 4, at roughly one hang per 10k-50k
+// ticks. A hang, not a failed assertion: in godog it surfaces as a step
+// deadline or "panic: test timed out", the worst possible shape.
 //
-//   - Scheduler.tick calls RepoLister.ListRepos exactly once, synchronously,
-//     on Run's own goroutine, before spawning any per-repo goroutine. The
-//     harness's wrapped ListRepos registers a pending waiter for every repo
-//     in the result INSIDE that same synchronous call, before returning
-//     control to tick -- so registration always happens-before any cycle
-//     goroutine could possibly report, no matter how fast a fake
-//     collaborator makes that cycle run.
-//   - Each cycle's terminal report (ReportIdle or ReportError) closes that
-//     repo's waiter channel.
-//   - Tick sends one value on the tick channel, blocks for the RepoLister
-//     wrapper's snapshot of the repos this tick started, then blocks on
-//     each of their waiter channels in turn -- a real synchronization
-//     primitive, not a poll.
+// There is no decorator-only fix. A skipped repo is indistinguishable
+// from "no ReportSyncing this tick", and absence is not observable in
+// bounded time without polling -- the sleep-in-disguise this package
+// exists to abolish. finish has no observable hook outside wg.Wait.
 //
-// This assumes a fresh Scheduler driven by exactly one SyncHarness, ticked
-// serially (never two Tick calls in flight at once) -- true for the
-// godog "fresh instances per scenario" rule this package's consumers
-// already follow. A cheaper, sturdier alternative for the same happens-
-// before is an exported method on Scheduler itself combining the existing
-// unexported tick and waitIdle, e.g. `func (s *Scheduler) Tick(ctx
-// context.Context) []RepoID`; see the package's implementation report for
-// the precise ask if that seam is ever added.
+// Scheduler.Tick is correct by construction instead: cycle's deferred
+// wg.Done fires after finish, so waiting on the WaitGroup is a strictly
+// stronger barrier than any external observer of the terminal report can
+// build. Tests call Tick directly and leave Run to production.
 //
 // # The ingest seam this package is missing
 //
