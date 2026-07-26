@@ -64,8 +64,14 @@ external surface (HTTP + Postgres + volume) precludes it later.
 In order, failing fast at each step:
 
 1. Load and validate configuration.
-2. Connect to Postgres; run **migrations** (golang-migrate, embedded; seeds built-in
-   roles — `docs/persistence-spec.md`).
+2. Run **migrations** against the database DSN (golang-migrate, embedded; seeds
+   built-in roles — `docs/persistence-spec.md`), **then** connect the Postgres
+   connection pool. Migrations must run first: the pool's `AfterConnect` hook
+   registers pgvector's `vector` type, which fails until migration `0002`'s
+   `CREATE EXTENSION vector` has run, and pgxpool fails every connection
+   acquisition (including its own readiness ping) while `AfterConnect` errors —
+   connecting the pool before migrating would deadlock permanently on a virgin
+   database (`internal/db/pool.go`'s `NewPool` doc comment).
 3. **Reconcile mirrors**: for every enrolled repo, idempotently rewrite the pre-receive
    hook stub and `receive.denyNonFastForwards` / `receive.denyDeletes` config
    (`docs/git-spec.md`). A mirror missing from disk is re-cloned by the next sync cycle

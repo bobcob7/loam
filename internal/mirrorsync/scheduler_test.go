@@ -475,3 +475,88 @@ func TestScheduler_Run_ListReposFailureDoesNotStopLoop(t *testing.T) {
 	}
 	assert.Len(t, h.fetch.FetchCalls(), 1, "only the second, successfully-listed tick ever reached a cycle")
 }
+
+// TestScheduler_Shutdown_NoInFlightCyclesReturnsImmediately proves the
+// trivial case: with nothing ever ticked, Shutdown's wait is already
+// satisfied and it returns nil without waiting out ctx's deadline at all.
+func TestScheduler_Shutdown_NoInFlightCyclesReturnsImmediately(t *testing.T) {
+	t.Parallel()
+	h := newHarness("repoA")
+	assert.NoError(t, h.scheduler.Shutdown(t.Context()))
+}
+
+// TestScheduler_Shutdown_BlocksUntilInFlightCycleFinishes is the
+// discriminating proof that Shutdown actually waits for a cycle already
+// running rather than merely riding Run's own (immediate) return on ctx
+// cancellation: a mutant Shutdown that returned nil right away -- e.g. by
+// forgetting to call waitIdle, or by racing it against ctx.Done() instead
+// of gating on it -- would pass every OTHER test in this file (they never
+// call Shutdown) yet fail this one, since it asserts, via a real
+// happens-before channel signal rather than a timing guess, that
+// Shutdown has NOT returned while the cycle is deliberately held open,
+// and DOES return the instant it is released.
+func TestScheduler_Shutdown_BlocksUntilInFlightCycleFinishes(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		close(fetchStarted)
+		<-releaseFetch
+		return FetchResult{}, nil
+	}
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	<-fetchStarted // the cycle is now genuinely in flight, blocked in Fetch
+
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- h.scheduler.Shutdown(context.Background()) }()
+
+	select {
+	case err := <-shutdownErr:
+		t.Fatalf("Shutdown returned (err=%v) before the in-flight cycle was released -- it is not actually waiting for it", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(releaseFetch)
+	select {
+	case err := <-shutdownErr:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after the in-flight cycle finished")
+	}
+	<-h.outcomes // drain the cycle's terminal report so it does not leak past the test
+}
+
+// TestScheduler_Shutdown_AbandonsWaitWhenContextExpiresFirst proves the
+// grace-period half of the contract: a cycle that outlives the ctx handed
+// to Shutdown causes Shutdown to give up and return that ctx's error,
+// rather than blocking forever regardless of what the caller asked for --
+// the property docs/server-spec.md's Shutdown grace period depends on.
+func TestScheduler_Shutdown_AbandonsWaitWhenContextExpiresFirst(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		close(fetchStarted)
+		<-releaseFetch
+		return FetchResult{}, nil
+	}
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	<-fetchStarted
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer shutdownCancel()
+	err := h.scheduler.Shutdown(shutdownCtx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	close(releaseFetch) // let the still-running cycle finish so it does not leak past the test
+	<-h.outcomes
+}
