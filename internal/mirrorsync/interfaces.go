@@ -107,6 +107,15 @@ type MergeabilityChecker interface {
 // when this call queued or touched nothing at all -- advanced was empty,
 // or none of its branches are indexed branches ingest.Enqueue is called
 // for.
+//
+// enqueued and err are independent, not mutually exclusive: advanced is a
+// slice, so an implementation that enqueues branch A and then fails on
+// branch B must return (true, err), not (false, err). The scheduler
+// propagates whatever this method returns verbatim on both the success and
+// error paths -- it never coerces enqueued to false just because err is
+// non-nil -- specifically so a real error partway through a multi-branch
+// call cannot silently drop an ownership hand-off that already happened
+// for an earlier branch and let ReportError clobber that branch's row.
 type IngestEnqueuer interface {
 	EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) (enqueued bool, err error)
 }

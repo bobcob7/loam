@@ -174,9 +174,14 @@ func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
 // (docs/sync-spec.md -> Mirror Sync, steps 1-5), returning whether step 4
 // actually enqueued an ingest job (IngestEnqueuer.EnqueueIngest's own
 // enqueued return value, never synthesised here — loam-ax1) and the first
-// step's wrapped error, if any. A failing step aborts only repo's
-// remaining steps for this tick; it never retries within the cycle — the
-// next tick is the retry, and the tick interval is the backoff.
+// step's wrapped error, if any. Step 4's enqueued is propagated verbatim
+// even when EnqueueIngest itself errors: per IngestEnqueuer's doc comment,
+// a partial multi-branch failure can legitimately enqueue one branch and
+// then fail on another, and that ownership hand-off must still reach
+// ReportError rather than being coerced to false just because err is
+// non-nil. A failing step aborts only repo's remaining steps for this
+// tick; it never retries within the cycle — the next tick is the retry,
+// and the tick interval is the backoff.
 func (s *Scheduler) runSteps(ctx context.Context, repo RepoID) (enqueuedIngest bool, err error) {
 	fetched, err := s.fetcher.Fetch(ctx, repo)
 	if err != nil {
@@ -191,7 +196,7 @@ func (s *Scheduler) runSteps(ctx context.Context, repo RepoID) (enqueuedIngest b
 	}
 	enqueued, err := s.ingest.EnqueueIngest(ctx, repo, advanced)
 	if err != nil {
-		return false, fmt.Errorf("enqueuing ingest for repo %s: %w", repo, err)
+		return enqueued, fmt.Errorf("enqueuing ingest for repo %s: %w", repo, err)
 	}
 	if err := s.prPoller.PollPRs(ctx, repo); err != nil {
 		return enqueued, fmt.Errorf("polling PRs for repo %s: %w", repo, err)
