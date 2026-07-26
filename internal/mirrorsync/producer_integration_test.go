@@ -29,9 +29,10 @@ import (
 )
 
 // sharedDSN is the one migrated Postgres every test in this package runs
-// against, started once in TestMain rather than one container per test
-// (docs/bead-workflow.md's container-discipline convention, also used by
-// internal/chunkstore and internal/codegraph).
+// against, started once in TestMain rather than one container per test --
+// the same shared-container pattern internal/chunkstore and
+// internal/codegraph already use (testcontainers-go per
+// docs/testing-spec.md:19, "Real infrastructure by default").
 var sharedDSN string
 
 // TestMain starts one pgvector-enabled Postgres container, applies the
