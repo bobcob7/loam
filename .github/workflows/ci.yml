@@ -128,10 +128,17 @@ jobs:
 
       - name: Sweep leaked testcontainers (ryuk failure backstop)
         # Runs even when the test step above failed or the job was
-        # cancelled/timed out: a failed ryuk run leaves its container
-        # stranded in "created" state, labelled org.testcontainers.reap=true,
-        # and t.Cleanup(container.Terminate) does not fire on SIGKILL, a step
-        # timeout, or a -timeout panic — exactly the cases this sweep covers.
+        # cancelled/timed out: a failed ryuk run leaves the workload
+        # container it was about to guard stranded in "created" state,
+        # labelled org.testcontainers.reap=true (the ryuk container itself
+        # is labelled differently and explicitly excluded from this label,
+        # per testcontainers-go's reaper.go), and
+        # t.Cleanup(container.Terminate) does not fire on SIGKILL, a step
+        # timeout, or a -timeout panic — exactly the cases this sweep
+        # covers. That label, and therefore this sweep, only exists when
+        # ryuk is enabled: TESTCONTAINERS_RYUK_DISABLED would silently
+        # disable both backstops at once, which is one more reason not to
+        # set it here (see the step above).
         if: always()
         run: |
           leaked="$(docker ps -aq --filter "label=org.testcontainers.reap=true")"
