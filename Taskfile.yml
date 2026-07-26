@@ -14,9 +14,10 @@ tasks:
       - go mod download
 
   generate:
-    desc: Regenerate everything (proto + moq mocks) — the single codegen entry point
+    desc: Regenerate everything (proto + sqlc + moq mocks) — the single codegen entry point
     cmds:
       - task: proto:generate
+      - task: sqlc:generate
       - go generate ./...
 
   build:
@@ -65,6 +66,11 @@ tasks:
     desc: Generate Go + Connect code into gen/
     cmds:
       - go tool buf generate
+
+  sqlc:generate:
+    desc: Generate type-safe Go (pgx/v5) from internal/db/queries/*.sql into internal/db/gen, reading schema straight from internal/db/migrations/files
+    cmds:
+      - go tool sqlc generate
 
   # Pre-1.0 breaking-change policy (loam-9yk): pinned to c195909, the merge
   # commit that landed the wave-1 proto reshape, rather than to the moving

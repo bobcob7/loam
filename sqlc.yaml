@@ -1,0 +1,50 @@
+# sqlc config (loam-54o.5). Generates type-safe Go from the hand-written
+# queries under internal/db/queries/*.sql, reading its schema straight from
+# the migrations directory so there is no separate schema file to drift
+# (docs/persistence-spec.md "Migrations, Queries & Testing").
+#
+# `schema` points at internal/db/migrations/files (not the migrations/
+# package directory itself): sqlc's directory reader is non-recursive
+# (github.com/sqlc-dev/sqlc/internal/sql/sqlpath.Glob does a single
+# os.ReadDir), and the .up.sql/.down.sql pairs golang-migrate applies live
+# one level down, under files/ (see internal/db/migrations/migrations.go's
+# migrationsDir constant and its //go:embed directive). sqlc also already
+# knows golang-migrate's ".down.sql" suffix and excludes those files
+# automatically (internal/migrations.IsDown upstream), so both 0001_init and
+# 0002_code_intel contribute only their .up.sql half to the schema sqlc
+# reads -- no separate exclude glob needed.
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "internal/db/migrations/files"
+    queries: "internal/db/queries"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/db/gen"
+        sql_package: "pgx/v5"
+        # text + CHECK columns (e.g. repos.sync_state, work_branches.state)
+        # need no override: sqlc only synthesizes a Go enum type from a real
+        # Postgres CREATE TYPE ... AS ENUM, and this schema has none (every
+        # enum-like column is `text` + CHECK, deliberately, per
+        # docs/persistence-spec.md "Conventions" -- evolvable without ALTER
+        # TYPE) -- so pgx/v5's default text->string mapping already applies
+        # and they surface as plain Go strings.
+        # NOT LOAD-BEARING against sqlc v1.30.0: its pgx/v5 codegen already
+        # maps a `vector` column to pgvector.Vector by default (see
+        # postgresql_type.go's "vector" case upstream) -- deleting this
+        # entire overrides block and regenerating still produces
+        # `Embedding pgvector.Vector` with the import unaliased, verified
+        # directly against this repo's schema. This block is kept anyway as
+        # an explicit VERSION GUARD: it is what makes a future sqlc release
+        # that changes or drops that built-in default fail loudly (a
+        # generation/compile error against a stale/renamed type) instead of
+        # silently changing the nine store beads' generated field type.
+        # Store beads should treat sqlc.yaml, not sqlc's current default
+        # behavior, as the source of truth for this mapping.
+        overrides:
+          - db_type: "vector"
+            go_type:
+              import: "github.com/pgvector/pgvector-go"
+              package: "pgvector"
+              type: "Vector"
