@@ -46,6 +46,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/db/migrations"
 	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/testdb"
 )
 
 // syncRow is the slice of repos this package's tests read back after each
@@ -83,11 +84,15 @@ func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name stri
 // production migration set (so this test proves Reporter against the
 // authoritative schema, not a hand-copied one) and returns a connected pool,
 // registering cleanup.
+//
+// The image must carry pgvector: Migrate applies every migration, and
+// 0002_code_intel runs CREATE EXTENSION IF NOT EXISTS vector unconditionally,
+// which a plain postgres image cannot satisfy (loam-75w).
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
