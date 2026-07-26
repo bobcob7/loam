@@ -23,13 +23,15 @@
 // Both are safe to use from godog step definitions, which have the
 // signature func(context.Context, ...) (context.Context, error) and no
 // testing.TB in scope (see internal/testfixture for the precedent this
-// package follows). Only IngestHarness follows testfixture's full
-// error-returning-primitive-plus-NewT-sugar pattern: DrainIngestQueue
-// returns a plain error, with DrainIngestQueueT as the testing.TB
-// convenience layer. SyncHarness.Tick returns no error at all -- there is
-// no failure this layer can observe, since mirrorsync itself swallows a
-// ListRepos error (see Tick's doc comment) -- so it has no *T sugar to
-// layer on.
+// package follows), and both follow testfixture's full
+// error-returning-primitive-plus-NewT-sugar pattern: DrainIngestQueue and
+// Tick each return a plain error for a step definition to propagate, with
+// DrainIngestQueueT and TickT as the testing.TB convenience layer for Go
+// tests. Tick's error is mirrorsync.Scheduler.Tick's own ListRepos
+// failure (see loam-hhh and Tick's own doc comment) -- before that bead,
+// mirrorsync logged and swallowed the error instead of returning it, so
+// there was nothing for TickT to fail a testing.TB on and it was dropped;
+// it is restored now that Tick actually has an error to carry.
 //
 // # The mirrorsync seam, and why it lives in mirrorsync
 //

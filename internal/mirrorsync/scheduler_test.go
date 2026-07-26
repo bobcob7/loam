@@ -319,14 +319,18 @@ func TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight(t *testing.T) {
 		<-release
 		return FetchResult{}, nil
 	}
-	started := h.scheduler.tick(ctx)
+	started, err := h.scheduler.tick(ctx)
+	require.NoError(t, err)
 	assert.Equal(t, []RepoID{"repoA"}, started)
 	<-entered
-	assert.Empty(t, h.scheduler.tick(ctx), "second tick must not start a new cycle while the first is in flight")
+	secondStarted, err := h.scheduler.tick(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, secondStarted, "second tick must not start a new cycle while the first is in flight")
 	close(release)
 	h.scheduler.waitIdle()
 	assert.Len(t, h.fetch.FetchCalls(), 1)
-	started = h.scheduler.tick(ctx)
+	started, err = h.scheduler.tick(ctx)
+	require.NoError(t, err)
 	assert.Equal(t, []RepoID{"repoA"}, started, "once the first cycle finishes, a later tick may start a new one")
 	h.scheduler.waitIdle()
 	assert.Len(t, h.fetch.FetchCalls(), 2)
@@ -352,13 +356,17 @@ func TestScheduler_GuardHeldUntilOutcomeIsReported(t *testing.T) {
 		<-release
 		return nil
 	}
-	started := h.scheduler.tick(ctx)
+	started, err := h.scheduler.tick(ctx)
+	require.NoError(t, err)
 	assert.Equal(t, []RepoID{"repoA"}, started)
 	<-entered
-	assert.Empty(t, h.scheduler.tick(ctx), "guard must still be held while the outcome is being reported")
+	secondStarted, err := h.scheduler.tick(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, secondStarted, "guard must still be held while the outcome is being reported")
 	close(release)
 	h.scheduler.waitIdle()
-	started = h.scheduler.tick(ctx)
+	started, err = h.scheduler.tick(ctx)
+	require.NoError(t, err)
 	assert.Equal(t, []RepoID{"repoA"}, started, "guard releases once the outcome has been reported")
 	h.scheduler.waitIdle()
 }
@@ -394,4 +402,76 @@ func TestScheduler_SyncFailureIsRetriedOnTheNextTick(t *testing.T) {
 	assert.Len(t, h.fetch.FetchCalls(), 2)
 	assert.Len(t, h.advances.DetectAdvancesCalls(), 1, "the failed tick must not have reached step 2")
 	assert.Len(t, h.prs.PollPRsCalls(), 1, "only the successful, second-tick cycle reaches step 5")
+}
+
+// TestScheduler_Tick_PropagatesListReposError is loam-hhh's core claim:
+// Tick's error return lets a manual-tick caller tell a ListRepos failure
+// apart from an empty enrollment, unlike the value tick alone (and the
+// pre-fix Tick) returned.
+func TestScheduler_Tick_PropagatesListReposError(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := newHarness()
+	wantErr := errors.New("db unreachable")
+	h.repoList.ListReposFunc = func(ctx context.Context) ([]RepoID, error) { return nil, wantErr }
+	started, err := h.scheduler.Tick(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, wantErr)
+	assert.Empty(t, started)
+}
+
+// TestScheduler_Tick_EmptyEnrollmentReturnsNoError is
+// TestScheduler_Tick_PropagatesListReposError's contrasting case: a
+// ListRepos call that succeeds with zero repos is not an error at all, so
+// Tick must return a nil error alongside the empty slice -- the two
+// "nothing started" outcomes loam-hhh's bug report says were previously
+// indistinguishable.
+func TestScheduler_Tick_EmptyEnrollmentReturnsNoError(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := newHarness()
+	started, err := h.scheduler.Tick(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, started)
+}
+
+// TestScheduler_Run_ListReposFailureDoesNotStopLoop drives Run through a
+// tick whose ListRepos fails, followed by a tick whose ListRepos succeeds,
+// and proves both that Run kept accepting ticks after the failure (the
+// send on h.ticks would time out if Run had returned) and that the
+// following tick ran an entirely normal cycle to completion -- not just
+// "didn't crash", but true log-and-continue, unchanged by giving Tick an
+// error return.
+func TestScheduler_Run_ListReposFailureDoesNotStopLoop(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	wantErr := errors.New("db unreachable")
+	failNext := true
+	h.repoList.ListReposFunc = func(ctx context.Context) ([]RepoID, error) {
+		if failNext {
+			failNext = false
+			return nil, wantErr
+		}
+		return []RepoID{"repoA"}, nil
+	}
+	go h.scheduler.Run(ctx)
+	sendTick := func() {
+		select {
+		case h.ticks <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not accept a tick -- it may have stopped running after the ListRepos failure")
+		}
+	}
+	sendTick()
+	sendTick()
+	select {
+	case outcome := <-h.outcomes:
+		require.NoError(t, outcome.err)
+		assert.Equal(t, RepoID("repoA"), outcome.repo)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tick after the ListRepos failure never produced an outcome -- Run did not continue normally")
+	}
+	assert.Len(t, h.fetch.FetchCalls(), 1, "only the second, successfully-listed tick ever reached a cycle")
 }

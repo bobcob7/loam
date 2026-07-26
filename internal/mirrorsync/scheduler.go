@@ -50,6 +50,12 @@ func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher 
 // tick, until ctx is canceled or the tick channel is closed. Each repo's
 // cycle runs in its own goroutine so a slow or stuck repo never blocks
 // another repo's cycle; Run itself only ever blocks on the tick source.
+// A ListRepos failure is logged and the loop continues to the next tick —
+// production's retry is simply trying again later, never stopping the
+// process over a transient listing failure (loam-hhh). Tick, below,
+// propagates that same failure instead, since a manual-tick caller has no
+// "next tick" to fall back on and needs to tell it apart from an empty
+// enrollment.
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		select {
@@ -59,23 +65,27 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.tick(ctx)
+			if _, err := s.tick(ctx); err != nil {
+				s.logger.Error("tick failed", "error", err)
+			}
 		}
 	}
 }
 
 // tick lists the enrolled repos, starts a cycle for each one that is not
-// already running, and returns the repos it actually started this call.
-// Listing and the per-repo in-flight guard both run synchronously here,
-// before any per-repo goroutine is spawned, so a second tick arriving
-// while a repo's cycle is still in flight reliably observes that repo as
-// running and skips it — a property the return value lets callers (and
-// tests) assert on directly, without inferring it from goroutine timing.
-func (s *Scheduler) tick(ctx context.Context) []RepoID {
+// already running, and returns the repos it actually started this call
+// alongside a ListRepos failure, if any. Listing and the per-repo
+// in-flight guard both run synchronously here, before any per-repo
+// goroutine is spawned, so a second tick arriving while a repo's cycle is
+// still in flight reliably observes that repo as running and skips it — a
+// property the return value lets callers (and tests) assert on directly,
+// without inferring it from goroutine timing. It never logs the error
+// itself: Run and Tick each decide what a listing failure means for their
+// own caller (log-and-continue vs. propagate), so tick only reports it.
+func (s *Scheduler) tick(ctx context.Context) ([]RepoID, error) {
 	repos, err := s.repos.ListRepos(ctx)
 	if err != nil {
-		s.logger.Error("listing enrolled repos", "error", err)
-		return nil
+		return nil, fmt.Errorf("listing enrolled repos: %w", err)
 	}
 	var started []RepoID
 	for _, repo := range repos {
@@ -86,7 +96,7 @@ func (s *Scheduler) tick(ctx context.Context) []RepoID {
 		s.wg.Add(1)
 		go s.cycle(ctx, repo)
 	}
-	return started
+	return started, nil
 }
 
 // waitIdle blocks until every cycle started so far has finished. It
@@ -109,6 +119,16 @@ func (s *Scheduler) waitIdle() {
 // directly rather than writing to the tick channel and separately trying
 // to detect completion.
 //
+// The returned error is a ListRepos failure, if one occurred, so a
+// manual-tick caller can tell "no repo is enrolled" (nil error, empty
+// slice) apart from "listing the enrolled repos failed" (non-nil error,
+// empty slice) -- the distinction Run's own log-and-continue swallows,
+// correctly, since production always gets a next tick to retry on
+// (loam-hhh). A non-nil error here still means zero repos started this
+// call; it carries no information about any cycle still in flight from an
+// earlier, successful call, since waitIdle below waits for those
+// regardless of whether this call's own listing succeeded.
+//
 // Do not call Tick concurrently with another Tick, or with Run, on the
 // same Scheduler: both paths drive the same sync.WaitGroup, and a second
 // Wait call arriving before a prior one has returned panics ("sync:
@@ -116,10 +136,18 @@ func (s *Scheduler) waitIdle() {
 // need manual, deterministic ticks (docs/testing-spec.md's "Manual
 // scheduler") should call Tick on its own and never start Run on that
 // Scheduler at all.
-func (s *Scheduler) Tick(ctx context.Context) []RepoID {
-	started := s.tick(ctx)
+//
+// Tick does not return early on ctx cancellation: waitIdle's wait for
+// every in-flight cycle is unconditional (sync.WaitGroup.Wait takes no
+// ctx), and this error return does not change that -- it surfaces a
+// ListRepos failure, not a path to abort the wait. A collaborator that
+// wedges and ignores ctx still hangs Tick forever; that trade is
+// unchanged by this method's signature (see internal/testsched's
+// SyncHarness.Tick doc comment for why that is deliberate).
+func (s *Scheduler) Tick(ctx context.Context) ([]RepoID, error) {
+	started, err := s.tick(ctx)
 	s.waitIdle()
-	return started
+	return started, err
 }
 
 // tryStart claims repo for a new cycle, returning false if a previous
