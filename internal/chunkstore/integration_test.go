@@ -4,14 +4,14 @@
 // excluded from the default `go test ./...` run by the integration build
 // tag, so CI stays green without one. Run explicitly with:
 //
-//	go test -tags=integration ./internal/store/chunks/... -v
+//	go test -tags=integration ./internal/chunkstore/... -v
 //
 // On podman (e.g. a `podman machine` forwarding /var/run/docker.sock), also
 // set TESTCONTAINERS_RYUK_DISABLED=true (see internal/db/migrations's
 // integration_test.go for why -- podman's Docker-compat API does not resolve
 // the reaper sidecar's expected `bridge` network, so the container never
 // starts without it). This is a local convenience only, not a CI setting.
-package chunks
+package chunkstore
 
 import (
 	"context"
@@ -31,12 +31,9 @@ import (
 
 	"github.com/bobcob7/loam/internal/db"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testdb"
 	"github.com/bobcob7/loam/internal/testembed"
 )
-
-// pgvectorImage matches internal/db/migrations's own integration tests:
-// plain postgres:16-alpine has no `vector` extension at all.
-const pgvectorImage = "pgvector/pgvector:pg16"
 
 // sharedDSN is the one migrated Postgres every test in this package runs
 // against, started once in TestMain rather than one container per test.
@@ -55,7 +52,7 @@ var sharedDSN string
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, pgvectorImage,
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),

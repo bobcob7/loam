@@ -1,8 +1,8 @@
-// Package chunks implements the RAG vector store over the pgvector-backed
-// chunks table (docs/persistence-spec.md "chunks"): per-file
+// Package chunkstore implements the RAG vector store over the
+// pgvector-backed chunks table (docs/persistence-spec.md "chunks"): per-file
 // delete-and-replace on re-embed, and nearest-neighbour search over the
 // chunks_embedding HNSW index, scoped to a caller-supplied set of repo ids.
-package chunks
+package chunkstore
 
 import (
 	"context"

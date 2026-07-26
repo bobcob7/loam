@@ -1,4 +1,4 @@
-package chunks
+package chunkstore
 
 import (
 	"context"
@@ -190,7 +190,7 @@ func pgUUID(id uuid.UUID) pgtype.UUID {
 }
 
 // fromGenChunk converts a sqlc-generated row into the store's domain Chunk
-// type, so callers depend on internal/store/chunks's own types rather than
+// type, so callers depend on internal/chunkstore's own types rather than
 // reaching into internal/db/gen directly.
 func fromGenChunk(row gen.Chunk) (Chunk, error) {
 	id, err := uuidFromPg(row.ID)

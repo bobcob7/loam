@@ -156,7 +156,7 @@ type SearchChunksByEmbeddingScopedParams struct {
 // field (github.com/sqlc-dev/sqlc#2635: sqlc.arg(...)::uuid[] cannot be
 // named under the offline/no-live-database analyzer this repo uses --
 // sqlc.yaml has no `database:` block, per loam-54o.5). The store package
-// (internal/store/chunks) is the only caller and hides this field behind
+// (internal/chunkstore) is the only caller and hides this field behind
 // its own Search(ctx, repoIDs []uuid.UUID, ...) method, so the awkward name
 // never leaks past internal/db/gen.
 func (q *Queries) SearchChunksByEmbeddingScoped(ctx context.Context, arg SearchChunksByEmbeddingScopedParams) ([]Chunk, error) {

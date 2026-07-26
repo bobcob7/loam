@@ -1,4 +1,4 @@
-package chunks
+package chunkstore
 
 import (
 	"context"
