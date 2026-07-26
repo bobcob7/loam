@@ -31,13 +31,14 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testdb"
 )
 
 // TestNewPoolAgainstRealPostgres proves the ordering contract this bead
 // restores: migrations.Migrate MUST run against the DSN before NewPool is
 // called, and once it has, pgvector.RegisterTypes in AfterConnect succeeds
 // and a `vector` column round-trips through pgvector-go's Vector type. It
-// uses a pgvector-enabled image (pgvector/pgvector:pg16) because a plain
+// uses a pgvector-enabled image (testdb.PostgresImage) because a plain
 // postgres:16-alpine image has no vector extension to CREATE at all -- per
 // this bead's DESIGN note, an image that merely has the extension available
 // does not stand in for one where it has been created.
@@ -45,7 +46,7 @@ func TestNewPoolAgainstRealPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, "pgvector/pgvector:pg16",
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),

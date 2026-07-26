@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/bobcob7/loam/internal/testdb"
 	"github.com/bobcob7/loam/internal/testembed"
 )
 
@@ -33,13 +34,6 @@ var codeIntelTables = []string{
 	"chunks",
 }
 
-// pgvectorImage is a Postgres 16 image with the pgvector extension already
-// built in. Plain postgres:16-alpine (loam-54o.3's image) has no `vector`
-// extension available at all -- `CREATE EXTENSION vector` fails outright
-// against it -- so this migration's integration test needs a different
-// image than the metadata migration's.
-const pgvectorImage = "pgvector/pgvector:pg16"
-
 // TestCodeIntelMigrationAgainstRealPostgres runs the full migration set
 // (0001_init then 0002_code_intel) against a real pgvector-enabled Postgres,
 // proving: the vector extension and all five derived tables exist with
@@ -52,7 +46,7 @@ func TestCodeIntelMigrationAgainstRealPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, pgvectorImage,
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),

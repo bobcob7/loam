@@ -38,6 +38,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	"github.com/bobcob7/loam/internal/testdb"
 )
 
 // expectedTables is the exact metadata table set loam-54o.3's migration must
@@ -64,9 +66,9 @@ var expectedTables = []string{
 // m.Version() / WithInstance path), asserts the ten metadata tables and the
 // built-in role seed exist, then migrates down and asserts a clean revert.
 //
-// Uses pgvectorImage (defined in code_intel_integration_test.go), not plain
-// postgres:16-alpine: Migrate applies every pending migration in order and
-// has no "stop after 0001" mode, so once 0002_code_intel.up.sql exists
+// Uses testdb.PostgresImage, not plain postgres:16-alpine: Migrate applies
+// every pending migration in order and has no "stop after 0001" mode, so
+// once 0002_code_intel.up.sql exists
 // (loam-54o.4) this test's single Migrate call runs it too, and
 // CREATE EXTENSION vector fails outright against an image that doesn't ship
 // the extension. This is a test-fixture change only -- the assertions below
@@ -76,7 +78,7 @@ func TestMigrateAgainstRealPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, pgvectorImage,
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),

@@ -24,6 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testdb"
 	"github.com/bobcob7/loam/internal/testembed"
 )
 
@@ -43,7 +44,7 @@ func TestGeneratedQueriesAgainstRealPostgres(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, "pgvector/pgvector:pg16",
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
