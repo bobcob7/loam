@@ -5,6 +5,22 @@
 // tag, so CI stays green without one. Run explicitly with:
 //
 //	go test -tags=integration ./internal/db/migrations/... -run TestMigrateAgainstRealPostgres -v
+//
+// On podman (e.g. a `podman machine` forwarding /var/run/docker.sock), also
+// set TESTCONTAINERS_RYUK_DISABLED=true:
+//
+//	TESTCONTAINERS_RYUK_DISABLED=true go test -tags=integration ./internal/db/migrations/... -run TestMigrateAgainstRealPostgres -v
+//
+// Without it the reaper sidecar testcontainers-go starts alongside every
+// container fails outright ("unable to find network with name or ID
+// bridge: network not found") because podman's Docker-compat API does not
+// resolve the reaper's expected `bridge` network the way a real Docker
+// daemon does -- so the test never reaches Migrate() at all. This is a
+// local convenience only: with ryuk disabled, cleanup relies entirely on
+// t.Cleanup(container.Terminate), which does not run on SIGKILL, a CI step
+// timeout, or a -timeout panic. Do not disable ryuk in CI without a
+// reaper-equivalent sweep (e.g. a scheduled `docker rm` pass) --
+// tracked separately.
 package migrations
 
 import (
@@ -233,21 +249,40 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	assert.Equal(t, "reviewer", got[1].name)
 	assert.True(t, got[1].builtin)
 
-	var authorOps, reviewerOps int
-	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(*) FROM role_operations ro JOIN roles r ON r.id = ro.role_id WHERE r.name = 'author'`,
-	).Scan(&authorOps))
-	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(*) FROM role_operations ro JOIN roles r ON r.id = ro.role_id WHERE r.name = 'reviewer'`,
-	).Scan(&reviewerOps))
-	assert.Equal(t, 9, authorOps)
-	assert.Equal(t, 6, reviewerOps)
+	// Compare the exact operation SETS, not just their cardinality: a seed
+	// that swapped one capability for another (e.g. reviewer seeded with
+	// git.push instead of git.clone) would still pass a count(*)==6 check --
+	// that is precisely the "permission bug shipped as data" this assertion
+	// exists to catch. Literals are the sorted vocabulary from
+	// docs/web-spec.md's built-in role list (:132-137).
+	wantAuthorOps := []string{
+		"git.clone", "git.push", "graph.query", "search",
+		"work.read", "work.reply", "work.request_review", "work.set", "work.start",
+	}
+	wantReviewerOps := []string{
+		"git.clone", "graph.query", "search", "work.read", "work.reply", "work.verdict",
+	}
+	assert.Equal(t, wantAuthorOps, roleOperations(ctx, t, pool, "author"))
+	assert.Equal(t, wantReviewerOps, roleOperations(ctx, t, pool, "reviewer"))
+}
 
-	var canVerdict bool
-	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM role_operations ro JOIN roles r ON r.id = ro.role_id WHERE r.name = 'author' AND ro.operation = 'work.verdict')`,
-	).Scan(&canVerdict))
-	assert.False(t, canVerdict, "author must not carry work.verdict per docs/web-spec.md")
+// roleOperations returns the sorted set of operations role_operations grants
+// roleName, joined through roles by name.
+func roleOperations(ctx context.Context, t *testing.T, pool *pgxpool.Pool, roleName string) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT ro.operation FROM role_operations ro JOIN roles r ON r.id = ro.role_id WHERE r.name = $1 ORDER BY ro.operation`,
+		roleName,
+	)
+	require.NoError(t, err)
+	var ops []string
+	for rows.Next() {
+		var op string
+		require.NoError(t, rows.Scan(&op))
+		ops = append(ops, op)
+	}
+	require.NoError(t, rows.Err())
+	return ops
 }
 
 // migrateDown drives golang-migrate's Down() directly (Migrate only exposes

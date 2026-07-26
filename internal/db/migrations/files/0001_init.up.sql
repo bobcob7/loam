@@ -163,13 +163,21 @@ CREATE INDEX ingest_jobs_repo_id_idx ON ingest_jobs (repo_id);
 -- Built-in roles (docs/web-spec.md -> RoleService), seeded here so they exist
 -- from the first migration and cannot be deleted (enforced at the handler
 -- layer via roles.builtin, not by the schema).
+--
+-- Fixed UUIDv7 literals rather than gen_random_uuid(): the app's convention
+-- for this table's primary keys is uuid.NewV7() (docs/persistence-spec.md
+-- "Conventions"), and this is the one row set 0001_init writes as production
+-- data -- worth generating in the right family and pinning, since 0001
+-- freezes the moment a real database applies it (Demo M1). Postgres has no
+-- built-in uuidv7() function, so literals are the only route; deterministic
+-- ids also make these rows easy fixtures for the store beads.
 WITH author_role AS (
     INSERT INTO roles (id, name, instructions, builtin)
-    VALUES (gen_random_uuid(), 'author', '', true)
+    VALUES ('019f9c4b-0474-7952-8c7d-509aecb334d4', 'author', '', true)
     RETURNING id
 ), reviewer_role AS (
     INSERT INTO roles (id, name, instructions, builtin)
-    VALUES (gen_random_uuid(), 'reviewer', '', true)
+    VALUES ('019f9c4b-0474-7953-8a86-61657a9d6cb5', 'reviewer', '', true)
     RETURNING id
 )
 INSERT INTO role_operations (role_id, operation)
