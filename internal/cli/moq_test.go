@@ -4,6 +4,9 @@
 package cli
 
 import (
+	"connectrpc.com/connect"
+	"context"
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"sync"
 )
 
@@ -399,6 +402,9 @@ var _ WorkspaceResolver = &WorkspaceResolverMock{}
 //			ResolveWorkBranchFunc: func() (string, error) {
 //				panic("mock out the ResolveWorkBranch method")
 //			},
+//			StagingPathFunc: func(repo string, workBranch string) string {
+//				panic("mock out the StagingPath method")
+//			},
 //		}
 //
 //		// use mockedWorkspaceResolver in code that requires WorkspaceResolver
@@ -412,6 +418,9 @@ type WorkspaceResolverMock struct {
 	// ResolveWorkBranchFunc mocks the ResolveWorkBranch method.
 	ResolveWorkBranchFunc func() (string, error)
 
+	// StagingPathFunc mocks the StagingPath method.
+	StagingPathFunc func(repo string, workBranch string) string
+
 	// calls tracks calls to the methods.
 	calls struct {
 		// ResolveRepo holds details about calls to the ResolveRepo method.
@@ -420,9 +429,17 @@ type WorkspaceResolverMock struct {
 		// ResolveWorkBranch holds details about calls to the ResolveWorkBranch method.
 		ResolveWorkBranch []struct {
 		}
+		// StagingPath holds details about calls to the StagingPath method.
+		StagingPath []struct {
+			// Repo is the repo argument value.
+			Repo string
+			// WorkBranch is the workBranch argument value.
+			WorkBranch string
+		}
 	}
 	lockResolveRepo       sync.RWMutex
 	lockResolveWorkBranch sync.RWMutex
+	lockStagingPath       sync.RWMutex
 }
 
 // ResolveRepo calls ResolveRepoFunc.
@@ -476,5 +493,1212 @@ func (mock *WorkspaceResolverMock) ResolveWorkBranchCalls() []struct {
 	mock.lockResolveWorkBranch.RLock()
 	calls = mock.calls.ResolveWorkBranch
 	mock.lockResolveWorkBranch.RUnlock()
+	return calls
+}
+
+// StagingPath calls StagingPathFunc.
+func (mock *WorkspaceResolverMock) StagingPath(repo string, workBranch string) string {
+	if mock.StagingPathFunc == nil {
+		panic("WorkspaceResolverMock.StagingPathFunc: method is nil but WorkspaceResolver.StagingPath was just called")
+	}
+	callInfo := struct {
+		Repo       string
+		WorkBranch string
+	}{
+		Repo:       repo,
+		WorkBranch: workBranch,
+	}
+	mock.lockStagingPath.Lock()
+	mock.calls.StagingPath = append(mock.calls.StagingPath, callInfo)
+	mock.lockStagingPath.Unlock()
+	return mock.StagingPathFunc(repo, workBranch)
+}
+
+// StagingPathCalls gets all the calls that were made to StagingPath.
+// Check the length with:
+//
+//	len(mockedWorkspaceResolver.StagingPathCalls())
+func (mock *WorkspaceResolverMock) StagingPathCalls() []struct {
+	Repo       string
+	WorkBranch string
+} {
+	var calls []struct {
+		Repo       string
+		WorkBranch string
+	}
+	mock.lockStagingPath.RLock()
+	calls = mock.calls.StagingPath
+	mock.lockStagingPath.RUnlock()
+	return calls
+}
+
+// Ensure, that gitLookupMock does implement gitLookup.
+// If this is not the case, regenerate this file with moq.
+var _ gitLookup = &gitLookupMock{}
+
+// gitLookupMock is a mock implementation of gitLookup.
+//
+//	func TestSomethingThatUsesgitLookup(t *testing.T) {
+//
+//		// make and configure a mocked gitLookup
+//		mockedgitLookup := &gitLookupMock{
+//			CloneRootFunc: func(dir string) (string, error) {
+//				panic("mock out the CloneRoot method")
+//			},
+//			CurrentBranchFunc: func(cloneRoot string) (string, error) {
+//				panic("mock out the CurrentBranch method")
+//			},
+//			OriginURLFunc: func(cloneRoot string) (string, error) {
+//				panic("mock out the OriginURL method")
+//			},
+//		}
+//
+//		// use mockedgitLookup in code that requires gitLookup
+//		// and then make assertions.
+//
+//	}
+type gitLookupMock struct {
+	// CloneRootFunc mocks the CloneRoot method.
+	CloneRootFunc func(dir string) (string, error)
+
+	// CurrentBranchFunc mocks the CurrentBranch method.
+	CurrentBranchFunc func(cloneRoot string) (string, error)
+
+	// OriginURLFunc mocks the OriginURL method.
+	OriginURLFunc func(cloneRoot string) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// CloneRoot holds details about calls to the CloneRoot method.
+		CloneRoot []struct {
+			// Dir is the dir argument value.
+			Dir string
+		}
+		// CurrentBranch holds details about calls to the CurrentBranch method.
+		CurrentBranch []struct {
+			// CloneRoot is the cloneRoot argument value.
+			CloneRoot string
+		}
+		// OriginURL holds details about calls to the OriginURL method.
+		OriginURL []struct {
+			// CloneRoot is the cloneRoot argument value.
+			CloneRoot string
+		}
+	}
+	lockCloneRoot     sync.RWMutex
+	lockCurrentBranch sync.RWMutex
+	lockOriginURL     sync.RWMutex
+}
+
+// CloneRoot calls CloneRootFunc.
+func (mock *gitLookupMock) CloneRoot(dir string) (string, error) {
+	if mock.CloneRootFunc == nil {
+		panic("gitLookupMock.CloneRootFunc: method is nil but gitLookup.CloneRoot was just called")
+	}
+	callInfo := struct {
+		Dir string
+	}{
+		Dir: dir,
+	}
+	mock.lockCloneRoot.Lock()
+	mock.calls.CloneRoot = append(mock.calls.CloneRoot, callInfo)
+	mock.lockCloneRoot.Unlock()
+	return mock.CloneRootFunc(dir)
+}
+
+// CloneRootCalls gets all the calls that were made to CloneRoot.
+// Check the length with:
+//
+//	len(mockedgitLookup.CloneRootCalls())
+func (mock *gitLookupMock) CloneRootCalls() []struct {
+	Dir string
+} {
+	var calls []struct {
+		Dir string
+	}
+	mock.lockCloneRoot.RLock()
+	calls = mock.calls.CloneRoot
+	mock.lockCloneRoot.RUnlock()
+	return calls
+}
+
+// CurrentBranch calls CurrentBranchFunc.
+func (mock *gitLookupMock) CurrentBranch(cloneRoot string) (string, error) {
+	if mock.CurrentBranchFunc == nil {
+		panic("gitLookupMock.CurrentBranchFunc: method is nil but gitLookup.CurrentBranch was just called")
+	}
+	callInfo := struct {
+		CloneRoot string
+	}{
+		CloneRoot: cloneRoot,
+	}
+	mock.lockCurrentBranch.Lock()
+	mock.calls.CurrentBranch = append(mock.calls.CurrentBranch, callInfo)
+	mock.lockCurrentBranch.Unlock()
+	return mock.CurrentBranchFunc(cloneRoot)
+}
+
+// CurrentBranchCalls gets all the calls that were made to CurrentBranch.
+// Check the length with:
+//
+//	len(mockedgitLookup.CurrentBranchCalls())
+func (mock *gitLookupMock) CurrentBranchCalls() []struct {
+	CloneRoot string
+} {
+	var calls []struct {
+		CloneRoot string
+	}
+	mock.lockCurrentBranch.RLock()
+	calls = mock.calls.CurrentBranch
+	mock.lockCurrentBranch.RUnlock()
+	return calls
+}
+
+// OriginURL calls OriginURLFunc.
+func (mock *gitLookupMock) OriginURL(cloneRoot string) (string, error) {
+	if mock.OriginURLFunc == nil {
+		panic("gitLookupMock.OriginURLFunc: method is nil but gitLookup.OriginURL was just called")
+	}
+	callInfo := struct {
+		CloneRoot string
+	}{
+		CloneRoot: cloneRoot,
+	}
+	mock.lockOriginURL.Lock()
+	mock.calls.OriginURL = append(mock.calls.OriginURL, callInfo)
+	mock.lockOriginURL.Unlock()
+	return mock.OriginURLFunc(cloneRoot)
+}
+
+// OriginURLCalls gets all the calls that were made to OriginURL.
+// Check the length with:
+//
+//	len(mockedgitLookup.OriginURLCalls())
+func (mock *gitLookupMock) OriginURLCalls() []struct {
+	CloneRoot string
+} {
+	var calls []struct {
+		CloneRoot string
+	}
+	mock.lockOriginURL.RLock()
+	calls = mock.calls.OriginURL
+	mock.lockOriginURL.RUnlock()
+	return calls
+}
+
+// Ensure, that ConnectClientMock does implement ConnectClient.
+// If this is not the case, regenerate this file with moq.
+var _ ConnectClient = &ConnectClientMock{}
+
+// ConnectClientMock is a mock implementation of ConnectClient.
+//
+//	func TestSomethingThatUsesConnectClient(t *testing.T) {
+//
+//		// make and configure a mocked ConnectClient
+//		mockedConnectClient := &ConnectClientMock{
+//			GraphFunc: func() GraphClient {
+//				panic("mock out the Graph method")
+//			},
+//			MetaFunc: func() MetaClient {
+//				panic("mock out the Meta method")
+//			},
+//			RepoFunc: func() RepoClient {
+//				panic("mock out the Repo method")
+//			},
+//			SearchFunc: func() SearchClient {
+//				panic("mock out the Search method")
+//			},
+//			WorkBranchFunc: func() WorkBranchClient {
+//				panic("mock out the WorkBranch method")
+//			},
+//		}
+//
+//		// use mockedConnectClient in code that requires ConnectClient
+//		// and then make assertions.
+//
+//	}
+type ConnectClientMock struct {
+	// GraphFunc mocks the Graph method.
+	GraphFunc func() GraphClient
+
+	// MetaFunc mocks the Meta method.
+	MetaFunc func() MetaClient
+
+	// RepoFunc mocks the Repo method.
+	RepoFunc func() RepoClient
+
+	// SearchFunc mocks the Search method.
+	SearchFunc func() SearchClient
+
+	// WorkBranchFunc mocks the WorkBranch method.
+	WorkBranchFunc func() WorkBranchClient
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Graph holds details about calls to the Graph method.
+		Graph []struct {
+		}
+		// Meta holds details about calls to the Meta method.
+		Meta []struct {
+		}
+		// Repo holds details about calls to the Repo method.
+		Repo []struct {
+		}
+		// Search holds details about calls to the Search method.
+		Search []struct {
+		}
+		// WorkBranch holds details about calls to the WorkBranch method.
+		WorkBranch []struct {
+		}
+	}
+	lockGraph      sync.RWMutex
+	lockMeta       sync.RWMutex
+	lockRepo       sync.RWMutex
+	lockSearch     sync.RWMutex
+	lockWorkBranch sync.RWMutex
+}
+
+// Graph calls GraphFunc.
+func (mock *ConnectClientMock) Graph() GraphClient {
+	if mock.GraphFunc == nil {
+		panic("ConnectClientMock.GraphFunc: method is nil but ConnectClient.Graph was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockGraph.Lock()
+	mock.calls.Graph = append(mock.calls.Graph, callInfo)
+	mock.lockGraph.Unlock()
+	return mock.GraphFunc()
+}
+
+// GraphCalls gets all the calls that were made to Graph.
+// Check the length with:
+//
+//	len(mockedConnectClient.GraphCalls())
+func (mock *ConnectClientMock) GraphCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockGraph.RLock()
+	calls = mock.calls.Graph
+	mock.lockGraph.RUnlock()
+	return calls
+}
+
+// Meta calls MetaFunc.
+func (mock *ConnectClientMock) Meta() MetaClient {
+	if mock.MetaFunc == nil {
+		panic("ConnectClientMock.MetaFunc: method is nil but ConnectClient.Meta was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockMeta.Lock()
+	mock.calls.Meta = append(mock.calls.Meta, callInfo)
+	mock.lockMeta.Unlock()
+	return mock.MetaFunc()
+}
+
+// MetaCalls gets all the calls that were made to Meta.
+// Check the length with:
+//
+//	len(mockedConnectClient.MetaCalls())
+func (mock *ConnectClientMock) MetaCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockMeta.RLock()
+	calls = mock.calls.Meta
+	mock.lockMeta.RUnlock()
+	return calls
+}
+
+// Repo calls RepoFunc.
+func (mock *ConnectClientMock) Repo() RepoClient {
+	if mock.RepoFunc == nil {
+		panic("ConnectClientMock.RepoFunc: method is nil but ConnectClient.Repo was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockRepo.Lock()
+	mock.calls.Repo = append(mock.calls.Repo, callInfo)
+	mock.lockRepo.Unlock()
+	return mock.RepoFunc()
+}
+
+// RepoCalls gets all the calls that were made to Repo.
+// Check the length with:
+//
+//	len(mockedConnectClient.RepoCalls())
+func (mock *ConnectClientMock) RepoCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockRepo.RLock()
+	calls = mock.calls.Repo
+	mock.lockRepo.RUnlock()
+	return calls
+}
+
+// Search calls SearchFunc.
+func (mock *ConnectClientMock) Search() SearchClient {
+	if mock.SearchFunc == nil {
+		panic("ConnectClientMock.SearchFunc: method is nil but ConnectClient.Search was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockSearch.Lock()
+	mock.calls.Search = append(mock.calls.Search, callInfo)
+	mock.lockSearch.Unlock()
+	return mock.SearchFunc()
+}
+
+// SearchCalls gets all the calls that were made to Search.
+// Check the length with:
+//
+//	len(mockedConnectClient.SearchCalls())
+func (mock *ConnectClientMock) SearchCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockSearch.RLock()
+	calls = mock.calls.Search
+	mock.lockSearch.RUnlock()
+	return calls
+}
+
+// WorkBranch calls WorkBranchFunc.
+func (mock *ConnectClientMock) WorkBranch() WorkBranchClient {
+	if mock.WorkBranchFunc == nil {
+		panic("ConnectClientMock.WorkBranchFunc: method is nil but ConnectClient.WorkBranch was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockWorkBranch.Lock()
+	mock.calls.WorkBranch = append(mock.calls.WorkBranch, callInfo)
+	mock.lockWorkBranch.Unlock()
+	return mock.WorkBranchFunc()
+}
+
+// WorkBranchCalls gets all the calls that were made to WorkBranch.
+// Check the length with:
+//
+//	len(mockedConnectClient.WorkBranchCalls())
+func (mock *ConnectClientMock) WorkBranchCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockWorkBranch.RLock()
+	calls = mock.calls.WorkBranch
+	mock.lockWorkBranch.RUnlock()
+	return calls
+}
+
+// Ensure, that WorkBranchClientMock does implement WorkBranchClient.
+// If this is not the case, regenerate this file with moq.
+var _ WorkBranchClient = &WorkBranchClientMock{}
+
+// WorkBranchClientMock is a mock implementation of WorkBranchClient.
+//
+//	func TestSomethingThatUsesWorkBranchClient(t *testing.T) {
+//
+//		// make and configure a mocked WorkBranchClient
+//		mockedWorkBranchClient := &WorkBranchClientMock{
+//			CreateWorkBranchFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.CreateWorkBranchRequest]) (*connect.Response[loamv1.CreateWorkBranchResponse], error) {
+//				panic("mock out the CreateWorkBranch method")
+//			},
+//			GetWorkBranchFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+//				panic("mock out the GetWorkBranch method")
+//			},
+//			GetWorkBranchDiffFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+//				panic("mock out the GetWorkBranchDiff method")
+//			},
+//			ListCommentsFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error) {
+//				panic("mock out the ListComments method")
+//			},
+//			ListVerdictsFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+//				panic("mock out the ListVerdicts method")
+//			},
+//			ListWorkBranchesFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+//				panic("mock out the ListWorkBranches method")
+//			},
+//			ReplyToThreadFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.ReplyToThreadRequest]) (*connect.Response[loamv1.ReplyToThreadResponse], error) {
+//				panic("mock out the ReplyToThread method")
+//			},
+//			RequestReviewFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.RequestReviewRequest]) (*connect.Response[loamv1.RequestReviewResponse], error) {
+//				panic("mock out the RequestReview method")
+//			},
+//			SubmitVerdictFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.SubmitVerdictRequest]) (*connect.Response[loamv1.SubmitVerdictResponse], error) {
+//				panic("mock out the SubmitVerdict method")
+//			},
+//			UpdateWorkBranchFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.UpdateWorkBranchRequest]) (*connect.Response[loamv1.UpdateWorkBranchResponse], error) {
+//				panic("mock out the UpdateWorkBranch method")
+//			},
+//		}
+//
+//		// use mockedWorkBranchClient in code that requires WorkBranchClient
+//		// and then make assertions.
+//
+//	}
+type WorkBranchClientMock struct {
+	// CreateWorkBranchFunc mocks the CreateWorkBranch method.
+	CreateWorkBranchFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.CreateWorkBranchRequest]) (*connect.Response[loamv1.CreateWorkBranchResponse], error)
+
+	// GetWorkBranchFunc mocks the GetWorkBranch method.
+	GetWorkBranchFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error)
+
+	// GetWorkBranchDiffFunc mocks the GetWorkBranchDiff method.
+	GetWorkBranchDiffFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error)
+
+	// ListCommentsFunc mocks the ListComments method.
+	ListCommentsFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error)
+
+	// ListVerdictsFunc mocks the ListVerdicts method.
+	ListVerdictsFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error)
+
+	// ListWorkBranchesFunc mocks the ListWorkBranches method.
+	ListWorkBranchesFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error)
+
+	// ReplyToThreadFunc mocks the ReplyToThread method.
+	ReplyToThreadFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.ReplyToThreadRequest]) (*connect.Response[loamv1.ReplyToThreadResponse], error)
+
+	// RequestReviewFunc mocks the RequestReview method.
+	RequestReviewFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.RequestReviewRequest]) (*connect.Response[loamv1.RequestReviewResponse], error)
+
+	// SubmitVerdictFunc mocks the SubmitVerdict method.
+	SubmitVerdictFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.SubmitVerdictRequest]) (*connect.Response[loamv1.SubmitVerdictResponse], error)
+
+	// UpdateWorkBranchFunc mocks the UpdateWorkBranch method.
+	UpdateWorkBranchFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.UpdateWorkBranchRequest]) (*connect.Response[loamv1.UpdateWorkBranchResponse], error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// CreateWorkBranch holds details about calls to the CreateWorkBranch method.
+		CreateWorkBranch []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.CreateWorkBranchRequest]
+		}
+		// GetWorkBranch holds details about calls to the GetWorkBranch method.
+		GetWorkBranch []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.GetWorkBranchRequest]
+		}
+		// GetWorkBranchDiff holds details about calls to the GetWorkBranchDiff method.
+		GetWorkBranchDiff []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.GetWorkBranchDiffRequest]
+		}
+		// ListComments holds details about calls to the ListComments method.
+		ListComments []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.ListCommentsRequest]
+		}
+		// ListVerdicts holds details about calls to the ListVerdicts method.
+		ListVerdicts []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.ListVerdictsRequest]
+		}
+		// ListWorkBranches holds details about calls to the ListWorkBranches method.
+		ListWorkBranches []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.ListWorkBranchesRequest]
+		}
+		// ReplyToThread holds details about calls to the ReplyToThread method.
+		ReplyToThread []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.ReplyToThreadRequest]
+		}
+		// RequestReview holds details about calls to the RequestReview method.
+		RequestReview []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.RequestReviewRequest]
+		}
+		// SubmitVerdict holds details about calls to the SubmitVerdict method.
+		SubmitVerdict []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.SubmitVerdictRequest]
+		}
+		// UpdateWorkBranch holds details about calls to the UpdateWorkBranch method.
+		UpdateWorkBranch []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.UpdateWorkBranchRequest]
+		}
+	}
+	lockCreateWorkBranch  sync.RWMutex
+	lockGetWorkBranch     sync.RWMutex
+	lockGetWorkBranchDiff sync.RWMutex
+	lockListComments      sync.RWMutex
+	lockListVerdicts      sync.RWMutex
+	lockListWorkBranches  sync.RWMutex
+	lockReplyToThread     sync.RWMutex
+	lockRequestReview     sync.RWMutex
+	lockSubmitVerdict     sync.RWMutex
+	lockUpdateWorkBranch  sync.RWMutex
+}
+
+// CreateWorkBranch calls CreateWorkBranchFunc.
+func (mock *WorkBranchClientMock) CreateWorkBranch(contextMoqParam context.Context, request *connect.Request[loamv1.CreateWorkBranchRequest]) (*connect.Response[loamv1.CreateWorkBranchResponse], error) {
+	if mock.CreateWorkBranchFunc == nil {
+		panic("WorkBranchClientMock.CreateWorkBranchFunc: method is nil but WorkBranchClient.CreateWorkBranch was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.CreateWorkBranchRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockCreateWorkBranch.Lock()
+	mock.calls.CreateWorkBranch = append(mock.calls.CreateWorkBranch, callInfo)
+	mock.lockCreateWorkBranch.Unlock()
+	return mock.CreateWorkBranchFunc(contextMoqParam, request)
+}
+
+// CreateWorkBranchCalls gets all the calls that were made to CreateWorkBranch.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.CreateWorkBranchCalls())
+func (mock *WorkBranchClientMock) CreateWorkBranchCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.CreateWorkBranchRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.CreateWorkBranchRequest]
+	}
+	mock.lockCreateWorkBranch.RLock()
+	calls = mock.calls.CreateWorkBranch
+	mock.lockCreateWorkBranch.RUnlock()
+	return calls
+}
+
+// GetWorkBranch calls GetWorkBranchFunc.
+func (mock *WorkBranchClientMock) GetWorkBranch(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+	if mock.GetWorkBranchFunc == nil {
+		panic("WorkBranchClientMock.GetWorkBranchFunc: method is nil but WorkBranchClient.GetWorkBranch was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetWorkBranchRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockGetWorkBranch.Lock()
+	mock.calls.GetWorkBranch = append(mock.calls.GetWorkBranch, callInfo)
+	mock.lockGetWorkBranch.Unlock()
+	return mock.GetWorkBranchFunc(contextMoqParam, request)
+}
+
+// GetWorkBranchCalls gets all the calls that were made to GetWorkBranch.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.GetWorkBranchCalls())
+func (mock *WorkBranchClientMock) GetWorkBranchCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.GetWorkBranchRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetWorkBranchRequest]
+	}
+	mock.lockGetWorkBranch.RLock()
+	calls = mock.calls.GetWorkBranch
+	mock.lockGetWorkBranch.RUnlock()
+	return calls
+}
+
+// GetWorkBranchDiff calls GetWorkBranchDiffFunc.
+func (mock *WorkBranchClientMock) GetWorkBranchDiff(contextMoqParam context.Context, request *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+	if mock.GetWorkBranchDiffFunc == nil {
+		panic("WorkBranchClientMock.GetWorkBranchDiffFunc: method is nil but WorkBranchClient.GetWorkBranchDiff was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetWorkBranchDiffRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockGetWorkBranchDiff.Lock()
+	mock.calls.GetWorkBranchDiff = append(mock.calls.GetWorkBranchDiff, callInfo)
+	mock.lockGetWorkBranchDiff.Unlock()
+	return mock.GetWorkBranchDiffFunc(contextMoqParam, request)
+}
+
+// GetWorkBranchDiffCalls gets all the calls that were made to GetWorkBranchDiff.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.GetWorkBranchDiffCalls())
+func (mock *WorkBranchClientMock) GetWorkBranchDiffCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.GetWorkBranchDiffRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetWorkBranchDiffRequest]
+	}
+	mock.lockGetWorkBranchDiff.RLock()
+	calls = mock.calls.GetWorkBranchDiff
+	mock.lockGetWorkBranchDiff.RUnlock()
+	return calls
+}
+
+// ListComments calls ListCommentsFunc.
+func (mock *WorkBranchClientMock) ListComments(contextMoqParam context.Context, request *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error) {
+	if mock.ListCommentsFunc == nil {
+		panic("WorkBranchClientMock.ListCommentsFunc: method is nil but WorkBranchClient.ListComments was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListCommentsRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockListComments.Lock()
+	mock.calls.ListComments = append(mock.calls.ListComments, callInfo)
+	mock.lockListComments.Unlock()
+	return mock.ListCommentsFunc(contextMoqParam, request)
+}
+
+// ListCommentsCalls gets all the calls that were made to ListComments.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.ListCommentsCalls())
+func (mock *WorkBranchClientMock) ListCommentsCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.ListCommentsRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListCommentsRequest]
+	}
+	mock.lockListComments.RLock()
+	calls = mock.calls.ListComments
+	mock.lockListComments.RUnlock()
+	return calls
+}
+
+// ListVerdicts calls ListVerdictsFunc.
+func (mock *WorkBranchClientMock) ListVerdicts(contextMoqParam context.Context, request *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+	if mock.ListVerdictsFunc == nil {
+		panic("WorkBranchClientMock.ListVerdictsFunc: method is nil but WorkBranchClient.ListVerdicts was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListVerdictsRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockListVerdicts.Lock()
+	mock.calls.ListVerdicts = append(mock.calls.ListVerdicts, callInfo)
+	mock.lockListVerdicts.Unlock()
+	return mock.ListVerdictsFunc(contextMoqParam, request)
+}
+
+// ListVerdictsCalls gets all the calls that were made to ListVerdicts.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.ListVerdictsCalls())
+func (mock *WorkBranchClientMock) ListVerdictsCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.ListVerdictsRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListVerdictsRequest]
+	}
+	mock.lockListVerdicts.RLock()
+	calls = mock.calls.ListVerdicts
+	mock.lockListVerdicts.RUnlock()
+	return calls
+}
+
+// ListWorkBranches calls ListWorkBranchesFunc.
+func (mock *WorkBranchClientMock) ListWorkBranches(contextMoqParam context.Context, request *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+	if mock.ListWorkBranchesFunc == nil {
+		panic("WorkBranchClientMock.ListWorkBranchesFunc: method is nil but WorkBranchClient.ListWorkBranches was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListWorkBranchesRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockListWorkBranches.Lock()
+	mock.calls.ListWorkBranches = append(mock.calls.ListWorkBranches, callInfo)
+	mock.lockListWorkBranches.Unlock()
+	return mock.ListWorkBranchesFunc(contextMoqParam, request)
+}
+
+// ListWorkBranchesCalls gets all the calls that were made to ListWorkBranches.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.ListWorkBranchesCalls())
+func (mock *WorkBranchClientMock) ListWorkBranchesCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.ListWorkBranchesRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ListWorkBranchesRequest]
+	}
+	mock.lockListWorkBranches.RLock()
+	calls = mock.calls.ListWorkBranches
+	mock.lockListWorkBranches.RUnlock()
+	return calls
+}
+
+// ReplyToThread calls ReplyToThreadFunc.
+func (mock *WorkBranchClientMock) ReplyToThread(contextMoqParam context.Context, request *connect.Request[loamv1.ReplyToThreadRequest]) (*connect.Response[loamv1.ReplyToThreadResponse], error) {
+	if mock.ReplyToThreadFunc == nil {
+		panic("WorkBranchClientMock.ReplyToThreadFunc: method is nil but WorkBranchClient.ReplyToThread was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ReplyToThreadRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockReplyToThread.Lock()
+	mock.calls.ReplyToThread = append(mock.calls.ReplyToThread, callInfo)
+	mock.lockReplyToThread.Unlock()
+	return mock.ReplyToThreadFunc(contextMoqParam, request)
+}
+
+// ReplyToThreadCalls gets all the calls that were made to ReplyToThread.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.ReplyToThreadCalls())
+func (mock *WorkBranchClientMock) ReplyToThreadCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.ReplyToThreadRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.ReplyToThreadRequest]
+	}
+	mock.lockReplyToThread.RLock()
+	calls = mock.calls.ReplyToThread
+	mock.lockReplyToThread.RUnlock()
+	return calls
+}
+
+// RequestReview calls RequestReviewFunc.
+func (mock *WorkBranchClientMock) RequestReview(contextMoqParam context.Context, request *connect.Request[loamv1.RequestReviewRequest]) (*connect.Response[loamv1.RequestReviewResponse], error) {
+	if mock.RequestReviewFunc == nil {
+		panic("WorkBranchClientMock.RequestReviewFunc: method is nil but WorkBranchClient.RequestReview was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.RequestReviewRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockRequestReview.Lock()
+	mock.calls.RequestReview = append(mock.calls.RequestReview, callInfo)
+	mock.lockRequestReview.Unlock()
+	return mock.RequestReviewFunc(contextMoqParam, request)
+}
+
+// RequestReviewCalls gets all the calls that were made to RequestReview.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.RequestReviewCalls())
+func (mock *WorkBranchClientMock) RequestReviewCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.RequestReviewRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.RequestReviewRequest]
+	}
+	mock.lockRequestReview.RLock()
+	calls = mock.calls.RequestReview
+	mock.lockRequestReview.RUnlock()
+	return calls
+}
+
+// SubmitVerdict calls SubmitVerdictFunc.
+func (mock *WorkBranchClientMock) SubmitVerdict(contextMoqParam context.Context, request *connect.Request[loamv1.SubmitVerdictRequest]) (*connect.Response[loamv1.SubmitVerdictResponse], error) {
+	if mock.SubmitVerdictFunc == nil {
+		panic("WorkBranchClientMock.SubmitVerdictFunc: method is nil but WorkBranchClient.SubmitVerdict was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.SubmitVerdictRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockSubmitVerdict.Lock()
+	mock.calls.SubmitVerdict = append(mock.calls.SubmitVerdict, callInfo)
+	mock.lockSubmitVerdict.Unlock()
+	return mock.SubmitVerdictFunc(contextMoqParam, request)
+}
+
+// SubmitVerdictCalls gets all the calls that were made to SubmitVerdict.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.SubmitVerdictCalls())
+func (mock *WorkBranchClientMock) SubmitVerdictCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.SubmitVerdictRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.SubmitVerdictRequest]
+	}
+	mock.lockSubmitVerdict.RLock()
+	calls = mock.calls.SubmitVerdict
+	mock.lockSubmitVerdict.RUnlock()
+	return calls
+}
+
+// UpdateWorkBranch calls UpdateWorkBranchFunc.
+func (mock *WorkBranchClientMock) UpdateWorkBranch(contextMoqParam context.Context, request *connect.Request[loamv1.UpdateWorkBranchRequest]) (*connect.Response[loamv1.UpdateWorkBranchResponse], error) {
+	if mock.UpdateWorkBranchFunc == nil {
+		panic("WorkBranchClientMock.UpdateWorkBranchFunc: method is nil but WorkBranchClient.UpdateWorkBranch was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.UpdateWorkBranchRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockUpdateWorkBranch.Lock()
+	mock.calls.UpdateWorkBranch = append(mock.calls.UpdateWorkBranch, callInfo)
+	mock.lockUpdateWorkBranch.Unlock()
+	return mock.UpdateWorkBranchFunc(contextMoqParam, request)
+}
+
+// UpdateWorkBranchCalls gets all the calls that were made to UpdateWorkBranch.
+// Check the length with:
+//
+//	len(mockedWorkBranchClient.UpdateWorkBranchCalls())
+func (mock *WorkBranchClientMock) UpdateWorkBranchCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.UpdateWorkBranchRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.UpdateWorkBranchRequest]
+	}
+	mock.lockUpdateWorkBranch.RLock()
+	calls = mock.calls.UpdateWorkBranch
+	mock.lockUpdateWorkBranch.RUnlock()
+	return calls
+}
+
+// Ensure, that RepoClientMock does implement RepoClient.
+// If this is not the case, regenerate this file with moq.
+var _ RepoClient = &RepoClientMock{}
+
+// RepoClientMock is a mock implementation of RepoClient.
+//
+//	func TestSomethingThatUsesRepoClient(t *testing.T) {
+//
+//		// make and configure a mocked RepoClient
+//		mockedRepoClient := &RepoClientMock{
+//			GetRepoFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
+//				panic("mock out the GetRepo method")
+//			},
+//		}
+//
+//		// use mockedRepoClient in code that requires RepoClient
+//		// and then make assertions.
+//
+//	}
+type RepoClientMock struct {
+	// GetRepoFunc mocks the GetRepo method.
+	GetRepoFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetRepo holds details about calls to the GetRepo method.
+		GetRepo []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.GetRepoRequest]
+		}
+	}
+	lockGetRepo sync.RWMutex
+}
+
+// GetRepo calls GetRepoFunc.
+func (mock *RepoClientMock) GetRepo(contextMoqParam context.Context, request *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
+	if mock.GetRepoFunc == nil {
+		panic("RepoClientMock.GetRepoFunc: method is nil but RepoClient.GetRepo was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetRepoRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockGetRepo.Lock()
+	mock.calls.GetRepo = append(mock.calls.GetRepo, callInfo)
+	mock.lockGetRepo.Unlock()
+	return mock.GetRepoFunc(contextMoqParam, request)
+}
+
+// GetRepoCalls gets all the calls that were made to GetRepo.
+// Check the length with:
+//
+//	len(mockedRepoClient.GetRepoCalls())
+func (mock *RepoClientMock) GetRepoCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.GetRepoRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetRepoRequest]
+	}
+	mock.lockGetRepo.RLock()
+	calls = mock.calls.GetRepo
+	mock.lockGetRepo.RUnlock()
+	return calls
+}
+
+// Ensure, that GraphClientMock does implement GraphClient.
+// If this is not the case, regenerate this file with moq.
+var _ GraphClient = &GraphClientMock{}
+
+// GraphClientMock is a mock implementation of GraphClient.
+//
+//	func TestSomethingThatUsesGraphClient(t *testing.T) {
+//
+//		// make and configure a mocked GraphClient
+//		mockedGraphClient := &GraphClientMock{
+//			QueryFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.QueryRequest]) (*connect.Response[loamv1.QueryResponse], error) {
+//				panic("mock out the Query method")
+//			},
+//		}
+//
+//		// use mockedGraphClient in code that requires GraphClient
+//		// and then make assertions.
+//
+//	}
+type GraphClientMock struct {
+	// QueryFunc mocks the Query method.
+	QueryFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.QueryRequest]) (*connect.Response[loamv1.QueryResponse], error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Query holds details about calls to the Query method.
+		Query []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.QueryRequest]
+		}
+	}
+	lockQuery sync.RWMutex
+}
+
+// Query calls QueryFunc.
+func (mock *GraphClientMock) Query(contextMoqParam context.Context, request *connect.Request[loamv1.QueryRequest]) (*connect.Response[loamv1.QueryResponse], error) {
+	if mock.QueryFunc == nil {
+		panic("GraphClientMock.QueryFunc: method is nil but GraphClient.Query was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.QueryRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockQuery.Lock()
+	mock.calls.Query = append(mock.calls.Query, callInfo)
+	mock.lockQuery.Unlock()
+	return mock.QueryFunc(contextMoqParam, request)
+}
+
+// QueryCalls gets all the calls that were made to Query.
+// Check the length with:
+//
+//	len(mockedGraphClient.QueryCalls())
+func (mock *GraphClientMock) QueryCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.QueryRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.QueryRequest]
+	}
+	mock.lockQuery.RLock()
+	calls = mock.calls.Query
+	mock.lockQuery.RUnlock()
+	return calls
+}
+
+// Ensure, that SearchClientMock does implement SearchClient.
+// If this is not the case, regenerate this file with moq.
+var _ SearchClient = &SearchClientMock{}
+
+// SearchClientMock is a mock implementation of SearchClient.
+//
+//	func TestSomethingThatUsesSearchClient(t *testing.T) {
+//
+//		// make and configure a mocked SearchClient
+//		mockedSearchClient := &SearchClientMock{
+//			SearchFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.SearchRequest]) (*connect.Response[loamv1.SearchResponse], error) {
+//				panic("mock out the Search method")
+//			},
+//		}
+//
+//		// use mockedSearchClient in code that requires SearchClient
+//		// and then make assertions.
+//
+//	}
+type SearchClientMock struct {
+	// SearchFunc mocks the Search method.
+	SearchFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.SearchRequest]) (*connect.Response[loamv1.SearchResponse], error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Search holds details about calls to the Search method.
+		Search []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.SearchRequest]
+		}
+	}
+	lockSearch sync.RWMutex
+}
+
+// Search calls SearchFunc.
+func (mock *SearchClientMock) Search(contextMoqParam context.Context, request *connect.Request[loamv1.SearchRequest]) (*connect.Response[loamv1.SearchResponse], error) {
+	if mock.SearchFunc == nil {
+		panic("SearchClientMock.SearchFunc: method is nil but SearchClient.Search was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.SearchRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockSearch.Lock()
+	mock.calls.Search = append(mock.calls.Search, callInfo)
+	mock.lockSearch.Unlock()
+	return mock.SearchFunc(contextMoqParam, request)
+}
+
+// SearchCalls gets all the calls that were made to Search.
+// Check the length with:
+//
+//	len(mockedSearchClient.SearchCalls())
+func (mock *SearchClientMock) SearchCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.SearchRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.SearchRequest]
+	}
+	mock.lockSearch.RLock()
+	calls = mock.calls.Search
+	mock.lockSearch.RUnlock()
+	return calls
+}
+
+// Ensure, that MetaClientMock does implement MetaClient.
+// If this is not the case, regenerate this file with moq.
+var _ MetaClient = &MetaClientMock{}
+
+// MetaClientMock is a mock implementation of MetaClient.
+//
+//	func TestSomethingThatUsesMetaClient(t *testing.T) {
+//
+//		// make and configure a mocked MetaClient
+//		mockedMetaClient := &MetaClientMock{
+//			GetInstructionsFunc: func(contextMoqParam context.Context, request *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error) {
+//				panic("mock out the GetInstructions method")
+//			},
+//		}
+//
+//		// use mockedMetaClient in code that requires MetaClient
+//		// and then make assertions.
+//
+//	}
+type MetaClientMock struct {
+	// GetInstructionsFunc mocks the GetInstructions method.
+	GetInstructionsFunc func(contextMoqParam context.Context, request *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetInstructions holds details about calls to the GetInstructions method.
+		GetInstructions []struct {
+			// ContextMoqParam is the contextMoqParam argument value.
+			ContextMoqParam context.Context
+			// Request is the request argument value.
+			Request *connect.Request[loamv1.GetInstructionsRequest]
+		}
+	}
+	lockGetInstructions sync.RWMutex
+}
+
+// GetInstructions calls GetInstructionsFunc.
+func (mock *MetaClientMock) GetInstructions(contextMoqParam context.Context, request *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error) {
+	if mock.GetInstructionsFunc == nil {
+		panic("MetaClientMock.GetInstructionsFunc: method is nil but MetaClient.GetInstructions was just called")
+	}
+	callInfo := struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetInstructionsRequest]
+	}{
+		ContextMoqParam: contextMoqParam,
+		Request:         request,
+	}
+	mock.lockGetInstructions.Lock()
+	mock.calls.GetInstructions = append(mock.calls.GetInstructions, callInfo)
+	mock.lockGetInstructions.Unlock()
+	return mock.GetInstructionsFunc(contextMoqParam, request)
+}
+
+// GetInstructionsCalls gets all the calls that were made to GetInstructions.
+// Check the length with:
+//
+//	len(mockedMetaClient.GetInstructionsCalls())
+func (mock *MetaClientMock) GetInstructionsCalls() []struct {
+	ContextMoqParam context.Context
+	Request         *connect.Request[loamv1.GetInstructionsRequest]
+} {
+	var calls []struct {
+		ContextMoqParam context.Context
+		Request         *connect.Request[loamv1.GetInstructionsRequest]
+	}
+	mock.lockGetInstructions.RLock()
+	calls = mock.calls.GetInstructions
+	mock.lockGetInstructions.RUnlock()
 	return calls
 }

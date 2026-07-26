@@ -14,10 +14,19 @@ import (
 
 func testLogger() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
 
-// fakeConnect is a trivial ConnectClient test double. It is declared here
-// (not as a package stub) precisely so deleting internal/cli's placeholder
-// collaborators later never breaks these tests.
+// fakeConnect is a trivial ConnectClient test double for tests that only
+// need a valid collaborator to inject, never an RPC call to actually
+// happen: every accessor returns nil, which is fine for WorkBranchClient
+// etc. since nothing here calls through them. It is declared here (not as a
+// package stub) precisely so deleting internal/cli's placeholder
+// collaborators (loam-qdr) never broke these tests.
 type fakeConnect struct{}
+
+func (fakeConnect) WorkBranch() WorkBranchClient { return nil }
+func (fakeConnect) Repo() RepoClient             { return nil }
+func (fakeConnect) Graph() GraphClient           { return nil }
+func (fakeConnect) Search() SearchClient         { return nil }
+func (fakeConnect) Meta() MetaClient             { return nil }
 
 func newTestDeps() *Deps {
 	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{})
