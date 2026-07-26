@@ -88,7 +88,7 @@ func newHarness(repoIDs ...RepoID) *harness {
 	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) { return FetchResult{}, nil }
 	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) { return nil, nil }
 	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return nil }
-	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return nil }
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) { return false, nil }
 	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return nil }
 	h.state = &SyncStateReporterMock{
 		ReportSyncingFunc: func(ctx context.Context, repo RepoID) error { return nil },
@@ -132,9 +132,9 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 		log.add(string(repo) + ":merge")
 		return nil
 	}
-	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error {
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
 		log.add(string(repo) + ":ingest")
-		return nil
+		return true, nil
 	}
 	h.prs.PollPRsFunc = recordStep(&log, "pollprs")
 	go h.scheduler.Run(ctx)
@@ -143,8 +143,8 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 	second := <-h.outcomes
 	require.NoError(t, first.err)
 	require.NoError(t, second.err)
-	assert.True(t, first.enqueuedIngest)
-	assert.True(t, second.enqueuedIngest)
+	assert.True(t, first.enqueuedIngest, "the enqueuer reported a genuine enqueue for this advance")
+	assert.True(t, second.enqueuedIngest, "the enqueuer reported a genuine enqueue for this advance")
 	assert.ElementsMatch(t, []RepoID{"repoA", "repoB"}, []RepoID{first.repo, second.repo})
 	assert.Equal(t, []string{"repoA:fetch", "repoA:advances", "repoA:merge", "repoA:ingest", "repoA:pollprs"}, log.forRepo("repoA"))
 	assert.Equal(t, []string{"repoB:fetch", "repoB:advances", "repoB:merge", "repoB:ingest", "repoB:pollprs"}, log.forRepo("repoB"))
@@ -172,7 +172,7 @@ func TestScheduler_FailingStepInOneRepoDoesNotBlockAnother(t *testing.T) {
 	require.ErrorIs(t, outcomes["repoA"].err, wantErr)
 	require.NoError(t, outcomes["repoB"].err)
 	assert.False(t, outcomes["repoA"].enqueuedIngest, "repoA never reached step 4")
-	assert.True(t, outcomes["repoB"].enqueuedIngest)
+	assert.False(t, outcomes["repoB"].enqueuedIngest, "repoB reached step 4 but the harness's default IngestEnqueuer enqueues nothing (loam-ax1: reaching step 4 without error is not the same as actually enqueuing a job)")
 	assert.Len(t, h.prs.PollPRsCalls(), 1)
 }
 
@@ -206,12 +206,53 @@ func TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails(t *testing.T) {
 	defer cancel()
 	h := newHarness("repoA")
 	wantErr := errors.New("forge unreachable")
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) { return true, nil }
 	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return wantErr }
 	go h.scheduler.Run(ctx)
 	h.ticks <- time.Now()
 	outcome := <-h.outcomes
 	require.ErrorIs(t, outcome.err, wantErr)
-	assert.True(t, outcome.enqueuedIngest, "step 4 succeeded before step 5 failed")
+	assert.True(t, outcome.enqueuedIngest, "step 4 genuinely enqueued a job before step 5 failed")
+}
+
+// TestScheduler_PropagatesWhatIngestEnqueuerActuallyReports is loam-ax1's
+// core regression proof: runSteps must forward IngestEnqueuer's own
+// enqueued return value, never synthesize true from "step 4 did not
+// error". Before this fix, every non-error path out of runSteps returned
+// enqueuedIngest=true unconditionally, so a cycle where nothing was
+// enqueued (e.g. no upstream advances) looked identical, from
+// SyncStateReporter's side, to one that genuinely handed sync_state
+// ownership to the ingest worker -- permanently suppressing
+// ReportIdle/ReportError and pinning repos.sync_state at 'syncing'
+// forever (docs/sync-spec.md :85). Both subtests reach step 4 without
+// error; only the IngestEnqueuer mock's own answer differs, so a
+// hardcoded-true runSteps passes the "true" subtest but fails the
+// "false" one by assertion, not by hang or panic.
+func TestScheduler_PropagatesWhatIngestEnqueuerActuallyReports(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		enqueued bool
+	}{
+		{name: "nothing enqueued lets the terminal report through", enqueued: false},
+		{name: "a genuine enqueue hands off ownership", enqueued: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			h := newHarness("repoA")
+			h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
+				return tt.enqueued, nil
+			}
+			go h.scheduler.Run(ctx)
+			h.ticks <- time.Now()
+			outcome := <-h.outcomes
+			require.NoError(t, outcome.err)
+			assert.Equal(t, tt.enqueued, outcome.enqueuedIngest, "enqueuedIngest must equal exactly what IngestEnqueuer reported")
+		})
+	}
 }
 
 // TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight drives the
