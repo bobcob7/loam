@@ -53,15 +53,46 @@ type Pool struct {
 	wg           sync.WaitGroup
 }
 
+// Option configures a Pool at construction, beyond the required
+// constructor arguments. docs/testing-spec.md's "Manual scheduler"
+// principle -- "the components already take their trigger as an input;
+// tests just own it" -- otherwise has no seam here: the retry backoff and
+// poll-interval timers are unexported fields with no other way for a test
+// in a different package (e.g. a harness driving features/ingestion.
+// feature's "the job is retried" step) to shrink them down from
+// production-scale defaults.
+type Option func(*Pool)
+
+// WithBackoff overrides the default exponential backoff bounds
+// (defaultBackoffBase, defaultBackoffMax) between a failed job's retry
+// attempts.
+func WithBackoff(base, max time.Duration) Option {
+	return func(p *Pool) {
+		p.backoffBase = base
+		p.backoffMax = max
+	}
+}
+
+// WithPollInterval overrides the default fallback poll cadence
+// (defaultPollInterval's doc comment: a safety net behind the wake-up
+// channel, not the primary dispatch path).
+func WithPollInterval(d time.Duration) Option {
+	return func(p *Pool) {
+		p.pollInterval = d
+	}
+}
+
 // NewPool builds a Pool. workers is LOAM_INGEST_WORKERS (a server-wide
 // cross-repo parallelism cap, read by internal/config); values below 1 are
 // clamped to 1 so the pool always makes progress. logger and db must be
-// non-nil; orchestrator is the injected pipeline (loam-c94.12).
-func NewPool(logger *slog.Logger, db *pgxpool.Pool, orchestrator Orchestrator, workers int) *Pool {
+// non-nil; orchestrator is the injected pipeline (loam-c94.12). opts
+// applies after the defaults, so WithBackoff/WithPollInterval override
+// them.
+func NewPool(logger *slog.Logger, db *pgxpool.Pool, orchestrator Orchestrator, workers int, opts ...Option) *Pool {
 	if workers < 1 {
 		workers = 1
 	}
-	return &Pool{
+	p := &Pool{
 		logger:       logger,
 		db:           db,
 		orchestrator: orchestrator,
@@ -73,6 +104,10 @@ func NewPool(logger *slog.Logger, db *pgxpool.Pool, orchestrator Orchestrator, w
 		busy:         make(map[uuid.UUID]struct{}),
 		drainWaiters: make(map[uuid.UUID][]chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Run starts workers worker goroutines and blocks until ctx is canceled
@@ -285,6 +320,21 @@ func (p *Pool) wakeUp() {
 // concurrent callers so a burst of triggers for the same repo commits at
 // most one new queued row, whether or not a job for that repo is
 // currently running.
+//
+// Deliberately not coalesced: a trigger arriving while a same-key job is
+// in status 'failed' (mid-backoff, see scheduleRetry) inserts a new
+// queued row alongside the eventual retry, rather than being absorbed by
+// it -- the dedup predicate below only matches status='queued'.
+// docs/ingestion-spec.md's coalescing clause ("Trigger & Scheduling")
+// scopes to "a new trigger while one runs", not one that is failed and
+// waiting to retry, so this is not a spec violation, just one wasted
+// (idempotent) unit of work in an uncommon window. Do NOT widen the
+// predicate to include 'failed': that would suppress a legitimate
+// re-trigger arriving during the backoff wait, and the per-repo claim
+// filter already serializes the duplicate against the retry so they
+// never run concurrently (mutation-tested in
+// TestPool_PerRepoSerializationHoldsUnderConcurrentClaim's mutation, see
+// this bead's final report).
 func (p *Pool) Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch string, kind Kind) error {
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
@@ -338,7 +388,7 @@ func (p *Pool) RequeueOrphaned(ctx context.Context) error {
 	return nil
 }
 
-// DrainRepo blocks until repoID has zero ingest_jobs rows in status
+// DrainRepoID blocks until repoID has zero ingest_jobs rows in status
 // 'queued' or 'running' -- including any coalesced follow-up job, not
 // merely whichever job is running right now, since a follow-up queued
 // while the current job runs keeps the repo un-drained. It exists for
@@ -349,27 +399,27 @@ func (p *Pool) RequeueOrphaned(ctx context.Context) error {
 // SyncStateReporter, which this package has no equivalent observable seam
 // for, so this method is that seam.
 //
-// It checks real Postgres state (not this Pool's own in-memory
+// The check queries real Postgres state (not this Pool's own in-memory
 // bookkeeping), so it is correct even for a row this Pool never itself
 // enqueued or claimed -- e.g. one seeded directly by a test, or one
 // RequeueOrphaned just reset. The check and the wait registration happen
 // under the same lock a completing job's notification also takes, so a
 // job finishing between this call's check and its wait can never be
-// missed (the classic check-then-wait lost-wakeup race).
+// missed (the classic check-then-wait lost-wakeup race) -- but the
+// *notification* is this Pool instance's own in-process signal, not a
+// Postgres one: if some other process (another server replica, a manual
+// UPDATE) is the one that finishes the job, this call's waiter is never
+// woken and blocks until ctx's deadline. That is fine for the
+// single-replica MVP this package targets (docs/server-spec.md "Process
+// Model"), but is not a general cross-process primitive.
 //
 // Semantics note for callers: this is a literal "zero queued-or-running"
 // check. A job that just failed and is waiting out its retry backoff is,
 // for that window, in status 'failed' -- neither queued nor running -- so
-// DrainRepo can return while a retry is about to re-queue it. Callers
+// DrainRepoID can return while a retry is about to re-queue it. Callers
 // that need "settled including all retries" need a different contract;
 // this one intentionally matches only what was asked.
-//
-// Type note: this Pool keys jobs by uuid.UUID (matching ingest_jobs.
-// repo_id's column type), not mirrorsync.RepoID (a string) -- this
-// package does not import mirrorsync, and its own Enqueuer signature
-// already commits to uuid.UUID. A caller keyed by mirrorsync.RepoID needs
-// a one-line uuid.Parse(string(repo)) adapter at the call site.
-func (p *Pool) DrainRepo(ctx context.Context, repoID uuid.UUID) error {
+func (p *Pool) DrainRepoID(ctx context.Context, repoID uuid.UUID) error {
 	for {
 		wait, drained, err := p.checkOrRegisterDrainWaiter(ctx, repoID)
 		if err != nil {
@@ -384,6 +434,32 @@ func (p *Pool) DrainRepo(ctx context.Context, repoID uuid.UUID) error {
 		case <-wait:
 		}
 	}
+}
+
+// DrainRepo is DrainRepoID keyed by repo name instead of id: it resolves
+// repo (repos.name, the `<group>/<repo_name>` form -- docs/persistence-
+// spec.md "repos") to its id via the unique, indexed repos_name_key
+// lookup, then delegates. This is the harness-facing seam: production
+// callers of Enqueue already hold repos.id (loam-c94.2's adapter keys
+// repo_target_branches by (repo_id, branch); loam-c94.14/loam-c94.15
+// receive a repo name off the proto surface and must resolve it to an id
+// regardless of this package, so resolving here too would just be a
+// second lookup, not a saved one) -- but a test harness driving the
+// system by name only ever holds the name, never the id, which is why
+// this asymmetry with Enqueue/Job/DrainRepoID (all uuid.UUID) is
+// deliberate rather than an inconsistency to "fix" by unifying types.
+//
+// This package takes repo as a plain string, not mirrorsync.RepoID:
+// internal/ingest does not import internal/mirrorsync. A caller keyed by
+// mirrorsync.RepoID needs a one-line string(repo) conversion (RepoID's
+// underlying type is string) to call this method, or its own adapter
+// implementing whatever consumer interface it declares.
+func (p *Pool) DrainRepo(ctx context.Context, repo string) error {
+	var repoID uuid.UUID
+	if err := p.db.QueryRow(ctx, `SELECT id FROM repos WHERE name = $1`, repo).Scan(&repoID); err != nil {
+		return fmt.Errorf("resolving repo %q to an id: %w", repo, err)
+	}
+	return p.DrainRepoID(ctx, repoID)
 }
 
 // checkOrRegisterDrainWaiter queries whether repoID currently has any

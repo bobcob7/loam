@@ -72,3 +72,34 @@ func TestNewPool_PreservesConfiguredWorkerCount(t *testing.T) {
 	pool := NewPool(testLogger(), nil, nil, 7)
 	assert.Equal(t, 7, pool.workers)
 }
+
+// TestNewPool_DefaultsWithoutOptions pins the zero-option construction
+// path so a later change to the option-application order (e.g.
+// accidentally applying opts before the defaults, silently discarding
+// them) has a test to fail.
+func TestNewPool_DefaultsWithoutOptions(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1)
+	assert.Equal(t, defaultPollInterval, pool.pollInterval)
+	assert.Equal(t, defaultBackoffBase, pool.backoffBase)
+	assert.Equal(t, defaultBackoffMax, pool.backoffMax)
+}
+
+// TestWithBackoff_OverridesBothBounds is FIX 3's core seam: a test in
+// another package (internal/testsched's "Manual scheduler" harness) has
+// no way to reach Pool's unexported backoff fields directly and must go
+// through this option.
+func TestWithBackoff_OverridesBothBounds(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1, WithBackoff(10*time.Millisecond, 40*time.Millisecond))
+	assert.Equal(t, 10*time.Millisecond, pool.backoffBase)
+	assert.Equal(t, 40*time.Millisecond, pool.backoffMax)
+}
+
+// TestWithPollInterval_OverridesTheDefault is WithBackoff's counterpart
+// for the fallback poll cadence.
+func TestWithPollInterval_OverridesTheDefault(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1, WithPollInterval(250*time.Millisecond))
+	assert.Equal(t, 250*time.Millisecond, pool.pollInterval)
+}

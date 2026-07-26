@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,6 +180,13 @@ func TestIngestJobLifecycle_QueuedRunningSucceeded(t *testing.T) {
 // Backoff is set high enough that the retry never fires before the
 // assertions run, so this test observes the failed state, not a later
 // retry's outcome.
+//
+// DEFERRED-WIP: features/ingestion.feature:44-50 "A failed ingest keeps
+// the previous index" -> TestIngestJobLifecycle_Failed (partial: covers
+// only the "job is shown as failed with its error" step; the previous-
+// index/ingested-commit steps belong to loam-c94.12's orchestrator, not
+// this package). Behind //go:build integration; @wip not removed
+// (loam-li0.5's godog harness does not exist yet).
 func TestIngestJobLifecycle_Failed(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -190,9 +198,7 @@ func TestIngestJobLifecycle_Failed(t *testing.T) {
 			return Stats{}, errors.New(wantErr)
 		},
 	}
-	pool := NewPool(testLogger(), pgPool, orch, 1)
-	pool.backoffBase = 1 * time.Minute
-	pool.backoffMax = 1 * time.Minute
+	pool := NewPool(testLogger(), pgPool, orch, 1, WithBackoff(1*time.Minute, 1*time.Minute))
 	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindIncremental))
 	var jobID uuid.UUID
 	require.NoError(t, pgPool.QueryRow(ctx, `SELECT id FROM ingest_jobs WHERE repo_id = $1`, repoID).Scan(&jobID))
@@ -213,6 +219,13 @@ func TestIngestJobLifecycle_Failed(t *testing.T) {
 // with attempts=2 (one per failure) and status=succeeded, and the whole
 // run takes at least as long as the two backoff waits, proving the delay
 // is real and not skipped.
+//
+// DEFERRED-WIP: features/ingestion.feature:44-50 "A failed ingest keeps
+// the previous index", final step "And the job is retried" ->
+// TestIngestJobRetry_BackoffRequeuesAndSucceeds (partial: covers only the
+// retry mechanism -- failed row eventually re-queues, re-runs, and
+// succeeds -- not the previous-index/ingested-commit steps, which belong
+// to loam-c94.12). Behind //go:build integration; @wip not removed.
 func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -228,9 +241,8 @@ func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 			return Stats{FilesParsed: 1, ChunksEmbedded: 1}, nil
 		},
 	}
-	pool := NewPool(testLogger(), pgPool, orch, 1)
-	pool.backoffBase = 50 * time.Millisecond
-	pool.backoffMax = 200 * time.Millisecond
+	const backoffBase = 50 * time.Millisecond
+	pool := NewPool(testLogger(), pgPool, orch, 1, WithBackoff(backoffBase, 200*time.Millisecond))
 	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindFull))
 	var jobID uuid.UUID
 	require.NoError(t, pgPool.QueryRow(ctx, `SELECT id FROM ingest_jobs WHERE repo_id = $1`, repoID).Scan(&jobID))
@@ -245,7 +257,7 @@ func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 	row := fetchJob(ctx, t, pgPool, jobID)
 	assert.Equal(t, 2, row.attempts, "two failures before the third, successful attempt")
 	assert.Equal(t, int32(3), calls.Load())
-	assert.GreaterOrEqualf(t, elapsed, pool.backoffBase, "must wait at least one backoff period (%s) before the first retry, took %s", pool.backoffBase, elapsed)
+	assert.GreaterOrEqualf(t, elapsed, backoffBase, "must wait at least one backoff period (%s) before the first retry, took %s", backoffBase, elapsed)
 }
 
 // TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp is the core
@@ -254,9 +266,23 @@ func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 // follow-up queued job". It seeds a running job (simulating a job already
 // in flight), then fires many concurrent Enqueue calls for the same
 // (repo, branch, kind) from real goroutines against the real advisory-lock
-// path, and asserts exactly one queued row results -- proving the
-// pg_advisory_xact_lock-guarded check-then-insert is race-free under real
-// contention, not just single-threaded reasoning.
+// path, and asserts exactly one queued row results.
+//
+// This and TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock below
+// are a complementary pair, not a redundant/superseded pair -- neither is
+// individually a deterministic mutation-catcher for "the advisory lock is
+// missing" from Enqueue, and each has caught that mutation on a run the
+// other missed (see this bead's final report for the review round that
+// established this by replication on different hardware: this test's own
+// author-side experiments saw 0/10 catches removing the lock, even with
+// this synchronized start barrier and pool_max_conns raised well past n;
+// an independent reviewer's replication caught it here on the run where
+// the timing test below happened to land inside its own threshold).
+// Keep both: this one is the literal ACCEPTANCE CRITERIA assertion
+// (exactly one queued row after N real concurrent callers) and remains
+// worth running even though it is not a reliable regression detector on
+// its own; the timing test is the more consistent -- but still
+// probabilistic, not deterministic -- detector of the two.
 func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -267,19 +293,8 @@ func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 	const n = 25
 	// start is a barrier every goroutine blocks on until all n are parked
 	// on the receive, then release fires them at Enqueue as close to
-	// simultaneously as possible. This assertion is the correctness
-	// property the ACCEPTANCE CRITERIA asks for and is worth keeping even
-	// so: N real concurrent callers against real Postgres must still
-	// leave exactly one queued row. It is NOT, on its own, a reliable
-	// mutation-catcher for "the advisory lock is missing" -- see
-	// TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock below and
-	// this bead's final report for why (the SELECT-then-INSERT window is
-	// far narrower than Go's goroutine dispatch + local network jitter,
-	// so even with this barrier and pool_max_conns raised well past n, an
-	// experiment removing the lock still only saw 1 of 25 goroutines ever
-	// observe "no existing row" -- confirmed the DB connection itself is
-	// not the bottleneck via a control test: 20 concurrent pg_sleep(0.3)
-	// calls completed in ~320ms, not ~6s).
+	// simultaneously as possible, to give the check-then-insert race the
+	// best realistic chance to manifest.
 	start := make(chan struct{})
 	var ready sync.WaitGroup
 	var wg sync.WaitGroup
@@ -304,20 +319,37 @@ func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 		"N concurrent triggers for a repo with a running job must coalesce into exactly one queued follow-up")
 }
 
-// TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock is the
-// deterministic proof the test above cannot reliably give: it does not
-// rely on winning a timing race, it measures one. n concurrent Enqueue
-// calls for the SAME (repo, branch, kind) must each acquire the same
+// TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock is the second
+// half of the complementary pair described on
+// TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp above: instead of
+// racing for a check-then-insert window (which turned out, empirically,
+// to be far narrower than Go's goroutine dispatch + local network
+// jitter), it measures a timing signature. n concurrent Enqueue calls for
+// the SAME (repo, branch, kind) must each acquire the same
 // pg_advisory_xact_lock in turn -- lock held from acquisition until that
 // call's COMMIT/ROLLBACK -- so their total wall time scales with n. n
 // concurrent Enqueue calls for n DIFFERENT repos never contend on that
 // lock (different hash key each), so their total wall time stays roughly
 // constant regardless of n. If the advisory lock were removed, both
-// scenarios would run at the same (fast, parallel) speed and this
-// comparison would collapse -- which is exactly what happened when this
-// test was run against the mutation that deleted the
-// pg_advisory_xact_lock call from Enqueue (see this bead's final report):
-// the same-key scenario ran no slower than the different-key one.
+// scenarios run at the same (fast, parallel) speed and this comparison
+// collapses.
+//
+// This is a more consistent detector than the goroutine-count test above,
+// but it is still probabilistic, not deterministic, and the review round
+// that added it found a real, reproducible false negative: three runs of
+// the lock-removed mutation on different hardware measured ratios of
+// 0.75x-1.56x, straddling this test's 1.5x threshold (one of those three
+// runs passed at 1.56x -- the threshold sits inside the mutated
+// distribution's observed range, not cleanly below it). The same review
+// also measured the correct-code distribution as 1.8x-6x across repeated
+// runs on the original hardware and a separate 3.1x-3.4x under
+// GOMAXPROCS=2 with a full container load on the reviewer's hardware, so
+// the risk is asymmetric: false negatives (missing a real regression) are
+// the demonstrated weakness; false positives (flagging correct code) were
+// not observed. Do not read this test's pass as deterministic proof the
+// lock is present -- read a *failure* as a strong signal something is
+// wrong, and lean on the goroutine-count test and code review for the
+// cases this one's timing margin is too close to call.
 func TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -476,10 +508,10 @@ func TestRequeueOrphaned_LeavesQueuedAndSucceededAlone(t *testing.T) {
 	assert.Equal(t, "queued", fetchJob(ctx, t, pgPool, queuedID).status)
 }
 
-// TestDrainRepo_ReturnsImmediatelyWhenNothingPending is DrainRepo's
+// TestDrainRepoID_ReturnsImmediatelyWhenNothingPending is DrainRepoID's
 // trivial case: a repo with no queued or running rows must not block at
 // all -- there is nothing to wait for and nothing will ever notify it.
-func TestDrainRepo_ReturnsImmediatelyWhenNothingPending(t *testing.T) {
+func TestDrainRepoID_ReturnsImmediatelyWhenNothingPending(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pgPool := newTestPool(ctx, t)
@@ -487,16 +519,17 @@ func TestDrainRepo_ReturnsImmediatelyWhenNothingPending(t *testing.T) {
 	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
 	drainCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	require.NoError(t, pool.DrainRepo(drainCtx, repoID), "a repo with nothing queued or running must drain immediately, not time out")
+	require.NoError(t, pool.DrainRepoID(drainCtx, repoID), "a repo with nothing queued or running must drain immediately, not time out")
 }
 
-// TestDrainRepo_WaitsForRunningJobAndItsCoalescedFollowUp is the seam
-// loam-li0.3 asked for: DrainRepo must not return while a job is running,
-// and -- the part a naive "wait for the current job" implementation would
-// get wrong -- must also not return while a coalesced follow-up enqueued
-// during that run is still queued. Only once both the original job and
-// its follow-up reach a terminal state does DrainRepo unblock.
-func TestDrainRepo_WaitsForRunningJobAndItsCoalescedFollowUp(t *testing.T) {
+// TestDrainRepoID_WaitsForRunningJobAndItsCoalescedFollowUp is the seam
+// loam-li0.3 asked for: DrainRepoID must not return while a job is
+// running, and -- the part a naive "wait for the current job"
+// implementation would get wrong -- must also not return while a
+// coalesced follow-up enqueued during that run is still queued. Only once
+// both the original job and its follow-up reach a terminal state does
+// DrainRepoID unblock.
+func TestDrainRepoID_WaitsForRunningJobAndItsCoalescedFollowUp(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pgPool := newTestPool(ctx, t)
@@ -520,18 +553,18 @@ func TestDrainRepo_WaitsForRunningJobAndItsCoalescedFollowUp(t *testing.T) {
 	go pool.Run(runCtx)
 	<-firstJobRunning
 	// A second trigger arrives while the first job is running: it must
-	// coalesce into a queued follow-up, and DrainRepo must account for it.
+	// coalesce into a queued follow-up, and DrainRepoID must account for it.
 	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindIncremental))
 	assert.Equal(t, 1, queuedJobCount(ctx, t, pgPool, repoID, "main", KindIncremental), "the trigger during the running job must coalesce into exactly one queued follow-up")
 	drained := make(chan error, 1)
 	go func() {
 		drainCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		drained <- pool.DrainRepo(drainCtx, repoID)
+		drained <- pool.DrainRepoID(drainCtx, repoID)
 	}()
 	select {
 	case err := <-drained:
-		t.Fatalf("DrainRepo returned (err=%v) before the running job and its coalesced follow-up settled", err)
+		t.Fatalf("DrainRepoID returned (err=%v) before the running job and its coalesced follow-up settled", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(gate)
@@ -539,7 +572,7 @@ func TestDrainRepo_WaitsForRunningJobAndItsCoalescedFollowUp(t *testing.T) {
 	case err := <-drained:
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("DrainRepo did not return after the running job and its follow-up both settled")
+		t.Fatal("DrainRepoID did not return after the running job and its follow-up both settled")
 	}
 	var settledCount int
 	require.NoError(t, pgPool.QueryRow(ctx,
@@ -547,6 +580,39 @@ func TestDrainRepo_WaitsForRunningJobAndItsCoalescedFollowUp(t *testing.T) {
 	).Scan(&settledCount))
 	assert.Equal(t, 2, settledCount, "both the original job and its coalesced follow-up must have run to completion")
 	assert.Equal(t, int32(2), callCount.Load())
+}
+
+// TestDrainRepo_ResolvesNameToIDAndDelegates is the harness-facing seam
+// (loam-li0.3, loam-c94.2's adapter): DrainRepo takes a repo name -- the
+// repos.name form callers of the proto surface and mirrorsync.RepoID both
+// carry -- resolves it via repos_name_key, and delegates to DrainRepoID.
+// This proves the resolution actually happens against real Postgres, not
+// just that the two methods compile against each other.
+func TestDrainRepo_ResolvesNameToIDAndDelegates(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	const name = "group/drain-by-name"
+	repoID := seedRepo(ctx, t, pgPool, name)
+	insertRunningJob(ctx, t, pgPool, repoID, "main", KindIncremental)
+	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
+	drainCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	err := pool.DrainRepo(drainCtx, name)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a repo resolved by name with a running job must block exactly as DrainRepoID would, not return early")
+}
+
+// TestDrainRepo_UnknownNameReturnsError proves DrainRepo surfaces a
+// legible error instead of hanging or panicking when the name does not
+// resolve to any repos row -- e.g. a caller racing enrollment, or a typo.
+func TestDrainRepo_UnknownNameReturnsError(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
+	err := pool.DrainRepo(ctx, "group/does-not-exist")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pgx.ErrNoRows)
 }
 
 // concurrencyTracker records, per repo, how many Orchestrator.Run calls
