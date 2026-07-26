@@ -37,6 +37,12 @@ tasks:
   test:
     desc: Run the test suite with the race detector
     cmds:
+      # No -count=1 here (deliberately, unlike test:integration below): unit
+      # tests are pure computation with no externally-observable side effect
+      # (no container, no live database) for a cache hit to misrepresent as
+      # freshly re-verified. If the code and its dependency graph haven't
+      # changed, the cached "ok" is still true, so letting `go test` skip the
+      # re-run is a legitimate speedup, not a false-green risk.
       - go test ./... -race
 
   test:integration:
@@ -47,7 +53,17 @@ tasks:
       internal/db/migrations/integration_test.go); CI's `integration` job
       runs on a real Docker daemon and must NOT set that var.
     cmds:
-      - go test -tags=integration ./...
+      # -count=1 forces a real re-run every time (loam-h3x). These tests'
+      # side effect IS the thing under test: a live container gets started,
+      # migrated against, and torn down. Go's test cache can't tell that
+      # apart from a pure unit test — it happily replays a stale "ok" from
+      # testlog-recorded inputs alone, so a second consecutive run with no
+      # code change starts NO container and touches NO database while still
+      # reporting green (see loam-ejr, which hit the identical replay bug in
+      # `demo:m1`, fixed there the same way). No flag marks a test
+      # "uncacheable" — forcing a fresh run is the only lever. Do not remove
+      # this thinking it's redundant.
+      - go test -tags=integration -count=1 ./...
 
   demo:m1:
     desc: >-
