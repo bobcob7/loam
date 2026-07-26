@@ -9,15 +9,21 @@
 // see internal/db/pool.go's NewPool doc comment: a pool built before
 // migrations have created the pgvector extension deadlocks permanently on a
 // virgin database; this is the ordering loam-ut9 filed against the spec
-// text, fixed alongside this wiring); build the ingest worker pool and
-// re-queue any ingest_jobs orphaned by a prior crash (Startup step 4); then
-// start the ingest worker pool and the HTTP listener, listener last, exactly
-// as run's own doc comment below details.
+// text, fixed alongside this wiring); reconcile every enrolled repo's bare
+// mirror (Startup step 3, loam-ofg.19: idempotently rewrite the pre-receive
+// hook stub and the receive.denyNonFastForwards/receive.denyDeletes config,
+// docs/git-spec.md "Enforcement Mechanics"); build the ingest worker pool
+// and re-queue any ingest_jobs orphaned by a prior crash (Startup step 4);
+// then start the ingest worker pool and the HTTP listener, listener last,
+// exactly as run's own doc comment below details.
 //
-// Steps 3 (mirror reconciliation, loam-ofg.19) and the policy socket half
-// of step 5 (loam-ofg.18) are not wired here -- neither package exists yet
-// in this tree. Nor is the sync scheduler (mirrorsync.Scheduler): see run's
-// doc comment for why constructing one today would do more harm than good.
+// The policy socket half of step 5 (loam-ofg.18) is not wired here -- that
+// package does not exist yet in this tree, and loam-ofg.19's own hook stub
+// (internal/mirrorreconcile) is a deliberate placeholder ofg.18 replaces
+// wholesale (see that package's hookScript doc comment), not a real
+// implementation of ref policy. Nor is the sync scheduler
+// (mirrorsync.Scheduler): see run's doc comment for why constructing one
+// today would do more harm than good.
 //
 // The /healthz and /readyz handlers below are placeholders: loam-ofg.22
 // owns their real liveness/readiness logic. They exist so this bead's own
@@ -48,9 +54,12 @@ import (
 
 	"github.com/bobcob7/loam/internal/config"
 	"github.com/bobcob7/loam/internal/db"
+	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
+	"github.com/bobcob7/loam/internal/mirrorreconcile"
+	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/server"
 	loamweb "github.com/bobcob7/loam/web"
 )
@@ -115,6 +124,11 @@ func run(cfg config.Config) error {
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
 		return err
+	}
+	repoStore := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	if err := reconcileMirrors(ctx, cfg.Logger, cfg.DataDir, repoStore, mirrorreconcile.ReconcileMirror); err != nil {
+		pool.Close()
+		return fmt.Errorf("reconciling mirrors: %w", err)
 	}
 	ingestPool := ingest.NewPool(cfg.Logger, pool, notImplementedOrchestrator{}, cfg.IngestWorkers)
 	if err := ingestPool.RequeueOrphaned(ctx); err != nil {

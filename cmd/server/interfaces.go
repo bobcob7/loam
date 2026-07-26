@@ -2,7 +2,7 @@ package main
 
 import "context"
 
-//go:generate go tool moq -out moq_test.go . runner closer
+//go:generate go tool moq -out moq_test.go . runner closer repoNameLister
 
 // runner is a long-lived background component whose Run blocks until ctx
 // is canceled and, per its own contract, every unit of work it already
@@ -34,4 +34,15 @@ type runner interface {
 // under it.
 type closer interface {
 	Close()
+}
+
+// repoNameLister supplies every enrolled repo's name for mirror
+// reconciliation at startup (docs/server-spec.md Startup step 3).
+// *reposstore.Store satisfies this structurally via its own
+// ListAllRepoNames -- mirroring internal/mirrorsync's own identical
+// unexported repoNameLister interface, defined separately here per this
+// repo's "interfaces live where consumed" convention rather than shared
+// across packages.
+type repoNameLister interface {
+	ListAllRepoNames(ctx context.Context) ([]string, error)
 }

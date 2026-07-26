@@ -132,3 +132,69 @@ func (mock *closerMock) CloseCalls() []struct {
 	mock.lockClose.RUnlock()
 	return calls
 }
+
+// Ensure, that repoNameListerMock does implement repoNameLister.
+// If this is not the case, regenerate this file with moq.
+var _ repoNameLister = &repoNameListerMock{}
+
+// repoNameListerMock is a mock implementation of repoNameLister.
+//
+//	func TestSomethingThatUsesrepoNameLister(t *testing.T) {
+//
+//		// make and configure a mocked repoNameLister
+//		mockedrepoNameLister := &repoNameListerMock{
+//			ListAllRepoNamesFunc: func(ctx context.Context) ([]string, error) {
+//				panic("mock out the ListAllRepoNames method")
+//			},
+//		}
+//
+//		// use mockedrepoNameLister in code that requires repoNameLister
+//		// and then make assertions.
+//
+//	}
+type repoNameListerMock struct {
+	// ListAllRepoNamesFunc mocks the ListAllRepoNames method.
+	ListAllRepoNamesFunc func(ctx context.Context) ([]string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ListAllRepoNames holds details about calls to the ListAllRepoNames method.
+		ListAllRepoNames []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+		}
+	}
+	lockListAllRepoNames sync.RWMutex
+}
+
+// ListAllRepoNames calls ListAllRepoNamesFunc.
+func (mock *repoNameListerMock) ListAllRepoNames(ctx context.Context) ([]string, error) {
+	if mock.ListAllRepoNamesFunc == nil {
+		panic("repoNameListerMock.ListAllRepoNamesFunc: method is nil but repoNameLister.ListAllRepoNames was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+	}{
+		Ctx: ctx,
+	}
+	mock.lockListAllRepoNames.Lock()
+	mock.calls.ListAllRepoNames = append(mock.calls.ListAllRepoNames, callInfo)
+	mock.lockListAllRepoNames.Unlock()
+	return mock.ListAllRepoNamesFunc(ctx)
+}
+
+// ListAllRepoNamesCalls gets all the calls that were made to ListAllRepoNames.
+// Check the length with:
+//
+//	len(mockedrepoNameLister.ListAllRepoNamesCalls())
+func (mock *repoNameListerMock) ListAllRepoNamesCalls() []struct {
+	Ctx context.Context
+} {
+	var calls []struct {
+		Ctx context.Context
+	}
+	mock.lockListAllRepoNames.RLock()
+	calls = mock.calls.ListAllRepoNames
+	mock.lockListAllRepoNames.RUnlock()
+	return calls
+}
