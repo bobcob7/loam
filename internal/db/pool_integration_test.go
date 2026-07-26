@@ -25,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
+	pgxvec "github.com/pgvector/pgvector-go/pgx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -78,6 +79,7 @@ func TestNewPoolAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err, "NewPool must succeed once migrations have created the vector extension")
 	t.Cleanup(pool.Close)
 
+	assertVectorTypeRegistered(ctx, t, pool)
 	assertVectorRoundTrips(ctx, t, pool)
 }
 
@@ -93,11 +95,34 @@ func createVectorExtension(ctx context.Context, t *testing.T, dsn string) {
 	require.NoError(t, err)
 }
 
-// assertVectorRoundTrips proves pgvector type registration actually
-// happened on the pooled connection -- not just that NewPool returned no
-// error -- by writing and reading back a `vector` column through
-// pgvector-go's Vector type, which only scans correctly if AfterConnect
-// registered the vector codec on that connection's type map.
+// assertVectorTypeRegistered proves AfterConnect actually ran RegisterTypes
+// on a real pooled connection, by inspecting that connection's type map
+// directly rather than inferring it from a round trip. This is the
+// discriminating assertion this test needs: pgvector-go's Vector type also
+// implements database/sql.Scanner and driver.Valuer (vector.go), so an
+// unregistered `vector` column still round-trips correctly through that
+// fallback path -- a prior version of this test asserted the round trip
+// alone and would have passed with AfterConnect left nil entirely. Only
+// TypeForName("vector") succeeding, with a *pgxvec.VectorCodec behind it,
+// proves the codec path -- the one AfterConnect installs -- is what is
+// actually active on connections this pool hands out.
+func assertVectorTypeRegistered(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	conn, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	typ, ok := conn.Conn().TypeMap().TypeForName("vector")
+	conn.Release()
+	require.True(t, ok, "AfterConnect must register the vector type on each pooled connection")
+	assert.IsType(t, &pgxvec.VectorCodec{}, typ.Codec)
+}
+
+// assertVectorRoundTrips is a functional (not discriminating) check that a
+// `vector` column can be written and read back through pgvector-go's Vector
+// type on a pool built by NewPool. It does NOT by itself prove AfterConnect
+// registration happened -- see assertVectorTypeRegistered, which is what
+// actually distinguishes the registered codec path from pgvector-go's
+// database/sql.Scanner/driver.Valuer fallback -- but a real deployment
+// still needs the values to come back correct, which this checks.
 func assertVectorRoundTrips(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `CREATE TABLE vector_roundtrip (id int PRIMARY KEY, embedding vector(3))`)
