@@ -20,6 +20,9 @@ var _ querier = &querierMock{}
 //
 //		// make and configure a mocked querier
 //		mockedquerier := &querierMock{
+//			CopyFromFunc: func(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
+//				panic("mock out the CopyFrom method")
+//			},
 //			ExecFunc: func(contextMoqParam context.Context, s string, ifaceVals ...interface{}) (pgconn.CommandTag, error) {
 //				panic("mock out the Exec method")
 //			},
@@ -36,6 +39,9 @@ var _ querier = &querierMock{}
 //
 //	}
 type querierMock struct {
+	// CopyFromFunc mocks the CopyFrom method.
+	CopyFromFunc func(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
+
 	// ExecFunc mocks the Exec method.
 	ExecFunc func(contextMoqParam context.Context, s string, ifaceVals ...interface{}) (pgconn.CommandTag, error)
 
@@ -47,6 +53,17 @@ type querierMock struct {
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// CopyFrom holds details about calls to the CopyFrom method.
+		CopyFrom []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// TableName is the tableName argument value.
+			TableName pgx.Identifier
+			// ColumnNames is the columnNames argument value.
+			ColumnNames []string
+			// RowSrc is the rowSrc argument value.
+			RowSrc pgx.CopyFromSource
+		}
 		// Exec holds details about calls to the Exec method.
 		Exec []struct {
 			// ContextMoqParam is the contextMoqParam argument value.
@@ -75,9 +92,54 @@ type querierMock struct {
 			IfaceVals []interface{}
 		}
 	}
+	lockCopyFrom sync.RWMutex
 	lockExec     sync.RWMutex
 	lockQuery    sync.RWMutex
 	lockQueryRow sync.RWMutex
+}
+
+// CopyFrom calls CopyFromFunc.
+func (mock *querierMock) CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
+	if mock.CopyFromFunc == nil {
+		panic("querierMock.CopyFromFunc: method is nil but querier.CopyFrom was just called")
+	}
+	callInfo := struct {
+		Ctx         context.Context
+		TableName   pgx.Identifier
+		ColumnNames []string
+		RowSrc      pgx.CopyFromSource
+	}{
+		Ctx:         ctx,
+		TableName:   tableName,
+		ColumnNames: columnNames,
+		RowSrc:      rowSrc,
+	}
+	mock.lockCopyFrom.Lock()
+	mock.calls.CopyFrom = append(mock.calls.CopyFrom, callInfo)
+	mock.lockCopyFrom.Unlock()
+	return mock.CopyFromFunc(ctx, tableName, columnNames, rowSrc)
+}
+
+// CopyFromCalls gets all the calls that were made to CopyFrom.
+// Check the length with:
+//
+//	len(mockedquerier.CopyFromCalls())
+func (mock *querierMock) CopyFromCalls() []struct {
+	Ctx         context.Context
+	TableName   pgx.Identifier
+	ColumnNames []string
+	RowSrc      pgx.CopyFromSource
+} {
+	var calls []struct {
+		Ctx         context.Context
+		TableName   pgx.Identifier
+		ColumnNames []string
+		RowSrc      pgx.CopyFromSource
+	}
+	mock.lockCopyFrom.RLock()
+	calls = mock.calls.CopyFrom
+	mock.lockCopyFrom.RUnlock()
+	return calls
 }
 
 // Exec calls ExecFunc.
