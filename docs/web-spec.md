@@ -45,7 +45,7 @@ request-review) rather than duplicating them. Agents (identity headers only) can
   the three `Loam-Agent-*` headers. Carrying neither is rejected `401 Unauthorized` (with a
   `WWW-Authenticate` challenge) before the request reaches any handler** (`loam-gcg`,
   decided by the repo owner 2026-07-25: there is no legitimate use-case for an
-  unauthenticated request here, since every CLI client sets all five `LOAM_AGENT_*` env
+  unauthenticated request here, since every CLI client sets all three `LOAM_AGENT_*` env
   vars — `docs/cli-spec.md`). 401 is chosen over 403 because it matches the response the
   CLI already gets for a presented-but-invalid basic credential on this same path group,
   keeping the "credential rejected" experience uniform regardless of which credential was

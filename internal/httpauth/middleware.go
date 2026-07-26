@@ -68,12 +68,13 @@ func (a *Auth) AdminOnly(next http.Handler) http.Handler {
 // must now be present. A request carrying neither a valid admin credential
 // nor a complete set of Loam-Agent-* headers is rejected with the same 401
 // + WWW-Authenticate, before it ever reaches a handler: every legitimate
-// CLI client sets all five LOAM_AGENT_* env vars (docs/cli-spec.md:51-53),
+// CLI client sets all three LOAM_AGENT_* env vars (docs/cli-spec.md:51-53),
 // so there is no client this could break, and it decouples this guarantee
 // from RequireCapability remembering to deny an empty identity on every
 // RPC. This applies uniformly, including to the capability-ungated
-// instructions/whoami RPCs (docs/web-spec.md:125-126) — ungated means they
-// skip the capability check, not that they are reachable anonymously.
+// instructions/whoami RPCs (docs/web-spec.md -> RoleService) — ungated
+// means they skip the capability check, not that they are reachable
+// anonymously.
 func (a *Auth) CLI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented, valid := a.checkBasicAuth(r)

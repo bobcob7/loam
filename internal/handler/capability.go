@@ -43,9 +43,12 @@ func NewCapabilityChecker(roles RoleStore) *CapabilityChecker {
 // an agent identity, both set by internal/httpauth — and confirms they
 // may perform capability. Admin basic-auth callers always bypass as
 // superuser. An agent whose role lacks the capability, or a caller with no
-// resolved identity at all (the untrusted end of the CLI path group's MVP
-// fallback — docs/web-spec.md), gets an error wrapping ErrPermissionDenied
-// (-> connect.CodePermissionDenied via ErrorMapper.ToConnectErr).
+// resolved identity at all (defence-in-depth: internal/httpauth.CLI itself
+// now rejects every /loam.v1.* request lacking one, so this branch only
+// matters if some future wrapper other than CLI ever reaches a handler
+// without resolving an identity first), gets an error wrapping
+// ErrPermissionDenied (-> connect.CodePermissionDenied via
+// ErrorMapper.ToConnectErr).
 func (c *CapabilityChecker) RequireCapability(ctx context.Context, capability string) error {
 	if httpauth.IsAdmin(ctx) {
 		return nil
