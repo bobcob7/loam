@@ -31,6 +31,18 @@ type prStateResponse struct {
 	State string `json:"state"`
 }
 
+type findOpenPRRequest struct {
+	Repo         string `json:"repo"`
+	HeadBranch   string `json:"head_branch"`
+	TargetBranch string `json:"target_branch"`
+}
+
+type findOpenPRResponse struct {
+	URL    string `json:"url"`
+	Number int    `json:"number"`
+	Found  bool   `json:"found"`
+}
+
 // requireProviderAuth checks the Authorization: token <token> header used
 // by the provider REST surface (distinct from the git surface's Basic
 // auth), writing a 401 and returning false on failure.
@@ -98,6 +110,32 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	pr := s.prs.create(req.Repo, req.HeadBranch, req.TargetBranch, req.Title, req.Description)
 	writeJSON(w, http.StatusCreated, createPRResponse{URL: fmt.Sprintf("http://%s/%s/pulls/%d", r.Host, req.Repo, pr.number), Number: pr.number})
+}
+
+// handleFindOpenPR looks up the open PR (if any) for a head/target
+// branch pair against the fake's PR registry, mirroring
+// Forgejo.FindOpenPR's real-provider semantics: not found is a
+// found=false 200, not an error; only a missing repo (or bad auth, via
+// requireProviderAuth above) is an error.
+func (s *Server) handleFindOpenPR(w http.ResponseWriter, r *http.Request) {
+	if !s.requireProviderAuth(w, r) {
+		return
+	}
+	var req findOpenPRRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	repoDir := s.repoDir(req.Repo)
+	if err := s.requireRepo(repoDir); err != nil {
+		writeJSONError(w, statusForErr(err), err)
+		return
+	}
+	pr, ok := s.prs.findOpen(req.Repo, req.HeadBranch, req.TargetBranch)
+	if !ok {
+		writeJSON(w, http.StatusOK, findOpenPRResponse{Found: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, findOpenPRResponse{URL: fmt.Sprintf("http://%s/%s/pulls/%d", r.Host, req.Repo, pr.number), Number: pr.number, Found: true})
 }
 
 func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +284,17 @@ func (c *Client) ClosePR(ctx context.Context, repo string, prNumber int) error {
 		return fmt.Errorf("closing pr %s#%d: %w", repo, prNumber, err)
 	}
 	return nil
+}
+
+// FindOpenPR looks up the open pull request (if any) from headBranch
+// into targetBranch on repo, against the fake's PR registry.
+func (c *Client) FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (string, int, bool, error) {
+	var resp findOpenPRResponse
+	req := findOpenPRRequest{Repo: repo, HeadBranch: headBranch, TargetBranch: targetBranch}
+	if err := c.call(ctx, http.MethodPost, "/provider/find-open-pr", req, &resp, true); err != nil {
+		return "", 0, false, fmt.Errorf("finding open pr for %s %s->%s: %w", repo, headBranch, targetBranch, err)
+	}
+	return resp.URL, resp.Number, resp.Found, nil
 }
 
 // GitCredentials returns the forge's token-authenticated HTTPS git

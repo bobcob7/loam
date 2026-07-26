@@ -251,6 +251,103 @@ func TestCreatePRTwiceForSameHeadTargetFailsNonIdempotentCaller(t *testing.T) {
 	assert.NotEqual(t, 0, firstNumber)
 }
 
+// TestClientFindOpenPRFindsExistingOpenPR covers FindOpenPR's core case: an
+// open PR already exists for the exact head/target pair, and the returned
+// URL/number match what CreatePR itself returned for that PR.
+func TestClientFindOpenPRFindsExistingOpenPR(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-feature", ""))
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	wantURL, wantNumber, err := client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "t", "d")
+	require.NoError(t, err)
+	gotURL, gotNumber, found, err := client.FindOpenPR(ctx, "acme/widgets", "wb-feature", "main")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, wantURL, gotURL)
+	assert.Equal(t, wantNumber, gotNumber)
+}
+
+// TestClientFindOpenPRNotFoundWhenNoMatch covers the not-found case: a repo
+// that exists but has no PR at all for the requested head/target pair.
+// found=false with a nil error, not an error.
+func TestClientFindOpenPRNotFoundWhenNoMatch(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	_, _, found, err := client.FindOpenPR(ctx, "acme/widgets", "wb-feature", "main")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestClientFindOpenPRIgnoresClosedPR covers a head/target pair whose only
+// PR has since closed: matching prRegistry.findOpen's own semantics (a
+// closed or merged PR does not count), so a caller must be free to open a
+// fresh PR for the pair rather than find a stale one.
+func TestClientFindOpenPRIgnoresClosedPR(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-feature", ""))
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	_, number, err := client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "t", "d")
+	require.NoError(t, err)
+	require.NoError(t, client.ClosePR(ctx, "acme/widgets", number))
+	_, _, found, err := client.FindOpenPR(ctx, "acme/widgets", "wb-feature", "main")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestClientFindOpenPRAdoptsAfterDuplicateConflict is the scenario loam-46g
+// exists for (loam-giq.7's retry path): CreatePR fails with ErrDuplicatePR
+// because a prior attempt already opened the PR, and FindOpenPR recovers
+// that PR's real per-repo number without parsing the 409's message.
+func TestClientFindOpenPRAdoptsAfterDuplicateConflict(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-feature", ""))
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	wantURL, wantNumber, err := client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "t", "d")
+	require.NoError(t, err)
+	_, _, err = client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "t2", "d2")
+	require.Error(t, err)
+	require.ErrorIs(t, err, forge.ErrDuplicatePR)
+	gotURL, gotNumber, found, findErr := client.FindOpenPR(ctx, "acme/widgets", "wb-feature", "main")
+	require.NoError(t, findErr)
+	assert.True(t, found)
+	assert.Equal(t, wantNumber, gotNumber, "adoption must recover the per-repo number, not the 409 message's internal id")
+	assert.Equal(t, wantURL, gotURL)
+}
+
+// TestClientFindOpenPRRepoNotFoundIsForgeErrRepoNotFound covers a repo that
+// was never seeded, matching the real Forgejo client's FindOpenPR mapping a
+// 404 from the list endpoint to ErrRepoNotFound.
+func TestClientFindOpenPRRepoNotFoundIsForgeErrRepoNotFound(t *testing.T) {
+	t.Parallel()
+	srv, ts := newTestServer(t)
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	_, _, found, err := client.FindOpenPR(t.Context(), "acme/nope", "wb-feature", "main")
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.ErrorIs(t, err, forge.ErrRepoNotFound)
+}
+
 // TestProviderClosePRMergedIsRejected covers the third defect: closing a PR
 // that has already merged must not flip it to "closed". Verified against
 // Forgejo 9.0.3, PATCH .../pulls/{merged} {"state":"closed"} returns 412
