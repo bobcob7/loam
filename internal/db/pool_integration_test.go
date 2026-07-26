@@ -142,14 +142,15 @@ func assertVectorRoundTrips(ctx context.Context, t *testing.T, pool *pgxpool.Poo
 // than silently registering nothing. That loud failure is deliberately
 // preserved behavior, per this bead's NOTES: it converts a deployment
 // ordering bug into an immediate, legible startup error instead of letting
-// it surface later as corrupt vector data. Uses a plain postgres:16-alpine
-// image (no pgvector extension available at all) to make the point sharply:
-// even if migrations had run, there would be no vector type to create.
+// it surface later as corrupt vector data. Uses testdb.PostgresImageWithoutVector
+// (no pgvector extension available at all), deliberately not
+// testdb.PostgresImage, to make the point sharply: even if migrations had
+// run, there would be no vector type to create.
 func TestNewPoolFailsLoudlyWithoutExtension(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	container, err := postgres.Run(ctx, testdb.PostgresImageWithoutVector,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),

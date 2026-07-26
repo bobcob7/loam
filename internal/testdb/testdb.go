@@ -14,3 +14,14 @@ package testdb
 // loam-li0.6 landing this wave add call sites, not new copies of the
 // literal.
 const PostgresImage = "pgvector/pgvector:pg16"
+
+// PostgresImageWithoutVector is the deliberately-plain counterpart to
+// PostgresImage, for the one class of test that needs the vector extension
+// to be UNAVAILABLE rather than merely uncreated: proving a caller fails
+// loudly when it cannot create the extension at all (see
+// internal/db/pool_integration_test.go's TestNewPoolFailsLoudlyWithoutExtension).
+// Naming this explicitly, rather than leaving a bare "postgres:16-alpine"
+// literal, makes that choice a documented decision instead of an
+// unexplained outlier next to every other integration test's use of
+// PostgresImage.
+const PostgresImageWithoutVector = "postgres:16-alpine"
