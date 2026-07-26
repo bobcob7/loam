@@ -312,7 +312,7 @@ var _ IngestEnqueuer = &IngestEnqueuerMock{}
 //
 //		// make and configure a mocked IngestEnqueuer
 //		mockedIngestEnqueuer := &IngestEnqueuerMock{
-//			EnqueueIngestFunc: func(ctx context.Context, repo RepoID, advanced []Advance) error {
+//			EnqueueIngestFunc: func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
 //				panic("mock out the EnqueueIngest method")
 //			},
 //		}
@@ -323,7 +323,7 @@ var _ IngestEnqueuer = &IngestEnqueuerMock{}
 //	}
 type IngestEnqueuerMock struct {
 	// EnqueueIngestFunc mocks the EnqueueIngest method.
-	EnqueueIngestFunc func(ctx context.Context, repo RepoID, advanced []Advance) error
+	EnqueueIngestFunc func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -341,7 +341,7 @@ type IngestEnqueuerMock struct {
 }
 
 // EnqueueIngest calls EnqueueIngestFunc.
-func (mock *IngestEnqueuerMock) EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) error {
+func (mock *IngestEnqueuerMock) EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
 	if mock.EnqueueIngestFunc == nil {
 		panic("IngestEnqueuerMock.EnqueueIngestFunc: method is nil but IngestEnqueuer.EnqueueIngest was just called")
 	}
