@@ -21,9 +21,10 @@ func TestForgejo_ValidateToken(t *testing.T) {
 	tests := []struct {
 		name       string
 		statusCode int
+		body       string
 		wantErr    error
 	}{
-		{name: "authenticated with scope, probe repo not found as expected", statusCode: http.StatusNotFound, wantErr: nil},
+		{name: "authenticated with scope, probe repo not found as expected", statusCode: http.StatusNotFound, body: `{"message":"repository does not exist","url":"https://x/api/swagger"}`, wantErr: nil},
 		{name: "authenticated with scope, unexpected 2xx", statusCode: http.StatusOK, wantErr: nil},
 		{name: "unauthenticated token rejected", statusCode: http.StatusUnauthorized, wantErr: ErrInvalidToken},
 		{name: "authenticated but missing scope rejected", statusCode: http.StatusForbidden, wantErr: ErrInsufficientScope},
@@ -36,6 +37,9 @@ func TestForgejo_ValidateToken(t *testing.T) {
 				assert.Equal(t, "/api/v1/repos/"+probeOwner+"/"+probeRepo+"/pulls", r.URL.Path)
 				assert.Equal(t, "token good-token", r.Header.Get("Authorization"))
 				w.WriteHeader(tt.statusCode)
+				if tt.body != "" {
+					_, _ = w.Write([]byte(tt.body))
+				}
 			}))
 			defer server.Close()
 			f := NewForgejo(server.URL, "", server.Client(), testLogger())
@@ -53,6 +57,35 @@ func TestForgejo_ValidateToken_UnexpectedStatus(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "", server.Client(), testLogger())
+	err := f.ValidateToken(t.Context(), server.URL, "good-token")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidToken)
+	assert.NotErrorIs(t, err, ErrInsufficientScope)
+}
+
+func TestForgejo_ValidateToken_EmptyToken(t *testing.T) {
+	t.Parallel()
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"repository does not exist","url":"https://x/api/swagger"}`))
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "", server.Client(), testLogger())
+	err := f.ValidateToken(t.Context(), server.URL, "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidToken)
+	assert.False(t, called, "an empty token must be rejected before any request is sent — Forgejo reads it as anonymous and would 404 through to the success path")
+}
+
+func TestForgejo_ValidateToken_NotFoundWithoutForgejoBody(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 	f := NewForgejo(server.URL, "", server.Client(), testLogger())
