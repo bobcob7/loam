@@ -108,6 +108,14 @@ func (s *Scheduler) waitIdle() {
 // the terminal report alone could construct. Tests should call Tick
 // directly rather than writing to the tick channel and separately trying
 // to detect completion.
+//
+// Do not call Tick concurrently with another Tick, or with Run, on the
+// same Scheduler: both paths drive the same sync.WaitGroup, and a second
+// Wait call arriving before a prior one has returned panics ("sync:
+// WaitGroup is reused before previous Wait has returned"). Callers that
+// need manual, deterministic ticks (docs/testing-spec.md's "Manual
+// scheduler") should call Tick on its own and never start Run on that
+// Scheduler at all.
 func (s *Scheduler) Tick(ctx context.Context) []RepoID {
 	started := s.tick(ctx)
 	s.waitIdle()

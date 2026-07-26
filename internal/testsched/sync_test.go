@@ -89,37 +89,19 @@ func TestSyncHarness_TickUnblocksEvenWhenACycleErrors(t *testing.T) {
 	assert.ErrorIs(t, state.ReportErrorCalls()[0].Err, wantErr)
 }
 
-// TestSyncHarness_TickSkipsRepoAlreadyMidCycle proves the per-repo guard
-// still holds through the exported Tick: a second Tick call, issued while
-// the first repo's cycle is still blocked inside Fetch, must not start a
-// second cycle for that repo -- its own returned slice must be empty --
-// even though both calls only return once the blocked cycle finishes
-// (Tick's happens-before is scheduler-wide, not per-call). Both
-// synchronization points (waiting for the second call's own ListRepos to
-// have run before releasing the gate) are channel receives, never a
-// sleep.
-func TestSyncHarness_TickSkipsRepoAlreadyMidCycle(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	listCalled := make(chan struct{}, 2)
-	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) {
-		listCalled <- struct{}{}
-		return []mirrorsync.RepoID{"repoA"}, nil
-	}}
-	fetcher := &blockingFetcher{entered: make(chan struct{}), release: make(chan struct{})}
-	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, fetcher,
-		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, newStateMock())
-	h := NewSyncHarness(scheduler)
-	firstDone := make(chan []mirrorsync.RepoID, 1)
-	go func() { firstDone <- h.Tick(ctx) }()
-	<-listCalled      // first Tick's ListRepos has run
-	<-fetcher.entered // and its cycle has reached (and is blocked in) Fetch, so tryStart has already claimed repoA
-	secondDone := make(chan []mirrorsync.RepoID, 1)
-	go func() { secondDone <- h.Tick(ctx) }()
-	<-listCalled // second Tick's ListRepos has also run -- its tryStart has already evaluated (and must have skipped) repoA
-	close(fetcher.release)
-	first := <-firstDone
-	second := <-secondDone
-	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, first, "the first call started repoA's cycle")
-	assert.Empty(t, second, "the second call must skip repoA -- its cycle was still in flight when tryStart ran")
-}
+// This package deliberately does NOT re-test "a repo already mid-cycle
+// is skipped by a concurrent tick" -- that property belongs one layer
+// down, at internal/mirrorsync (scheduler_test.go's
+// TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight), which
+// asserts on tick's synchronous return value from a single goroutine and
+// cannot race. An earlier version of this test drove two concurrent
+// SyncHarness.Tick calls and synchronized on ListRepos call counts,
+// which does not actually prove tryStart has evaluated (that happens
+// after ListRepos returns, inside tick's per-repo loop) -- it failed
+// under `-race -count=2000` and flaked under plain `-count=5000`. Fixing
+// it would mean re-deriving mirrorsync's own internal ordering from
+// outside the package; docs/testing-spec.md's "one behavior, one home"
+// puts this one at the lowest layer that can observe it honestly, which
+// is not here. Concurrent Tick calls are also disallowed by SyncHarness's
+// own contract (see Tick's doc comment), so this package has no
+// supported way to construct the scenario safely in the first place.

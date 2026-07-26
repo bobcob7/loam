@@ -2,24 +2,34 @@
 // the ingest worker pool (loam-c94.1) by explicit, harness-controlled
 // ticks instead of timers or polling, per docs/testing-spec.md's
 // "Deterministic time" principle and its "Manual scheduler" test double.
-// Every wait this package performs is a blocking receive on a channel
-// closed by the real event it is waiting for -- never a sleep, never an
-// Eventually-style retry loop.
+// Neither helper below sleeps or polls, but they wait differently:
+// SyncHarness.Tick's wait is a sync.WaitGroup.Wait inside mirrorsync
+// (see mirrorsync.Scheduler.Tick); IngestHarness.DrainIngestQueue's wait
+// is a blocking call on the injected IngestDrainer, whatever primitive
+// loam-c94.1 backs it with.
 //
 // Two independent helpers, because sync and ingest are different
 // concurrency shapes:
 //
 //   - SyncHarness.Tick runs mirrorsync's per-repo cycle to completion,
-//     in-line, for every repo the tick actually started, and only
-//     returns once each has reported a terminal outcome (idle or error).
+//     in-line, for every repo currently enrolled, and only returns once
+//     every cycle in flight -- this call's and any earlier one's -- has
+//     finished. That is stronger than "reported a terminal outcome": see
+//     SyncHarness's own doc comment for why the distinction is exactly
+//     what the original design mistake in this package got wrong.
 //   - IngestHarness.DrainIngestQueue blocks until the async, in-process
 //     ingest worker pool has no queued or running job left for a repo.
 //
 // Both are safe to use from godog step definitions, which have the
 // signature func(context.Context, ...) (context.Context, error) and no
 // testing.TB in scope (see internal/testfixture for the precedent this
-// package follows): the primitives below return a plain error. NewT-style
-// sugar wraps them for callers that do have a testing.TB.
+// package follows). Only IngestHarness follows testfixture's full
+// error-returning-primitive-plus-NewT-sugar pattern: DrainIngestQueue
+// returns a plain error, with DrainIngestQueueT as the testing.TB
+// convenience layer. SyncHarness.Tick returns no error at all -- there is
+// no failure this layer can observe, since mirrorsync itself swallows a
+// ListRepos error (see Tick's doc comment) -- so it has no *T sugar to
+// layer on.
 //
 // # The mirrorsync seam, and why it lives in mirrorsync
 //
@@ -50,16 +60,21 @@
 // stronger barrier than any external observer of the terminal report can
 // build. Tests call Tick directly and leave Run to production.
 //
-// # The ingest seam this package is missing
+// # The ingest seam, agreed with loam-c94.1 but not yet visible here
 //
-// loam-c94.1 (in flight; its DESIGN is the only visibility this package
-// has into it) exposes an Enqueuer seam and RequeueOrphaned for startup
-// recovery, but no synchronous per-repo drain/wait: nothing a caller can
-// block on to learn "no queued or running ingest_jobs row remains for
-// repo X" without polling Postgres, which is exactly the timing-guess
-// pattern docs/testing-spec.md forbids. IngestDrainer below names the
-// seam this package needs; it is not satisfied by anything in the tree
-// today. See the implementation report for the precise ask.
+// loam-c94.1 (in flight on a sibling branch this package cannot see) owns
+// the ingest_jobs worker pool: an Enqueuer seam, RequeueOrphaned for
+// startup recovery, and jobs keyed by repos.id rather than a repo name.
+// Without a synchronous per-repo drain/wait, a caller would have no way
+// to learn "no queued or running ingest_jobs row remains for repo X"
+// short of polling Postgres -- exactly the timing-guess pattern
+// docs/testing-spec.md forbids. IngestDrainer below is the seam this
+// package asked loam-c94.1 for and the coordinator confirmed it landed
+// as DrainRepo(ctx, name string) error, matching this interface's shape;
+// internal/ingest on this branch still contains only embed/, so that
+// confirmation is relayed, not something this package's own tests
+// exercise against the real pool. IngestDrainer's doc comment below
+// records the agreed contract for when it becomes reachable.
 package testsched
 
 import (
@@ -89,13 +104,17 @@ type syncStateReporter interface {
 
 // IngestDrainer is the synchronous per-repo drain primitive
 // IngestHarness needs from the ingest worker pool (loam-c94.1): block
-// until repo has no queued or running ingest_jobs row left.
+// until repo has no queued or running ingest_jobs row left. This is the
+// agreed contract with loam-c94.1 (see the package doc's "ingest seam"
+// section for how confirmed) -- as of this package's own tests,
+// IngestDrainer is only satisfied by a moq mock, not by loam-c94.1's
+// pool directly.
 //
 // repo is a plain string (repos.name, an "owner/repo" identifier), not
-// mirrorsync.RepoID, deliberately: internal/ingest keys its production
-// seam (Enqueue, Job) on repos.id (uuid.UUID, the ingest_jobs.repo_id FK
-// column) since every real caller already holds it, and exposes this
-// harness-facing method as a separate DrainRepo(ctx, name string) that
+// mirrorsync.RepoID, deliberately: loam-c94.1's production seam
+// (Enqueue, Job) is keyed on repos.id (uuid.UUID, the ingest_jobs.repo_id
+// FK column), since every real caller already holds it, with this
+// harness-facing method a separate DrainRepo(ctx, name string) that
 // resolves name to id internally. Typing this interface's parameter as
 // mirrorsync.RepoID (or uuid.UUID) would either force internal/ingest to
 // import internal/mirrorsync for a single string-newtype, or force this
