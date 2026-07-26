@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -57,22 +58,42 @@ type Store struct {
 	logger  *slog.Logger
 }
 
-// New builds a Store backed by pool. Callers must have already run
-// migrations.Migrate against pool's DSN and built pool via internal/db.NewPool
-// (its own doc comment explains why: the chunks_embedding vector column and
-// pgvector type registration must exist before any query runs).
+// New builds a Store backed by pool: every ReplaceFileChunks call opens and
+// commits its own transaction (via pgxTransactor), the right shape for a
+// standalone caller that is not composing this write with any other
+// store's. Callers must have already run migrations.Migrate against pool's
+// DSN and built pool via internal/db.NewPool (its own doc comment explains
+// why: the chunks_embedding vector column and pgvector type registration
+// must exist before any query runs).
 func New(pool *pgxpool.Pool, logger *slog.Logger) *Store {
 	return newStore(gen.New(pool), &pgxTransactor{pool: pool}, logger)
 }
 
-// newStore is New's unexported core, taking the queries/transactor seams
-// directly so unit tests can supply moq mocks instead of a live pool.
+// NewInTx builds a Store bound to tx, an already-open transaction the
+// caller owns: every ReplaceFileChunks call runs its delete-then-insert
+// directly against tx and neither begins nor commits anything itself
+// (passthroughTransactor never calls tx.Begin), so a caller composing
+// several stores' writes into one commit -- the atomic swap loam-c94.12
+// orchestrates -- can hand each store the same tx and be certain none of
+// them opens a nested transaction of its own. Search also reads through tx,
+// so it sees this transaction's own uncommitted writes, consistent with
+// every other read inside it. The caller alone decides when tx commits or
+// rolls back.
+func NewInTx(tx pgx.Tx, logger *slog.Logger) *Store {
+	q := gen.New(tx)
+	return newStore(q, &passthroughTransactor{q: q}, logger)
+}
+
+// newStore is New's and NewInTx's unexported core, taking the
+// queries/transactor seams directly so unit tests can supply moq mocks
+// instead of a live pool or transaction.
 func newStore(q queries, tx transactor, logger *slog.Logger) *Store {
 	return &Store{queries: q, tx: tx, logger: logger}
 }
 
 // pgxTransactor is transactor's production implementation over a real
-// *pgxpool.Pool.
+// *pgxpool.Pool: it owns the full begin/commit/rollback lifecycle of a
+// fresh transaction per withinTx call, for New's standalone-caller shape.
 type pgxTransactor struct {
 	pool *pgxpool.Pool
 }
@@ -90,6 +111,20 @@ func (t *pgxTransactor) withinTx(ctx context.Context, fn func(q queries) error) 
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
+}
+
+// passthroughTransactor is transactor's implementation for NewInTx: q is
+// already bound to the caller's open transaction, so withinTx just invokes
+// fn against it. There is no Begin/Commit/Rollback call anywhere in this
+// type -- not merely an unused one -- so a Store built via NewInTx cannot
+// nest a transaction inside the caller's, whether by a savepoint or by
+// mistake; the code path to do so does not exist.
+type passthroughTransactor struct {
+	q queries
+}
+
+func (t *passthroughTransactor) withinTx(_ context.Context, fn func(q queries) error) error {
+	return fn(t.q)
 }
 
 // ReplaceFileChunks atomically deletes every existing chunk for

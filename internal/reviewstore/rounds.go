@@ -46,9 +46,23 @@ type RoundStore struct {
 }
 
 // NewRoundStore builds a RoundStore backed by db, typically a
-// *pgxpool.Pool.
+// *pgxpool.Pool (standalone reads/writes) or a pgx.Tx (atomic with other
+// stores' writes in the same transaction) -- both satisfy querier (gen.
+// DBTX) directly. See NewRoundStoreInTx for the latter as a named,
+// pgx.Tx-typed entry point matching this package's siblings.
 func NewRoundStore(db querier, logger *slog.Logger) *RoundStore {
 	return &RoundStore{q: gen.New(db), logger: logger}
+}
+
+// NewRoundStoreInTx builds a RoundStore bound to tx, an already-open
+// transaction the caller owns and will commit or roll back itself: it is
+// exactly NewRoundStore(tx, logger), given a name so callers composing
+// several stores' writes into one commit -- the atomic swap loam-c94.12
+// orchestrates -- have one consistent constructor to reach for across every
+// store package. RoundStore never calls tx.Begin/Commit/Rollback itself, so
+// there is no nested-transaction path to guard against here.
+func NewRoundStoreInTx(tx pgx.Tx, logger *slog.Logger) *RoundStore {
+	return NewRoundStore(tx, logger)
 }
 
 // OpenRound opens a new review round for workBranchID: number =

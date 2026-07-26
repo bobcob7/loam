@@ -8,6 +8,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -88,9 +89,23 @@ type Store struct {
 	logger *slog.Logger
 }
 
-// New builds a Store backed by q, typically a *gen.Queries.
+// New builds a Store backed by q, typically a *gen.Queries constructed over
+// either a *pgxpool.Pool (standalone reads/writes) or a pgx.Tx (atomic with
+// other stores' writes in the same transaction) -- see NewInTx for the
+// latter as a named entry point matching this package's siblings.
 func New(q querier, logger *slog.Logger) *Store {
 	return &Store{q: q, logger: logger}
+}
+
+// NewInTx builds a Store bound to tx, an already-open transaction the
+// caller owns and will commit or roll back itself: it is exactly New(gen.
+// New(tx), logger), given a name so callers composing several stores' writes
+// into one commit -- the atomic swap loam-c94.12 orchestrates -- have one
+// consistent constructor to reach for across every store package. Store
+// never calls tx.Begin/Commit/Rollback itself (see Store's doc comment), so
+// there is no nested-transaction path to guard against here.
+func NewInTx(tx pgx.Tx, logger *slog.Logger) *Store {
+	return New(gen.New(tx), logger)
 }
 
 // ReplaceFileSymbols performs one file's delete-and-replace

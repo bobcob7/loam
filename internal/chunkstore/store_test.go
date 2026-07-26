@@ -269,6 +269,41 @@ func TestSearch_RowWithInvalidRepoID_ReturnsErrInvalidUUID(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+// TestPassthroughTransactor_RunsFnExactlyOnceAgainstBoundQueries proves
+// NewInTx's passthrough path does exactly one thing: hand fn the queries it
+// was built with and return. There is no Begin/Commit/Rollback call to
+// assert the absence of directly (passthroughTransactor has no reference to
+// any pgx.Tx at all), so this instead asserts the positive contract a
+// mistaken reintroduction of transaction-opening would violate: fn runs
+// exactly once, against exactly the bound queries, with nothing else
+// happening around it.
+func TestPassthroughTransactor_RunsFnExactlyOnceAgainstBoundQueries(t *testing.T) {
+	t.Parallel()
+	q := &queriesMock{}
+	pt := &passthroughTransactor{q: q}
+	calls := 0
+	var got queries
+	err := pt.withinTx(t.Context(), func(q queries) error {
+		calls++
+		got = q
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "withinTx must invoke fn exactly once -- no retry, no nested call")
+	assert.Same(t, queries(q), got, "withinTx must hand fn the exact queries it was constructed with, not a fresh one")
+}
+
+// TestPassthroughTransactor_PropagatesFnError proves withinTx does not
+// swallow or wrap fn's error -- there is no commit/rollback step here that
+// could otherwise mask it.
+func TestPassthroughTransactor_PropagatesFnError(t *testing.T) {
+	t.Parallel()
+	fnErr := errors.New("boom")
+	pt := &passthroughTransactor{q: &queriesMock{}}
+	err := pt.withinTx(t.Context(), func(_ queries) error { return fnErr })
+	assert.ErrorIs(t, err, fnErr)
+}
+
 func chunkRow(repoID uuid.UUID, file string, embedding []float32) gen.Chunk {
 	return gen.Chunk{
 		ID:           pgUUID(uuid.New()),
