@@ -100,12 +100,14 @@ func (s *Scheduler) waitIdle() {
 // Tick runs one cycle per enrolled repo and blocks until every cycle
 // started so far has finished -- not just the cycles this call started,
 // but any still in flight from an earlier call. This is the seam
-// docs/testing-spec.md's "Manual scheduler" needs: a caller outside this
-// package cannot observe finish (scheduler.go's in-flight guard release)
-// any other way, since it runs after a cycle's terminal report but
-// cycle's deferred wg.Done (this method's completion signal) always runs
-// after finish. Tests should call Tick directly rather than writing to
-// the tick channel and separately trying to detect completion.
+// docs/testing-spec.md's "Manual scheduler" needs: finish (the in-flight
+// guard release) is unobservable from outside this package, since it
+// runs after a cycle's terminal report; cycle's deferred wg.Done, this
+// method's completion signal, always runs after finish too, so waitIdle
+// is a strictly stronger barrier than any external decorator built on
+// the terminal report alone could construct. Tests should call Tick
+// directly rather than writing to the tick channel and separately trying
+// to detect completion.
 func (s *Scheduler) Tick(ctx context.Context) []RepoID {
 	started := s.tick(ctx)
 	s.waitIdle()
