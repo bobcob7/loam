@@ -12,14 +12,29 @@ import "context"
 
 //go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter
 
-// RepoID identifies an enrolled repo the scheduler cycles on each tick.
+// RepoID identifies an enrolled repo the scheduler cycles on each tick. It
+// is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
+// settled RepoID decision (loam-54o.7 NOTES): the proto surface never
+// exposes repos.id to any client, and every Mirror Sync collaborator here
+// operates on the repo's mirror path or the forge, both keyed by name, not
+// by the FK id. Where a collaborator needs the id (an FK join, e.g.
+// internal/ingest.Enqueuer), it resolves this name to repos.id itself via
+// a single indexed lookup on repos_name_key UNIQUE (name)
+// (internal/reposstore.Store.GetRepoByName) -- this package never carries
+// the id.
 type RepoID string
 
 // RepoLister supplies the set of enrolled repos to cycle on a tick. The
 // scheduler re-lists on every tick, so enrollment changes take effect on
 // the next cycle without a restart. No bead supplies this enumeration
-// today; this is the scheduler's own narrow, read-only view of
-// enrollment, owned wherever repo enrollment itself lands (loam-54o.7).
+// today: internal/reposstore (loam-54o.7) owns repo enrollment but
+// exposes only a paginated page of full Repo rows plus a total count
+// (Store.ListRepos(ctx, Page) (ListReposResult, error), where
+// ListReposResult is {Repos []Repo; Total int}), not the bare []RepoID
+// this interface needs -- both the pagination parameter and the return
+// type differ, not just the element type -- so a producer still has to
+// be wired (loam-13z): adapting Store's output to this interface, or
+// adding a dedicated name-listing query, before a real Scheduler can run.
 type RepoLister interface {
 	ListRepos(ctx context.Context) ([]RepoID, error)
 }

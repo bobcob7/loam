@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countRepos = `-- name: CountRepos :one
+SELECT count(*) FROM repos
+`
+
+func (q *Queries) CountRepos(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countRepos)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createRepo = `-- name: CreateRepo :one
 INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
 VALUES ($1, $2, $3, $4, $5)
@@ -55,6 +66,118 @@ SELECT id, name, upstream_url, forge_host, indexed_branch, sync_state, last_sync
 
 func (q *Queries) GetRepoByID(ctx context.Context, id pgtype.UUID) (Repo, error) {
 	row := q.db.QueryRow(ctx, getRepoByID, id)
+	var i Repo
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.UpstreamUrl,
+		&i.ForgeHost,
+		&i.IndexedBranch,
+		&i.SyncState,
+		&i.LastSyncedAt,
+		&i.SyncError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRepoByName = `-- name: GetRepoByName :one
+SELECT id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at FROM repos WHERE name = $1
+`
+
+// The cheap, indexed name->id resolution path (repos_name_key UNIQUE
+// (name), 0001_init.up.sql): callers hold repos.name as the natural key
+// (docs/persistence-spec.md "repos"; loam-54o.7 NOTES on the settled RepoID
+// decision) and resolve to the FK id other tables reference through this
+// single indexed lookup.
+func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) {
+	row := q.db.QueryRow(ctx, getRepoByName, name)
+	var i Repo
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.UpstreamUrl,
+		&i.ForgeHost,
+		&i.IndexedBranch,
+		&i.SyncState,
+		&i.LastSyncedAt,
+		&i.SyncError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listRepos = `-- name: ListRepos :many
+SELECT id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at FROM repos ORDER BY name LIMIT $1 OFFSET $2
+`
+
+type ListReposParams struct {
+	Limit  int32
+	Offset int32
+}
+
+// Offset pagination (docs/persistence-spec.md "Conventions"): paired with
+// CountRepos for PageInfo.total. Ordered by name for a stable page
+// boundary across calls.
+func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, error) {
+	rows, err := q.db.Query(ctx, listRepos, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Repo
+	for rows.Next() {
+		var i Repo
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.UpstreamUrl,
+			&i.ForgeHost,
+			&i.IndexedBranch,
+			&i.SyncState,
+			&i.LastSyncedAt,
+			&i.SyncError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateRepo = `-- name: UpdateRepo :one
+UPDATE repos
+SET upstream_url = $2, forge_host = $3, indexed_branch = $4, updated_at = now()
+WHERE id = $1
+RETURNING id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at
+`
+
+type UpdateRepoParams struct {
+	ID            pgtype.UUID
+	UpstreamUrl   string
+	ForgeHost     string
+	IndexedBranch string
+}
+
+// Updates the enrollment-config fields an admin can change post-enroll
+// (RepoAdminService.SetTargetBranches's indexed_branch change; a future
+// re-point of upstream_url/forge_host). name is deliberately not
+// updatable here: loam-54o.7 NOTES settled that there is no rename path
+// anywhere in the proto surface, so repos.name is immutable once created.
+func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, error) {
+	row := q.db.QueryRow(ctx, updateRepo,
+		arg.ID,
+		arg.UpstreamUrl,
+		arg.ForgeHost,
+		arg.IndexedBranch,
+	)
 	var i Repo
 	err := row.Scan(
 		&i.ID,
