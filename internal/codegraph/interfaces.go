@@ -21,11 +21,18 @@
 // visited on the current recursion branch and refuse to re-expand one
 // already seen -- but CYCLE is chosen here because:
 //
-//  1. The pinned integration-test and production image is
-//     pgvector/pgvector:pg16 (docs/persistence-spec.md "Deployment"), i.e.
-//     Postgres 16, comfortably past the Postgres 14 floor CYCLE requires --
-//     there is no version-compatibility reason to reach for the older
-//     idiom here.
+//  1. The pinned integration-test image is internal/testdb.PostgresImage
+//     ("pgvector/pgvector:pg16"), i.e. Postgres 16, comfortably past the
+//     Postgres 14 floor CYCLE requires. docs/persistence-spec.md
+//     "Deployment" only says Postgres runs "as its own container (a plain
+//     image under testcontainers-go for tests; an operator/chart under
+//     Argo CD in prod)" -- it names no image or version and leaves
+//     production's Postgres version unpinned; that bullet is NOT the
+//     source of this floor and should not be cited as one (a prior version
+//     of this comment did). Production Postgres must be >= 14 for the
+//     CYCLE clause these queries rely on to be available at all; that
+//     floor is not yet written down in persistence-spec and is being
+//     tracked separately, not by this bead.
 //  2. CYCLE is Postgres's own implementation of that idiom (it is
 //     documented as being rewritten internally into exactly the
 //     hand-rolled array-and-filter form), so it is not a *different*,

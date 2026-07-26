@@ -24,14 +24,8 @@ import (
 
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testdb"
 )
-
-// pgvectorImage matches internal/db/migrations's pinned image
-// (docs/persistence-spec.md "Deployment"): plain postgres:16-alpine has no
-// `vector` extension, and this package's Store methods rely on the real
-// 0002_code_intel schema, not a mock, to prove the FKs, CHECK constraints,
-// and the CYCLE-clause recursive CTEs actually work.
-const pgvectorImage = "pgvector/pgvector:pg16"
 
 // sharedPool is one migrated pgvector-backed Postgres for the whole test
 // binary, started once in TestMain rather than per test. Every test below
@@ -53,7 +47,7 @@ var sharedPool *pgxpool.Pool
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, pgvectorImage,
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
@@ -260,6 +254,46 @@ func TestRecomputeGraphEdges_ResolvesByNameAcrossFiles(t *testing.T) {
 
 func int32Ptr(v int32) *int32 { return &v }
 
+// TestRecomputeGraphEdges_DuplicateReferencesProduceOneEdge is FIX 3's
+// proof: a symbol referencing the same name twice in one file (a common,
+// ordinary case -- e.g. calling the same function twice) must resolve to
+// exactly one graph_edges row for that (from, to) pair, not one per
+// reference. Before FIX 3 (ResolveGraphEdgeCandidates without DISTINCT),
+// this test fails with count == 2: harmless-looking in isolation, but the
+// Dependents/Deps recursive CTEs join through graph_edges with UNION ALL,
+// so k parallel edges between the same pair multiply the branch count k
+// times per hop of recursion -- the bug compounds even though DISTINCT ON
+// hides it from the final output.
+func TestRecomputeGraphEdges_DuplicateReferencesProduceOneEdge(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+
+	_, err := store.ReplaceFileSymbols(ctx, repoID, "main", "b.go", []SymbolInput{
+		{Line: int32Ptr(1), Name: "Callee", Kind: "function"},
+	})
+	require.NoError(t, err)
+	_, err = store.ReplaceFileSymbols(ctx, repoID, "main", "a.go", []SymbolInput{
+		{Line: int32Ptr(5), Name: "Caller", Kind: "function"},
+	})
+	require.NoError(t, err)
+	// Caller references Callee twice -- e.g. two call sites in one
+	// function body.
+	_, err = store.ReplaceFileReferences(ctx, repoID, "main", "a.go", []ReferenceInput{
+		{Name: "Callee", Kind: "function", Line: 10},
+		{Name: "Callee", Kind: "function", Line: 12},
+	})
+	require.NoError(t, err)
+
+	inserted, err := store.RecomputeGraphEdges(ctx, repoID, "main")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), inserted, "two references to the same name from the same enclosing symbol must resolve to exactly one edge candidate")
+
+	var count int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM graph_edges WHERE repo_id = $1`, repoID).Scan(&count))
+	assert.Equal(t, 1, count, "graph_edges must hold exactly one row for the (Caller, Callee) pair, not one per duplicate reference")
+}
+
 // --- Cycle safety: the hard part. ---
 //
 // Each subtest below seeds graph_edges directly (bypassing name
@@ -285,12 +319,14 @@ func TestDependentsCycleSafety_SelfEdge(t *testing.T) {
 	a := insertSymbol(ctx, t, pool, repoID, "a.go", "A")
 	insertEdge(ctx, t, pool, repoID, a, a)
 
-	deps, err := store.Dependents(ctx, repoID, "main", a, 0)
+	deps, truncated, err := store.Dependents(ctx, repoID, "main", a, 0)
 	require.NoError(t, err, "Dependents must terminate on a self-edge, not hang or error")
+	assert.False(t, truncated)
 	assert.ElementsMatch(t, []uuid.UUID{a}, symbolIDs(deps))
 
-	fwd, err := store.Deps(ctx, repoID, "main", a, 0)
+	fwd, truncated, err := store.Deps(ctx, repoID, "main", a, 0)
 	require.NoError(t, err, "Deps must terminate on a self-edge, not hang or error")
+	assert.False(t, truncated)
 	assert.ElementsMatch(t, []uuid.UUID{a}, symbolIDs(fwd))
 }
 
@@ -309,15 +345,15 @@ func TestDependentsCycleSafety_MutualRecursion(t *testing.T) {
 	insertEdge(ctx, t, pool, repoID, a, b)
 	insertEdge(ctx, t, pool, repoID, b, a)
 
-	depsOfB, err := store.Dependents(ctx, repoID, "main", b, 0)
+	depsOfB, _, err := store.Dependents(ctx, repoID, "main", b, 0)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{a, b}, symbolIDs(depsOfB), "everything depending on is_odd, transitively, is {is_even, is_odd}")
 
-	depsOfA, err := store.Dependents(ctx, repoID, "main", a, 0)
+	depsOfA, _, err := store.Dependents(ctx, repoID, "main", a, 0)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{a, b}, symbolIDs(depsOfA), "starting from the other node in the cycle must be symmetric")
 
-	fwdOfA, err := store.Deps(ctx, repoID, "main", a, 0)
+	fwdOfA, _, err := store.Deps(ctx, repoID, "main", a, 0)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{a, b}, symbolIDs(fwdOfA), "is_even's transitive deps are {is_even, is_odd}")
 }
@@ -338,11 +374,11 @@ func TestDependentsCycleSafety_LongerCycle(t *testing.T) {
 	insertEdge(ctx, t, pool, repoID, b, c)
 	insertEdge(ctx, t, pool, repoID, c, a)
 
-	deps, err := store.Dependents(ctx, repoID, "main", a, 0)
+	deps, _, err := store.Dependents(ctx, repoID, "main", a, 0)
 	require.NoError(t, err, "Dependents must terminate on a 3-node cycle")
 	assert.ElementsMatch(t, []uuid.UUID{a, b, c}, symbolIDs(deps))
 
-	fwd, err := store.Deps(ctx, repoID, "main", b, 0)
+	fwd, _, err := store.Deps(ctx, repoID, "main", b, 0)
 	require.NoError(t, err, "Deps must terminate on a 3-node cycle")
 	assert.ElementsMatch(t, []uuid.UUID{a, b, c}, symbolIDs(fwd))
 }
@@ -366,16 +402,61 @@ func TestDependentsCycleSafety_StartOutsideCycle(t *testing.T) {
 	insertEdge(ctx, t, pool, repoID, c, a)
 	insertEdge(ctx, t, pool, repoID, d, a)
 
-	fwd, err := store.Deps(ctx, repoID, "main", d, 0)
+	fwd, _, err := store.Deps(ctx, repoID, "main", d, 0)
 	require.NoError(t, err, "Deps starting outside the cycle must still terminate")
 	assert.ElementsMatch(t, []uuid.UUID{a, b, c}, symbolIDs(fwd), "D's transitive deps are the whole cycle, not D itself")
 
 	// And the reverse direction, queried from inside the cycle, must also
 	// see D as a dependent (it depends on A) alongside the rest of the
 	// cycle.
-	deps, err := store.Dependents(ctx, repoID, "main", a, 0)
+	deps, _, err := store.Dependents(ctx, repoID, "main", a, 0)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []uuid.UUID{a, b, c, d}, symbolIDs(deps), "everything depending on A, transitively, includes D from outside the cycle")
+}
+
+// TestDependents_NearestDepthFirst_NotUUIDOrder is FIX 2's proof: a capped
+// Dependents call must keep the NEAREST symbols (smallest depth), not an
+// arbitrary subset picked by symbol UUID order. It builds a graph where
+// UUID creation order and depth order actively disagree -- Root <-
+// Mid <- Deep is a 2-hop chain (Deep is a depth-2 dependent of Root), and
+// five more symbols (Shallow1..Shallow5) each depend on Root directly
+// (depth 1), but are created AFTER Deep, so their UUIDv7s sort later than
+// Deep's. Root has 6 depth-1 dependents total (Mid + 5 Shallows), so a
+// Dependents(Root, limit=3) call has more than enough depth-1 candidates
+// to fill its quota -- Deep (depth 2) must never appear in the result.
+// Before FIX 2 (ORDER BY s.id, d.depth applied directly after DISTINCT ON
+// (s.id), i.e. truncating in UUID order), Deep's early-created UUID put it
+// ahead of some Shallow nodes despite being strictly farther away, so it
+// wrongly appeared in a limit-3 result while a genuine depth-1 dependent
+// was dropped -- an assertion failure, not a timeout, and a strictly
+// stronger check than "the query returned".
+func TestDependents_NearestDepthFirst_NotUUIDOrder(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx, cancel := context.WithTimeout(t.Context(), cycleTestTimeout)
+	defer cancel()
+
+	root := insertSymbol(ctx, t, pool, repoID, "root.go", "Root")
+	mid := insertSymbol(ctx, t, pool, repoID, "mid.go", "Mid")
+	deep := insertSymbol(ctx, t, pool, repoID, "deep.go", "Deep")
+	insertEdge(ctx, t, pool, repoID, mid, root) // Mid depends on Root (depth 1)
+	insertEdge(ctx, t, pool, repoID, deep, mid) // Deep depends on Mid, so transitively on Root (depth 2)
+
+	var shallow []uuid.UUID
+	for i := range 5 {
+		s := insertSymbol(ctx, t, pool, repoID, fmt.Sprintf("shallow%d.go", i), fmt.Sprintf("Shallow%d", i))
+		insertEdge(ctx, t, pool, repoID, s, root) // depth 1, created after deep
+		shallow = append(shallow, s)
+	}
+
+	deps, truncated, err := store.Dependents(ctx, repoID, "main", root, 3)
+	require.NoError(t, err)
+	assert.True(t, truncated, "6 depth-1 dependents exist for a limit of 3")
+	require.Len(t, deps, 3)
+	for _, d := range deps {
+		assert.Equal(t, int32(1), d.Depth, "every returned symbol must be depth 1: Root has 6 depth-1 dependents, more than enough to fill limit=3 without ever reaching Deep")
+		assert.NotEqual(t, deep, d.Symbol.ID, "Deep (depth 2) must not appear ahead of a depth-1 dependent just because its UUID sorts earlier")
+	}
 }
 
 // TestDependentsCTE_GuardRemovedHangs is the mutation test: it runs the
@@ -407,18 +488,23 @@ func TestDependentsCTE_GuardRemovedHangs(t *testing.T) {
 	// cycleTestTimeout), so 3s comfortably separates "terminates" from
 	// "does not" without making the suite slow.
 	const guardRemovedBound = 3 * time.Second
-	bg := context.Background()
 
-	a := insertSymbol(bg, t, pool, repoID, "parity.py", "is_even")
-	b := insertSymbol(bg, t, pool, repoID, "parity.py", "is_odd")
-	insertEdge(bg, t, pool, repoID, a, b)
-	insertEdge(bg, t, pool, repoID, b, a)
+	a := insertSymbol(t.Context(), t, pool, repoID, "parity.py", "is_even")
+	b := insertSymbol(t.Context(), t, pool, repoID, "parity.py", "is_odd")
+	insertEdge(t.Context(), t, pool, repoID, a, b)
+	insertEdge(t.Context(), t, pool, repoID, b, a)
 
 	// Identical to the Dependents query in internal/db/queries/code_graph.sql
 	// EXCEPT the "CYCLE symbol_id SET is_cycle USING visited_path" clause is
 	// gone and nothing replaces it -- no depth cap, no row cap. If this
 	// still terminated quickly, it would mean the CYCLE clause was never
 	// the thing stopping the real query, i.e. the guard was decorative.
+	// The LIMIT $4 here is deliberately generous (100000, passed below) and
+	// deliberately NOT a stand-in cycle guard: it sits downstream of the
+	// DISTINCT ON dedup subquery (a blocking sort node, same as the real
+	// query), so it cannot short-circuit the recursive term even in
+	// principle -- see FIX 2's reasoning in code_graph.sql's Dependents
+	// comment, which applies identically to this inlined copy.
 	const unguarded = `
 WITH RECURSIVE dependents(symbol_id, depth) AS (
     SELECT ge.from_symbol_id, 1
@@ -430,9 +516,17 @@ WITH RECURSIVE dependents(symbol_id, depth) AS (
     JOIN dependents d ON ge.to_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
 )
-SELECT DISTINCT symbol_id FROM dependents LIMIT $4`
+SELECT s.id
+FROM (
+    SELECT DISTINCT ON (symbol_id) symbol_id, depth
+    FROM dependents
+    ORDER BY symbol_id, depth
+) deduped
+JOIN symbols s ON s.id = deduped.symbol_id
+ORDER BY deduped.depth, s.id
+LIMIT $4`
 
-	ctx, cancel := context.WithTimeout(bg, guardRemovedBound)
+	ctx, cancel := context.WithTimeout(t.Context(), guardRemovedBound)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -495,14 +589,16 @@ func TestSymbolHistory_AppendAndQuery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)
 
-	entries, err := store.History(ctx, sym, 0)
+	entries, truncated, err := store.History(ctx, sym, 0)
 	require.NoError(t, err)
+	assert.False(t, truncated)
 	require.Len(t, entries, 2)
 	assert.Equal(t, "c2", entries[0].Commit, "most recent commit must come first")
 	assert.Equal(t, "c1", entries[1].Commit)
 
-	limited, err := store.History(ctx, sym, 1)
+	limited, truncated, err := store.History(ctx, sym, 1)
 	require.NoError(t, err)
+	assert.True(t, truncated, "asking for 1 of 2 entries must report truncated=true")
 	require.Len(t, limited, 1)
 	assert.Equal(t, "c2", limited[0].Commit)
 }

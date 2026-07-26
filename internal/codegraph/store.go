@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/google/uuid"
@@ -213,39 +214,51 @@ func (s *Store) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targe
 }
 
 // Dependents returns the reverse blast radius of symbolID: every symbol
-// that transitively depends on it, deduplicated, nearest-depth-first, up to
-// limit rows (limit <= 0 uses defaultLimit). See the package doc comment
-// for the cycle-safety guarantee this relies on.
-func (s *Store) Dependents(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) ([]Dependency, error) {
+// that transitively depends on it, deduplicated (by minimum depth),
+// nearest-depth-first, up to limit rows (limit <= 0 uses defaultLimit).
+// truncated reports whether more than limit rows actually exist -- a
+// caller that received exactly limit rows but truncated=false has the
+// complete transitive set, never confusing "exactly limit" with "there
+// were more" (docs/cli-spec.md's `truncated` envelope field depends on
+// this distinction, and clampLimit's own defaultLimit substitution is not
+// exempt: a blast radius that silently exceeds 1000 must still report
+// truncated=true). See the package doc comment for the cycle-safety
+// guarantee this relies on.
+func (s *Store) Dependents(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) (deps []Dependency, truncated bool, err error) {
+	effectiveLimit := clampLimit(limit)
 	rows, err := s.q.Dependents(ctx, gen.DependentsParams{
 		RepoID:       pgUUID(repoID),
 		TargetBranch: targetBranch,
 		ToSymbolID:   pgUUID(symbolID),
-		Limit:        clampLimit(limit),
+		Limit:        fetchLimit(effectiveLimit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("querying dependents of %s: %w", symbolID, err)
+		return nil, false, fmt.Errorf("querying dependents of %s: %w", symbolID, err)
 	}
-	return toDependents(rows), nil
+	deps, truncated = trimDependentsRows(rows, effectiveLimit)
+	return deps, truncated, nil
 }
 
 // Deps returns the forward blast radius of symbolID: every symbol it
-// transitively depends on, deduplicated, nearest-depth-first, up to limit
-// rows (limit <= 0 uses defaultLimit). See the package doc comment for the
-// cycle-safety guarantee this relies on.
-func (s *Store) Deps(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) ([]Dependency, error) {
+// transitively depends on, deduplicated (by minimum depth), nearest-depth-
+// first, up to limit rows (limit <= 0 uses defaultLimit). truncated
+// reports whether more than limit rows actually exist -- see Dependents'
+// doc comment for the full rationale, which applies identically here. See
+// the package doc comment for the cycle-safety guarantee this relies on.
+func (s *Store) Deps(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) (deps []Dependency, truncated bool, err error) {
+	effectiveLimit := clampLimit(limit)
 	rows, err := s.q.Deps(ctx, gen.DepsParams{
 		RepoID:       pgUUID(repoID),
 		TargetBranch: targetBranch,
 		FromSymbolID: pgUUID(symbolID),
-		Limit:        clampLimit(limit),
+		Limit:        fetchLimit(effectiveLimit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("querying deps of %s: %w", symbolID, err)
+		return nil, false, fmt.Errorf("querying deps of %s: %w", symbolID, err)
 	}
-	deps := make([]Dependency, len(rows))
+	all := make([]Dependency, len(rows))
 	for i, r := range rows {
-		deps[i] = Dependency{
+		all[i] = Dependency{
 			Symbol: Symbol{
 				ID:           uuidFromPg(r.ID),
 				RepoID:       uuidFromPg(r.RepoID),
@@ -258,7 +271,8 @@ func (s *Store) Deps(ctx context.Context, repoID uuid.UUID, targetBranch string,
 			Depth: r.Depth,
 		}
 	}
-	return deps, nil
+	deps, truncated = trimDependencies(all, effectiveLimit)
+	return deps, truncated, nil
 }
 
 // AppendSymbolHistory bulk-inserts symbol_history rows with a fresh
@@ -288,16 +302,23 @@ func (s *Store) AppendSymbolHistory(ctx context.Context, entries []HistoryEntryI
 }
 
 // History returns symbolID's history entries, most-recent-first, up to
-// limit rows (limit <= 0 uses defaultLimit).
-func (s *Store) History(ctx context.Context, symbolID uuid.UUID, limit int32) ([]HistoryEntry, error) {
+// limit rows (limit <= 0 uses defaultLimit). truncated reports whether
+// more entries exist beyond limit -- see Dependents' doc comment for why
+// this distinction matters; it applies identically here.
+func (s *Store) History(ctx context.Context, symbolID uuid.UUID, limit int32) (entries []HistoryEntry, truncated bool, err error) {
+	effectiveLimit := clampLimit(limit)
 	rows, err := s.q.SymbolHistory(ctx, gen.SymbolHistoryParams{
 		SymbolID: pgUUID(symbolID),
-		Limit:    clampLimit(limit),
+		Limit:    fetchLimit(effectiveLimit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("querying history for symbol %s: %w", symbolID, err)
+		return nil, false, fmt.Errorf("querying history for symbol %s: %w", symbolID, err)
 	}
-	entries := make([]HistoryEntry, len(rows))
+	truncated = int32(len(rows)) > effectiveLimit
+	if truncated {
+		rows = rows[:effectiveLimit]
+	}
+	entries = make([]HistoryEntry, len(rows))
 	for i, r := range rows {
 		entries[i] = HistoryEntry{
 			ID:       uuidFromPg(r.ID),
@@ -307,17 +328,19 @@ func (s *Store) History(ctx context.Context, symbolID uuid.UUID, limit int32) ([
 			Message:  r.Message,
 		}
 	}
-	return entries, nil
+	return entries, truncated, nil
 }
 
-// toDependents converts Dependents rows to the exported Dependency type.
+// trimDependentsRows converts Dependents rows to the exported Dependency
+// type and trims to effectiveLimit, reporting whether the raw fetch (which
+// requested effectiveLimit+1 rows, see fetchLimit) actually found more.
 // Deps has an identical row shape but a distinct generated type
-// (gen.DepsRow vs gen.DependentsRow), so it converts inline in Deps rather
-// than sharing this helper.
-func toDependents(rows []gen.DependentsRow) []Dependency {
-	deps := make([]Dependency, len(rows))
+// (gen.DepsRow vs gen.DependentsRow), so Deps converts inline and shares
+// only trimDependencies, not this conversion step.
+func trimDependentsRows(rows []gen.DependentsRow, effectiveLimit int32) ([]Dependency, bool) {
+	all := make([]Dependency, len(rows))
 	for i, r := range rows {
-		deps[i] = Dependency{
+		all[i] = Dependency{
 			Symbol: Symbol{
 				ID:           uuidFromPg(r.ID),
 				RepoID:       uuidFromPg(r.RepoID),
@@ -330,7 +353,17 @@ func toDependents(rows []gen.DependentsRow) []Dependency {
 			Depth: r.Depth,
 		}
 	}
-	return deps
+	return trimDependencies(all, effectiveLimit)
+}
+
+// trimDependencies trims deps to effectiveLimit rows, reporting whether it
+// held more than that -- the shared truncation-detection step for
+// Dependents and Deps once their rows are in the common Dependency shape.
+func trimDependencies(deps []Dependency, effectiveLimit int32) ([]Dependency, bool) {
+	if int32(len(deps)) > effectiveLimit {
+		return deps[:effectiveLimit], true
+	}
+	return deps, false
 }
 
 // clampLimit applies defaultLimit to a non-positive caller-supplied limit.
@@ -340,6 +373,19 @@ func clampLimit(limit int32) int32 {
 		return defaultLimit
 	}
 	return limit
+}
+
+// fetchLimit returns effectiveLimit+1: Dependents, Deps, and History all
+// fetch one extra row internally so the Store methods can tell "exactly
+// effectiveLimit rows exist" apart from "more were truncated" without a
+// second round-trip. Saturates at math.MaxInt32 instead of overflowing
+// negative for the (pathological) case of a caller-supplied limit already
+// at the int32 ceiling.
+func fetchLimit(effectiveLimit int32) int32 {
+	if effectiveLimit >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return effectiveLimit + 1
 }
 
 // pgUUID converts a uuid.UUID to the pgtype.UUID sqlc-generated params

@@ -85,10 +85,14 @@ WITH RECURSIVE dependents(symbol_id, depth) AS (
     JOIN dependents d ON ge.to_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
 ) CYCLE symbol_id SET is_cycle USING visited_path
-SELECT DISTINCT ON (s.id) s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind, d.depth
-FROM dependents d
-JOIN symbols s ON s.id = d.symbol_id
-ORDER BY s.id, d.depth
+SELECT s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind, deduped.depth
+FROM (
+    SELECT DISTINCT ON (symbol_id) symbol_id, depth
+    FROM dependents
+    ORDER BY symbol_id, depth
+) deduped
+JOIN symbols s ON s.id = deduped.symbol_id
+ORDER BY deduped.depth, s.id
 LIMIT $4
 `
 
@@ -125,12 +129,29 @@ type DependentsRow struct {
 // already emitted on that branch, and it refuses to expand a branch whose
 // next candidate repeats one already in its own path. That is what
 // actually terminates the recursion; it is not decorative. Available since
-// Postgres 14 (see internal/codegraph package doc for why this, not the
-// older hand-rolled array idiom, was chosen against the pinned
-// pgvector/pgvector:pg16 image). There is deliberately no separate
-// depth/row cap backing this up -- see the package doc for why one is not
-// needed and why adding one risks masking a broken guard instead of
-// catching it.
+// Postgres 14 (see internal/codegraph package doc for the version floor
+// this relies on). There is deliberately no separate depth/row cap backing
+// this up -- see the package doc for why one is not needed and why adding
+// one risks masking a broken guard instead of catching it. The LIMIT
+// below is a pagination cap, not a cycle guard, and cannot double as one:
+// it sits downstream of DISTINCT ON's dedup subquery, which itself
+// requires a full sort over the CTE's output (both are blocking nodes),
+// so nothing here can short-circuit the recursive term early.
+//
+// The dedup subquery picks the MINIMUM depth per symbol_id (ORDER BY
+// symbol_id, depth inside DISTINCT ON), then the outer query orders by
+// depth first, id second, before LIMIT applies -- nearest-depth-first,
+// ties broken deterministically by id. Applying LIMIT directly after
+// DISTINCT ON (s.id) (an earlier version of this query did) truncates in
+// whatever order DISTINCT ON's own dedup happens to leave rows in, i.e.
+// symbol UUID order, which is not depth order -- silently returning an
+// arbitrary 50 symbols instead of the nearest 50 for a capped call.
+//
+// Callers ask for one more row than they intend to keep (limit+1) so they
+// can detect truncation themselves: this query has no way to signal "more
+// rows existed" on its own, and the caller must not be left to confuse
+// "exactly limit results" with "truncated at limit" (docs/cli-spec.md's
+// `truncated` envelope field depends on that distinction).
 func (q *Queries) Dependents(ctx context.Context, arg DependentsParams) ([]DependentsRow, error) {
 	rows, err := q.db.Query(ctx, dependents,
 		arg.RepoID,
@@ -176,10 +197,14 @@ WITH RECURSIVE deps(symbol_id, depth) AS (
     JOIN deps d ON ge.from_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
 ) CYCLE symbol_id SET is_cycle USING visited_path
-SELECT DISTINCT ON (s.id) s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind, d.depth
-FROM deps d
-JOIN symbols s ON s.id = d.symbol_id
-ORDER BY s.id, d.depth
+SELECT s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind, deduped.depth
+FROM (
+    SELECT DISTINCT ON (symbol_id) symbol_id, depth
+    FROM deps
+    ORDER BY symbol_id, depth
+) deduped
+JOIN symbols s ON s.id = deduped.symbol_id
+ORDER BY deduped.depth, s.id
 LIMIT $4
 `
 
@@ -203,9 +228,10 @@ type DepsRow struct {
 
 // Forward blast radius: every symbol the target symbol transitively
 // depends on, walking graph_edges forwards from from_symbol_id = target
-// toward to_symbol_id. Same CYCLE-clause termination guard as Dependents
-// above, mirrored in the opposite direction; see that query's comment for
-// the full rationale.
+// toward to_symbol_id. Same CYCLE-clause termination guard, dedup-by-
+// minimum-depth, depth-first ordering, and limit+1-for-truncation-
+// detection convention as Dependents above, mirrored in the opposite
+// direction; see that query's comment for the full rationale.
 func (q *Queries) Deps(ctx context.Context, arg DepsParams) ([]DepsRow, error) {
 	rows, err := q.db.Query(ctx, deps,
 		arg.RepoID,
@@ -278,7 +304,7 @@ type InsertSymbolsParams struct {
 }
 
 const resolveGraphEdgeCandidates = `-- name: ResolveGraphEdgeCandidates :many
-SELECT enclosing.id AS from_symbol_id, target.id AS to_symbol_id
+SELECT DISTINCT enclosing.id AS from_symbol_id, target.id AS to_symbol_id
 FROM symbol_references sr
 JOIN LATERAL (
     SELECT s.id
@@ -338,6 +364,18 @@ type ResolveGraphEdgeCandidatesRow struct {
 // legitimate case and is deliberately NOT excluded here -- it is exactly
 // the shape of self-edge the dependents/deps CTE cycle-safety guard must
 // handle.
+//
+// DISTINCT is required, not cosmetic: a symbol referencing the same name N
+// times in one file produces N identical symbol_references rows resolving
+// to the same (from_symbol_id, to_symbol_id) pair, and graph_edges has no
+// unique constraint on that pair. Parallel duplicate edges between the
+// same two nodes don't just look redundant in the output -- the
+// Dependents/Deps recursive CTEs join through graph_edges with UNION ALL,
+// so k parallel edges between a pair multiply the branch count k times per
+// hop, and intermediate row counts grow as k^depth. Deduplicating only at
+// the end (e.g. via DISTINCT ON in Dependents/Deps) hides the symptom in
+// the final output while that multiplicative work has already been done;
+// deduplicating here, at the source, is what actually avoids it.
 func (q *Queries) ResolveGraphEdgeCandidates(ctx context.Context, arg ResolveGraphEdgeCandidatesParams) ([]ResolveGraphEdgeCandidatesRow, error) {
 	rows, err := q.db.Query(ctx, resolveGraphEdgeCandidates, arg.RepoID, arg.TargetBranch)
 	if err != nil {
@@ -374,7 +412,10 @@ type SymbolHistoryParams struct {
 // timestamp column, so chronological order comes from the UUID v7 primary
 // key (docs/persistence-spec.md "Conventions": UUID v7 ids are
 // time-ordered) -- ORDER BY id DESC is most-recent-first without a
-// separate column to maintain.
+// separate column to maintain. As with Dependents/Deps, the caller passes
+// limit+1 so it can detect truncation itself (docs/cli-spec.md's
+// `truncated` envelope field) rather than confuse "exactly limit results"
+// with "there were more".
 func (q *Queries) SymbolHistory(ctx context.Context, arg SymbolHistoryParams) ([]SymbolHistory, error) {
 	rows, err := q.db.Query(ctx, symbolHistory, arg.SymbolID, arg.Limit)
 	if err != nil {
