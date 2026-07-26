@@ -30,6 +30,30 @@ func TestClientValidateTokenBadTokenIsForgeErrInvalidToken(t *testing.T) {
 	assert.ErrorIs(t, err, forge.ErrInvalidToken)
 }
 
+// TestClientValidateTokenEmptyTokenIsForgeErrInvalidToken covers loam-ddv's
+// DIVERGENCE 2: real Forgejo (Forgejo.ValidateToken, internal/forge/
+// forgejo.go) rejects an empty token with ErrInvalidToken via a client-side
+// guard before any request is sent — because an empty "Authorization: token "
+// value reads as anonymous there, 404s through the scope probe, and would
+// otherwise read as success. handleValidateToken (provider.go) reaches the
+// same ErrInvalidToken class by a different route: it treats an empty
+// req.Token as an unregistered token and returns 401 alongside every other
+// auth failure. The two sides agree on the sentinel by different mechanisms,
+// which is exactly the kind of agreement that can silently rot if only one
+// side is ever exercised — this is the verification loam-ddv's DESCRIPTION
+// asked for and the prior diff omitted. This is also the input loam-li0.9's
+// shared table would most naturally reach for as "an invalid token."
+func TestClientValidateTokenEmptyTokenIsForgeErrInvalidToken(t *testing.T) {
+	t.Parallel()
+	srv, ts := newTestServer(t)
+	srv.AddToken("good-token")
+	client := NewClient(ts.URL, "")
+	err := client.ValidateToken(t.Context(), "example.invalid", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, forge.ErrInvalidToken)
+	assert.NotErrorIs(t, err, forge.ErrInsufficientScope, "an empty token must not read as merely underscoped")
+}
+
 // TestClientValidateTokenMissingPRScopeIsForgeErrInsufficientScope covers a
 // token that authenticates but lacks PR-opening scope. forge.Provider's
 // ValidateToken contract has a dedicated sentinel for this case,
