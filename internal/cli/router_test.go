@@ -68,14 +68,63 @@ func TestRouterDispatch_GroupWithNoSubcommand_ReturnsUsageError(t *testing.T) {
 	assert.ErrorAs(t, err, &ue)
 }
 
+// stillStubbedExemptions lists dispatchable leaf commands (see
+// leafCommandKeys) deliberately absent from
+// TestRouterDispatch_EveryCommandIsReachable's table because they no longer
+// return errNotImplemented: a real handler exists, and that command's own
+// test file proves it is reachable instead. clone is entry #1 -- covered by
+// TestRouterDispatch_Clone_ReachesRealHandler in clone_test.go (loam-0pj.8).
+// As each future command bead lands, add its leaf key here rather than
+// deleting its row from the table silently: this keeps the coverage claim
+// enforced by TestRouterDispatch_EveryCommandIsReachable's drift check
+// below instead of by a reviewer noticing a table shrank.
+var stillStubbedExemptions = map[string]bool{
+	"clone": true,
+}
+
+// leafCommandKeys walks tree and returns the set of dispatchable leaf
+// command keys: a top-level leaf's own name, or "<group> <sub>" for a
+// subcommand -- the same shape leafKeyFromArgs derives from a reachability
+// table row's args, so the two can be compared directly.
+func leafCommandKeys(tree map[string]*command) map[string]bool {
+	leaves := make(map[string]bool)
+	for name, cmd := range tree {
+		if cmd.subcommands == nil {
+			leaves[name] = true
+			continue
+		}
+		for sub := range cmd.subcommands {
+			leaves[name+" "+sub] = true
+		}
+	}
+	return leaves
+}
+
+// leafKeyFromArgs maps a reachability-table row's args to the same
+// "<top>"/"<top> <sub>" key leafCommandKeys produces. Only "work" and
+// "graph" are groups in the current command tree; every other top-level
+// command is itself a leaf.
+func leafKeyFromArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	top := args[0]
+	if top != "work" && top != "graph" || len(args) < 2 {
+		return top
+	}
+	return top + " " + args[1]
+}
+
 // TestRouterDispatch_EveryCommandIsReachable proves every still-stubbed
 // command named in docs/cli-spec.md is registered and dispatchable: given
 // plausible args, each resolves to its stub handler and returns
-// errNotImplemented rather than a routing usageError. clone is excluded
-// here: loam-0pj.8 gave it a real handler that no longer returns
-// errNotImplemented, so its routing coverage lives in
-// TestRouterDispatch_Clone_ReachesRealHandler (clone_test.go) instead,
-// against collaborators that do not panic when clone actually calls them.
+// errNotImplemented rather than a routing usageError. This is
+// self-enforcing, not just a fixed list: it walks commandTree() itself and
+// fails if any leaf command has neither a row below nor an entry in
+// stillStubbedExemptions, so the next ~24 command beads (each of which
+// turns one more row real, exactly as loam-0pj.8 did for clone) cannot
+// silently shrink this test's coverage by deleting a row -- the leaf must
+// be exempted explicitly instead.
 func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -107,6 +156,18 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"search", []string{"search", "how does auth work"}},
 		{"search with flags", []string{"search", "auth", "--repo", "acme/repo", "--limit", "3"}},
 	}
+
+	covered := make(map[string]bool, len(tests))
+	for _, tt := range tests {
+		covered[leafKeyFromArgs(tt.args)] = true
+	}
+	for leaf := range leafCommandKeys(commandTree()) {
+		if stillStubbedExemptions[leaf] {
+			continue
+		}
+		assert.True(t, covered[leaf], "command %q has no row in the reachability table above and no entry in stillStubbedExemptions", leaf)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

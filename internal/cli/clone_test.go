@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,18 +94,18 @@ func okGetRepo(repo string) func(context.Context, *connect.Request[loamv1.GetRep
 }
 
 // TestRunCloneCommand_Success proves the full happy path: GetRepo confirms
-// enrollment, Clone runs against the composed URL/branch/destination, the
-// clone is bootstrapped with the agent's author identity and all three
-// Loam-Agent-* headers (matching connect.go's header constants exactly, the
-// same ones httpauth's GitIdentity wrapper will require), and the encoder
+// enrollment, Clone runs against the composed URL/branch/destination
+// carrying all three Loam-Agent-* headers (matching connect.go's header
+// constants exactly, the same ones httpauth's GitIdentity wrapper
+// requires) so the clone's OWN initial fetch is authorized, the clone is
+// then bootstrapped with the agent's author identity, and the encoder
 // receives {repo, path, branch} (see docs/cli-spec.md -> clone).
 func TestRunCloneCommand_Success(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc:     func(context.Context, string, string, string) error { return nil },
+		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
 		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
-		AddConfigFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("bobcob7/doc-server"), cloner, &encoded)
@@ -116,23 +118,17 @@ func TestRunCloneCommand_Success(t *testing.T) {
 	assert.Equal(t, "https://loam.example/git/bobcob7/doc-server.git", cloneCall.URL)
 	assert.Equal(t, "wb-9c2f1a", cloneCall.Branch)
 	assert.Equal(t, "./doc-server", cloneCall.Dest)
+	assert.Equal(t, []string{
+		"Loam-Agent-Name: grace-hopper",
+		"Loam-Agent-Id: 3",
+		"Loam-Agent-Role: author",
+	}, cloneCall.Headers, "Clone itself must carry all three identity headers -- writing them into the clone's config only after Clone returns would be too late for its own initial fetch")
 
 	require.Len(t, cloner.SetConfigCalls(), 2, "user.name and user.email")
 	assert.Equal(t, "user.name", cloner.SetConfigCalls()[0].Key)
 	assert.Equal(t, "grace-hopper", cloner.SetConfigCalls()[0].Value)
 	assert.Equal(t, "user.email", cloner.SetConfigCalls()[1].Key)
 	assert.Equal(t, "grace-hopper-3-author@loam", cloner.SetConfigCalls()[1].Value)
-
-	require.Len(t, cloner.AddConfigCalls(), 3, "one http.extraHeader entry per Loam-Agent-* header")
-	wantHeaders := []string{
-		"Loam-Agent-Name: grace-hopper",
-		"Loam-Agent-Id: 3",
-		"Loam-Agent-Role: author",
-	}
-	for i, want := range wantHeaders {
-		assert.Equal(t, "http.extraHeader", cloner.AddConfigCalls()[i].Key)
-		assert.Equal(t, want, cloner.AddConfigCalls()[i].Value)
-	}
 
 	out, ok := encoded.(cloneOutput)
 	require.True(t, ok, "clone must encode a cloneOutput")
@@ -148,13 +144,12 @@ func TestRunCloneCommand_RepoNotEnrolled_ExitsThree(t *testing.T) {
 	cfg := cloneTestConfig("https://loam.example")
 	cloneCalled := false
 	cloner := &gitClonerMock{
-		// SetConfig/AddConfig are harmless no-ops here, deliberately: if a
-		// regression ever lets Clone run despite an unenrolled repo, this
-		// test must still fail on the cloneCalled assertion below, not on an
-		// unrelated nil-func panic several calls deeper into bootstrap.
-		CloneFunc:     func(context.Context, string, string, string) error { cloneCalled = true; return nil },
+		// SetConfig is a harmless no-op here, deliberately: if a regression
+		// ever lets Clone run despite an unenrolled repo, this test must
+		// still fail on the cloneCalled assertion below, not on an
+		// unrelated nil-func panic one call deeper into bootstrap.
+		CloneFunc:     func(context.Context, string, string, string, []string) error { cloneCalled = true; return nil },
 		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
-		AddConfigFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	notFound := func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("repo bobcob7/doc-server is not enrolled"))
@@ -177,11 +172,10 @@ func TestRunCloneCommand_BranchMissing_ExitsTwo(t *testing.T) {
 	cfg := cloneTestConfig("https://loam.example")
 	bootstrapped := false
 	cloner := &gitClonerMock{
-		CloneFunc: func(context.Context, string, string, string) error {
+		CloneFunc: func(context.Context, string, string, string, []string) error {
 			return errors.New("exit status 128: fatal: Remote branch wb-missing not found in upstream origin")
 		},
 		SetConfigFunc: func(context.Context, string, string, string) error { bootstrapped = true; return nil },
-		AddConfigFunc: func(context.Context, string, string, string) error { bootstrapped = true; return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("bobcob7/doc-server"), cloner, &encoded)
@@ -195,7 +189,12 @@ func TestRunCloneCommand_BranchMissing_ExitsTwo(t *testing.T) {
 
 // TestRunCloneCommand_MalformedRepo_ExitsTwo proves a repo argument with no
 // "/group/" shape is a usage error (exit 2) caught before any RPC or git
-// invocation, rather than reaching the server with an unparseable repo.
+// invocation, rather than reaching the server with an unparseable repo. The
+// cloner mock is a full no-op (not bare &gitClonerMock{}), deliberately: if
+// a regression ever drops the splitRepo guard, Clone/SetConfig would run
+// with a zero-value group ("splitRepo failed" shape), and this test must
+// still fail on the getRepoCalled/exit-code assertions below rather than on
+// an unrelated nil-func panic from an incomplete mock.
 func TestRunCloneCommand_MalformedRepo_ExitsTwo(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
@@ -204,13 +203,18 @@ func TestRunCloneCommand_MalformedRepo_ExitsTwo(t *testing.T) {
 		getRepoCalled = true
 		return connect.NewResponse(&loamv1.GetRepoResponse{}), nil
 	}
+	cloner := &gitClonerMock{
+		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
+	}
 	var encoded any
-	deps := cloneTestDeps(cfg, getRepo, &gitClonerMock{}, &encoded)
+	deps := cloneTestDeps(cfg, getRepo, cloner, &encoded)
 
 	err := runCloneCommand(t.Context(), deps, "doc-server", "wb-9c2f1a")
 	require.Error(t, err)
 	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
 	assert.False(t, getRepoCalled, "a malformed repo must never reach the server")
+	assert.Empty(t, cloner.CloneCalls(), "a malformed repo must never reach git either")
 }
 
 // TestRunCloneCommand_BootstrapFailure_PropagatesAsError proves a git-config
@@ -220,7 +224,7 @@ func TestRunCloneCommand_BootstrapFailure_PropagatesAsError(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc: func(context.Context, string, string, string) error { return nil },
+		CloneFunc: func(context.Context, string, string, string, []string) error { return nil },
 		SetConfigFunc: func(context.Context, string, string, string) error {
 			return errors.New("git config failed: permission denied")
 		},
@@ -234,17 +238,17 @@ func TestRunCloneCommand_BootstrapFailure_PropagatesAsError(t *testing.T) {
 }
 
 // TestRouterDispatch_Clone_ReachesRealHandler proves the router dispatches
-// "clone" through to the real runCloneCommand handler (not a routing
-// usageError, and not the old errNotImplemented stub), against
-// collaborators that would fail loudly rather than panic if clone somehow
-// skipped a step.
+// "clone" through to the real runCloneCommand handler (not the old
+// errNotImplemented stub, and not a routing usageError): with every
+// collaborator wired to succeed, dispatching "clone" end to end through the
+// real command tree returns nil, exactly as runCloneCommand's own success
+// test does when called directly.
 func TestRouterDispatch_Clone_ReachesRealHandler(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc:     func(context.Context, string, string, string) error { return nil },
+		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
 		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
-		AddConfigFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("acme/repo"), cloner, &encoded)
@@ -252,19 +256,18 @@ func TestRouterDispatch_Clone_ReachesRealHandler(t *testing.T) {
 
 	err := router.Dispatch(t.Context(), []string{"clone", "acme/repo", "wb-1"})
 	require.NoError(t, err)
-	var ue *usageError
-	assert.NotErrorAs(t, err, &ue)
-	assert.NotErrorIs(t, err, errNotImplemented)
+	require.Len(t, cloner.CloneCalls(), 1, "dispatch must reach the real handler, which shells out to git exactly once")
 }
 
-// --- execGitCloner: real git subprocess behavior, no server involved ---
+// --- execGitCloner: real git subprocess behavior ---
 //
-// These exercise the actual git binary against a local bare repository over
-// a plain filesystem path (equivalent to file://), proving the two claims
-// that matter most and that a mocked gitCloner cannot prove on its own:
-// single-branch clone genuinely fetches only the named branch, and the
-// config writes land in the clone's real .git/config where plain git push
-// would read them from.
+// These exercise the actual git binary -- most against a local bare
+// repository over a plain filesystem path (equivalent to file://), one
+// against a real HTTP server -- proving what a mocked gitCloner cannot
+// prove on its own: single-branch clone genuinely fetches only the named
+// branch, the identity headers reach git's OWN initial fetch (not just
+// later operations), and every config write lands in the clone's real
+// .git/config where plain git push/commit would read it from.
 
 // mustRunGit runs git with args in dir, failing t on error. Deliberately
 // independent of runGitCommand (the code under test) so a bug there cannot
@@ -319,7 +322,7 @@ func TestExecGitCloner_Clone_SingleBranch_FetchesOnlyTheNamedBranch(t *testing.T
 	dest := filepath.Join(t.TempDir(), "doc-server")
 	cloner := execGitCloner{}
 
-	err := cloner.Clone(t.Context(), upstream, "wb-1", dest)
+	err := cloner.Clone(t.Context(), upstream, "wb-1", dest, nil)
 	require.NoError(t, err)
 
 	branch := mustRunGit(t, dest, "symbolic-ref", "--short", "HEAD")
@@ -333,32 +336,76 @@ func TestExecGitCloner_Clone_SingleBranch_FetchesOnlyTheNamedBranch(t *testing.T
 	assert.Equal(t, "origin", remotes, "the clone's only remote must be the server endpoint")
 }
 
-// TestExecGitCloner_ConfigWrites_LandInRealGitConfig proves SetConfig and
-// AddConfig write into the clone's actual .git/config, exactly where plain
-// `git push` and `git commit` read user.name/user.email and
+// TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig proves the
+// identity headers passed to Clone (as clone-time --config arguments, not a
+// separate write afterward) land in the clone's actual .git/config, all
+// three, in order -- exactly where plain `git push`/`git fetch` read
 // http.extraHeader from -- not merely that the subprocess exited 0.
-func TestExecGitCloner_ConfigWrites_LandInRealGitConfig(t *testing.T) {
+func TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig(t *testing.T) {
 	t.Parallel()
 	upstream := newBareRepoWithTwoBranches(t)
 	dest := filepath.Join(t.TempDir(), "doc-server")
 	cloner := execGitCloner{}
-	require.NoError(t, cloner.Clone(t.Context(), upstream, "main", dest))
-
-	require.NoError(t, cloner.SetConfig(t.Context(), dest, "user.name", "grace-hopper"))
-	require.NoError(t, cloner.SetConfig(t.Context(), dest, "user.email", "grace-hopper-3-author@loam"))
-	require.NoError(t, cloner.AddConfig(t.Context(), dest, "http.extraHeader", "Loam-Agent-Name: grace-hopper"))
-	require.NoError(t, cloner.AddConfig(t.Context(), dest, "http.extraHeader", "Loam-Agent-Id: 3"))
-	require.NoError(t, cloner.AddConfig(t.Context(), dest, "http.extraHeader", "Loam-Agent-Role: author"))
-
-	assert.Equal(t, "grace-hopper", mustRunGit(t, dest, "config", "user.name"))
-	assert.Equal(t, "grace-hopper-3-author@loam", mustRunGit(t, dest, "config", "user.email"))
-
-	headers := mustRunGit(t, dest, "config", "--get-all", "http.extraHeader")
-	assert.Equal(t, []string{
+	headers := []string{
 		"Loam-Agent-Name: grace-hopper",
 		"Loam-Agent-Id: 3",
 		"Loam-Agent-Role: author",
-	}, strings.Split(headers, "\n"), "all three headers must accumulate rather than overwrite each other")
+	}
+
+	require.NoError(t, cloner.Clone(t.Context(), upstream, "main", dest, headers))
+
+	got := mustRunGit(t, dest, "config", "--get-all", "http.extraHeader")
+	assert.Equal(t, headers, strings.Split(got, "\n"), "all three headers must land in the clone's config exactly once each, in order, from Clone itself")
+}
+
+// TestExecGitCloner_SetConfig_LandsInRealGitConfig proves SetConfig writes
+// into the clone's actual .git/config, exactly where plain `git commit`
+// reads user.name/user.email from.
+func TestExecGitCloner_SetConfig_LandsInRealGitConfig(t *testing.T) {
+	t.Parallel()
+	upstream := newBareRepoWithTwoBranches(t)
+	dest := filepath.Join(t.TempDir(), "doc-server")
+	cloner := execGitCloner{}
+	require.NoError(t, cloner.Clone(t.Context(), upstream, "main", dest, nil))
+
+	require.NoError(t, cloner.SetConfig(t.Context(), dest, "user.name", "grace-hopper"))
+	require.NoError(t, cloner.SetConfig(t.Context(), dest, "user.email", "grace-hopper-3-author@loam"))
+
+	assert.Equal(t, "grace-hopper", mustRunGit(t, dest, "config", "user.name"))
+	assert.Equal(t, "grace-hopper-3-author@loam", mustRunGit(t, dest, "config", "user.email"))
+}
+
+// TestExecGitCloner_Clone_SendsIdentityHeadersOnTheInitialFetch is the
+// direct proof for MUST-FIX 1's failure mode: it captures the request
+// headers git itself sends on the very FIRST request a clone makes (the
+// upload-pack info/refs GET, before any destination directory or config
+// exists), against a bare HTTP handler standing in for /git/* -- exactly
+// the request httpauth.Auth.GitIdentity would 403 if it arrived without
+// all three Loam-Agent-* headers. The server always answers 404 (it isn't
+// a real smart-HTTP backend), so `git clone` itself fails -- what matters
+// is what arrived before that.
+func TestExecGitCloner_Clone_SendsIdentityHeadersOnTheInitialFetch(t *testing.T) {
+	t.Parallel()
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "doc-server")
+	cloner := execGitCloner{}
+	headers := []string{
+		"Loam-Agent-Name: grace-hopper",
+		"Loam-Agent-Id: 3",
+		"Loam-Agent-Role: author",
+	}
+
+	err := cloner.Clone(t.Context(), srv.URL+"/git/bobcob7/doc-server.git", "wb-1", dest, headers)
+	require.Error(t, err, "the stub server is not a real smart-HTTP backend, so the clone itself must fail")
+	require.NotNil(t, captured, "git must have sent at least one request before failing")
+	assert.Equal(t, "grace-hopper", captured.Get("Loam-Agent-Name"), "the clone's own initial fetch must carry the identity headers, not just later fetches/pushes")
+	assert.Equal(t, "3", captured.Get("Loam-Agent-Id"))
+	assert.Equal(t, "author", captured.Get("Loam-Agent-Role"))
 }
 
 // TestExecGitCloner_Clone_MissingBranch_ReturnsGitsOwnReason proves a
@@ -371,7 +418,7 @@ func TestExecGitCloner_Clone_MissingBranch_ReturnsGitsOwnReason(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "doc-server")
 	cloner := execGitCloner{}
 
-	err := cloner.Clone(t.Context(), upstream, "does-not-exist", dest)
+	err := cloner.Clone(t.Context(), upstream, "does-not-exist", dest, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does-not-exist")
 }

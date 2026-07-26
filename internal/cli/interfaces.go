@@ -110,27 +110,29 @@ type gitLookup interface {
 
 // gitCloner runs the git subprocess operations `loam clone` bootstraps (see
 // docs/git-spec.md -> The CLI's Role): the initial single-branch `git
-// clone`, plus the git-config writes that carry author identity and the
-// three Loam-Agent-* headers into the clone so plain `git push`/`git fetch`
-// carry them from then on with no wrapper command. Defined here,
-// consumer-side, so clone.go's tests can mock it instead of shelling out to
-// a real git binary for every case; execGitCloner in clone.go is the real
-// implementation.
+// clone` -- carrying the three Loam-Agent-* identity headers as clone-time
+// config so even that first fetch is authorized -- plus the git-config
+// write that sets author identity so plain `git push`/`git fetch` carry it
+// from then on with no wrapper command. Defined here, consumer-side, so
+// clone.go's tests can mock it instead of shelling out to a real git binary
+// for every case; execGitCloner in clone.go is the real implementation.
 type gitCloner interface {
-	// Clone runs `git clone --branch branch --single-branch url dest`
+	// Clone runs `git clone --branch branch --single-branch --config
+	// http.extraHeader=<h> (once per entry in headers) url dest`
 	// (docs/cli-spec.md -> clone: "single-branch clone -- a convenient
-	// default shape, not an enforcement"). err wraps the git process's
-	// combined output on failure, so callers can surface a missing branch
-	// or transport failure with the reason git itself gave.
-	Clone(ctx context.Context, url, branch, dest string) error
+	// default shape, not an enforcement"; docs/git-spec.md -> Identity on
+	// Git Operations). Passing headers at clone time (rather than writing
+	// them into dest's config only after Clone returns) is required, not
+	// cosmetic: git's own first request -- the upload-pack info/refs GET --
+	// happens before dest exists at all, so config written afterward would
+	// never reach it, and httpauth.Auth.GitIdentity 403s any /git/* request
+	// missing them. err wraps the git process's combined output on
+	// failure, so callers can surface a missing branch or transport
+	// failure with the reason git itself gave.
+	Clone(ctx context.Context, url, branch, dest string, headers []string) error
 	// SetConfig runs `git -C dest config <key> <value>`, overwriting a
 	// single-valued key. Used for user.name / user.email.
 	SetConfig(ctx context.Context, dest, key, value string) error
-	// AddConfig runs `git -C dest config --add <key> <value>`, appending to
-	// a multi-valued key. Used for the three http.extraHeader entries --
-	// SetConfig would overwrite each prior entry instead of accumulating
-	// them, leaving only the last identity header in place.
-	AddConfig(ctx context.Context, dest, key, value string) error
 }
 
 // WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs

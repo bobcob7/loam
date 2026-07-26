@@ -21,10 +21,12 @@ type Deps struct {
 	cloner      gitCloner
 }
 
-// NewDeps constructs a Deps from its collaborators. Every field is required;
-// callers (main(), tests) supply the concrete implementations. cloner is
-// only exercised by `loam clone` (see clone.go); other commands never touch
-// it.
+// NewDeps constructs a Deps from its collaborators. Every field is required
+// for main(), which always supplies NewProductionDeps' concrete
+// implementations. cloner is the one exception in tests: it is only
+// exercised by `loam clone` (see clone.go), so tests that never dispatch
+// clone may safely pass nil for it, as several in this package's own test
+// files do.
 func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner) *Deps {
 	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner}
 }

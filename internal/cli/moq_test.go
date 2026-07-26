@@ -696,10 +696,7 @@ var _ gitCloner = &gitClonerMock{}
 //
 //		// make and configure a mocked gitCloner
 //		mockedgitCloner := &gitClonerMock{
-//			AddConfigFunc: func(ctx context.Context, dest string, key string, value string) error {
-//				panic("mock out the AddConfig method")
-//			},
-//			CloneFunc: func(ctx context.Context, url string, branch string, dest string) error {
+//			CloneFunc: func(ctx context.Context, url string, branch string, dest string, headers []string) error {
 //				panic("mock out the Clone method")
 //			},
 //			SetConfigFunc: func(ctx context.Context, dest string, key string, value string) error {
@@ -712,28 +709,14 @@ var _ gitCloner = &gitClonerMock{}
 //
 //	}
 type gitClonerMock struct {
-	// AddConfigFunc mocks the AddConfig method.
-	AddConfigFunc func(ctx context.Context, dest string, key string, value string) error
-
 	// CloneFunc mocks the Clone method.
-	CloneFunc func(ctx context.Context, url string, branch string, dest string) error
+	CloneFunc func(ctx context.Context, url string, branch string, dest string, headers []string) error
 
 	// SetConfigFunc mocks the SetConfig method.
 	SetConfigFunc func(ctx context.Context, dest string, key string, value string) error
 
 	// calls tracks calls to the methods.
 	calls struct {
-		// AddConfig holds details about calls to the AddConfig method.
-		AddConfig []struct {
-			// Ctx is the ctx argument value.
-			Ctx context.Context
-			// Dest is the dest argument value.
-			Dest string
-			// Key is the key argument value.
-			Key string
-			// Value is the value argument value.
-			Value string
-		}
 		// Clone holds details about calls to the Clone method.
 		Clone []struct {
 			// Ctx is the ctx argument value.
@@ -744,6 +727,8 @@ type gitClonerMock struct {
 			Branch string
 			// Dest is the dest argument value.
 			Dest string
+			// Headers is the headers argument value.
+			Headers []string
 		}
 		// SetConfig holds details about calls to the SetConfig method.
 		SetConfig []struct {
@@ -757,75 +742,32 @@ type gitClonerMock struct {
 			Value string
 		}
 	}
-	lockAddConfig sync.RWMutex
 	lockClone     sync.RWMutex
 	lockSetConfig sync.RWMutex
 }
 
-// AddConfig calls AddConfigFunc.
-func (mock *gitClonerMock) AddConfig(ctx context.Context, dest string, key string, value string) error {
-	if mock.AddConfigFunc == nil {
-		panic("gitClonerMock.AddConfigFunc: method is nil but gitCloner.AddConfig was just called")
-	}
-	callInfo := struct {
-		Ctx   context.Context
-		Dest  string
-		Key   string
-		Value string
-	}{
-		Ctx:   ctx,
-		Dest:  dest,
-		Key:   key,
-		Value: value,
-	}
-	mock.lockAddConfig.Lock()
-	mock.calls.AddConfig = append(mock.calls.AddConfig, callInfo)
-	mock.lockAddConfig.Unlock()
-	return mock.AddConfigFunc(ctx, dest, key, value)
-}
-
-// AddConfigCalls gets all the calls that were made to AddConfig.
-// Check the length with:
-//
-//	len(mockedgitCloner.AddConfigCalls())
-func (mock *gitClonerMock) AddConfigCalls() []struct {
-	Ctx   context.Context
-	Dest  string
-	Key   string
-	Value string
-} {
-	var calls []struct {
-		Ctx   context.Context
-		Dest  string
-		Key   string
-		Value string
-	}
-	mock.lockAddConfig.RLock()
-	calls = mock.calls.AddConfig
-	mock.lockAddConfig.RUnlock()
-	return calls
-}
-
 // Clone calls CloneFunc.
-func (mock *gitClonerMock) Clone(ctx context.Context, url string, branch string, dest string) error {
+func (mock *gitClonerMock) Clone(ctx context.Context, url string, branch string, dest string, headers []string) error {
 	if mock.CloneFunc == nil {
 		panic("gitClonerMock.CloneFunc: method is nil but gitCloner.Clone was just called")
 	}
 	callInfo := struct {
-		Ctx    context.Context
-		URL    string
-		Branch string
-		Dest   string
+		Ctx     context.Context
+		URL     string
+		Branch  string
+		Dest    string
+		Headers []string
 	}{
-		Ctx:    ctx,
-		URL:    url,
-		Branch: branch,
-		Dest:   dest,
+		Ctx:     ctx,
+		URL:     url,
+		Branch:  branch,
+		Dest:    dest,
+		Headers: headers,
 	}
 	mock.lockClone.Lock()
 	mock.calls.Clone = append(mock.calls.Clone, callInfo)
 	mock.lockClone.Unlock()
-	return mock.CloneFunc(ctx, url, branch, dest)
+	return mock.CloneFunc(ctx, url, branch, dest, headers)
 }
 
 // CloneCalls gets all the calls that were made to Clone.
@@ -833,16 +775,18 @@ func (mock *gitClonerMock) Clone(ctx context.Context, url string, branch string,
 //
 //	len(mockedgitCloner.CloneCalls())
 func (mock *gitClonerMock) CloneCalls() []struct {
-	Ctx    context.Context
-	URL    string
-	Branch string
-	Dest   string
+	Ctx     context.Context
+	URL     string
+	Branch  string
+	Dest    string
+	Headers []string
 } {
 	var calls []struct {
-		Ctx    context.Context
-		URL    string
-		Branch string
-		Dest   string
+		Ctx     context.Context
+		URL     string
+		Branch  string
+		Dest    string
+		Headers []string
 	}
 	mock.lockClone.RLock()
 	calls = mock.calls.Clone

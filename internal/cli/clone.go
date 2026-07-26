@@ -27,11 +27,14 @@ type cloneOutput struct {
 // RepoService.GetRepo -- a NotFound there is classified by
 // classifyConnectError into exit 3, matching the bead's "exit 3 unenrolled
 // repo"; (2) runs a single-branch `git clone` into ./<repo_name>, the
-// clone's sole remote; (3) bootstraps the clone for plain git: user.name /
-// user.email set to the agent identity, plus the three Loam-Agent-* headers
-// written as http.extraHeader entries so every subsequent plain git
-// operation carries them, with no wrapper command and no hook; (4) emits
-// {repo, path, branch} through the injected encoder.
+// clone's sole remote, passing the three Loam-Agent-* identity headers as
+// clone-time --config arguments (see identityHeaders) so even the clone's
+// OWN initial fetch is authorized -- httpauth.Auth.GitIdentity 403s any
+// /git/* request missing them, and headers written into dest's config only
+// AFTER Clone returns would be too late for that very first request; (3)
+// bootstraps the rest of the clone for plain git: user.name / user.email
+// set to the agent identity, so commits are attributed; (4) emits {repo,
+// path, branch} through the injected encoder.
 func runCloneCommand(ctx context.Context, deps *Deps, repo, branch string) error {
 	if repo == "" || branch == "" {
 		return newUsageCLIError("clone requires a non-empty repo and branch argument", nil)
@@ -45,13 +48,26 @@ func runCloneCommand(ctx context.Context, deps *Deps, repo, branch string) error
 	}
 	dest := "./" + name
 	remoteURL := cloneURL(deps.config.ServerURL(), group, name)
-	if err := deps.cloner.Clone(ctx, remoteURL, branch, dest); err != nil {
+	if err := deps.cloner.Clone(ctx, remoteURL, branch, dest, identityHeaders(deps.config)); err != nil {
 		return newPreconditionFailedError(fmt.Sprintf("cloning %s at branch %q: %s", repo, branch, err), err)
 	}
 	if err := bootstrapCloneIdentity(ctx, deps.cloner, dest, deps.config); err != nil {
 		return fmt.Errorf("bootstrapping clone identity in %s: %w", dest, err)
 	}
 	return deps.encoder.Encode(cloneOutput{Repo: repo, Path: dest, Branch: branch})
+}
+
+// identityHeaders builds the three "<Header>: <value>" strings (see
+// docs/git-spec.md -> Identity on Git Operations) that authorize every
+// /git/* request from this clone, reusing connect.go's exact header name
+// constants so the git-transport headers can never drift from the ones
+// attached to every Connect RPC.
+func identityHeaders(cfg Config) []string {
+	return []string{
+		fmt.Sprintf("%s: %s", headerAgentName, cfg.AgentName()),
+		fmt.Sprintf("%s: %s", headerAgentID, cfg.AgentID()),
+		fmt.Sprintf("%s: %s", headerAgentRole, cfg.AgentRole()),
+	}
 }
 
 // splitRepo splits repo ("<group>/<repo_name>", see docs/cli-spec.md ->
@@ -75,31 +91,19 @@ func cloneURL(serverURL, group, name string) string {
 	return fmt.Sprintf("%s/git/%s/%s.git", strings.TrimRight(serverURL, "/"), group, name)
 }
 
-// bootstrapCloneIdentity writes the git config `loam clone` promises: the
-// git author (user.name / user.email, see docs/cli-spec.md -> clone: "sets
-// the git author ... so commits are attributed") and the three
-// Loam-Agent-* identity headers as http.extraHeader entries (see
-// docs/git-spec.md -> Identity on Git Operations), reusing the exact header
-// name constants connect.go attaches to every Connect RPC so the two never
-// drift apart. user.email is "<identifier>@loam" per the bead's design (the
-// resolved "<name>-<id>-<role>" identifier, same as whoami and the identity
-// headers).
+// bootstrapCloneIdentity writes the remaining git config `loam clone`
+// promises beyond the identity headers Clone already passed at clone time
+// (see identityHeaders and Clone's doc comment): the git author (user.name
+// / user.email, see docs/cli-spec.md -> clone: "sets the git author ... so
+// commits are attributed"). user.email is "<identifier>@loam" per the
+// bead's design (the resolved "<name>-<id>-<role>" identifier, same as
+// whoami and the identity headers).
 func bootstrapCloneIdentity(ctx context.Context, cloner gitCloner, dest string, cfg Config) error {
 	if err := cloner.SetConfig(ctx, dest, "user.name", cfg.AgentName()); err != nil {
 		return fmt.Errorf("setting user.name: %w", err)
 	}
 	if err := cloner.SetConfig(ctx, dest, "user.email", cfg.Identifier()+"@loam"); err != nil {
 		return fmt.Errorf("setting user.email: %w", err)
-	}
-	headers := []struct{ name, value string }{
-		{headerAgentName, cfg.AgentName()},
-		{headerAgentID, cfg.AgentID()},
-		{headerAgentRole, cfg.AgentRole()},
-	}
-	for _, h := range headers {
-		if err := cloner.AddConfig(ctx, dest, "http.extraHeader", fmt.Sprintf("%s: %s", h.name, h.value)); err != nil {
-			return fmt.Errorf("adding http.extraHeader for %s: %w", h.name, err)
-		}
 	}
 	return nil
 }
@@ -112,19 +116,27 @@ type execGitCloner struct{}
 func newGitCloner() gitCloner { return execGitCloner{} }
 
 // Clone implements gitCloner via `git clone --branch branch --single-branch
-// url dest`.
-func (execGitCloner) Clone(ctx context.Context, url, branch, dest string) error {
-	return runGitCommand(ctx, "", "clone", "--branch", branch, "--single-branch", url, dest)
+// --config http.extraHeader=<h> (once per entry in headers) url dest`.
+// Passing the headers as clone-time --config arguments, rather than writing
+// them into dest's git config once Clone returns, is required: git issues
+// the upload-pack info/refs GET before dest exists at all, so config
+// written afterward never reaches that request. --config persists into
+// dest/.git/config exactly like a subsequent `config --add` would (proven
+// by TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig), so the
+// clone's later fetches/pushes still carry the same headers with no
+// separate write.
+func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, headers []string) error {
+	args := []string{"clone", "--branch", branch, "--single-branch"}
+	for _, h := range headers {
+		args = append(args, "--config", "http.extraHeader="+h)
+	}
+	args = append(args, url, dest)
+	return runGitCommand(ctx, "", args...)
 }
 
 // SetConfig implements gitCloner via `git -C dest config key value`.
 func (execGitCloner) SetConfig(ctx context.Context, dest, key, value string) error {
 	return runGitCommand(ctx, dest, "config", key, value)
-}
-
-// AddConfig implements gitCloner via `git -C dest config --add key value`.
-func (execGitCloner) AddConfig(ctx context.Context, dest, key, value string) error {
-	return runGitCommand(ctx, dest, "config", "--add", key, value)
 }
 
 // runGitCommand runs `git -C dir <args...>` (or `git <args...>` when dir is
