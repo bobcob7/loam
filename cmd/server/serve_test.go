@@ -181,3 +181,81 @@ func TestServe_StartsBackgroundComponentBeforeReturning(t *testing.T) {
 	background.mu.Unlock()
 	assert.True(t, started, "serve must start the background component")
 }
+
+// TestServe_DrainsInFlightHTTPRequestOnShutdown is this bead's own named
+// acceptance line: "a SIGTERM mid-request drains it before process exit
+// within the grace period." It holds a real HTTP request open (blocked in
+// the handler, not just queued) at the moment shutdown begins, and proves
+// two things a request that merely never started could not: (1) serve
+// does not return while that request is still being handled, and (2) the
+// client actually receives its response (the connection was never cut),
+// only after which serve returns. httpServer.Shutdown provides the
+// draining itself (stdlib behavior); this test proves cmd/server's serve
+// actually invokes it against a listener carrying a live connection,
+// rather than e.g. closing the listener some other way that would abort
+// in-flight requests.
+func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
+	t.Parallel()
+	listener := newTestListener(t)
+	addr := listener.Addr().String()
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("done"))
+	})
+	httpServer := &http.Server{Handler: mux}
+	background := &fakeRunner{run: func(ctx context.Context) { <-ctx.Done() }}
+	db := &fakeCloser{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, 5*time.Second)
+
+	type result struct {
+		status int
+		err    error
+	}
+	requestResult := make(chan result, 1)
+	go func() {
+		resp, err := http.Get("http://" + addr + "/slow")
+		if err != nil {
+			requestResult <- result{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		requestResult <- result{status: resp.StatusCode}
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the in-flight request never reached the handler")
+	}
+
+	cancel() // simulate SIGTERM arriving mid-request
+
+	select {
+	case err := <-done:
+		t.Fatalf("serve returned (err=%v) while a request was still being handled -- it did not drain the in-flight request", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(releaseRequest)
+
+	select {
+	case r := <-requestResult:
+		require.NoError(t, r.err, "the in-flight request must receive its response, not have its connection cut by shutdown")
+		assert.Equal(t, http.StatusOK, r.status)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight request never completed")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after the in-flight request finished")
+	}
+}
