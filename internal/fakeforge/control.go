@@ -422,7 +422,7 @@ func (s *Server) handleControlClosePR(w http.ResponseWriter, r *http.Request) {
 // wire representation should carry; unrecognized errors are a 500.
 func statusForErr(err error) int {
 	switch codeForError(err) {
-	case "repo_not_found", "branch_not_found", "pr_not_found":
+	case "repo_not_found", "branch_not_found", "target_branch_not_found", "pr_not_found":
 		return http.StatusNotFound
 	case "repo_exists", "pr_exists":
 		return http.StatusConflict

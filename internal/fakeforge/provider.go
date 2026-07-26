@@ -72,12 +72,23 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, statusForErr(err), err)
 		return
 	}
+	// The head and target branch checks below deliberately use different
+	// sentinels. Real Forgejo 9.0.3 folds a nonexistent target/base branch
+	// into the same 404 -> ErrRepoNotFound class as a missing repo or PR
+	// (verified empirically: {"message":"BaseNotExist"}), so the target
+	// check here wraps forge.ErrRepoNotFound via errTargetBranchNotFound to
+	// match. A nonexistent HEAD branch instead 500s there with a leaked git
+	// error — an apparent upstream bug (loam-9qu) — so the head check below
+	// keeps the plain, forge-sentinel-free errBranchNotFound rather than
+	// claiming a parity that does not exist; loam-li0.9's shared contract
+	// table must not assert forge.ErrRepoNotFound for a rejected head
+	// branch (see errors.go).
 	if err := s.requireBranch(r.Context(), repoDir, req.HeadBranch); err != nil {
 		writeJSONError(w, statusForErr(err), fmt.Errorf("head branch %s: %w", req.HeadBranch, err))
 		return
 	}
 	if err := s.requireBranch(r.Context(), repoDir, req.TargetBranch); err != nil {
-		writeJSONError(w, statusForErr(err), fmt.Errorf("target branch %s: %w", req.TargetBranch, err))
+		writeJSONError(w, statusForErr(errTargetBranchNotFound), fmt.Errorf("target branch %s: %w", req.TargetBranch, errTargetBranchNotFound))
 		return
 	}
 	if existing, ok := s.prs.findOpen(req.Repo, req.HeadBranch, req.TargetBranch); ok {
@@ -240,8 +251,17 @@ func (c *Client) ClosePR(ctx context.Context, repo string, prNumber int) error {
 // GitCredentials returns the forge's token-authenticated HTTPS git
 // convention: any username, the token as the password. This is a fixed
 // convention, not a network call, matching how a real Forgejo provider
-// would implement it (docs/sync-spec.md → Provider Interface).
+// would implement it (docs/sync-spec.md → Provider Interface). An empty
+// token is rejected the same way Forgejo.GitCredentials rejects it
+// (internal/forge/forgejo.go): real Forgejo would happily hand back an
+// empty password otherwise, which git-over-HTTPS reads as "no
+// credential" rather than a clear failure — loam-hza found the fake
+// previously returned ("fakeforge", "", nil) here with no error at all,
+// diverging from the real provider's explicit guard.
 func (c *Client) GitCredentials(_ context.Context, token string) (string, string, error) {
+	if token == "" {
+		return "", "", fmt.Errorf("fakeforge: git credentials: %w", forge.ErrInvalidToken)
+	}
 	return "fakeforge", token, nil
 }
 

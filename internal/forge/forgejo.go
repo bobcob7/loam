@@ -223,6 +223,9 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, ErrInvalidToken
 	}
+	if resp.StatusCode == http.StatusConflict {
+		return nil, ErrDuplicatePR
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("unexpected status %s", resp.Status)
 	}

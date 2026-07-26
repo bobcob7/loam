@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bobcob7/loam/internal/forge"
 )
 
 func TestClientValidateToken(t *testing.T) {
@@ -86,6 +88,30 @@ func TestClientCreatePRGetStateClosePR(t *testing.T) {
 	assert.ErrorIs(t, err, errPRNotFound)
 }
 
+// TestClientPRLookupAgainstNonexistentPRIsForgeErrRepoNotFound covers
+// loam-hza's negative PR-lookup row: real Forgejo 9.0.3 maps EVERY 404 from
+// the pulls endpoints to ErrRepoNotFound, including a nonexistent PR number
+// against a repo that exists (verified empirically — GET and PATCH
+// .../pulls/{number} for a missing number return the identical generic 404
+// body a missing repo would), so GetPRState and ClosePR against a PR number
+// that was never created must both match forge.ErrRepoNotFound on the fake
+// too, not just the fake-internal errPRNotFound.
+func TestClientPRLookupAgainstNonexistentPRIsForgeErrRepoNotFound(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	srv.AddToken("token")
+	client := NewClient(ts.URL, "token")
+	_, err := client.GetPRState(ctx, "acme/widgets", 999)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, forge.ErrRepoNotFound)
+	err = client.ClosePR(ctx, "acme/widgets", 999)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, forge.ErrRepoNotFound)
+}
+
 func TestClientCreatePRRepoNotFound(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
@@ -100,6 +126,17 @@ func TestClientCreatePRRepoNotFound(t *testing.T) {
 // not exist, but the fake previously checked only that the repo directory
 // existed (control_test.go's ClosePR-over-HTTP case exercised this gap by
 // accident, passing with a head branch that was never created).
+//
+// This must NOT match forge.ErrRepoNotFound (loam-9qu): verified
+// empirically against Forgejo 9.0.3, a nonexistent HEAD branch on CreatePR
+// 500s there with a leaked git error ("exit status 128: ... fatal: bad
+// revision") instead of 404ing — an apparent upstream bug distinct from the
+// target-branch case below, which DOES 404 correctly. Mimicking the 500
+// would propagate that bug into the fake for no test value; the fake keeps
+// rejecting with a plain 404 (satisfying loam-5rh) but does not claim the
+// forge.ErrRepoNotFound class real Forgejo cannot actually deliver here.
+// loam-li0.9's shared contract table must not add a head-branch-not-found
+// row expecting identical error classes across the fake and real Forgejo.
 func TestClientCreatePRRejectsNonexistentHeadBranch(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
@@ -111,12 +148,17 @@ func TestClientCreatePRRejectsNonexistentHeadBranch(t *testing.T) {
 	_, _, err := client.CreatePR(ctx, "acme/widgets", "wb-never-created", "main", "t", "d")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errBranchNotFound)
+	assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a nonexistent head branch has no forge-sentinel parity with real Forgejo 9.0.3 — see loam-9qu")
 	assert.False(t, branchExists(t, srv, "acme/widgets", "wb-never-created"))
 }
 
 // TestClientCreatePRRejectsNonexistentTargetBranch is the target-branch
 // half of the same validation: the head branch is real, but the target is
-// not.
+// not. Unlike the head-branch case above, this DOES match
+// forge.ErrRepoNotFound: verified empirically against Forgejo 9.0.3, a
+// nonexistent base/target branch on CreatePR correctly 404s with
+// {"message":"BaseNotExist"}, which doPullRequest folds into
+// ErrRepoNotFound the same as a missing repo or PR (loam-hza/loam-9qu).
 func TestClientCreatePRRejectsNonexistentTargetBranch(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
@@ -128,7 +170,8 @@ func TestClientCreatePRRejectsNonexistentTargetBranch(t *testing.T) {
 	client := NewClient(ts.URL, "token")
 	_, _, err := client.CreatePR(ctx, "acme/widgets", "wb-feature", "release", "t", "d")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errBranchNotFound)
+	assert.ErrorIs(t, err, errTargetBranchNotFound)
+	assert.ErrorIs(t, err, forge.ErrRepoNotFound)
 }
 
 // TestClientCreatePRDuplicateOpenReturnsConflict covers the second, most
@@ -151,6 +194,7 @@ func TestClientCreatePRDuplicateOpenReturnsConflict(t *testing.T) {
 	_, _, err = client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "t2", "d2")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errPRExists)
+	assert.ErrorIs(t, err, forge.ErrDuplicatePR, "verified against Forgejo 9.0.3: a repeat CreatePR for an open head/target pair returns 409, which doPullRequest maps to ErrDuplicatePR (loam-hza)")
 	state, stateErr := client.GetPRState(ctx, "acme/widgets", first)
 	require.NoError(t, stateErr)
 	assert.Equal(t, "open", state, "the original PR must be untouched by the rejected duplicate")
@@ -249,4 +293,24 @@ func TestClientGitCredentials(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, user)
 	assert.Equal(t, "some-token", pass)
+}
+
+// TestClientGitCredentialsEmptyTokenIsForgeErrInvalidToken covers
+// loam-hza's second divergence: the fake previously returned
+// ("fakeforge", "", nil) for an empty token with no error at all, while
+// Forgejo.GitCredentials (internal/forge/forgejo.go) rejects an empty
+// token with ErrInvalidToken before doing anything else. GitCredentials
+// is a fixed local convention, not a network call, so this is a
+// same-process comparison rather than something to verify against a live
+// Forgejo container — but it is exactly the kind of row loam-li0.9's
+// shared table would need to run unbranched against both providers.
+func TestClientGitCredentialsEmptyTokenIsForgeErrInvalidToken(t *testing.T) {
+	t.Parallel()
+	_, ts := newTestServer(t)
+	client := NewClient(ts.URL, "some-token")
+	user, pass, err := client.GitCredentials(t.Context(), "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, forge.ErrInvalidToken)
+	assert.Empty(t, user)
+	assert.Empty(t, pass)
 }

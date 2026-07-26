@@ -139,6 +139,25 @@ func TestForgejo_CreatePR_RepoNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrRepoNotFound)
 }
 
+// TestForgejo_CreatePR_DuplicatePR covers doPullRequest's 409 handling:
+// verified empirically against a real Forgejo 9.0.3 instance, a repeat
+// CreatePR for a head/target pair that already has an open PR returns 409
+// with a message embedding the existing PR's internal id (loam-hza). The
+// id is unstructured text, not parsed here — this only asserts the status
+// maps to ErrDuplicatePR.
+func TestForgejo_CreatePR_DuplicatePR(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"pull request already exists for these targets [id: 1, issue_id: 1, head_repo_id: 1, base_repo_id: 1, head_branch: feature, base_branch: main]","url":"https://x/api/swagger"}`))
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	_, _, err := f.CreatePR(t.Context(), "acme/widgets", "feature", "main", "t", "d")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDuplicatePR)
+}
+
 func TestForgejo_GetPRState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

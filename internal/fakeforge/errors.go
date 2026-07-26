@@ -10,46 +10,67 @@ import (
 // Sentinel errors returned by the fake forge, both from direct Go method
 // calls (control API) and reconstructed by Client from REST error codes.
 //
-// errUnauthorized, errMissingScope, errRepoNotFound, and errNoWriteAccess
-// wrap the corresponding internal/forge sentinel, so a caller holding a
-// fakeforge.Client wherever a forge.Provider is expected can use the same
-// errors.Is(err, forge.ErrX) assertion against the fake and the real
-// Forgejo provider (loam-li0.9's shared contract suite; see loam-4k7).
-// The other sentinels have no forge-level equivalent: they are raised
-// only by the control API and the git smart-HTTP surface, neither of
-// which is part of the forge.Provider contract.
+// errUnauthorized, errMissingScope, errRepoNotFound, errTargetBranchNotFound,
+// errPRNotFound, errPRExists, and errNoWriteAccess wrap the corresponding
+// internal/forge sentinel, so a caller holding a fakeforge.Client wherever
+// a forge.Provider is expected can use the same errors.Is(err, forge.ErrX)
+// assertion against the fake and the real Forgejo provider (loam-li0.9's
+// shared contract suite; see loam-4k7). The other sentinels have no
+// forge-level equivalent: they are raised only by the control API and the
+// git smart-HTTP surface, neither of which is part of the forge.Provider
+// contract.
 //
-// errMissingScope wraps ErrInvalidToken, not a scope-specific sentinel:
-// forge.Provider's ValidateToken contract folds "does not authenticate"
-// and "authenticates but lacks the scopes needed to open PRs" into one
-// error path (see forge/interfaces.go and Forgejo.ValidateToken, which
-// maps both 401 and 403 to ErrInvalidToken). There is no fourth
-// forge-level class for "valid token, wrong scope" to map onto.
+// errMissingScope wraps ErrInsufficientScope, matching Forgejo.ValidateToken
+// (internal/forge/forgejo.go), which distinguishes a 403 ("authenticates,
+// wrong scope") from a 401 ("does not authenticate at all") — verified
+// empirically against a real Forgejo 9.0.3 instance (loam-1ao). It used to
+// wrap ErrInvalidToken, on the correct-at-the-time premise that
+// ValidateToken folded both cases together; loam-ddv found that premise
+// stale (forge grew ErrInsufficientScope) and the fake had silently
+// re-diverged. See TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass in
+// errors_test.go for how the regression guard now makes that class of
+// drift structurally harder to miss.
 //
-// errPRExists and errPRMerged deliberately do not wrap a forge sentinel
-// either, but for the opposite reason from errPRNotFound (see loam-hza,
-// which tracks that gap separately and is not fixed here): Forgejo.
-// doPullRequest (internal/forge/forgejo.go) only classifies 404/401/403
-// into sentinels today. A 409 from a duplicate PR and a 412 from closing an
-// already-merged PR both fall through to its generic "unexpected status"
-// branch, so there is no forge-level class yet for either to map onto —
-// both sides are opaque errors, which is the parity loam-li0.9's contract
-// suite can actually observe. If forge later grows dedicated sentinels for
-// either status, this should be revisited alongside loam-hza.
+// errPRNotFound and errTargetBranchNotFound both wrap ErrRepoNotFound, not
+// because a PR or a branch is a repo, but because that is genuinely what
+// real Forgejo 9.0.3 returns for both: doPullRequest maps every 404 from
+// the pulls endpoints to ErrRepoNotFound, and a nonexistent PR number
+// against an existing repo, and a nonexistent target/base branch on
+// CreatePR, both 404 there indistinguishably from the repo itself missing
+// (verified empirically; see ErrRepoNotFound's godoc in
+// internal/forge/errors.go). errBranchNotFound (the HEAD-branch and
+// control-API case) deliberately does NOT wrap it: a nonexistent HEAD
+// branch on CreatePR is Forgejo's one genuine wire-level divergence in this
+// area — a leaked-git-error 500, not a 404 — so mapping it to
+// ErrRepoNotFound would make the fake claim a parity that does not exist
+// (loam-9qu). See CreatePR's branch-validation call sites in provider.go.
+//
+// errPRExists wraps ErrDuplicatePR: real Forgejo 9.0.3 returns 409 for a
+// repeat CreatePR against an already-open head/target pair (verified
+// empirically), and doPullRequest now classifies that status explicitly
+// instead of folding it into "unexpected status" (loam-hza; the fold was
+// accurate when this comment last said otherwise, before ErrDuplicatePR
+// existed).
+//
+// errPRMerged still has no forge-level equivalent: Forgejo's 412 from
+// closing an already-merged PR still falls through doPullRequest's generic
+// "unexpected status" branch. That gap is loam-giq.8's, not this one's —
+// left as-is here.
 var (
-	errUnauthorized    = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
-	errRepoNotFound    = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)
-	errRepoExists      = errors.New("fakeforge: repo already exists")
-	errBranchNotFound  = errors.New("fakeforge: branch not found")
-	errPRNotFound      = errors.New("fakeforge: pull request not found")
-	errPRExists        = errors.New("fakeforge: an open pull request already exists for this head/target pair")
-	errPRMerged        = errors.New("fakeforge: pull request is already merged")
-	errInvalidBranch   = errors.New("fakeforge: invalid branch name")
-	errMergeConflict   = errors.New("fakeforge: merge conflict")
-	errGitUnavailable  = errors.New("fakeforge: git binary not available")
-	errInvalidUpstream = errors.New("fakeforge: invalid upstream url")
-	errNoWriteAccess   = fmt.Errorf("fakeforge: token has no write access: %w", forge.ErrNoWriteAccess)
-	errMissingScope    = fmt.Errorf("fakeforge: token missing required scope: %w", forge.ErrInvalidToken)
+	errUnauthorized         = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
+	errRepoNotFound         = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)
+	errRepoExists           = errors.New("fakeforge: repo already exists")
+	errBranchNotFound       = errors.New("fakeforge: branch not found")
+	errTargetBranchNotFound = fmt.Errorf("fakeforge: target branch not found: %w", forge.ErrRepoNotFound)
+	errPRNotFound           = fmt.Errorf("fakeforge: pull request not found: %w", forge.ErrRepoNotFound)
+	errPRExists             = fmt.Errorf("fakeforge: an open pull request already exists for this head/target pair: %w", forge.ErrDuplicatePR)
+	errPRMerged             = errors.New("fakeforge: pull request is already merged")
+	errInvalidBranch        = errors.New("fakeforge: invalid branch name")
+	errMergeConflict        = errors.New("fakeforge: merge conflict")
+	errGitUnavailable       = errors.New("fakeforge: git binary not available")
+	errInvalidUpstream      = errors.New("fakeforge: invalid upstream url")
+	errNoWriteAccess        = fmt.Errorf("fakeforge: token has no write access: %w", forge.ErrNoWriteAccess)
+	errMissingScope         = fmt.Errorf("fakeforge: token missing required scope: %w", forge.ErrInsufficientScope)
 )
 
 // errorCodes maps sentinel errors to the stable string codes carried over
@@ -62,6 +83,7 @@ var errorCodes = []struct {
 	{errRepoNotFound, "repo_not_found"},
 	{errRepoExists, "repo_exists"},
 	{errBranchNotFound, "branch_not_found"},
+	{errTargetBranchNotFound, "target_branch_not_found"},
 	{errPRNotFound, "pr_not_found"},
 	{errPRExists, "pr_exists"},
 	{errPRMerged, "pr_merged"},
