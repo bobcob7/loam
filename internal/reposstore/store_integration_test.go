@@ -105,10 +105,10 @@ func TestGetRepoNotFoundAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.GetRepoByID(t.Context(), missing)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 	_, err = store.GetRepoByName(t.Context(), "group/does-not-exist")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestListReposPaginatesWithRealCount(t *testing.T) {
@@ -164,7 +164,7 @@ func TestUpdateRepoNotFoundAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.UpdateRepo(t.Context(), missing, UpdateRepoParams{IndexedBranch: "main"})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestTargetBranchLifecycleAgainstRealPostgres(t *testing.T) {
@@ -206,7 +206,7 @@ func TestTargetBranchLifecycleAgainstRealPostgres(t *testing.T) {
 	assert.Equal(t, "main", remaining[0].Branch)
 	err = store.RemoveTargetBranch(t.Context(), repo.ID, "develop")
 	require.Error(t, err, "removing an already-removed branch must not silently succeed")
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestAddTargetBranchViolatesForeignKeyForUnknownRepo(t *testing.T) {

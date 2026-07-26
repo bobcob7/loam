@@ -82,7 +82,7 @@ func TestGetRepoByIDNotFoundMapsToErrNotFound(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	_, err := store.GetRepoByID(t.Context(), [16]byte{9})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestGetRepoByNameResolvesViaSingleIndexedLookup(t *testing.T) {
@@ -111,7 +111,7 @@ func TestGetRepoByNameNotFoundMapsToErrNotFound(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	_, err := store.GetRepoByName(t.Context(), "missing/repo")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestListReposDefaultsNonPositiveLimit(t *testing.T) {
@@ -191,7 +191,7 @@ func TestUpdateRepoNotFoundMapsToErrNotFound(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	_, err := store.UpdateRepo(t.Context(), [16]byte{1}, UpdateRepoParams{})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestUpdateRepoOmitsNameFromParams(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 
 // CreateRepo enrolls a new repo, assigning it a fresh UUIDv7 id. A
 // duplicate params.Name violates repos_name_key and is returned wrapped,
-// unmapped to errNotFound (that sentinel is reserved for absence, not
+// unmapped to ErrNotFound (that sentinel is reserved for absence, not
 // conflict); callers match a uniqueness violation themselves if they need
 // to distinguish it.
 func (s *Store) CreateRepo(ctx context.Context, params CreateRepoParams) (Repo, error) {
@@ -34,13 +34,13 @@ func (s *Store) CreateRepo(ctx context.Context, params CreateRepoParams) (Repo, 
 	return fromGenRepo(row), nil
 }
 
-// GetRepoByID returns the repo with id, or a wrapped errNotFound if none
+// GetRepoByID returns the repo with id, or a wrapped ErrNotFound if none
 // exists.
 func (s *Store) GetRepoByID(ctx context.Context, id uuid.UUID) (Repo, error) {
 	row, err := s.db.GetRepoByID(ctx, pgUUID(id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Repo{}, fmt.Errorf("getting repo %s: %w", id, errNotFound)
+			return Repo{}, fmt.Errorf("getting repo %s: %w", id, ErrNotFound)
 		}
 		return Repo{}, fmt.Errorf("getting repo %s: %w", id, err)
 	}
@@ -53,12 +53,12 @@ func (s *Store) GetRepoByID(ctx context.Context, id uuid.UUID) (Repo, error) {
 // single indexed lookup via repos_name_key UNIQUE (name)
 // (0001_init.up.sql), not a table scan: it is the intended path for
 // resolving a held repo name to the id a downstream query needs. Returns a
-// wrapped errNotFound if name is not enrolled.
+// wrapped ErrNotFound if name is not enrolled.
 func (s *Store) GetRepoByName(ctx context.Context, name string) (Repo, error) {
 	row, err := s.db.GetRepoByName(ctx, name)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Repo{}, fmt.Errorf("getting repo %s: %w", name, errNotFound)
+			return Repo{}, fmt.Errorf("getting repo %s: %w", name, ErrNotFound)
 		}
 		return Repo{}, fmt.Errorf("getting repo %s: %w", name, err)
 	}
@@ -108,7 +108,7 @@ func (s *Store) ListAllRepoNames(ctx context.Context) ([]string, error) {
 // UpdateRepo updates the enrollment-config fields of the repo with id
 // (upstream_url, forge_host, indexed_branch -- e.g.
 // RepoAdminService.SetTargetBranches re-pointing indexed_branch). Returns
-// a wrapped errNotFound if id does not exist.
+// a wrapped ErrNotFound if id does not exist.
 func (s *Store) UpdateRepo(ctx context.Context, id uuid.UUID, params UpdateRepoParams) (Repo, error) {
 	row, err := s.db.UpdateRepo(ctx, gen.UpdateRepoParams{
 		ID:            pgUUID(id),
@@ -118,7 +118,7 @@ func (s *Store) UpdateRepo(ctx context.Context, id uuid.UUID, params UpdateRepoP
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Repo{}, fmt.Errorf("updating repo %s: %w", id, errNotFound)
+			return Repo{}, fmt.Errorf("updating repo %s: %w", id, ErrNotFound)
 		}
 		return Repo{}, fmt.Errorf("updating repo %s: %w", id, err)
 	}

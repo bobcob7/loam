@@ -19,6 +19,17 @@
 // in this tree. Nor is the sync scheduler (mirrorsync.Scheduler): see run's
 // doc comment for why constructing one today would do more harm than good.
 //
+// buildRouter's pool parameter (loam-ofg.11) is the seam RepoService and
+// MetaService (registerMetadataServices, below) need: connectDatabase's
+// pool -- alive by the time run() calls buildRouter -- is threaded straight
+// through, so both services are genuinely registered against the real
+// connection every other /loam.v1.* handler this composition root builds
+// will eventually share. registerMetadataServices still guards against a
+// nil pool (buildRouter's own tests exercise that path directly, without a
+// live database), but run() never passes one: connectDatabase either
+// returns a live pool or run() has already returned its error before
+// buildRouter is ever reached.
+//
 // The /healthz and /readyz handlers below are placeholders: loam-ofg.22
 // owns their real liveness/readiness logic. They exist so this bead's own
 // claim -- that the health exemption is reachable at the mux level with no
@@ -46,11 +57,20 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/bobcob7/loam/internal/config"
 	"github.com/bobcob7/loam/internal/db"
+	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/handler/meta"
+	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
+	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/rolestore"
 	"github.com/bobcob7/loam/internal/server"
 	loamweb "github.com/bobcob7/loam/web"
 )
@@ -137,24 +157,97 @@ func run(cfg config.Config) error {
 		pool.Close()
 		return fmt.Errorf("starting http listener: %w", err)
 	}
-	router := buildRouter(cfg)
+	router := buildRouter(cfg, pool)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
 	return serve(ctx, stop, cfg.Logger, listener, httpServer, ingestPool, pool, defaultShutdownGrace)
 }
 
 // buildRouter wires the auth wrappers onto the mux and mounts the embedded
-// SPA plus the two unauthenticated health placeholders. Later handler beads
-// (loam-ofg.8/.10/.11 for /loam.v1.*, loam-ofg.12/.13/.14/.15 for
-// /loam.admin.v1.*, loam-ofg.16 for /git/*) each add one RegisterCLI /
-// RegisterAdmin / RegisterGit call here, once their service constructors
+// SPA plus the two unauthenticated health placeholders, then registers
+// every /loam.v1.*, /loam.admin.v1.*, and /git/* handler whose
+// dependencies pool makes available. Later handler beads (loam-ofg.8/.10
+// for the rest of /loam.v1.*, loam-ofg.12/.13/.14/.15 for
+// /loam.admin.v1.*, loam-ofg.16 for /git/*) each add their own RegisterCLI
+// / RegisterAdmin / RegisterGit call here, once their service constructors
 // exist -- the registration point this bead's DESIGN note establishes.
-func buildRouter(cfg config.Config) *server.Router {
+// pool may be nil (buildRouter's own tests exercise that path without a
+// live database); registerMetadataServices no-ops in that case rather than
+// registering handlers that would panic on their first real request. run()
+// itself never passes nil -- see this file's package doc comment.
+func buildRouter(cfg config.Config, pool *pgxpool.Pool) *server.Router {
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
 	router := server.New(auth)
 	router.RegisterSPA(loamweb.Dist())
 	router.RegisterUnauthenticated("/healthz", placeholderHealthHandler("live"))
 	router.RegisterUnauthenticated("/readyz", placeholderHealthHandler("ready"))
+	registerMetadataServices(router, cfg, pool)
 	return router
+}
+
+// registerMetadataServices wires loam.v1.RepoService and loam.v1.MetaService
+// (loam-ofg.11) over pool, the single Postgres connection every /loam.v1.*
+// handler this composition root builds ultimately shares. Both read
+// internal/reposstore and internal/rolestore directly; MetaService also
+// needs RoleStore's instructions text, so roleStoreAdapter (below) is
+// built once and satisfies both internal/handler.RoleStore (the
+// capability gate RepoService.GetRepo's git.clone check reads) and
+// meta.RoleStore (the fuller surface GetInstructions reads) from the same
+// underlying rolestore.Store.
+//
+// pool == nil is the only guard here, exercised directly by buildRouter's
+// own tests (no live database): registering these handlers without a pool
+// would panic the first request that reached them. run() always supplies
+// a real, already-connected pool (connectDatabase returns before
+// buildRouter is ever called), so this guard is never hit in production.
+func registerMetadataServices(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
+	capabilities := handler.NewCapabilityChecker(roles)
+	errorMapper := handler.NewErrorMapper(cfg.Logger)
+	router.RegisterCLI(loamv1connect.NewRepoServiceHandler(repo.New(repos, capabilities, errorMapper, cfg.Logger)))
+	router.RegisterCLI(loamv1connect.NewMetaServiceHandler(meta.New(roles, errorMapper, cfg.Logger)))
+}
+
+// roleStoreAdapter adapts internal/rolestore.Store's plain-string
+// role_operations to the []handler.Capability surfaces
+// internal/handler.RoleStore (CapabilityChecker's gate) and
+// internal/handler/meta.RoleStore (GetInstructions) both consume.
+// role_operations.operation is CHECK-constrained to exactly the fixed
+// capability vocabulary (role_operations_operation_check,
+// 0001_init.up.sql), so every string this converts is already a valid
+// handler.Capability -- rolestore itself does not import internal/handler
+// (a store package depending on an RPC-boundary package would invert the
+// layering "interfaces defined at the consumer" establishes), so this
+// conversion belongs here, at composition-root wiring time, not in
+// rolestore.
+type roleStoreAdapter struct {
+	store *rolestore.Store
+}
+
+// RoleCapabilities implements internal/handler.RoleStore and
+// internal/handler/meta.RoleStore.
+func (a roleStoreAdapter) RoleCapabilities(ctx context.Context, role string) ([]handler.Capability, error) {
+	r, err := a.store.GetRole(ctx, role)
+	if err != nil {
+		return nil, err
+	}
+	capabilities := make([]handler.Capability, len(r.Operations))
+	for i, operation := range r.Operations {
+		capabilities[i] = handler.Capability(operation)
+	}
+	return capabilities, nil
+}
+
+// RoleInstructions implements internal/handler/meta.RoleStore.
+func (a roleStoreAdapter) RoleInstructions(ctx context.Context, role string) (string, error) {
+	r, err := a.store.GetRole(ctx, role)
+	if err != nil {
+		return "", err
+	}
+	return r.Instructions, nil
 }
 
 // placeholderHealthHandler stands in for loam-ofg.22's real /healthz and

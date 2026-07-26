@@ -1,0 +1,35 @@
+// Package meta implements loam.v1.MetaService: GetInstructions, the
+// orientation RPC `loam instructions` calls (docs/cli-spec.md ->
+// instructions). Unlike every other loam.v1 handler, GetInstructions is
+// NEVER capability-gated (README -> Agent Identity and Roles): any
+// identified caller -- admin or agent, regardless of role -- may call it,
+// because an agent has to learn what it may do before it can be expected
+// to respect a gate on anything else. This package therefore has no
+// dependency on internal/handler.CapabilityChecker at all; it only reads
+// the caller's identity (internal/httpauth) to resolve which commands and
+// instructions to return, never to deny the call itself.
+package meta
+
+import (
+	"context"
+
+	"github.com/bobcob7/loam/internal/handler"
+)
+
+//go:generate go tool moq -out moq_test.go . RoleStore
+
+// RoleStore resolves a role's granted capabilities and configured
+// instructions text, defined here at the consumer per repo convention. It
+// is the same underlying role store (internal/rolestore.Store) capability
+// package's CapabilityChecker reads via its own, separately-defined
+// RoleStore interface -- role_operations.operation is CHECK-constrained to
+// the fixed capability vocabulary (0001_init.up.sql), so every value
+// RoleCapabilities returns is already a valid handler.Capability.
+type RoleStore interface {
+	// RoleCapabilities returns the operations granted to role.
+	RoleCapabilities(ctx context.Context, role string) ([]handler.Capability, error)
+	// RoleInstructions returns the instructions text configured for role
+	// (roles.instructions, docs/persistence-spec.md "roles"), empty until
+	// an admin sets one in the web console.
+	RoleInstructions(ctx context.Context, role string) (string, error)
+}

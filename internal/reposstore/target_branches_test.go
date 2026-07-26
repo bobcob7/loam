@@ -59,7 +59,7 @@ func TestRemoveTargetBranchNotFoundWhenZeroRowsAffected(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	err := store.RemoveTargetBranch(t.Context(), [16]byte{1}, "main")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound, "a no-op delete (branch never enrolled) must map to errNotFound, not succeed silently")
+	assert.ErrorIs(t, err, ErrNotFound, "a no-op delete (branch never enrolled) must map to ErrNotFound, not succeed silently")
 }
 
 func TestRemoveTargetBranchSucceedsWhenARowIsAffected(t *testing.T) {
@@ -116,7 +116,7 @@ func TestIngestedRefNotFoundWhenBranchNotEnrolled(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	_, err := store.IngestedRef(t.Context(), [16]byte{1}, "main")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestAdvanceIngestedRefRejectsEmptyRefWithoutCallingTheDB(t *testing.T) {
@@ -165,5 +165,5 @@ func TestAdvanceIngestedRefNotFoundWhenBranchNotEnrolled(t *testing.T) {
 	store := NewStore(mock, testLogger())
 	_, err := store.AdvanceIngestedRef(t.Context(), [16]byte{1}, "main", "cafef00d", time.Now(), nil)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
