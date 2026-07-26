@@ -115,7 +115,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go test -tags=integration ./...
+      - name: go test -tags=integration -count=1 ./...
         # Do NOT set TESTCONTAINERS_RYUK_DISABLED here. That env var is a
         # local-podman-only workaround (podman's Docker-compat API can't
         # resolve ryuk's expected `bridge` network); GitHub-hosted runners
@@ -124,7 +124,20 @@ jobs:
         # exactly the failure modes it exists to catch: SIGKILL, a step
         # timeout, or a -timeout panic, none of which run t.Cleanup. See
         # internal/db/migrations/integration_test.go.
-        run: go test -tags=integration ./...
+        #
+        # -count=1 (loam-h3x): the `Set up Go` step above runs with
+        # cache: true, and actions/setup-go's cache covers `go env GOCACHE`
+        # -- the exact directory Go's test result cache lives in -- keyed
+        # on the dependency file hash (go.mod/go.sum), not on a full source
+        # diff. Any push/PR that doesn't touch go.mod/go.sum restores that
+        # same GOCACHE from a prior run, so this job's cache is warm, NOT
+        # cold, whenever dependencies are unchanged -- confirmed against
+        # actions/setup-go's own caching ADR, not assumed. Without
+        # -count=1, a package whose test inputs (source + testlog-recorded
+        # env/file reads) are unchanged since the last run would replay a
+        # cached "ok" and skip starting its container, same false-green
+        # hole as Taskfile.yml's test:integration (loam-h3x, loam-ejr).
+        run: go test -tags=integration -count=1 ./...
 
       - name: Sweep leaked testcontainers (ryuk failure backstop)
         # Runs even when the test step above failed or the job was
