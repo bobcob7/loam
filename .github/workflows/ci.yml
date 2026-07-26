@@ -90,3 +90,54 @@ jobs:
             git diff
             exit 1
           fi
+
+  integration:
+    name: integration tests (real Postgres via testcontainers)
+    # Tests behind //go:build integration (starting with loam-54o.3's
+    # TestMigrateAgainstRealPostgres) spin up real containers through
+    # testcontainers-go against the Docker daemon on the runner, so this
+    # needs a Docker-capable host. ubuntu-latest GitHub-hosted runners ship
+    # one; macos-latest hosted runners do not, so unlike the `ci` job above
+    # this does not run a macOS leg.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -tags=integration ./...
+        # Do NOT set TESTCONTAINERS_RYUK_DISABLED here. That env var is a
+        # local-podman-only workaround (podman's Docker-compat API can't
+        # resolve ryuk's expected `bridge` network); GitHub-hosted runners
+        # have a real Docker daemon, so ryuk (the testcontainers reaper
+        # sidecar) works, and disabling it would remove the backstop for
+        # exactly the failure modes it exists to catch: SIGKILL, a step
+        # timeout, or a -timeout panic, none of which run t.Cleanup. See
+        # internal/db/migrations/integration_test.go.
+        run: go test -tags=integration ./...
+
+      - name: Sweep leaked testcontainers (ryuk failure backstop)
+        # Runs even when the test step above failed or the job was
+        # cancelled/timed out: a failed ryuk run leaves its container
+        # stranded in "created" state, labelled org.testcontainers.reap=true,
+        # and t.Cleanup(container.Terminate) does not fire on SIGKILL, a step
+        # timeout, or a -timeout panic — exactly the cases this sweep covers.
+        if: always()
+        run: |
+          leaked="$(docker ps -aq --filter "label=org.testcontainers.reap=true")"
+          if [ -n "$leaked" ]; then
+            echo "::warning::Removing containers left behind by a failed ryuk run: $leaked"
+            docker rm -f $leaked
+          else
+            echo "No leaked testcontainers containers found."
+          fi

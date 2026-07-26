@@ -29,6 +29,16 @@ tasks:
     cmds:
       - go test ./... -race
 
+  test:integration:
+    desc: >-
+      Run the //go:build integration suite (real Postgres via
+      testcontainers-go) — needs a Docker (or Docker-API-compatible) daemon.
+      On podman, also set TESTCONTAINERS_RYUK_DISABLED=true (see
+      internal/db/migrations/integration_test.go); CI's `integration` job
+      runs on a real Docker daemon and must NOT set that var.
+    cmds:
+      - go test -tags=integration ./...
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:
