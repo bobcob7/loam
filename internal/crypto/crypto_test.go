@@ -94,9 +94,12 @@ func TestEncryptor_Decrypt_TamperedCiphertextFails(t *testing.T) {
 	require.NoError(t, err)
 	original, err := enc.Encrypt([]byte("sensitive forge token"))
 	require.NoError(t, err)
-	for i := range original {
+	// Byte 0 is the version prefix, deliberately excluded here: flipping
+	// it produces errUnsupportedVersion, not errDecryptionFailed, and
+	// that distinction has its own test below.
+	for i := 1; i < len(original); i++ {
 		region := "ciphertext-or-tag"
-		if i < 12 {
+		if i < 13 {
 			region = "nonce"
 		}
 		t.Run(fmt.Sprintf("%s byte %d of %d", region, i, len(original)), func(t *testing.T) {
@@ -106,6 +109,54 @@ func TestEncryptor_Decrypt_TamperedCiphertextFails(t *testing.T) {
 			tampered[i] ^= 0xff
 			_, err := enc.Decrypt(tampered)
 			require.ErrorIs(t, err, errDecryptionFailed)
+		})
+	}
+}
+
+func TestEncryptor_Decrypt_UnsupportedVersionErrorsDistinctlyFromDecryptionFailure(t *testing.T) {
+	t.Parallel()
+	enc, err := NewEncryptor(testKey(9))
+	require.NoError(t, err)
+	original, err := enc.Encrypt([]byte("sensitive forge token"))
+	require.NoError(t, err)
+	tampered := make([]byte, len(original))
+	copy(tampered, original)
+	tampered[0] = 0x02
+	_, err = enc.Decrypt(tampered)
+	require.ErrorIs(t, err, errUnsupportedVersion)
+	require.NotErrorIs(t, err, errDecryptionFailed, "an unrecognized version must not be reported as a decryption failure")
+}
+
+func TestEncryptor_Decrypt_V1BlobRoundTrips(t *testing.T) {
+	t.Parallel()
+	enc, err := NewEncryptor(testKey(10))
+	require.NoError(t, err)
+	plaintext := []byte("a v1-formatted secret")
+	ciphertext, err := enc.Encrypt(plaintext)
+	require.NoError(t, err)
+	require.Equal(t, formatVersion1, ciphertext[0], "Encrypt must currently write formatVersion1")
+	got, err := enc.Decrypt(ciphertext)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
+func TestEncryptor_Decrypt_TruncatedBelowPrefixPlusNonceErrorsCleanly(t *testing.T) {
+	t.Parallel()
+	enc, err := NewEncryptor(testKey(11))
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		in   []byte
+	}{
+		{name: "empty input", in: []byte{}},
+		{name: "only the version byte", in: []byte{formatVersion1}},
+		{name: "version byte plus 11 of 12 nonce bytes", in: append([]byte{formatVersion1}, make([]byte, 11)...)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := enc.Decrypt(tt.in)
+			require.ErrorIs(t, err, errCiphertextTooShort)
 		})
 	}
 }
@@ -132,7 +183,7 @@ func TestEncryptor_Decrypt_TruncatedInputErrorsCleanly(t *testing.T) {
 	}{
 		{name: "empty input", in: []byte{}},
 		{name: "one byte", in: []byte{0x01}},
-		{name: "eleven bytes (one short of the 12-byte nonce)", in: make([]byte, 11)},
+		{name: "twelve bytes (one short of version prefix + 12-byte nonce)", in: make([]byte, 12)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,16 +194,18 @@ func TestEncryptor_Decrypt_TruncatedInputErrorsCleanly(t *testing.T) {
 	}
 }
 
-func TestEncryptor_Encrypt_ProducesNonceLengthPrefix(t *testing.T) {
+func TestEncryptor_Encrypt_ProducesVersionNoncePrefix(t *testing.T) {
 	t.Parallel()
 	enc, err := NewEncryptor(testKey(7))
 	require.NoError(t, err)
 	plaintext := []byte("check the layout")
 	ciphertext, err := enc.Encrypt(plaintext)
 	require.NoError(t, err)
+	const versionByteSize = 1
 	const gcmNonceSize = 12
 	const gcmTagSize = 16
-	assert.Len(t, ciphertext, gcmNonceSize+len(plaintext)+gcmTagSize)
+	assert.Len(t, ciphertext, versionByteSize+gcmNonceSize+len(plaintext)+gcmTagSize)
+	assert.Equal(t, formatVersion1, ciphertext[0])
 }
 
 func TestEncryptor_Encrypt_NonceNotAllZero(t *testing.T) {
@@ -162,5 +215,5 @@ func TestEncryptor_Encrypt_NonceNotAllZero(t *testing.T) {
 	zeroNonce := make([]byte, 12)
 	ciphertext, err := enc.Encrypt(nil)
 	require.NoError(t, err)
-	assert.NotEqual(t, zeroNonce, ciphertext[:12], "crypto/rand should never hand back an all-zero nonce")
+	assert.NotEqual(t, zeroNonce, ciphertext[1:13], "crypto/rand should never hand back an all-zero nonce")
 }
