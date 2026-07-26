@@ -188,13 +188,15 @@ func TestAuth_Matrix(t *testing.T) {
 			wantHasID:    true,
 		},
 		{
-			name:       "cli: neither credential -> MVP trusts through, no identity, isAdmin false",
-			group:      groupCLI,
-			setReq:     nil,
-			wantStatus: http.StatusOK,
-			wantCalled: true,
-			wantAdmin:  false,
-			wantHasID:  false,
+			// loam-gcg: neither credential has no legitimate use-case, so
+			// the request is rejected before it reaches a handler rather
+			// than proceeding with an empty identity.
+			name:        "cli: neither credential -> REJECTED (401), no use-case for anonymous access",
+			group:       groupCLI,
+			setReq:      nil,
+			wantStatus:  http.StatusUnauthorized,
+			wantWWWAuth: true,
+			wantCalled:  false,
 		},
 		{
 			// C3 (fail-closed, FIX 1): a presented-but-wrong admin credential
@@ -237,13 +239,14 @@ func TestAuth_Matrix(t *testing.T) {
 			wantHasID:  false,
 		},
 		{
-			name:       "cli: incomplete agent headers -> treated as absent, no identity",
-			group:      groupCLI,
-			setReq:     withAgentHeaders("ada-lovelace", "", "author"),
-			wantStatus: http.StatusOK,
-			wantCalled: true,
-			wantAdmin:  false,
-			wantHasID:  false,
+			// loam-gcg: incomplete agent headers are treated as absent, and
+			// absent-with-no-admin-credential is now rejected too.
+			name:        "cli: incomplete agent headers -> REJECTED (401), treated as absent",
+			group:       groupCLI,
+			setReq:      withAgentHeaders("ada-lovelace", "", "author"),
+			wantStatus:  http.StatusUnauthorized,
+			wantWWWAuth: true,
+			wantCalled:  false,
 		},
 		{
 			// A non-Basic Authorization scheme must not be treated as a

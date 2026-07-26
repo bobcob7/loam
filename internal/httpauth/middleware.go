@@ -63,11 +63,18 @@ func (a *Auth) AdminOnly(next http.Handler) http.Handler {
 // a typo'd password into a much harder to diagnose CodePermissionDenied
 // further down the stack instead of a 401. Only when no Basic credential
 // was presented at all does the request fall back to the agent identity
-// headers; if neither is present it still proceeds with no identity in
-// context — the MVP trusts (does not require) the agent headers on this
-// path group, as documented in the bead's acceptance criteria — a gated
-// RPC then has nothing to authorize against and requireCapability denies
-// it.
+// headers — and, per loam-gcg (decided by the repo owner 2026-07-25: no
+// unauthorized requests without a use-case), all three of those headers
+// must now be present. A request carrying neither a valid admin credential
+// nor a complete set of Loam-Agent-* headers is rejected with the same 401
+// + WWW-Authenticate, before it ever reaches a handler: every legitimate
+// CLI client sets all three LOAM_AGENT_* env vars (docs/cli-spec.md:51-53),
+// so there is no client this could break, and it decouples this guarantee
+// from RequireCapability remembering to deny an empty identity on every
+// RPC. This applies uniformly, including to the capability-ungated
+// instructions/whoami RPCs (docs/web-spec.md -> RoleService) — ungated
+// means they skip the capability check, not that they are reachable
+// anonymously.
 func (a *Auth) CLI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented, valid := a.checkBasicAuth(r)
@@ -81,9 +88,13 @@ func (a *Auth) CLI(next http.Handler) http.Handler {
 		case valid:
 			ctx = WithAdmin(ctx)
 		default:
-			if identity, ok := agentIdentityFromHeaders(r); ok {
-				ctx = WithIdentity(ctx, identity)
+			identity, ok := agentIdentityFromHeaders(r)
+			if !ok {
+				w.Header().Set("WWW-Authenticate", wwwAuthenticateRealm)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
 			}
+			ctx = WithIdentity(ctx, identity)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
