@@ -28,17 +28,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // hookRelPath is the pre-receive hook's path relative to a bare mirror's
 // git directory (a bare mirror's git directory IS the repo root, unlike a
-// non-bare repo's .git subdirectory) -- docs/git-spec.md "Enforcement
-// Mechanics" and loam-ofg.19's own DESIGN note: "the pre-receive hook file
-// ... at /hooks/pre-receive (0755)".
+// non-bare repo's .git subdirectory) -- loam-ofg.19's own DESIGN note: "the
+// pre-receive hook file ... at /hooks/pre-receive (0755)". docs/git-spec.md
+// itself never states the hook's path or mode; only this bead's DESIGN
+// note does, so that is what this comment cites, not the spec.
 const hookRelPath = "hooks/pre-receive"
 
-// hookMode is the mode git requires a hook file to run under: executable,
-// per docs/git-spec.md's own "(0755)" callout.
+// hookMode is the mode git requires a hook file to run under: executable.
+// git only inspects the executable bit itself (there is no git config knob
+// for hook permissions); 0o755 is simply the conventional
+// owner/group/other read+execute, owner-write mode for a script nobody but
+// this process writes. loam-ofg.19's own DESIGN note pins the same
+// "(0755)" figure -- docs/git-spec.md never mentions a mode.
 const hookMode = 0o755
 
 // hookScript is the pre-receive hook stub content this package installs.
@@ -90,6 +96,17 @@ exit 1
 // record of enrollment, not the mirror's presence on disk. ReconcileMirror
 // returns nil rather than erroring so one missing mirror never aborts
 // reconciliation of every other enrolled repo.
+//
+// repoPath must resolve, via git's own --git-dir (never -C/-cd, which
+// walks UP to an enclosing repository when the given directory is not
+// itself a valid git directory), to an actual bare repository: a path that
+// exists as a directory but is not a git directory at all (a half-finished
+// clone, a restored volume missing its object store) is a real error, not
+// a silent success, and a path that is a valid but non-bare repository is
+// also rejected -- writing this package's hook at "<repoPath>/hooks/" would
+// land outside that repo's real (nested ".git/hooks") hook directory and
+// never run, while the config calls below would have silently hardened
+// nothing.
 func ReconcileMirror(ctx context.Context, repoPath string) error {
 	info, err := os.Stat(repoPath)
 	if err != nil {
@@ -100,6 +117,9 @@ func ReconcileMirror(ctx context.Context, repoPath string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("mirror path %s exists but is not a directory", repoPath)
+	}
+	if err := verifyBareRepo(ctx, repoPath); err != nil {
+		return err
 	}
 	if err := writeHook(repoPath); err != nil {
 		return err
@@ -113,38 +133,86 @@ func ReconcileMirror(ctx context.Context, repoPath string) error {
 	return nil
 }
 
+// verifyBareRepo confirms repoPath is itself a bare git repository, using
+// --git-dir (which fails loudly, rc=128, on a directory that is not a git
+// directory) rather than -C/-cd (which, given a directory that is not
+// itself a repo, walks up its parents looking for one that is, and would
+// silently read and write an ENCLOSING repository's config instead of
+// erroring -- exactly the mistake this function exists to rule out before
+// any hook file or config command touches repoPath).
+func verifyBareRepo(ctx context.Context, repoPath string) error {
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repoPath, "rev-parse", "--is-bare-repository")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verifying %s is a bare git repository: %w: %s", repoPath, err, out)
+	}
+	if strings.TrimSpace(string(out)) != "true" {
+		return fmt.Errorf("mirror path %s is a git repository but not bare", repoPath)
+	}
+	return nil
+}
+
 // writeHook (over)writes repoPath's pre-receive hook with hookScript,
-// creating the hooks directory first in case it is somehow missing (a
-// `git init --bare` mirror always has one, populated with git's *.sample
-// files, never a real pre-receive). It always chmods the file after
-// writing: os.WriteFile only applies its mode argument when CREATING a
-// file, not when overwriting an existing one (open(2)'s O_CREAT semantics
-// -- an existing file keeps whatever mode it already had), so without this
-// second call a hook that already existed with some other mode (e.g.
-// 0o644, non-executable, left by an older version of this package or hand
-// edited) would silently stay non-executable forever, defeating the hook
-// on every push after the first reconciliation left it wrong.
+// atomically: it writes hookScript's bytes to a temp file in the same
+// hooks directory (so the final os.Rename stays within one filesystem),
+// chmods that temp file to hookMode, then renames it over the real hook
+// path. os.Rename is atomic on POSIX filesystems, so any concurrent or
+// interrupted receive-pack invocation execs either the complete old hook
+// or the complete new one -- never a partially written file. Writing
+// hookScript's bytes directly via os.WriteFile at the final path, as an
+// earlier version of this function did, is NOT safe: os.WriteFile
+// truncates the destination before writing its new content, and a crash
+// or kill between that truncation and the write completing leaves an
+// empty, still-executable pre-receive hook on disk -- which git treats as
+// a hook that ran and exited 0, ACCEPTING every push, the exact fail-open
+// outcome this whole design forbids. The same risk applies at
+// loam-ofg.12's enroll call site, which runs against a live, already-
+// serving mirror, not just at startup before the listener accepts
+// connections.
 func writeHook(repoPath string) error {
 	hookPath := filepath.Join(repoPath, hookRelPath)
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+	hooksDir := filepath.Dir(hookPath)
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return fmt.Errorf("creating hooks dir in %s: %w", repoPath, err)
 	}
-	if err := os.WriteFile(hookPath, []byte(hookScript), hookMode); err != nil {
-		return fmt.Errorf("writing pre-receive hook in %s: %w", repoPath, err)
+	tmp, err := os.CreateTemp(hooksDir, ".pre-receive-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp hook file in %s: %w", repoPath, err)
 	}
-	if err := os.Chmod(hookPath, hookMode); err != nil {
-		return fmt.Errorf("setting pre-receive hook mode in %s: %w", repoPath, err)
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(hookScript); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("writing temp hook file in %s: %w", repoPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("closing temp hook file in %s: %w", repoPath, err)
+	}
+	if err := os.Chmod(tmpPath, hookMode); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("setting temp hook file mode in %s: %w", repoPath, err)
+	}
+	if err := os.Rename(tmpPath, hookPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("installing pre-receive hook in %s: %w", repoPath, err)
 	}
 	return nil
 }
 
 // setConfig runs `git config <key> <value>` against the bare mirror at
-// repoPath. git config always overwrites an existing key's value
-// unconditionally (it neither errors nor skips on a pre-existing value),
-// so this alone is what makes ReconcileMirror's config half idempotent: a
-// second call sets the exact same value again, a no-op in effect.
+// repoPath, addressed via --git-dir for the same upward-discovery reason
+// verifyBareRepo's doc comment explains (-C would otherwise silently write
+// to an enclosing repository if repoPath itself were ever invalid, a case
+// verifyBareRepo above already rules out before this runs, but this
+// function stays defensive rather than relying solely on that earlier
+// check). git config always overwrites an existing key's value
+// unconditionally (it neither errors nor skips on a pre-existing single
+// value), so this alone is what makes ReconcileMirror's config half
+// idempotent: a second call sets the exact same value again, a no-op in
+// effect.
 func setConfig(ctx context.Context, repoPath, key, value string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", key, value)
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repoPath, "config", key, value)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("setting %s=%s in %s: %w: %s", key, value, repoPath, err, out)
 	}
