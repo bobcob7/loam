@@ -220,23 +220,34 @@ func (f *Forgejo) GitCredentials(ctx context.Context, token string) (string, str
 // parse of CreatePR's ErrDuplicatePR message: that message's "id" is
 // the PR's internal id, not the per-repo number this method returns,
 // and the two only coincide on a repo's first PR (see ErrDuplicatePR's
-// godoc).
+// godoc) — confirmed live on a second repo, where the first PR's
+// number=1 came back behind internal id=64.
+//
+// The loop terminates on an EMPTY page, never a page shorter than
+// listOpenPRsPageSize: verified live that Forgejo silently caps the
+// effective page size at its own api.MAX_RESPONSE_ITEMS
+// (admin-tunable) regardless of the limit= this method requests — a
+// 62-open-PR repo returned exactly 50 items whether limit was 62, 100,
+// or 1000. Treating a server-shortened full page as the last page
+// would silently stop paging before reaching a real match on a later
+// page, on any instance configured with MAX_RESPONSE_ITEMS below this
+// method's own page size.
 func (f *Forgejo) FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (string, int, bool, error) {
 	for page := 1; page <= listOpenPRsMaxPages; page++ {
 		prs, err := f.listOpenPRsPage(ctx, repo, page)
 		if err != nil {
 			return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: %w", repo, headBranch, targetBranch, err)
 		}
+		if len(prs) == 0 {
+			return "", 0, false, nil
+		}
 		for _, pr := range prs {
 			if pr.Head.Ref == headBranch && pr.Base.Ref == targetBranch {
 				return pr.HTMLURL, pr.Number, true, nil
 			}
 		}
-		if len(prs) < listOpenPRsPageSize {
-			return "", 0, false, nil
-		}
 	}
-	return "", 0, false, nil
+	return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: exhausted %d pages of open PRs without reaching the end of the list", repo, headBranch, targetBranch, listOpenPRsMaxPages)
 }
 
 // listOpenPRsPage fetches one page of repo's open pull requests.

@@ -2,6 +2,7 @@ package forge
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -265,6 +266,10 @@ func TestForgejo_FindOpenPR_Found(t *testing.T) {
 func TestForgejo_FindOpenPR_NotFound(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "1" {
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/3", "number": 3, "head": map[string]string{"ref": "other-branch"}, "base": map[string]string{"ref": "main"}},
 		})
@@ -359,6 +364,67 @@ func TestForgejo_FindOpenPR_Paginates(t *testing.T) {
 	assert.Equal(t, 42, prNumber)
 	assert.Equal(t, "https://forgejo.example.com/acme/widgets/pulls/42", prURL)
 	assert.Equal(t, []string{"1", "2"}, gotPages)
+}
+
+// TestForgejo_FindOpenPR_ServerCapsPageSizeBelowRequested is FIX 1's
+// regression test: verified live against a real Forgejo 9.0.3 instance
+// with 62 open PRs, the server silently caps the effective page size at
+// its own api.MAX_RESPONSE_ITEMS (admin-tunable) regardless of the
+// limit= FindOpenPR requests — asking limit=62, 100, or 1000 all
+// returned exactly 50 items. This server serves a page smaller than
+// listOpenPRsPageSize (mimicking a MAX_RESPONSE_ITEMS below this
+// method's own page size) with the match only on page 2, so the old
+// "len(prs) < listOpenPRsPageSize means last page" termination — which
+// this short first page would have satisfied — must not stop the walk
+// before page 2 is ever requested.
+func TestForgejo_FindOpenPR_ServerCapsPageSizeBelowRequested(t *testing.T) {
+	t.Parallel()
+	const serverPageSize = 20 // < listOpenPRsPageSize: the server-side cap
+	var gotPages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPages = append(gotPages, r.URL.Query().Get("page"))
+		assert.Equal(t, fmt.Sprintf("%d", listOpenPRsPageSize), r.URL.Query().Get("limit"), "the client always asks for its own page size, regardless of what the server actually honors")
+		if r.URL.Query().Get("page") == "1" {
+			prs := make([]map[string]any, serverPageSize)
+			for i := range prs {
+				prs[i] = map[string]any{"html_url": "x", "number": i + 200, "head": map[string]string{"ref": "unrelated"}, "base": map[string]string{"ref": "main"}}
+			}
+			_ = json.NewEncoder(w).Encode(prs)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/77", "number": 77, "head": map[string]string{"ref": "feature"}, "base": map[string]string{"ref": "main"}},
+		})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	prURL, prNumber, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.NoError(t, err)
+	assert.True(t, found, "a match on page 2 must still be found even though page 1 came back shorter than requested")
+	assert.Equal(t, 77, prNumber)
+	assert.Equal(t, "https://forgejo.example.com/acme/widgets/pulls/77", prURL)
+	assert.Equal(t, []string{"1", "2"}, gotPages)
+}
+
+// TestForgejo_FindOpenPR_ExhaustsPagesReturnsError is FIX 2's regression
+// test: a server that never returns an empty page (every page full, no
+// match) must not be read as found=false — that would be indistinguishable
+// from a genuine "no such PR is open," contradicting FindOpenPR's own
+// godoc. Exhausting listOpenPRsMaxPages returns a non-nil error instead.
+func TestForgejo_FindOpenPR_ExhaustsPagesReturnsError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prs := make([]map[string]any, listOpenPRsPageSize)
+		for i := range prs {
+			prs[i] = map[string]any{"html_url": "x", "number": i, "head": map[string]string{"ref": "unrelated"}, "base": map[string]string{"ref": "main"}}
+		}
+		_ = json.NewEncoder(w).Encode(prs)
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	_, _, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.Error(t, err, "exhausting every page without an empty page or a match must not silently read as not-found")
+	assert.False(t, found)
 }
 
 func TestApiBaseURL(t *testing.T) {
