@@ -12,6 +12,21 @@
 // verdicts_round_id_reviewer_key are the actual constraints Postgres
 // enforces -- not a hand-rolled test schema that could silently drift
 // from what ships.
+//
+// DEFERRED-WIP: reviewing.feature: Verdicts and comments record their review
+// round -> TestReviewRounds_DerivedStaleness_Narrative,
+// TestList_MultipleReviewersSameRound_OneRecordEach (covers the VERDICT half
+// only: a verdict carries its round_id and List surfaces RoundNumber. Does
+// NOT cover "the published comment is recorded against the second round" --
+// threads/comments is loam-54o.12's table group, and publication is
+// loam-ofg.9's handler. The godog scenario stays @wip pending loam-li0.5.)
+//
+// DEFERRED-WIP: replies.feature: A reply records the round it was made in ->
+// no test in this bead covers it. This bead contributes only the
+// review_rounds row a reply's round_id would be stamped against
+// (RoundStore.CurrentRound); the reply write path itself belongs to
+// loam-54o.12 (threads/comments store) and loam-ofg.9 (handler). The godog
+// scenario stays @wip pending loam-li0.5.)
 package reviewstore
 
 import (
@@ -141,7 +156,13 @@ func TestReviewRounds_DerivedStaleness_Narrative(t *testing.T) {
 // TestSubmit_Resubmission_ReplacesNotDuplicates proves
 // UNIQUE(round_id, reviewer) is honored the way Demo M1 shows it off:
 // re-submitting for the same round and reviewer replaces the prior
-// verdict in place, never creating a second row.
+// verdict in place, never creating a second row. It also proves a
+// retracted approval actually retracts: changing the same reviewer's
+// verdict from approve to disapprove within one round must drop
+// CurrentRoundApproveCount back to 0, not leave a stale approve
+// counted -- a mutation that widens the count's outcome filter (e.g.
+// `<> 'neutral'` instead of `= 'approve'`) would let a disapprove keep
+// counting and this assertion is what catches it.
 func TestSubmit_Resubmission_ReplacesNotDuplicates(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -169,6 +190,16 @@ func TestSubmit_Resubmission_ReplacesNotDuplicates(t *testing.T) {
 		pgUUID(round.ID), "ada-lovelace-7-reviewer",
 	).Scan(&rowCount))
 	assert.Equal(t, 1, rowCount, "the real table has exactly one row -- proves the upsert path, not just the store's view of it")
+
+	count, err := verdicts.CurrentRoundApproveCount(ctx, workBranchID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "Ada's approve counts toward the approval bar")
+
+	_, err = verdicts.Submit(ctx, round.ID, "ada-lovelace-7-reviewer", OutcomeDisapprove)
+	require.NoError(t, err)
+	count, err = verdicts.CurrentRoundApproveCount(ctx, workBranchID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "retracting the approval (same reviewer, same round, now disapprove) must drop the count -- a stale approve must not keep counting")
 }
 
 // TestVerdictsUniqueConstraint_EnforcedByRealSchema bypasses the store

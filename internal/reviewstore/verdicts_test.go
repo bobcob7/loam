@@ -20,11 +20,14 @@ var testWorkBranchID = uuid.MustParse("019a0000-0000-7000-8000-000000000001")
 // defensive error-identity mapping: IF a unique_violation on
 // verdicts_round_id_reviewer_key ever reaches Submit (e.g. the ON
 // CONFLICT clause is bypassed or removed), it surfaces as the stable
-// errDuplicateVerdict rather than raw pgconn text -- exercised directly
-// here since Submit's own upsert makes this path unreachable through a
-// live database in normal operation (see the mutation test in the
-// integration suite, which removes the ON CONFLICT clause and proves this
-// mapping is what catches it).
+// errDuplicateVerdict rather than raw pgconn text. Exercised directly
+// here via a mocked querier, since Submit's own upsert makes this path
+// unreachable through a live database in normal operation -- verified by
+// hand-running this exact mutation (temporarily dropping ON CONFLICT
+// from SubmitVerdict's SQL, regenerating, and confirming
+// TestSubmit_Resubmission_ReplacesNotDuplicates then fails with this
+// same errDuplicateVerdict identity) rather than by a committed test,
+// since Submit's normal codepath can never trigger it live.
 func TestSubmit_UniqueViolation_ReturnsErrDuplicateVerdict(t *testing.T) {
 	t.Parallel()
 	pgErr := &pgconn.PgError{Code: "23505", ConstraintName: "verdicts_round_id_reviewer_key"}
