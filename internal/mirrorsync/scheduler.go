@@ -66,7 +66,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 				return
 			}
 			if _, err := s.tick(ctx); err != nil {
-				s.logger.Error("listing enrolled repos", "error", err)
+				s.logger.Error("tick failed", "error", err)
 			}
 		}
 	}

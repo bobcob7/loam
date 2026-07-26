@@ -128,6 +128,18 @@ func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) 
 // *registered* service keeps getting that service's own 404 exactly as
 // before.
 //
+// The peek deliberately discards the *http.Handler mux.Handler(r) returns
+// and re-dispatches through rt.mux.ServeHTTP instead of serving that
+// handler directly — do not "simplify" this into a single call. Per
+// net/http's ServeMux.Handler godoc, "it does not populate named path
+// wildcards, so r.PathValue will always return the empty string" on the
+// request passed to Handler; only a subsequent mux.ServeHTTP populates
+// them on r. Serving the peeked handler would silently break
+// r.PathValue for every wildcard-pattern registration this Router
+// carries — most notably the "/git/{repo...}" shape loam-ofg.16 is
+// expected to register — with no test failure pointing at this line to
+// explain why.
+//
 // The returned value is deliberately opaque (a plain http.HandlerFunc, not
 // the *http.ServeMux itself): the mux underlying this Router is only ever
 // mutated by RegisterCLI/RegisterAdmin/RegisterGit/RegisterUnauthenticated/

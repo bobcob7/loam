@@ -6,11 +6,25 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"connectrpc.com/connect"
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// authInjectingTransport wraps a RoundTripper, adding valid admin basic
+// auth to every outgoing request. connect.NewClient has no per-call header
+// hook, so a real client (used below to prove the wire format against
+// connect-go itself, not just this package's own JSON assertions) needs
+// its auth injected at the http.Client's Transport instead.
+type authInjectingTransport struct{}
+
+func (authInjectingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.SetBasicAuth(testAdminUser, testAdminPassword)
+	return http.DefaultTransport.RoundTrip(r)
+}
 
 // TestRouter_UnregisteredCLIServicePrefix_GetAndPost proves loam-cjq's core
 // claim: a request under /loam.v1.* naming a service this Router never
@@ -174,4 +188,26 @@ func TestRouter_UnregisteredServicePrefix_NoSPARegistered(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "not_found", body["code"])
+}
+
+// TestRouter_UnregisteredCLIServicePrefix_RealConnectClientDecodesNotFound
+// closes the gap the other tests in this file leave open: they assert
+// body["code"] == "not_found" on a bare map[string]any, which would also
+// pass for an envelope shape connect-go itself rejects. This test drives
+// a real connect.Client -- the same one a genuine CLI caller uses --
+// against a live httptest.Server wrapping Router.Handler(), and checks
+// that connect-go's own decoder recovers a *connect.Error with the
+// expected code, proving the hand-built envelope in fallback.go is wire-
+// compatible with connect-go v1.20.0, not merely JSON that looks similar.
+func TestRouter_UnregisteredCLIServicePrefix_RealConnectClientDecodesNotFound(t *testing.T) {
+	t.Parallel()
+	router := newTestRouter(t)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	hc := &http.Client{Transport: authInjectingTransport{}}
+	client := connect.NewClient[loamv1.GetInstructionsRequest, loamv1.GetInstructionsResponse](
+		hc, srv.URL+"/loam.v1.NoSuchService/DoThing")
+	_, err := client.CallUnary(t.Context(), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
