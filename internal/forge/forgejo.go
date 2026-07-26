@@ -15,6 +15,19 @@ import (
 // accepts alongside the token as password; Forgejo ignores it.
 const gitUsername = "loam"
 
+// probeOwner and probeRepo name a repository path chosen to never exist
+// on any real Forgejo instance. ValidateToken's scope probe targets it:
+// verified empirically against Forgejo 9.0.3 (gitea API 1.22), the
+// scope-enforcement middleware rejects an insufficiently-scoped token
+// with 401/403 before the owner or repo is ever resolved, so a request
+// against this synthetic path is a safe, non-mutating way to observe
+// the scope decision without touching, or even needing to know, any
+// real repository.
+const (
+	probeOwner = "loam-scope-probe-9f3c2e71"
+	probeRepo  = "does-not-exist"
+)
+
 // Forgejo implements Provider against a Forgejo instance. An instance is
 // bound to one host and the token currently on record for it: CheckRepo,
 // CreatePR, GetPRState, and ClosePR use that bound credential.
@@ -53,10 +66,24 @@ func apiBaseURL(host string) string {
 	return "https://" + strings.TrimSuffix(host, "/") + "/api/v1"
 }
 
-// ValidateToken confirms token authenticates against host by fetching
-// the authenticated user.
+// ValidateToken confirms token authenticates against host and carries
+// the write:repository scope CreatePR/ClosePR need. It does not probe
+// GET /user: that endpoint only requires read:user, so a token missing
+// every PR-relevant scope still returns 200 there (verified empirically
+// against a real Forgejo 9.0.3 instance — see loam-1ao). Instead it
+// issues the same request shape as CreatePR (POST .../pulls) against
+// probeOwner/probeRepo, a path picked to never exist. Forgejo runs its
+// scope check before resolving the owner or repo, so the response is
+// unambiguous:
+//   - 401 means the token does not authenticate at all: ErrInvalidToken.
+//   - 403 means the token authenticates but lacks write:repository:
+//     ErrInsufficientScope.
+//   - 404 (or any 2xx, which would be a surprise) means the token
+//     authenticates and has the scope; the repo not existing is
+//     expected and not itself an error.
 func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBaseURL(host)+"/user", nil)
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL(host), probeOwner, probeRepo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("building validate-token request for %s: %w", host, err)
 	}
@@ -66,13 +93,16 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 		return fmt.Errorf("validating token for %s: %w", host, err)
 	}
 	defer drainAndClose(resp.Body)
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("validating token for %s: %w", host, ErrInvalidToken)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("validating token for %s: unexpected status %s", host, resp.Status)
+	if resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("validating token for %s: %w", host, ErrInsufficientScope)
 	}
-	return nil
+	if resp.StatusCode == http.StatusNotFound || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		return nil
+	}
+	return fmt.Errorf("validating token for %s: unexpected status %s", host, resp.Status)
 }
 
 // forgejoPullRequest is the subset of the Forgejo pull-request response

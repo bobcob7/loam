@@ -23,15 +23,17 @@ func TestForgejo_ValidateToken(t *testing.T) {
 		statusCode int
 		wantErr    error
 	}{
-		{name: "valid token", statusCode: http.StatusOK, wantErr: nil},
-		{name: "invalid token rejected", statusCode: http.StatusUnauthorized, wantErr: ErrInvalidToken},
-		{name: "forbidden token rejected", statusCode: http.StatusForbidden, wantErr: ErrInvalidToken},
+		{name: "authenticated with scope, probe repo not found as expected", statusCode: http.StatusNotFound, wantErr: nil},
+		{name: "authenticated with scope, unexpected 2xx", statusCode: http.StatusOK, wantErr: nil},
+		{name: "unauthenticated token rejected", statusCode: http.StatusUnauthorized, wantErr: ErrInvalidToken},
+		{name: "authenticated but missing scope rejected", statusCode: http.StatusForbidden, wantErr: ErrInsufficientScope},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/api/v1/user", r.URL.Path)
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/v1/repos/"+probeOwner+"/"+probeRepo+"/pulls", r.URL.Path)
 				assert.Equal(t, "token good-token", r.Header.Get("Authorization"))
 				w.WriteHeader(tt.statusCode)
 			}))
@@ -45,6 +47,19 @@ func TestForgejo_ValidateToken(t *testing.T) {
 			assert.ErrorIs(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestForgejo_ValidateToken_UnexpectedStatus(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "", server.Client(), testLogger())
+	err := f.ValidateToken(t.Context(), server.URL, "good-token")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidToken)
+	assert.NotErrorIs(t, err, ErrInsufficientScope)
 }
 
 func TestForgejo_ValidateToken_NetworkFailure(t *testing.T) {
