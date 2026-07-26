@@ -140,27 +140,6 @@ func TestEncryptor_Decrypt_V1BlobRoundTrips(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
-func TestEncryptor_Decrypt_TruncatedBelowPrefixPlusNonceErrorsCleanly(t *testing.T) {
-	t.Parallel()
-	enc, err := NewEncryptor(testKey(11))
-	require.NoError(t, err)
-	tests := []struct {
-		name string
-		in   []byte
-	}{
-		{name: "empty input", in: []byte{}},
-		{name: "only the version byte", in: []byte{formatVersion1}},
-		{name: "version byte plus 11 of 12 nonce bytes", in: append([]byte{formatVersion1}, make([]byte, 11)...)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := enc.Decrypt(tt.in)
-			require.ErrorIs(t, err, errCiphertextTooShort)
-		})
-	}
-}
-
 func TestEncryptor_Decrypt_WrongKeyFails(t *testing.T) {
 	t.Parallel()
 	encA, err := NewEncryptor(testKey(4))
@@ -173,23 +152,38 @@ func TestEncryptor_Decrypt_WrongKeyFails(t *testing.T) {
 	require.ErrorIs(t, err, errDecryptionFailed)
 }
 
-func TestEncryptor_Decrypt_TruncatedInputErrorsCleanly(t *testing.T) {
+// TestEncryptor_Decrypt_TruncatedAndBoundaryInputs covers every input
+// length around the version+nonce prefix boundary (versionSize+nonceSize
+// == 13 bytes): everything strictly shorter must fail the length check
+// with errCiphertextTooShort (including the 12-byte cases, which are the
+// ones that turn a `<=` vs `<` typo in that check into a slice-bounds
+// panic rather than a clean error), and exactly-13-bytes must pass the
+// length check and fail AEAD authentication instead, with a different
+// sentinel — errDecryptionFailed, not errCiphertextTooShort.
+func TestEncryptor_Decrypt_TruncatedAndBoundaryInputs(t *testing.T) {
 	t.Parallel()
 	enc, err := NewEncryptor(testKey(6))
 	require.NoError(t, err)
 	tests := []struct {
-		name string
-		in   []byte
+		name    string
+		in      []byte
+		wantErr error
 	}{
-		{name: "empty input", in: []byte{}},
-		{name: "one byte", in: []byte{0x01}},
-		{name: "twelve bytes (one short of version prefix + 12-byte nonce)", in: make([]byte, 12)},
+		{name: "empty input", in: []byte{}, wantErr: errCiphertextTooShort},
+		{name: "one byte (version prefix alone)", in: []byte{formatVersion1}, wantErr: errCiphertextTooShort},
+		{name: "twelve bytes, all zero (one short of the 13-byte prefix)", in: make([]byte, 12), wantErr: errCiphertextTooShort},
+		{name: "version byte plus 11 of 12 nonce bytes", in: append([]byte{formatVersion1}, make([]byte, 11)...), wantErr: errCiphertextTooShort},
+		{
+			name:    "exactly version byte plus full nonce, zero-length sealed",
+			in:      append([]byte{formatVersion1}, make([]byte, 12)...),
+			wantErr: errDecryptionFailed, // length check passes at exactly prefixSize; AEAD then rejects the (missing) tag.
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := enc.Decrypt(tt.in)
-			require.ErrorIs(t, err, errCiphertextTooShort)
+			require.ErrorIs(t, err, tt.wantErr)
 		})
 	}
 }

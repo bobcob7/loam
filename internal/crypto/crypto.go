@@ -101,6 +101,15 @@ var (
 // above, it is additive to this: a DB column recording which key
 // candidate decrypted a row, orthogonal to the format byte this package
 // owns.
+//
+// One gap this leaves, tracked as loam-nqy rather than fixed here: a
+// caller running the trial-decryption loop above cannot yet distinguish
+// "wrong key, try the next one" from "wrong parser, no key will help"
+// (errUnsupportedVersion) without an exported sentinel, so it would
+// grind through every candidate key on a blob it structurally cannot
+// read. Both sentinels stay unexported until loam-54o.8 has a caller
+// that actually needs to branch on them — exporting speculatively, with
+// no consumer, would violate unexported-by-default.
 type Encryptor struct {
 	aead cipher.AEAD
 }
