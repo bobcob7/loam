@@ -122,9 +122,17 @@ func TestGetRepo_AdminBypassesCapabilityGate(t *testing.T) {
 func TestGetRepo_UnenrolledRepo_ReturnsCodeNotFound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
+	// ListTargetBranchesFunc is configured too, even though correct code
+	// never reaches it here: a mutation that ignored GetRepoByName's error
+	// and fell through to call it anyway must surface as a clean assertion
+	// failure below (wrong response, or require.Error failing), not a
+	// nil-func panic that would obscure what's actually being proved.
 	store := &repo.RepoStoreMock{
 		GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
 			return reposstore.Repo{}, fmt.Errorf("getting repo %s: %w", name, reposstore.ErrNotFound)
+		},
+		ListTargetBranchesFunc: func(_ context.Context, _ uuid.UUID) ([]reposstore.TargetBranch, error) {
+			return nil, nil
 		},
 	}
 	h := newHandler(store, []handler.Capability{handler.CapabilityGitClone}, &buf)
@@ -144,9 +152,14 @@ func TestGetRepo_StoreFailure_MapsToInternalAndLogs(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	dbErr := errors.New("connection reset by peer")
+	// ListTargetBranchesFunc is configured too, for the same reason as
+	// TestGetRepo_UnenrolledRepo_ReturnsCodeNotFound above.
 	store := &repo.RepoStoreMock{
 		GetRepoByNameFunc: func(_ context.Context, _ string) (reposstore.Repo, error) {
 			return reposstore.Repo{}, dbErr
+		},
+		ListTargetBranchesFunc: func(_ context.Context, _ uuid.UUID) ([]reposstore.TargetBranch, error) {
+			return nil, nil
 		},
 	}
 	h := newHandler(store, []handler.Capability{handler.CapabilityGitClone}, &buf)
@@ -164,10 +177,18 @@ func TestGetRepo_EmptyRepoName_ReturnsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	storeCalled := false
+	// ListTargetBranchesFunc is configured too, so a mutation that dropped
+	// the empty-name check falls all the way through to a real (if
+	// meaningless) success response, caught by the assertions below --
+	// not a nil-func panic.
 	store := &repo.RepoStoreMock{
 		GetRepoByNameFunc: func(_ context.Context, _ string) (reposstore.Repo, error) {
 			storeCalled = true
 			return reposstore.Repo{}, nil
+		},
+		ListTargetBranchesFunc: func(_ context.Context, _ uuid.UUID) ([]reposstore.TargetBranch, error) {
+			storeCalled = true
+			return nil, nil
 		},
 	}
 	h := newHandler(store, []handler.Capability{handler.CapabilityGitClone}, &buf)

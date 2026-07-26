@@ -61,12 +61,18 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback is the "before"
-// half of this bead's registration proof: with no pool (run's current,
-// documented state -- see main.go's package doc), RepoService requests
-// still answer through the group-level 404 fallback (internal/server ->
-// loam-cjq), exactly as they did before this bead existed. This is the
-// baseline the "with a pool" test below is contrasted against.
+// TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback is the
+// "before" half of this bead's registration proof, exercising
+// registerMetadataServices's nil guard directly: buildRouter given no
+// pool (a case run() itself never hits -- it always passes
+// connectDatabase's live pool through, see main.go's package doc; this is
+// buildRouter's own defensive path) still answers RepoService requests
+// through the group-level 404 fallback (internal/server -> loam-cjq),
+// exactly as every /loam.v1.RepoService/* request did before this bead
+// existed. This is the baseline the "with a pool" test below is
+// contrasted against; TestServer_RepoServiceIsRegistered_NotGroupFallback
+// (registration_integration_test.go) is the same proof against the real,
+// booted binary.
 func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
 	router := buildRouter(testConfigForRouter(), nil)
@@ -84,18 +90,24 @@ func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 		"with no pool wired in, RepoService must still be entirely unregistered -- the group fallback's own message")
 }
 
-// TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered is this bead's
-// central registration proof, and the DIRECT rebuttal of the bug that
-// raised this bead to P1: proof that a request to /loam.v1.RepoService/GetRepo
-// no longer hits internal/server's group-level 404 fallback once a pool is
-// supplied. It does NOT need a live, reachable Postgres to prove this --
-// only that the request reaches the REAL handler (whose capability check
-// attempts a real query and fails with a connection error, mapped to
-// CodeInternal by handler.ErrorMapper) rather than the fallback's
-// hand-written "no service registered" 404. Compare directly against
+// TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered is a fast,
+// container-free registration proof: a request to
+// /loam.v1.RepoService/GetRepo no longer hits internal/server's
+// group-level 404 fallback once a pool is supplied -- the shape of pool
+// run() always passes since loam-ofg.21 landed connectDatabase. It does
+// NOT need a live, reachable Postgres to prove this -- only that the
+// request reaches the REAL handler (whose capability check attempts a
+// real query and fails with a connection error, mapped to CodeInternal by
+// handler.ErrorMapper) rather than the fallback's hand-written "no
+// service registered" 404. Compare directly against
 // TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback above: same
 // request, same identity, only the pool differs, and the code AND message
 // are both different as a result.
+// TestServer_RepoServiceIsRegistered_NotGroupFallback
+// (registration_integration_test.go) is the slower, real-Postgres version
+// of this same proof against the actual booted binary -- run this pair
+// together when the question is "does this run for real", not just "is
+// the wiring correct".
 func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)

@@ -22,9 +22,16 @@ func testLogger() *slog.Logger {
 // separately.
 func TestGetRole_NoRows_ReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
+	// QueryFunc is configured too, even though correct code never reaches
+	// it here: a mutation that ignored GetRoleByName's error and fell
+	// through to list operations anyway must surface as a clean assertion
+	// failure below, not a nil-func panic.
 	mock := &querierMock{
 		QueryRowFunc: func(_ context.Context, _ string, _ ...any) pgx.Row {
 			return fakeRow{err: pgx.ErrNoRows}
+		},
+		QueryFunc: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return nil, errors.New("must not be called: role lookup already failed")
 		},
 	}
 	s := NewStore(mock, testLogger())
@@ -42,6 +49,9 @@ func TestGetRole_QueryRowOtherError_NotMappedToNotFound(t *testing.T) {
 	mock := &querierMock{
 		QueryRowFunc: func(_ context.Context, _ string, _ ...any) pgx.Row {
 			return fakeRow{err: connErr}
+		},
+		QueryFunc: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return nil, errors.New("must not be called: role lookup already failed")
 		},
 	}
 	s := NewStore(mock, testLogger())
