@@ -48,3 +48,22 @@ func TestNewPoolUnreachableDSN(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pinging database")
 }
+
+// TestNewPoolConfigSetsAfterConnect is a DB-free smoke check that NewPool
+// wires something into AfterConnect at all: pgxpool.ParseConfig never
+// dials the network, so this exercises newPoolConfig without a live
+// database. It intentionally does not pin AfterConnect to a specific
+// function value -- reflect.Value.Pointer() is documented as not a
+// reliable function identity check, and a closure that calls
+// pgxvec.RegisterTypes plus does something else (e.g. logs, registers an
+// additional type) would be an equally correct implementation that a
+// stricter check would wrongly fail. What actually needs to be true --
+// that the pgvector codec is the thing active on a real pooled connection,
+// not merely that some function is assigned -- is proven against a real
+// database by assertVectorTypeRegistered in pool_integration_test.go.
+func TestNewPoolConfigSetsAfterConnect(t *testing.T) {
+	t.Parallel()
+	poolCfg, err := newPoolConfig("postgres://localhost:1/nonexistent?sslmode=disable")
+	require.NoError(t, err)
+	require.NotNil(t, poolCfg.AfterConnect, "NewPool must set AfterConnect so pgvector types are registered once migrations have created the extension")
+}
