@@ -214,14 +214,14 @@ func (s *Store) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targe
 }
 
 // LookupSymbolsByName resolves name to every matching symbols row, scoped
-// to repoIDs (the caller's repo scope, plural per chunkstore.Search's
-// convention -- see internal/db/queries/code_graph.sql's LookupSymbolsByName
-// comment for why this package's multi-value scoping now matches
-// chunkstore's rather than Dependents/Deps/History's single-repoID shape)
+// to repoIDs (plural because `graph def --all` fans out and unions across
+// enrolled repos -- see internal/db/queries/code_graph.sql's
+// LookupSymbolsByName comment for why that differs from
+// Dependents/Deps/History's single-repoID shape without contradicting it)
 // and targetBranch, optionally narrowed to one file (empty file means no
 // narrowing). Matching is exact-name; ambiguity -- several distinct symbols
 // sharing name, e.g. three Logins in three files -- is deliberately not an
-// error: docs/cli-spec.md:531-535 requires every match returned as data, so
+// error: docs/cli-spec.md:528-533 requires every match returned as data, so
 // a handler can build the per-row `of` disambiguation field itself.
 //
 // An empty result is the ONLY authoritative not-found signal this package
@@ -238,7 +238,7 @@ func (s *Store) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targe
 //
 // truncated follows the same limit+1/clampLimit/fetchLimit contract as
 // Dependents/Deps/History (limit <= 0 uses defaultLimit): docs/cli-spec.md
-// :537-539 requires a capped `graph` response to set truncated: true
+// :535-537 requires a capped `graph` response to set truncated: true
 // regardless of which subquery it backs, not only the blast-radius ones,
 // so a many-way name collision capped by limit must report it exactly like
 // a capped blast radius does.

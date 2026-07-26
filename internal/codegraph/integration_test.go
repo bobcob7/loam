@@ -679,7 +679,7 @@ func TestLookupSymbolsByName_ExactlyOneMatch(t *testing.T) {
 }
 
 // TestLookupSymbolsByName_AmbiguousReturnsAllMatches proves
-// docs/cli-spec.md:531-535's "ambiguous target is data, not an error":
+// docs/cli-spec.md:528-533's "ambiguous target is data, not an error":
 // three distinct "Login" symbols in three different files must all come
 // back, not an error and not just one of them.
 func TestLookupSymbolsByName_AmbiguousReturnsAllMatches(t *testing.T) {
@@ -846,7 +846,7 @@ func TestLookupSymbolsByName_IncludesMultipleInScopeRepos(t *testing.T) {
 
 // TestLookupSymbolsByName_TruncatesAndReportsTruncated proves the
 // limit/truncated contract against a real database, not just a mock:
-// docs/cli-spec.md:537-539 requires truncated: true on a capped `graph`
+// docs/cli-spec.md:535-537 requires truncated: true on a capped `graph`
 // response for every subquery, not only the blast-radius ones -- this
 // seeds 4 same-named symbols and asks for at most 2.
 func TestLookupSymbolsByName_TruncatesAndReportsTruncated(t *testing.T) {

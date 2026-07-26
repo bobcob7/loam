@@ -328,16 +328,23 @@ type LookupSymbolsByNameParams struct {
 // Dependents/Deps/SymbolHistory, which all take a symbol id rather than a
 // name. Matching is exact-name, scoped to (repo_id, target_branch) --
 // consistent with ResolveGraphEdgeCandidates' to_symbol_id match above,
-// which is also exact-name within a repo/branch. "Approximate" in
-// persistence-spec's description of graph_edges resolution refers to that
-// edge-resolution step's lack of kind/file narrowing, not to fuzzy name
-// matching here.
+// which is also exact-name within a repo/branch. Neither spec defines
+// "approximate" as fuzzy string matching: docs/cli-spec.md:528-530 glosses
+// it as an ambiguous target matching several symbols whose union is "data,
+// not an error", which is exactly what exact-name-plus-return-every-match
+// implements here. (The edge-building comment below uses the same word for
+// a different thing -- that step's line-proximity from-side heuristic.)
 //
-// Scope is repo_id = ANY($1::uuid[]) rather than a single repo_id, matching
-// internal/chunkstore.SearchChunksByEmbeddingScoped's convention (a
-// caller-supplied set of repo ids, one target_branch) rather than
-// Dependents/Deps/History's single-repoID convention -- deliberately, so
-// the two store packages scope multi-value lookups the same way. See
+// Scope is repo_id = ANY($1::uuid[]) rather than a single repo_id because a
+// name lookup can legitimately span repos: docs/cli-spec.md:550-551 gives
+// `--all` to run the query across all enrolled repos, and :553-557 defines
+// that as a fan-out that "queries each repo's graph independently and unions
+// the results" -- which is exactly this union. Dependents/Deps' single-repoID
+// shape is equally correct and NOT an inconsistency to reconcile later: those
+// are recursive CTEs whose depth-ordered dedup and LIMIT are only
+// well-defined within one repo. The plural shape also happens to match
+// internal/chunkstore.SearchChunksByEmbeddingScoped (a caller-supplied set of
+// repo ids, one target_branch), so the two store packages agree. See
 // SearchChunksByEmbeddingScoped's comment for why sqlc surfaces the array
 // param as an anonymous Column1 (sqlc#2635): the store layer
 // (internal/codegraph.Store.LookupSymbolsByName) hides it behind a typed
@@ -361,7 +368,7 @@ type LookupSymbolsByNameParams struct {
 // "symbol exists with zero edges" (LookupSymbolsByName returns one match,
 // then Dependents/Deps on its id returns an empty, non-truncated set).
 // Ambiguity is NOT an error: several distinct symbols_id rows sharing $3's
-// name is ordinary data (docs/cli-spec.md:531-535, three `Login`s in three
+// name is ordinary data (docs/cli-spec.md:528-533, three `Login`s in three
 // files), so this returns every match, not just one.
 //
 // Ordered by file, then line (NULLS LAST for file-level symbols, which
@@ -372,7 +379,7 @@ type LookupSymbolsByNameParams struct {
 //
 // Callers pass limit+1 (this package's fetchLimit convention) so the Store
 // can detect truncation itself, exactly as Dependents/Deps/History do --
-// docs/cli-spec.md:537-539 requires `truncated: true` in the envelope for
+// docs/cli-spec.md:535-537 requires `truncated: true` in the envelope for
 // every graph subquery's capped response, not only the blast-radius ones.
 func (q *Queries) LookupSymbolsByName(ctx context.Context, arg LookupSymbolsByNameParams) ([]Symbol, error) {
 	rows, err := q.db.Query(ctx, lookupSymbolsByName,

@@ -340,7 +340,7 @@ func TestLookupSymbolsByName_ClampsNonPositiveLimitToDefaultThenFetchesOneMore(t
 // TestLookupSymbolsByName_TrimsToLimitAndReportsTruncated proves the
 // truncation contract this bead adds: given more rows than the caller's
 // limit, LookupSymbolsByName must trim to exactly limit and report
-// truncated=true -- the same signal docs/cli-spec.md:537-539 requires for
+// truncated=true -- the same signal docs/cli-spec.md:535-537 requires for
 // every graph subquery's capped response, not only Dependents/Deps/History.
 func TestLookupSymbolsByName_TrimsToLimitAndReportsTruncated(t *testing.T) {
 	t.Parallel()
@@ -402,7 +402,7 @@ func TestLookupSymbolsByName_ZeroRowsIsNotAnError(t *testing.T) {
 
 // TestLookupSymbolsByName_MultipleMatchesReturnedAsData proves ambiguity
 // (several distinct symbols sharing a name) comes back as multiple rows,
-// not an error -- docs/cli-spec.md:531-535's "ambiguous target is data,
+// not an error -- docs/cli-spec.md:528-533's "ambiguous target is data,
 // not an error".
 func TestLookupSymbolsByName_MultipleMatchesReturnedAsData(t *testing.T) {
 	t.Parallel()
