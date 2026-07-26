@@ -16,10 +16,10 @@ var errNotFound = errors.New("work branch not found")
 // errIllegalTransition is returned when a transition method's guarded
 // UPDATE matches zero rows because the work branch's CURRENT state (or
 // conflict value) does not permit the requested move -- e.g. calling
-// UpdateState to jump straight from draft to reviewed, or FlagConflict on
-// a branch that is not draft/conflict-free. The guard and the write are
-// one atomic SQL statement (internal/db/queries/work_branches.sql), so
-// this is never a race: the row was actually read and rejected by
+// UpdateState to jump straight from draft to reviewed, or MarkConflicted
+// on a branch that is already complete/closed. The guard and the write
+// are one atomic SQL statement (internal/db/queries/work_branches.sql),
+// so this is never a race: the row was actually read and rejected by
 // Postgres in the same statement that would have written it.
 var errIllegalTransition = errors.New("illegal work branch state transition")
 
