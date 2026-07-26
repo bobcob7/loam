@@ -83,11 +83,21 @@ func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name stri
 // production migration set (so this test proves Reporter against the
 // authoritative schema, not a hand-copied one) and returns a connected pool,
 // registering cleanup.
+//
+// Uses pgvector/pgvector:pg16, not plain postgres:16-alpine: since wave 4's
+// 0002_code_intel migration landed, migrations.Migrate unconditionally runs
+// `CREATE EXTENSION IF NOT EXISTS vector` for every caller regardless of
+// which tables it cares about, and plain postgres:16-alpine has no `vector`
+// extension to create at all (loam-ax1 found this pre-existing breakage
+// while adding this file's scheduler-composition test; internal/db/
+// migrations and internal/db already made the same switch for the same
+// reason -- see internal/db/migrations/code_intel_integration_test.go's
+// pgvectorImage doc comment).
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := t.Context()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	container, err := postgres.Run(ctx, "pgvector/pgvector:pg16",
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
