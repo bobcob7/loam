@@ -1,0 +1,379 @@
+package codegraph
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/bobcob7/loam/internal/db/gen"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+// defaultLimit bounds the number of rows Dependents/Deps/History return
+// when the caller passes a non-positive limit, so a careless call can never
+// issue an effectively unbounded query. This is a pagination default, NOT a
+// cycle-safety measure -- the CYCLE clause in Dependents/Deps
+// (internal/db/queries/code_graph.sql) is what makes those queries
+// terminate at all; this constant only caps how many of the (already
+// finite) results come back over the wire.
+const defaultLimit = 1000
+
+// SymbolInput is one freshly parsed symbol awaiting insertion. Line is nil
+// for a file-level symbol (docs/persistence-spec.md "symbols": "line (null
+// for file-level)").
+type SymbolInput struct {
+	Line *int32
+	Name string
+	Kind string
+}
+
+// Symbol is a persisted symbols row.
+type Symbol struct {
+	ID           uuid.UUID
+	RepoID       uuid.UUID
+	TargetBranch string
+	File         string
+	Line         *int32
+	Name         string
+	Kind         string
+}
+
+// ReferenceInput is one freshly parsed, unresolved reference awaiting
+// insertion.
+type ReferenceInput struct {
+	Name string
+	Kind string
+	Line int32
+}
+
+// Dependency is one entry in a Dependents/Deps transitive result: the
+// reached symbol, plus the depth (hop count) at which it was first
+// reached. Depth is informational only -- it plays no part in cycle
+// termination, which the CYCLE clause enforces independently of it.
+type Dependency struct {
+	Symbol Symbol
+	Depth  int32
+}
+
+// HistoryEntryInput is one symbol_history row awaiting insertion, derived
+// from git (docs/ingestion-spec.md "Symbol history").
+type HistoryEntryInput struct {
+	SymbolID uuid.UUID
+	Commit   string
+	Ref      string
+	Message  string
+}
+
+// HistoryEntry is a persisted symbol_history row.
+type HistoryEntry struct {
+	ID       uuid.UUID
+	SymbolID uuid.UUID
+	Commit   string
+	Ref      string
+	Message  string
+}
+
+// Store implements the code-graph stores over symbols, symbol_references,
+// graph_edges, and symbol_history. Every method that mutates more than one
+// row expects the caller to have already decided the transactional scope:
+// Store itself opens no transaction and commits nothing -- construct it
+// over gen.New(tx) for callers that need e.g. ReplaceFileSymbols and a
+// subsequent RecomputeGraphEdges to land atomically (docs/ingestion-spec.md
+// "Consistency & Failure": "Each ingest is one transaction"), or over
+// gen.New(pool) for standalone reads/writes.
+type Store struct {
+	q      querier
+	logger *slog.Logger
+}
+
+// New builds a Store backed by q, typically a *gen.Queries.
+func New(q querier, logger *slog.Logger) *Store {
+	return &Store{q: q, logger: logger}
+}
+
+// ReplaceFileSymbols performs one file's delete-and-replace
+// (docs/ingestion-spec.md "Incremental Build"): every existing symbols row
+// for (repoID, targetBranch, file) is dropped, then symbols is
+// bulk-inserted with a fresh uuid.NewV7 id per row, in that order. It
+// returns the inserted rows (with their assigned ids) so a caller can
+// immediately reference them, e.g. to attach symbol_history. Passing an
+// empty symbols slice deletes the file's existing symbols and inserts
+// nothing -- the correct behavior for a file that no longer declares any
+// symbols (docs/ingestion-spec.md "Deleted / renamed-away files").
+func (s *Store) ReplaceFileSymbols(ctx context.Context, repoID uuid.UUID, targetBranch, file string, symbols []SymbolInput) ([]Symbol, error) {
+	if err := s.q.DeleteSymbolsForFile(ctx, gen.DeleteSymbolsForFileParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+		File:         file,
+	}); err != nil {
+		return nil, fmt.Errorf("deleting symbols for %s@%s:%s: %w", repoID, targetBranch, file, err)
+	}
+	if len(symbols) == 0 {
+		return nil, nil
+	}
+	inserted := make([]Symbol, len(symbols))
+	params := make([]gen.InsertSymbolsParams, len(symbols))
+	for i, sym := range symbols {
+		id := uuid.Must(uuid.NewV7())
+		params[i] = gen.InsertSymbolsParams{
+			ID:           pgUUID(id),
+			RepoID:       pgUUID(repoID),
+			TargetBranch: targetBranch,
+			File:         file,
+			Line:         pgInt4(sym.Line),
+			Name:         sym.Name,
+			Kind:         sym.Kind,
+		}
+		inserted[i] = Symbol{ID: id, RepoID: repoID, TargetBranch: targetBranch, File: file, Line: sym.Line, Name: sym.Name, Kind: sym.Kind}
+	}
+	if _, err := s.q.InsertSymbols(ctx, params); err != nil {
+		return nil, fmt.Errorf("inserting symbols for %s@%s:%s: %w", repoID, targetBranch, file, err)
+	}
+	s.logger.DebugContext(ctx, "replaced file symbols", "repo_id", repoID, "target_branch", targetBranch, "file", file, "count", len(inserted))
+	return inserted, nil
+}
+
+// ReplaceFileReferences performs one file's delete-and-replace for
+// symbol_references, mirroring ReplaceFileSymbols. It returns the number of
+// references inserted.
+func (s *Store) ReplaceFileReferences(ctx context.Context, repoID uuid.UUID, targetBranch, file string, refs []ReferenceInput) (int64, error) {
+	if err := s.q.DeleteSymbolReferencesForFile(ctx, gen.DeleteSymbolReferencesForFileParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+		File:         file,
+	}); err != nil {
+		return 0, fmt.Errorf("deleting symbol references for %s@%s:%s: %w", repoID, targetBranch, file, err)
+	}
+	if len(refs) == 0 {
+		return 0, nil
+	}
+	params := make([]gen.InsertSymbolReferencesParams, len(refs))
+	for i, ref := range refs {
+		params[i] = gen.InsertSymbolReferencesParams{
+			ID:           pgUUID(uuid.Must(uuid.NewV7())),
+			RepoID:       pgUUID(repoID),
+			TargetBranch: targetBranch,
+			File:         file,
+			Name:         ref.Name,
+			Kind:         ref.Kind,
+			Line:         ref.Line,
+		}
+	}
+	count, err := s.q.InsertSymbolReferences(ctx, params)
+	if err != nil {
+		return 0, fmt.Errorf("inserting symbol references for %s@%s:%s: %w", repoID, targetBranch, file, err)
+	}
+	s.logger.DebugContext(ctx, "replaced file references", "repo_id", repoID, "target_branch", targetBranch, "file", file, "count", count)
+	return count, nil
+}
+
+// RecomputeGraphEdges rebuilds graph_edges for (repoID, targetBranch) from
+// scratch (docs/persistence-spec.md "graph_edges": "Recomputed each
+// ingest"): every existing edge for the repo/branch is deleted, then
+// candidates are resolved by name from the current symbols/symbol_references
+// rows and bulk-inserted with a fresh uuid.NewV7 id per edge. It returns
+// the number of edges inserted. Callers that need this atomic with the
+// symbol/reference replacement that precedes it must construct Store over
+// a transaction-scoped querier (see Store's doc comment).
+func (s *Store) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+	if err := s.q.DeleteGraphEdgesForRepoBranch(ctx, gen.DeleteGraphEdgesForRepoBranchParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+	}); err != nil {
+		return 0, fmt.Errorf("deleting graph edges for %s@%s: %w", repoID, targetBranch, err)
+	}
+	candidates, err := s.q.ResolveGraphEdgeCandidates(ctx, gen.ResolveGraphEdgeCandidatesParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("resolving graph edge candidates for %s@%s: %w", repoID, targetBranch, err)
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+	params := make([]gen.InsertGraphEdgesParams, len(candidates))
+	for i, c := range candidates {
+		params[i] = gen.InsertGraphEdgesParams{
+			ID:           pgUUID(uuid.Must(uuid.NewV7())),
+			RepoID:       pgUUID(repoID),
+			TargetBranch: targetBranch,
+			FromSymbolID: c.FromSymbolID,
+			ToSymbolID:   c.ToSymbolID,
+			Kind:         "dependency",
+		}
+	}
+	count, err := s.q.InsertGraphEdges(ctx, params)
+	if err != nil {
+		return 0, fmt.Errorf("inserting graph edges for %s@%s: %w", repoID, targetBranch, err)
+	}
+	s.logger.DebugContext(ctx, "recomputed graph edges", "repo_id", repoID, "target_branch", targetBranch, "count", count)
+	return count, nil
+}
+
+// Dependents returns the reverse blast radius of symbolID: every symbol
+// that transitively depends on it, deduplicated, nearest-depth-first, up to
+// limit rows (limit <= 0 uses defaultLimit). See the package doc comment
+// for the cycle-safety guarantee this relies on.
+func (s *Store) Dependents(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) ([]Dependency, error) {
+	rows, err := s.q.Dependents(ctx, gen.DependentsParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+		ToSymbolID:   pgUUID(symbolID),
+		Limit:        clampLimit(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying dependents of %s: %w", symbolID, err)
+	}
+	return toDependents(rows), nil
+}
+
+// Deps returns the forward blast radius of symbolID: every symbol it
+// transitively depends on, deduplicated, nearest-depth-first, up to limit
+// rows (limit <= 0 uses defaultLimit). See the package doc comment for the
+// cycle-safety guarantee this relies on.
+func (s *Store) Deps(ctx context.Context, repoID uuid.UUID, targetBranch string, symbolID uuid.UUID, limit int32) ([]Dependency, error) {
+	rows, err := s.q.Deps(ctx, gen.DepsParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+		FromSymbolID: pgUUID(symbolID),
+		Limit:        clampLimit(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying deps of %s: %w", symbolID, err)
+	}
+	deps := make([]Dependency, len(rows))
+	for i, r := range rows {
+		deps[i] = Dependency{
+			Symbol: Symbol{
+				ID:           uuidFromPg(r.ID),
+				RepoID:       uuidFromPg(r.RepoID),
+				TargetBranch: r.TargetBranch,
+				File:         r.File,
+				Line:         fromPgInt4(r.Line),
+				Name:         r.Name,
+				Kind:         r.Kind,
+			},
+			Depth: r.Depth,
+		}
+	}
+	return deps, nil
+}
+
+// AppendSymbolHistory bulk-inserts symbol_history rows with a fresh
+// uuid.NewV7 id per entry (docs/ingestion-spec.md "Symbol history":
+// append-only, derived from git at ingest). It returns the number of rows
+// inserted.
+func (s *Store) AppendSymbolHistory(ctx context.Context, entries []HistoryEntryInput) (int64, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	params := make([]gen.InsertSymbolHistoryParams, len(entries))
+	for i, e := range entries {
+		params[i] = gen.InsertSymbolHistoryParams{
+			ID:       pgUUID(uuid.Must(uuid.NewV7())),
+			SymbolID: pgUUID(e.SymbolID),
+			Commit:   e.Commit,
+			Ref:      e.Ref,
+			Message:  e.Message,
+		}
+	}
+	count, err := s.q.InsertSymbolHistory(ctx, params)
+	if err != nil {
+		return 0, fmt.Errorf("appending symbol history: %w", err)
+	}
+	s.logger.DebugContext(ctx, "appended symbol history", "count", count)
+	return count, nil
+}
+
+// History returns symbolID's history entries, most-recent-first, up to
+// limit rows (limit <= 0 uses defaultLimit).
+func (s *Store) History(ctx context.Context, symbolID uuid.UUID, limit int32) ([]HistoryEntry, error) {
+	rows, err := s.q.SymbolHistory(ctx, gen.SymbolHistoryParams{
+		SymbolID: pgUUID(symbolID),
+		Limit:    clampLimit(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying history for symbol %s: %w", symbolID, err)
+	}
+	entries := make([]HistoryEntry, len(rows))
+	for i, r := range rows {
+		entries[i] = HistoryEntry{
+			ID:       uuidFromPg(r.ID),
+			SymbolID: uuidFromPg(r.SymbolID),
+			Commit:   r.Commit,
+			Ref:      r.Ref,
+			Message:  r.Message,
+		}
+	}
+	return entries, nil
+}
+
+// toDependents converts Dependents rows to the exported Dependency type.
+// Deps has an identical row shape but a distinct generated type
+// (gen.DepsRow vs gen.DependentsRow), so it converts inline in Deps rather
+// than sharing this helper.
+func toDependents(rows []gen.DependentsRow) []Dependency {
+	deps := make([]Dependency, len(rows))
+	for i, r := range rows {
+		deps[i] = Dependency{
+			Symbol: Symbol{
+				ID:           uuidFromPg(r.ID),
+				RepoID:       uuidFromPg(r.RepoID),
+				TargetBranch: r.TargetBranch,
+				File:         r.File,
+				Line:         fromPgInt4(r.Line),
+				Name:         r.Name,
+				Kind:         r.Kind,
+			},
+			Depth: r.Depth,
+		}
+	}
+	return deps
+}
+
+// clampLimit applies defaultLimit to a non-positive caller-supplied limit.
+// This is a pagination safeguard only; see defaultLimit's doc comment.
+func clampLimit(limit int32) int32 {
+	if limit <= 0 {
+		return defaultLimit
+	}
+	return limit
+}
+
+// pgUUID converts a uuid.UUID to the pgtype.UUID sqlc-generated params
+// expect.
+func pgUUID(id uuid.UUID) pgtype.UUID {
+	return pgtype.UUID{Bytes: id, Valid: true}
+}
+
+// uuidFromPg converts a pgtype.UUID scanned off a NOT NULL uuid column back
+// to uuid.UUID. Every id/foreign-key column this package reads is NOT
+// NULL, so a non-Valid value here indicates driver/schema corruption, not a
+// legitimate null -- it converts to the zero uuid.UUID rather than panic.
+func uuidFromPg(id pgtype.UUID) uuid.UUID {
+	if !id.Valid {
+		return uuid.UUID{}
+	}
+	return id.Bytes
+}
+
+// pgInt4 converts symbols.line's nullable Go representation (*int32) to
+// pgtype.Int4.
+func pgInt4(line *int32) pgtype.Int4 {
+	if line == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: *line, Valid: true}
+}
+
+// fromPgInt4 converts a scanned pgtype.Int4 back to symbols.line's nullable
+// Go representation.
+func fromPgInt4(v pgtype.Int4) *int32 {
+	if !v.Valid {
+		return nil
+	}
+	line := v.Int32
+	return &line
+}
