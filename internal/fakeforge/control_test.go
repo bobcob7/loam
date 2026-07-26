@@ -140,11 +140,14 @@ func TestControlClosePROverHTTP(t *testing.T) {
 	assert.Equal(t, "closed", state)
 }
 
-// TestControlClosePROnMergedIsNoOp covers the control API's direct-on-forge
-// ClosePR (as opposed to the provider REST path Client.ClosePR exercises):
-// closing a PR that a prior /control/merge-pr already merged must leave its
-// state as "merged", the same guard handleProviderClosePR applies.
-func TestControlClosePROnMergedIsNoOp(t *testing.T) {
+// TestControlClosePROnMergedIsRejected covers the control API's
+// direct-on-forge ClosePR (as opposed to the provider REST path
+// Client.ClosePR exercises): closing a PR that a prior /control/merge-pr
+// already merged must be rejected with a 412, the same guard
+// handleProviderClosePR applies to the provider REST path, per Forgejo
+// 9.0.3's verified behavior of rejecting a close on a merged PR rather
+// than absorbing it as a no-op.
+func TestControlClosePROnMergedIsRejected(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
 	srv, ts := newTestServer(t)
@@ -158,10 +161,10 @@ func TestControlClosePROnMergedIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, srv.MergePR(ctx, "acme/widgets", number))
 	resp := postControl(t, ts, "/control/close-pr", prActionRequest{Repo: "acme/widgets", Number: number})
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusPreconditionFailed, resp.StatusCode)
 	state, err := client.GetPRState(ctx, "acme/widgets", number)
 	require.NoError(t, err)
-	assert.Equal(t, "merged", state, "closing an already-merged PR through the control API must not regress its state")
+	assert.Equal(t, "merged", state, "the rejected close through the control API must not regress the PR's state")
 }
 
 func TestMergePRThreeWay(t *testing.T) {

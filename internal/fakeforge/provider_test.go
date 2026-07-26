@@ -207,14 +207,15 @@ func TestCreatePRTwiceForSameHeadTargetFailsNonIdempotentCaller(t *testing.T) {
 	assert.NotEqual(t, 0, firstNumber)
 }
 
-// TestProviderClosePRMergedIsNoOp covers the third defect: closing a PR that
-// has already merged must not flip it to "closed", since real Forgejo's
-// issue model treats a merged PR as permanently concluded rather than a
-// re-closeable open issue. This matters for loam-giq.8's best-effort
-// close-after-merge path: if sync detects the merge and defensively closes
-// the same PR, the recorded state must still read "merged" afterward, not
-// regress to "closed".
-func TestProviderClosePRMergedIsNoOp(t *testing.T) {
+// TestProviderClosePRMergedIsRejected covers the third defect: closing a PR
+// that has already merged must not flip it to "closed". Verified against
+// Forgejo 9.0.3, PATCH .../pulls/{merged} {"state":"closed"} returns 412
+// Precondition Failed with state unchanged — merging is a one-way
+// transition, not a form of "already closed" that a later close silently
+// absorbs. loam-giq.8's best-effort close-after-merge path must special-
+// case errPRMerged rather than assume the fake (or a real forge) treats
+// this as success.
+func TestProviderClosePRMergedIsRejected(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
 	srv, ts := newTestServer(t)
@@ -231,11 +232,13 @@ func TestProviderClosePRMergedIsNoOp(t *testing.T) {
 	state, err := client.GetPRState(ctx, "acme/widgets", number)
 	require.NoError(t, err)
 	require.Equal(t, "merged", state)
-	require.NoError(t, client.ClosePR(ctx, "acme/widgets", number))
+	err = client.ClosePR(ctx, "acme/widgets", number)
+	require.Error(t, err, "closing an already-merged PR must be rejected, not silently succeed")
+	assert.ErrorIs(t, err, errPRMerged)
 	state, err = client.GetPRState(ctx, "acme/widgets", number)
 	require.NoError(t, err)
-	assert.Equal(t, "merged", state, "closing an already-merged PR must not regress its state")
-	assert.Equal(t, mergedTip, branchSHA(t, srv, "acme/widgets", "main"), "closing must not touch git state")
+	assert.Equal(t, "merged", state, "the rejected close must not regress the PR's state")
+	assert.Equal(t, mergedTip, branchSHA(t, srv, "acme/widgets", "main"), "the rejected close must not touch git state")
 }
 
 func TestClientGitCredentials(t *testing.T) {

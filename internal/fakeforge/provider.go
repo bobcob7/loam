@@ -106,11 +106,12 @@ func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleProviderClosePR asks the forge to close a PR without merging it.
-// A PR that is already merged is left alone rather than flipped to
-// "closed": real Forgejo's issue model treats a merged PR's issue as
-// already closed and sticky, so a later close request against it is a
-// no-op, not an error, matching the best-effort close-after-merge path
-// Loam's sync uses when it races a forge-side merge (loam-giq.8).
+// A PR that is already merged rejects the close with errPRMerged (412)
+// instead of transitioning: verified against Forgejo 9.0.3, PATCH
+// .../pulls/{merged} {"state":"closed"} returns 412 Precondition Failed
+// with state unchanged — merging is a one-way transition, not a form of
+// "already closed." loam-giq.8's best-effort close-after-merge path must
+// special-case this error rather than rely on the fake silently no-oping.
 func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	if !s.requireProviderAuth(w, r) {
 		return
@@ -124,9 +125,12 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, errPRNotFound)
 		return
 	}
-	if pr.state != "merged" {
-		s.prs.setState(req.Repo, req.Number, "closed")
+	if pr.state == "merged" {
+		err := fmt.Errorf("closing pr %s#%d: %w", req.Repo, req.Number, errPRMerged)
+		writeJSONError(w, statusForErr(errPRMerged), err)
+		return
 	}
+	s.prs.setState(req.Repo, req.Number, "closed")
 	w.WriteHeader(http.StatusNoContent)
 }
 

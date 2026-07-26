@@ -146,6 +146,7 @@ func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
 		{"errBranchNotFound", errBranchNotFound, nil},
 		{"errPRNotFound", errPRNotFound, nil},
 		{"errPRExists", errPRExists, nil},
+		{"errPRMerged", errPRMerged, nil},
 		{"errInvalidBranch", errInvalidBranch, nil},
 		{"errMergeConflict", errMergeConflict, nil},
 		{"errGitUnavailable", errGitUnavailable, nil},
