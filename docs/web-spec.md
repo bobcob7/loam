@@ -14,7 +14,7 @@ path.
 
 | Path | Handler | Auth |
 | --- | --- | --- |
-| `/loam.v1.*` | CLI Connect services (WorkBranch, Repo, Graph, Search, Meta) | agent identity headers (MVP: trusted) **or** admin basic auth |
+| `/loam.v1.*` | CLI Connect services (WorkBranch, Repo, Graph, Search, Meta) | a complete set of agent identity headers (MVP: trusted, not verified) **or** admin basic auth — neither present is rejected `401` |
 | `/loam.admin.v1.*` | admin-only Connect services | admin basic auth |
 | `/git/*` | git smart HTTP — clone/fetch/push (`docs/git-spec.md`) | agent identity headers **only** (MVP: trusted) |
 | everything else (`/`, assets) | embedded static SPA (fallback to `index.html`) | admin basic auth |
@@ -37,11 +37,30 @@ request-review) rather than duplicating them. Agents (identity headers only) can
   provided on server startup (see README → Web Interface → Auth). A single admin credential
   is sufficient for the MVP. Basic-auth middleware wraps the admin RPC paths and all static
   content.
-- **Agents** (`/loam.v1.*`): identity via `LOAM_AGENT_*` headers, trusted in the MVP (no
-  authentication). These paths accept agent identity headers; they also accept admin basic
-  auth so the web UI (a superuser) can call them.
+- **Agents** (`/loam.v1.*`): identity via `LOAM_AGENT_*` headers, trusted in the MVP —
+  meaning the headers are not cryptographically verified, **not** that they are optional.
+  These paths accept agent identity headers; they also accept admin basic auth so the web
+  UI (a superuser) can call them.
+- **A `/loam.v1.*` request must carry either valid admin basic auth or a complete set of
+  the three `Loam-Agent-*` headers. Carrying neither is rejected `401 Unauthorized` (with a
+  `WWW-Authenticate` challenge) before the request reaches any handler** (`loam-gcg`,
+  decided by the repo owner 2026-07-25: there is no legitimate use-case for an
+  unauthenticated request here, since every CLI client sets all five `LOAM_AGENT_*` env
+  vars — `docs/cli-spec.md`). 401 is chosen over 403 because it matches the response the
+  CLI already gets for a presented-but-invalid basic credential on this same path group,
+  keeping the "credential rejected" experience uniform regardless of which credential was
+  missing or wrong; contrast `/git/*` below, which prefers 403 so unconfigured git clients
+  fail fast rather than being prompted for credentials that would never help. An incomplete
+  set of agent headers (e.g. only `Loam-Agent-Name`) is treated as absent, not as a partial
+  identity. This applies uniformly across `/loam.v1.*`, including to the capability-ungated
+  `instructions` and `whoami` RPCs (see RoleService below): ungated means they skip the capability
+  check, not that they are reachable without an identity at all.
 - The two regimes are split purely by path prefix: the web is unreachable to an agent that
   only carries identity headers, and the CLI API never prompts for basic auth.
+- **Health** (`GET /healthz`, `GET /readyz`): unauthenticated — the only such exemption
+  (`docs/server-spec.md`). These are not part of the `/loam.v1.*` Connect-service path
+  group at all, so the exemption is a routing fact (they are registered as their own
+  handlers, not behind the CLI auth wrapper), not a special case inside this middleware.
 - **Git (`/git/*`)**: the same trusted agent identity headers as `/loam.v1.*`, written
   into each clone's config by `loam clone` so plain git carries them; the server's ref
   policy authorizes pushes at receive time (`docs/git-spec.md`). Admin basic auth is
