@@ -91,6 +91,22 @@ var sharedPool *pgxpool.Pool
 // package, applies the production migration set once so the container is
 // usable even if Go's test scheduler ever changed which test runs first,
 // runs every test, then tears the container down.
+//
+// LOAM_DEMO_KEEP_CONTAINER=1 (loam-ejr, `task demo:m1`) skips that teardown
+// and instead prints the container's id and resolved DSN to stdout on
+// well-known marker lines, so a wrapping shell step can capture them and
+// `docker exec` a psql peek at the seeded rows AFTER this process exits --
+// testcontainers-go owns the container's lifecycle inside this binary, so
+// there is no way to peek from outside while it is still running this
+// suite. The container is NOT left to ryuk in this mode: ryuk is disabled
+// on this repo's podman setups (TESTCONTAINERS_RYUK_DISABLED=true, see
+// Taskfile.yml's test:integration desc), so on a developer machine ryuk
+// is not running at all and would never reap it. `task demo:m1` reads the
+// printed LOAM_DEMO_CONTAINER_ID line and issues its own `docker rm -f`
+// once the psql peek finishes, so the keep flag never causes a real leak
+// when driven through the task -- only a manual, non-Taskfile invocation
+// of this test binary with the env var set would leak, and that risk is
+// documented at the call site (Taskfile.yml).
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -119,6 +135,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	if sharedPool != nil {
 		sharedPool.Close()
+	}
+	if os.Getenv("LOAM_DEMO_KEEP_CONTAINER") == "1" {
+		fmt.Println("=== LOAM_DEMO_KEEP_CONTAINER=1: skipping teardown for the psql peek ===")
+		fmt.Println("LOAM_DEMO_CONTAINER_ID=" + container.GetContainerID())
+		fmt.Println("LOAM_DEMO_DSN=" + dsn)
+		os.Exit(code)
 	}
 	if err := container.Terminate(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "terminating shared pgvector container:", err)

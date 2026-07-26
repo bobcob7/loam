@@ -40,6 +40,70 @@ tasks:
     cmds:
       - go test -tags=integration ./...
 
+  demo:m1:
+    desc: >-
+      Demo M1 (loam-ejr): run the store integration suite (loam-li0.6,
+      internal/storesuite) live against a real pgvector container, then
+      peek at the rows it seeded via psql. Needs only Docker (or a
+      Docker-API-compatible daemon) and the Go toolchain -- migrations are
+      applied by the suite's own TestMain, no manual DB setup. On podman,
+      export TESTCONTAINERS_RYUK_DISABLED=true yourself before running this
+      (same podman-only workaround `task test:integration` documents; do
+      NOT set it against a real Docker daemon, where ryuk is the reaper
+      backstop -- see .github/workflows/ci.yml's `integration` job). This
+      target does not export that var itself, so it can never silently
+      disable ryuk on a host where ryuk actually works.
+      Container discipline: this keeps the suite's one shared container
+      alive past the test binary's exit (LOAM_DEMO_KEEP_CONTAINER=1, see
+      internal/storesuite/main_integration_test.go) only long enough to
+      `docker exec` a psql peek at its seeded rows -- no host psql install
+      needed. ryuk is NOT a usable backstop for that kept container on
+      podman setups (it runs disabled there), so this target does not rely
+      on it: a trap on this script's exit always runs `docker rm -f`
+      against the container id the test process printed, whether the
+      suite passed, failed, or this script was interrupted.
+    cmds:
+      - |
+        set -u
+        output="$(mktemp)"
+        cleanup() {
+          local id
+          id="$(grep -m1 '^LOAM_DEMO_CONTAINER_ID=' "$output" 2>/dev/null | cut -d= -f2)"
+          if [ -n "${id:-}" ]; then
+            echo "=== demo:m1 cleanup: removing kept container $id ==="
+            if ! docker rm -f "$id" >/dev/null 2>&1; then
+              echo "demo:m1: WARNING -- could not remove container $id automatically; remove it manually: docker rm -f $id" >&2
+            fi
+          fi
+          rm -f "$output"
+        }
+        trap cleanup EXIT
+        CGO_ENABLED=1 LOAM_DEMO_KEEP_CONTAINER=1 go test -tags=integration -count=1 ./internal/storesuite/... -v > "$output" 2>&1
+        test_status=$?
+        cat "$output"
+        if [ "$test_status" -ne 0 ]; then
+          echo "demo:m1: store integration suite failed (exit $test_status) -- see output above" >&2
+          exit "$test_status"
+        fi
+        container_id="$(grep -m1 '^LOAM_DEMO_CONTAINER_ID=' "$output" | cut -d= -f2)"
+        if [ -z "$container_id" ]; then
+          echo "demo:m1: LOAM_DEMO_CONTAINER_ID not found in test output -- cannot run the psql peek" >&2
+          exit 1
+        fi
+        echo ""
+        echo "=== psql peek: seeded rows (docker exec into the kept pgvector container -- no host psql required) ==="
+        echo ""
+        echo "--- UNIQUE(round_id, reviewer) + derived round staleness (review_rounds/verdicts) ---"
+        docker exec "$container_id" psql -U loam -d loam -c "SELECT r.name AS repo, rr.number AS round, v.reviewer, v.outcome, (rr.number = (SELECT max(number) FROM review_rounds WHERE work_branch_id = wb.id)) AS is_current_round FROM verdicts v JOIN review_rounds rr ON rr.id = v.round_id JOIN work_branches wb ON wb.id = rr.work_branch_id JOIN repos r ON r.id = wb.repo_id WHERE r.name = 'group/demo-rounds-repo' ORDER BY rr.number;"
+        echo ""
+        echo "--- HNSW nearest-neighbour cosine distance on seeded vectors (chunks, distance from near.go) ---"
+        docker exec "$container_id" psql -U loam -d loam -c "WITH repo AS (SELECT id FROM repos WHERE name = 'group/demo-hnsw-repo'), origin AS (SELECT embedding FROM chunks, repo WHERE chunks.repo_id = repo.id AND file = 'near.go') SELECT file, ROUND((embedding <=> (SELECT embedding FROM origin))::numeric, 4) AS cosine_distance FROM chunks, repo WHERE chunks.repo_id = repo.id ORDER BY cosine_distance;"
+        echo ""
+        echo "--- dependents recursive CTE: mutual-recursion cycle edges (graph_edges/symbols) ---"
+        docker exec "$container_id" psql -U loam -d loam -c "SELECT s1.name AS from_symbol, s2.name AS to_symbol FROM graph_edges e JOIN symbols s1 ON s1.id = e.from_symbol_id JOIN symbols s2 ON s2.id = e.to_symbol_id JOIN repos r ON r.id = e.repo_id WHERE r.name = 'group/demo-cte-repo' ORDER BY s1.name;"
+        echo ""
+        echo "=== demo:m1 complete ==="
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:
