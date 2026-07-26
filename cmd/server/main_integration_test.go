@@ -165,7 +165,8 @@ func startServer(t *testing.T, databaseURL string) *runningServer {
 // no deterministic hook to drive an external OS process's startup with.
 func waitForReady(t *testing.T, addr string, stderr *bytes.Buffer) {
 	t.Helper()
-	client := &http.Client{Timeout: 200 * time.Millisecond}
+	client := newIsolatedHTTPClient(t)
+	client.Timeout = 200 * time.Millisecond
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("http://" + addr + "/healthz")
@@ -205,7 +206,7 @@ func getWithAuthorization(t *testing.T, addr, path, authorization string) (strin
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newIsolatedHTTPClient(t).Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
@@ -238,7 +239,7 @@ func TestServer_Root_ValidAdminAuth_ServesEmbeddedIndex(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "http://"+rs.addr+"/", nil)
 	require.NoError(t, err)
 	req.SetBasicAuth(testAdminUser, testAdminPassword)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newIsolatedHTTPClient(t).Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
@@ -254,7 +255,7 @@ func TestServer_Root_ValidAdminAuth_ServesEmbeddedIndex(t *testing.T) {
 // browser prompt.
 func TestServer_Root_NoCredentials_Returns401WithChallenge(t *testing.T) {
 	rs := startServer(t, newPostgres(t))
-	resp, err := http.Get("http://" + rs.addr + "/")
+	resp, err := newIsolatedHTTPClient(t).Get("http://" + rs.addr + "/")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)

@@ -23,16 +23,20 @@ import (
 // headers (docs/cli-spec.md -> Environment Variables) onto every request,
 // the way the real CLI does, so a test client can reach a /loam.v1.*
 // handler as an identified agent rather than being rejected 401 by
-// internal/httpauth.Auth.CLI before ever reaching it.
+// internal/httpauth.Auth.CLI before ever reaching it. base must be a
+// private transport (newIsolatedTransport), never http.DefaultTransport
+// -- see that helper's doc comment for why sharing it cross-contaminates
+// these start/stop-a-server tests (loam-nk6).
 type identityRoundTripper struct {
 	role string
+	base http.RoundTripper
 }
 
 func (rt identityRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Loam-Agent-Name", "ada-lovelace")
 	req.Header.Set("Loam-Agent-Id", "7")
 	req.Header.Set("Loam-Agent-Role", rt.role)
-	return http.DefaultTransport.RoundTrip(req)
+	return rt.base.RoundTrip(req)
 }
 
 func testConfigForRouter() config.Config {
@@ -78,7 +82,7 @@ func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 	router := buildRouter(testConfigForRouter(), nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
-	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author"}}, srv.URL)
+	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_, err := client.GetRepo(ctx, connect.NewRequest(&loamv1.GetRepoRequest{Repo: "bobcob7/doc-server"}))
@@ -114,7 +118,7 @@ func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 	router := buildRouter(testConfigForRouter(), pool)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
-	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author"}}, srv.URL)
+	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_, err := client.GetRepo(ctx, connect.NewRequest(&loamv1.GetRepoRequest{Repo: "bobcob7/doc-server"}))
@@ -136,7 +140,7 @@ func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 	router := buildRouter(testConfigForRouter(), pool)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
-	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author"}}, srv.URL)
+	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	_, err := client.GetInstructions(ctx, connect.NewRequest(&loamv1.GetInstructionsRequest{}))

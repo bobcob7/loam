@@ -18,12 +18,32 @@ import (
 // auth to every outgoing request. connect.NewClient has no per-call header
 // hook, so a real client (used below to prove the wire format against
 // connect-go itself, not just this package's own JSON assertions) needs
-// its auth injected at the http.Client's Transport instead.
-type authInjectingTransport struct{}
+// its auth injected at the http.Client's Transport instead. base must be
+// a private transport (newIsolatedTransport), never http.DefaultTransport
+// -- this package's tests start and stop real httptest.Server instances,
+// and http.DefaultTransport's process-global idle-connection pool lets a
+// later test's request reuse a pooled connection to an already-closed
+// server once the OS reissues its port, producing a bogus EOF or "http:
+// server closed idle connection" failure unrelated to either test
+// (loam-nk6).
+type authInjectingTransport struct {
+	base http.RoundTripper
+}
 
-func (authInjectingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+func (t authInjectingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.SetBasicAuth(testAdminUser, testAdminPassword)
-	return http.DefaultTransport.RoundTrip(r)
+	return t.base.RoundTrip(r)
+}
+
+// newIsolatedTransport returns an *http.Transport cloned from
+// http.DefaultTransport, with its own private idle-connection pool --
+// see authInjectingTransport's doc comment for why this package's real,
+// start/stop-a-server tests must never share http.DefaultTransport's.
+func newIsolatedTransport(t *testing.T) *http.Transport {
+	t.Helper()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	return transport
 }
 
 // TestRouter_UnregisteredCLIServicePrefix_GetAndPost proves loam-cjq's core
@@ -204,7 +224,7 @@ func TestRouter_UnregisteredCLIServicePrefix_RealConnectClientDecodesNotFound(t 
 	router := newTestRouter(t)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
-	hc := &http.Client{Transport: authInjectingTransport{}}
+	hc := &http.Client{Transport: authInjectingTransport{base: newIsolatedTransport(t)}}
 	client := connect.NewClient[loamv1.GetInstructionsRequest, loamv1.GetInstructionsResponse](
 		hc, srv.URL+"/loam.v1.NoSuchService/DoThing")
 	_, err := client.CallUnary(t.Context(), connect.NewRequest(&loamv1.GetInstructionsRequest{}))

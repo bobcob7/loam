@@ -118,7 +118,7 @@ func TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains(t *testing
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return after the background component finished draining")
 	}
 	assert.True(t, backgroundFinished())
@@ -133,12 +133,13 @@ func TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains(t *testing
 // wraps, or simply still busy) must not be allowed to hang shutdown
 // forever. serve is given a short grace period and a background runner
 // that blocks unconditionally; the assertion is that serve still returns
-// within a small bounded multiple of that grace period. A mutant that
-// replaced the bounded select (waiting on backgroundDone OR the grace
-// deadline) with an unconditional `<-backgroundDone` would hang this test
-// until its own outer timeout fires and fails it -- proving the mutation
-// is caught by assertion (a failed, bounded test) rather than by an
-// indefinite hang.
+// within a bounded ceiling well above that grace period -- the ceiling
+// here (100x grace) is deliberately loose, not "a small bounded
+// multiple": it exists only to fail the test rather than hang it forever,
+// and any finite value would equally catch the mutant this test targets
+// (replacing the bounded select -- backgroundDone OR the grace deadline
+// -- with an unconditional `<-backgroundDone`, which hangs forever
+// regardless of grace), so there is no correctness reason to tighten it.
 func TestServe_AbandonsBackgroundWaitAfterGracePeriodElapses(t *testing.T) {
 	t.Parallel()
 	listener := newTestListener(t)
@@ -176,7 +177,7 @@ func TestServe_StartsBackgroundComponentBeforeReturning(t *testing.T) {
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("serve did not return")
 	}
 	assert.NotEmpty(t, background.RunCalls(), "serve must start the background component")
@@ -211,14 +212,32 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	background, _ := newTrackedRunner(nil)
 	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	// grace and the bounds below are deliberately generous (not the 100ms-
-	// scale used in the grace-period-enforcement test): this test's
-	// property is that the drain completes correctly, not that it
-	// completes within any particular short window, so there is no
-	// correctness reason to keep them tight, and a wide margin avoids
-	// mistaking ordinary scheduling delay under a loaded test run (many
-	// concurrent containers/subprocesses elsewhere in this package) for a
-	// real failure.
+	// grace and the select bounds below are deliberately left at
+	// loam-ofg.21's widened values, NOT restored to their pre-ofg.21
+	// 5s/3s scale, even though loam-nk6's actual fix is the isolated
+	// client just below (newIsolatedHTTPClient, its own private
+	// transport, never sharing http.DefaultTransport's process-global
+	// idle-connection pool with every other test in this package -- that
+	// sharing is what produced the exact "EOF"/"http: server closed idle
+	// connection" signature loam-nk6 diagnosed). Verified empirically on
+	// this repo's own dev sandbox: even with the isolated client, and
+	// even at grace values well above the pre-ofg.21 baseline (5s, 10s,
+	// 20s all still produced occasional failures -- including plain EOF
+	// well inside the grace window, not just grace-exceeded timeouts --
+	// across repeated full-package `go test -race -count=10`), this test
+	// runs cleanly in isolation every time (50/50 at -count=50) but can
+	// still flake under this specific package's full parallel load (~8
+	// other tests binding real listeners concurrently under -race). That
+	// residual flakiness reproduces on unmodified main with its ORIGINAL
+	// bounds too (confirmed by re-running the pre-loam-nk6 code under the
+	// same conditions), so it predates this bead and is not something a
+	// bound chosen here can reliably close out. Since this test's own
+	// property genuinely does not depend on tight timing (a real drain
+	// regression fails the assertion, it does not merely run slow), there
+	// is no correctness upside to tightening further, and real downside
+	// (spurious failures) to doing so -- see loam-6ob, filed against this
+	// residual, load-dependent flake directly (out of loam-nk6's scope,
+	// since it reproduces on unmodified main too).
 	const grace = 30 * time.Second
 	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
 
@@ -227,8 +246,9 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 		err    error
 	}
 	requestResult := make(chan result, 1)
+	client := newIsolatedHTTPClient(t)
 	go func() {
-		resp, err := http.Get("http://" + addr + "/slow")
+		resp, err := client.Get("http://" + addr + "/slow")
 		if err != nil {
 			requestResult <- result{err: err}
 			return
@@ -297,7 +317,7 @@ func TestServe_ServeFailureCallsStopSoBackgroundStillDrains(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err, "Serve on an already-closed listener must surface an error")
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return within a bounded multiple of the grace period")
 	}
 	assert.True(t, backgroundFinished(), "background must have observed ctx cancellation -- on this branch, only serve's stop() call causes that")

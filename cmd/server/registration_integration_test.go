@@ -42,7 +42,7 @@ import (
 // CodeNotFound and could slip past a code-only assertion.
 func TestServer_RepoServiceIsRegistered_NotGroupFallback(t *testing.T) {
 	rs := startServer(t, newPostgres(t))
-	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author"}}, "http://"+rs.addr)
+	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, "http://"+rs.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := client.GetRepo(ctx, connect.NewRequest(&loamv1.GetRepoRequest{Repo: "bobcob7/never-enrolled"}))
@@ -67,7 +67,7 @@ func TestServer_RepoServiceIsRegistered_NotGroupFallback(t *testing.T) {
 // real, role-filtered command catalog, not a canned 404.
 func TestServer_MetaServiceIsRegistered_NotGroupFallback(t *testing.T) {
 	rs := startServer(t, newPostgres(t))
-	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author"}}, "http://"+rs.addr)
+	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, "http://"+rs.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := client.GetInstructions(ctx, connect.NewRequest(&loamv1.GetInstructionsRequest{}))
