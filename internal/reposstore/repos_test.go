@@ -116,18 +116,24 @@ func TestGetRepoByNameNotFoundMapsToErrNotFound(t *testing.T) {
 
 func TestListReposDefaultsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
+	// CountRepos deliberately returns a value (7) that disagrees with the
+	// single row ListRepos returns: if ListRepos ever ignored CountRepos
+	// and derived Total from len(repos) instead (a real mutation this
+	// caught), asserting Total == 1 would still pass. Asserting Total == 7
+	// only holds if Store.ListRepos actually plumbs CountRepos's result
+	// through, not the page length.
 	mock := &querierMock{
 		ListReposFunc: func(ctx context.Context, arg gen.ListReposParams) ([]gen.Repo, error) {
 			return []gen.Repo{genRepoFixture()}, nil
 		},
-		CountReposFunc: func(ctx context.Context) (int64, error) { return 1, nil },
+		CountReposFunc: func(ctx context.Context) (int64, error) { return 7, nil },
 	}
 	store := NewStore(mock, testLogger())
 	result, err := store.ListRepos(t.Context(), Page{})
 	require.NoError(t, err)
 	require.Len(t, mock.ListReposCalls(), 1)
 	assert.Equal(t, int32(defaultListLimit), mock.ListReposCalls()[0].Arg.Limit)
-	assert.Equal(t, 1, result.Total)
+	assert.Equal(t, 7, result.Total, "Total must come from CountRepos, not len(result.Repos)")
 	require.Len(t, result.Repos, 1)
 }
 
