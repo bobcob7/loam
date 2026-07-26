@@ -182,11 +182,14 @@ func TestIngestJobLifecycle_QueuedRunningSucceeded(t *testing.T) {
 // retry's outcome.
 //
 // DEFERRED-WIP: features/ingestion.feature:44-50 "A failed ingest keeps
-// the previous index" -> TestIngestJobLifecycle_Failed (partial: covers
-// only the "job is shown as failed with its error" step; the previous-
-// index/ingested-commit steps belong to loam-c94.12's orchestrator, not
-// this package). Behind //go:build integration; @wip not removed
-// (loam-li0.5's godog harness does not exist yet).
+// the previous index" -> TestIngestJobLifecycle_Failed (partial: proves
+// the persisted state the "job is shown as failed with its error" step
+// reads from -- status='failed' and the error text on the row -- not the
+// step itself, which is loam-c94.14's ListIngestJobs surfacing that row;
+// the previous-index/ingested-commit steps belong to loam-c94.12's
+// orchestrator. Neither of those two beads' territory is this package's).
+// Behind //go:build integration; @wip not removed (loam-li0.5's godog
+// harness does not exist yet).
 func TestIngestJobLifecycle_Failed(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -336,20 +339,30 @@ func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 //
 // This is a more consistent detector than the goroutine-count test above,
 // but it is still probabilistic, not deterministic, and the review round
-// that added it found a real, reproducible false negative: three runs of
-// the lock-removed mutation on different hardware measured ratios of
-// 0.75x-1.56x, straddling this test's 1.5x threshold (one of those three
-// runs passed at 1.56x -- the threshold sits inside the mutated
-// distribution's observed range, not cleanly below it). The same review
-// also measured the correct-code distribution as 1.8x-6x across repeated
-// runs on the original hardware and a separate 3.1x-3.4x under
-// GOMAXPROCS=2 with a full container load on the reviewer's hardware, so
-// the risk is asymmetric: false negatives (missing a real regression) are
-// the demonstrated weakness; false positives (flagging correct code) were
-// not observed. Do not read this test's pass as deterministic proof the
-// lock is present -- read a *failure* as a strong signal something is
-// wrong, and lean on the goroutine-count test and code review for the
-// cases this one's timing margin is too close to call.
+// that added it found a real, reproducible false negative. On the
+// reviewer's hardware, three runs of the lock-removed mutation measured
+// ratios of approximately 0.70x, 0.87x, and 1.56x -- straddling this
+// test's 1.5x threshold, so one of those three runs passed at 1.56x even
+// with the lock gone. Separately, six runs of the same mutation on the
+// original (author-side) hardware measured ratios of approximately
+// 0.64x-1.13x -- never near the threshold, so on that machine this test
+// failed 6/6, correctly. The mirror image is the strongest evidence
+// neither test can be deleted on one machine's say-so: on the reviewer's
+// hardware, this timing test passed the one mutated run at 1.56x, and the
+// goroutine-count test above caught exactly that run; on the author's
+// hardware, this timing test failed all six mutated runs, and the
+// goroutine-count test caught none of them. Each test's blind spot was
+// exactly where the other one's coverage landed, on different machines.
+// The same review measured the correct-code distribution as 1.8x-6x
+// across repeated runs on the original hardware and a separate 3.1x-3.4x
+// under GOMAXPROCS=2 with a full container load on the reviewer's
+// hardware, so the risk is asymmetric: false negatives (missing a real
+// regression) are the demonstrated weakness; false positives (flagging
+// correct code) were not observed on either machine. Do not read this
+// test's pass as deterministic proof the lock is present -- read a
+// *failure* as a strong signal something is wrong, and lean on the
+// goroutine-count test and code review for the cases this one's timing
+// margin is too close to call.
 func TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

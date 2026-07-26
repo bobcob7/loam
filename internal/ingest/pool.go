@@ -30,6 +30,15 @@ const (
 	defaultBackoffMax  = 5 * time.Minute
 )
 
+// minBackoffBase is the floor WithBackoff clamps a non-positive base to.
+// A zero or negative base means time.NewTimer fires immediately every
+// time (see scheduleRetry), so a permanently-failing job becomes an
+// unbounded hot loop against Postgres instead of a backoff; a negative
+// base also runs backoffDelay's doubling backwards. It is small enough
+// that a test harness driving features/ingestion.feature's "the job is
+// retried" step can still use it without a real wall-clock wait.
+const minBackoffBase = 1 * time.Millisecond
+
 // Pool is an in-process worker pool that claims queued ingest_jobs rows
 // and runs them through an injected Orchestrator, serialized per repo: at
 // most one job per repo_id runs at a time, regardless of pool size
@@ -65,8 +74,22 @@ type Option func(*Pool)
 
 // WithBackoff overrides the default exponential backoff bounds
 // (defaultBackoffBase, defaultBackoffMax) between a failed job's retry
-// attempts.
+// attempts. base below minBackoffBase is clamped up to it -- a
+// zero-or-negative base is not "retry immediately with a tiny delay", it
+// is an unbounded hot loop against Postgres for a permanently-failing job
+// (minBackoffBase's doc comment), and a negative base makes backoffDelay's
+// growth run backwards. max below base is clamped up to base, since a cap
+// smaller than the base delay is not a cap at all -- it would make every
+// attempt wait base regardless of what max says, silently ignoring the
+// caller's max. This mirrors NewPool's existing convention of clamping
+// workers < 1 to 1 rather than accepting a pool that cannot make progress.
 func WithBackoff(base, max time.Duration) Option {
+	if base < minBackoffBase {
+		base = minBackoffBase
+	}
+	if max < base {
+		max = base
+	}
 	return func(p *Pool) {
 		p.backoffBase = base
 		p.backoffMax = max
