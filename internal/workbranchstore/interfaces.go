@@ -43,7 +43,6 @@ type querier interface {
 	UpdateWorkBranchState(ctx context.Context, arg gen.UpdateWorkBranchStateParams) (gen.WorkBranch, error)
 	CloseWorkBranch(ctx context.Context, arg gen.CloseWorkBranchParams) (gen.WorkBranch, error)
 	CompleteWorkBranch(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
-	FlagWorkBranchConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
-	DemoteWorkBranchOnConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
+	MarkWorkBranchConflicted(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 	ClearWorkBranchConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 }

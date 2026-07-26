@@ -215,10 +215,12 @@ func (s *Store) SetTitleDescription(ctx context.Context, id uuid.UUID, title, de
 // UpdateState performs one of the ordinary, agent-facing lifecycle
 // transitions (docs/cli-spec.md "Its lifecycle"): draft -> reviewable
 // (request-review), reviewable -> reviewed (first verdict), reviewed ->
-// reviewable (re-review). Any other (from, to) pair -- including
+// reviewable (re-review). Both transitions into reviewable also require a
+// title and description to already be set (docs/cli-spec.md
+// "request-review"). Any other (from, to) pair -- including
 // reviewable/reviewed -> draft, -> complete, or -> closed -- is rejected
 // (errIllegalTransition): those are reached only through
-// DemoteOnConflict, Complete, and Close respectively, each of which
+// MarkConflicted, Complete, and Close respectively, each of which
 // carries bookkeeping (conflict, or close_reason) this generic method
 // does not.
 func (s *Store) UpdateState(ctx context.Context, id uuid.UUID, to State) (WorkBranch, error) {
@@ -255,32 +257,29 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID) (WorkBranch, error) 
 	return fromGenWorkBranch(row), nil
 }
 
-// FlagConflict records that a target-branch advance no longer merges
-// cleanly into a draft branch: "a draft branch just gains the flag"
-// (docs/git-spec.md "Target Advances & Catch-Up"). Only legal from
-// (state=draft, conflict=none); a branch already flagged, or one that is
-// reviewable/reviewed (which must demote instead, via DemoteOnConflict),
-// is rejected.
-func (s *Store) FlagConflict(ctx context.Context, id uuid.UUID) (WorkBranch, error) {
-	row, err := s.q.FlagWorkBranchConflict(ctx, pgUUID(id))
+// MarkConflicted records that a target-branch advance no longer merges
+// cleanly into id (docs/git-spec.md "Target Advances & Catch-Up"): a
+// draft branch just gains the flag (conflict -> flagged, state
+// untouched); a reviewable or reviewed branch is reset to draft AND
+// flagged in the same statement (conflict -> reset, state -> draft).
+//
+// This method is IDEMPOTENT and level-triggered, matching how the
+// mergeability checker actually calls it: it re-evaluates every open
+// (non-terminal) work branch on every target-branch advance, so the same
+// branch can be found still-conflicting on several advances in a row
+// before anyone catches it up. Calling MarkConflicted again on an
+// already-conflicted branch is a benign no-op (it never returns
+// errIllegalTransition for that reason alone), and it never downgrades an
+// existing 'reset' back to 'flagged' -- doing so would silently strand a
+// demoted branch merely-flagged, with no restore-to-reviewable path left
+// for ClearConflict. Only legal from a non-terminal state (draft,
+// reviewable, or reviewed); complete/closed reject.
+func (s *Store) MarkConflicted(ctx context.Context, id uuid.UUID) (WorkBranch, error) {
+	row, err := s.q.MarkWorkBranchConflicted(ctx, pgUUID(id))
 	if err != nil {
-		return WorkBranch{}, s.transitionErr(ctx, id, err, "flagging conflict on")
+		return WorkBranch{}, s.transitionErr(ctx, id, err, "marking conflicted")
 	}
-	s.logger.InfoContext(ctx, "flagged work branch conflict", "work_branch_id", id)
-	return fromGenWorkBranch(row), nil
-}
-
-// DemoteOnConflict records that a target-branch advance no longer merges
-// cleanly into a reviewable or reviewed branch: it is "reset to draft and
-// flagged as conflicted" (docs/git-spec.md "Target Advances & Catch-Up"),
-// state and conflict moving together in one statement. Only legal from
-// (state IN (reviewable, reviewed), conflict=none).
-func (s *Store) DemoteOnConflict(ctx context.Context, id uuid.UUID) (WorkBranch, error) {
-	row, err := s.q.DemoteWorkBranchOnConflict(ctx, pgUUID(id))
-	if err != nil {
-		return WorkBranch{}, s.transitionErr(ctx, id, err, "demoting on conflict")
-	}
-	s.logger.InfoContext(ctx, "demoted work branch on conflict", "work_branch_id", id)
+	s.logger.InfoContext(ctx, "marked work branch conflicted", "work_branch_id", id, "state", row.State, "conflict", row.Conflict)
 	return fromGenWorkBranch(row), nil
 }
 
@@ -307,14 +306,26 @@ func (s *Store) ClearConflict(ctx context.Context, id uuid.UUID) (WorkBranch, er
 // UPDATE (zero rows matched, not a transport failure), or the raw error
 // wrapped with context for anything else. verb names the attempted action
 // for the error message.
+//
+// The classification Get below can itself fail for a reason that is
+// neither "found" nor "not found" -- a dropped connection, a cancelled
+// context -- and errors.Is(getErr, pgx.ErrNoRows) is false in that case
+// too, same as it would be for a genuine row. That failure must NOT fall
+// through to errIllegalTransition (which would misreport a transport
+// problem as a precondition failure a caller could just accept and move
+// on from); it is reported as its own wrapped error instead.
 func (s *Store) transitionErr(ctx context.Context, id uuid.UUID, err error, verb string) error {
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%s work branch %s: %w", verb, id, err)
 	}
-	if _, getErr := s.q.GetWorkBranchByID(ctx, pgUUID(id)); errors.Is(getErr, pgx.ErrNoRows) {
+	_, getErr := s.q.GetWorkBranchByID(ctx, pgUUID(id))
+	if getErr == nil {
+		return fmt.Errorf("%s work branch %s: %w", verb, id, errIllegalTransition)
+	}
+	if errors.Is(getErr, pgx.ErrNoRows) {
 		return fmt.Errorf("%s work branch %s: %w", verb, id, errNotFound)
 	}
-	return fmt.Errorf("%s work branch %s: %w", verb, id, errIllegalTransition)
+	return fmt.Errorf("%s work branch %s: classifying failed transition: %w", verb, id, getErr)
 }
 
 // filterColumns converts a ListFilter to the five positional filter

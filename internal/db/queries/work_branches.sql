@@ -50,20 +50,34 @@ RETURNING *;
 -- author or the admin sending it back). Every other pair is deliberately
 -- absent from this guard and reached (if at all) through a dedicated
 -- method instead: reviewable/reviewed -> draft only through
--- DemoteWorkBranchOnConflict (which also stamps conflict = 'reset' in the
+-- MarkWorkBranchConflicted (which also stamps conflict = 'reset' in the
 -- same statement); -> complete only through CompleteWorkBranch ("There is
 -- no agent complete command" -- server-only, set when the upstream PR
 -- merges); -> closed only through CloseWorkBranch (admin-only, and it also
 -- records close_reason in the same statement). Splitting these out means
 -- this method's guard can never be widened by accident into a path that
 -- reaches complete/closed without their own bookkeeping.
+--
+-- Both transitions into reviewable also require a title and description
+-- to already be set (docs/cli-spec.md "request-review": "Requires a title
+-- and description to already be set (via set)"; the State gates table,
+-- ":289"/":300" in this file's own review notes). title/description are
+-- nullable columns that start out NULL (CreateWorkBranch never sets
+-- them) and, once set, are only ever written as a non-NULL, possibly
+-- empty string (SetWorkBranchTitleDescription's pgText always writes
+-- Valid: true, never SQL NULL) -- so both "never set" (NULL) and "set to
+-- empty" ('') must be checked; neither alone is enough.
 UPDATE work_branches
 SET state = $2, updated_at = now()
 WHERE id = $1
   AND (
-    (state = 'draft' AND $2::text = 'reviewable') OR
+    (state = 'draft' AND $2::text = 'reviewable'
+      AND title IS NOT NULL AND title <> ''
+      AND description IS NOT NULL AND description <> '') OR
     (state = 'reviewable' AND $2::text = 'reviewed') OR
-    (state = 'reviewed' AND $2::text = 'reviewable')
+    (state = 'reviewed' AND $2::text = 'reviewable'
+      AND title IS NOT NULL AND title <> ''
+      AND description IS NOT NULL AND description <> '')
   )
 RETURNING *;
 
@@ -85,24 +99,41 @@ SET state = 'complete', updated_at = now()
 WHERE id = $1 AND state IN ('reviewable', 'reviewed')
 RETURNING *;
 
--- name: FlagWorkBranchConflict :one
--- Target advance no longer merges cleanly, and the branch was draft: "a
--- draft branch just gains the flag" (docs/git-spec.md "Target Advances &
--- Catch-Up") -- state does not change, only conflict: none -> flagged.
+-- name: MarkWorkBranchConflicted :one
+-- The server's mergeability check re-evaluates EVERY open (non-terminal)
+-- work branch on every target-branch advance (docs/git-spec.md "Target
+-- Advances & Catch-Up": "the server tests each open (non-terminal) work
+-- branch against the new tip"). That is level-triggered, not
+-- edge-triggered: the same branch can be found still-conflicting on
+-- several advances in a row before anyone catches it up, so this method
+-- is idempotent -- calling it again on an already-conflicted branch is a
+-- benign no-op, never errIllegalTransition.
+--
+-- A draft branch just gains the flag (conflict -> flagged, state
+-- untouched); a reviewable/reviewed branch is reset to draft AND flagged
+-- in the SAME statement (conflict -> reset, state -> draft), so no reader
+-- ever observes conflict = 'reset' paired with a pre-demotion state. If
+-- the branch is ALREADY draft+reset (a prior demotion that has not caught
+-- up yet) and is found conflicting again, this call preserves 'reset'
+-- rather than downgrading it to 'flagged': 'reset' is what tells
+-- ClearWorkBranchConflict to restore the branch directly to reviewable
+-- ("the round was interrupted, not abandoned") -- silently losing that
+-- distinction on a second failed re-check would strand the branch as
+-- merely-flagged, with no restore-to-reviewable path left.
+--
+-- Guarded to state IN ('draft', 'reviewable', 'reviewed') -- the open,
+-- non-terminal states the mergeability check applies to at all; a
+-- complete/closed branch reaching this method is a caller bug, not a
+-- state this method silently accepts.
 UPDATE work_branches
-SET conflict = 'flagged', updated_at = now()
-WHERE id = $1 AND state = 'draft' AND conflict = 'none'
-RETURNING *;
-
--- name: DemoteWorkBranchOnConflict :one
--- Target advance no longer merges cleanly, and the branch was reviewable
--- or reviewed: it is "reset to draft and flagged as conflicted" in one
--- statement (docs/git-spec.md "Target Advances & Catch-Up") -- conflict:
--- none -> reset, state: reviewable/reviewed -> draft, together, so no
--- reader ever observes conflict = 'reset' paired with a pre-demotion state.
-UPDATE work_branches
-SET conflict = 'reset', state = 'draft', updated_at = now()
-WHERE id = $1 AND state IN ('reviewable', 'reviewed') AND conflict = 'none'
+SET conflict = CASE
+      WHEN state IN ('reviewable', 'reviewed') THEN 'reset'
+      WHEN conflict = 'reset' THEN 'reset'
+      ELSE 'flagged'
+    END,
+    state = CASE WHEN state IN ('reviewable', 'reviewed') THEN 'draft' ELSE state END,
+    updated_at = now()
+WHERE id = $1 AND state IN ('draft', 'reviewable', 'reviewed')
 RETURNING *;
 
 -- name: ClearWorkBranchConflict :one

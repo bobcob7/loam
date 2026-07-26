@@ -35,12 +35,6 @@ var _ querier = &querierMock{}
 //			CreateWorkBranchFunc: func(ctx context.Context, arg gen.CreateWorkBranchParams) (gen.WorkBranch, error) {
 //				panic("mock out the CreateWorkBranch method")
 //			},
-//			DemoteWorkBranchOnConflictFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
-//				panic("mock out the DemoteWorkBranchOnConflict method")
-//			},
-//			FlagWorkBranchConflictFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
-//				panic("mock out the FlagWorkBranchConflict method")
-//			},
 //			GetWorkBranchByIDFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
 //				panic("mock out the GetWorkBranchByID method")
 //			},
@@ -49,6 +43,9 @@ var _ querier = &querierMock{}
 //			},
 //			ListWorkBranchesFunc: func(ctx context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error) {
 //				panic("mock out the ListWorkBranches method")
+//			},
+//			MarkWorkBranchConflictedFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
+//				panic("mock out the MarkWorkBranchConflicted method")
 //			},
 //			SetWorkBranchTitleDescriptionFunc: func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error) {
 //				panic("mock out the SetWorkBranchTitleDescription method")
@@ -78,12 +75,6 @@ type querierMock struct {
 	// CreateWorkBranchFunc mocks the CreateWorkBranch method.
 	CreateWorkBranchFunc func(ctx context.Context, arg gen.CreateWorkBranchParams) (gen.WorkBranch, error)
 
-	// DemoteWorkBranchOnConflictFunc mocks the DemoteWorkBranchOnConflict method.
-	DemoteWorkBranchOnConflictFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
-
-	// FlagWorkBranchConflictFunc mocks the FlagWorkBranchConflict method.
-	FlagWorkBranchConflictFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
-
 	// GetWorkBranchByIDFunc mocks the GetWorkBranchByID method.
 	GetWorkBranchByIDFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 
@@ -92,6 +83,9 @@ type querierMock struct {
 
 	// ListWorkBranchesFunc mocks the ListWorkBranches method.
 	ListWorkBranchesFunc func(ctx context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error)
+
+	// MarkWorkBranchConflictedFunc mocks the MarkWorkBranchConflicted method.
+	MarkWorkBranchConflictedFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 
 	// SetWorkBranchTitleDescriptionFunc mocks the SetWorkBranchTitleDescription method.
 	SetWorkBranchTitleDescriptionFunc func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error)
@@ -136,20 +130,6 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.CreateWorkBranchParams
 		}
-		// DemoteWorkBranchOnConflict holds details about calls to the DemoteWorkBranchOnConflict method.
-		DemoteWorkBranchOnConflict []struct {
-			// Ctx is the ctx argument value.
-			Ctx context.Context
-			// ID is the id argument value.
-			ID pgtype.UUID
-		}
-		// FlagWorkBranchConflict holds details about calls to the FlagWorkBranchConflict method.
-		FlagWorkBranchConflict []struct {
-			// Ctx is the ctx argument value.
-			Ctx context.Context
-			// ID is the id argument value.
-			ID pgtype.UUID
-		}
 		// GetWorkBranchByID holds details about calls to the GetWorkBranchByID method.
 		GetWorkBranchByID []struct {
 			// Ctx is the ctx argument value.
@@ -171,6 +151,13 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.ListWorkBranchesParams
 		}
+		// MarkWorkBranchConflicted holds details about calls to the MarkWorkBranchConflicted method.
+		MarkWorkBranchConflicted []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID pgtype.UUID
+		}
 		// SetWorkBranchTitleDescription holds details about calls to the SetWorkBranchTitleDescription method.
 		SetWorkBranchTitleDescription []struct {
 			// Ctx is the ctx argument value.
@@ -191,11 +178,10 @@ type querierMock struct {
 	lockCompleteWorkBranch            sync.RWMutex
 	lockCountWorkBranches             sync.RWMutex
 	lockCreateWorkBranch              sync.RWMutex
-	lockDemoteWorkBranchOnConflict    sync.RWMutex
-	lockFlagWorkBranchConflict        sync.RWMutex
 	lockGetWorkBranchByID             sync.RWMutex
 	lockGetWorkBranchByName           sync.RWMutex
 	lockListWorkBranches              sync.RWMutex
+	lockMarkWorkBranchConflicted      sync.RWMutex
 	lockSetWorkBranchTitleDescription sync.RWMutex
 	lockUpdateWorkBranchState         sync.RWMutex
 }
@@ -380,78 +366,6 @@ func (mock *querierMock) CreateWorkBranchCalls() []struct {
 	return calls
 }
 
-// DemoteWorkBranchOnConflict calls DemoteWorkBranchOnConflictFunc.
-func (mock *querierMock) DemoteWorkBranchOnConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
-	if mock.DemoteWorkBranchOnConflictFunc == nil {
-		panic("querierMock.DemoteWorkBranchOnConflictFunc: method is nil but querier.DemoteWorkBranchOnConflict was just called")
-	}
-	callInfo := struct {
-		Ctx context.Context
-		ID  pgtype.UUID
-	}{
-		Ctx: ctx,
-		ID:  id,
-	}
-	mock.lockDemoteWorkBranchOnConflict.Lock()
-	mock.calls.DemoteWorkBranchOnConflict = append(mock.calls.DemoteWorkBranchOnConflict, callInfo)
-	mock.lockDemoteWorkBranchOnConflict.Unlock()
-	return mock.DemoteWorkBranchOnConflictFunc(ctx, id)
-}
-
-// DemoteWorkBranchOnConflictCalls gets all the calls that were made to DemoteWorkBranchOnConflict.
-// Check the length with:
-//
-//	len(mockedquerier.DemoteWorkBranchOnConflictCalls())
-func (mock *querierMock) DemoteWorkBranchOnConflictCalls() []struct {
-	Ctx context.Context
-	ID  pgtype.UUID
-} {
-	var calls []struct {
-		Ctx context.Context
-		ID  pgtype.UUID
-	}
-	mock.lockDemoteWorkBranchOnConflict.RLock()
-	calls = mock.calls.DemoteWorkBranchOnConflict
-	mock.lockDemoteWorkBranchOnConflict.RUnlock()
-	return calls
-}
-
-// FlagWorkBranchConflict calls FlagWorkBranchConflictFunc.
-func (mock *querierMock) FlagWorkBranchConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
-	if mock.FlagWorkBranchConflictFunc == nil {
-		panic("querierMock.FlagWorkBranchConflictFunc: method is nil but querier.FlagWorkBranchConflict was just called")
-	}
-	callInfo := struct {
-		Ctx context.Context
-		ID  pgtype.UUID
-	}{
-		Ctx: ctx,
-		ID:  id,
-	}
-	mock.lockFlagWorkBranchConflict.Lock()
-	mock.calls.FlagWorkBranchConflict = append(mock.calls.FlagWorkBranchConflict, callInfo)
-	mock.lockFlagWorkBranchConflict.Unlock()
-	return mock.FlagWorkBranchConflictFunc(ctx, id)
-}
-
-// FlagWorkBranchConflictCalls gets all the calls that were made to FlagWorkBranchConflict.
-// Check the length with:
-//
-//	len(mockedquerier.FlagWorkBranchConflictCalls())
-func (mock *querierMock) FlagWorkBranchConflictCalls() []struct {
-	Ctx context.Context
-	ID  pgtype.UUID
-} {
-	var calls []struct {
-		Ctx context.Context
-		ID  pgtype.UUID
-	}
-	mock.lockFlagWorkBranchConflict.RLock()
-	calls = mock.calls.FlagWorkBranchConflict
-	mock.lockFlagWorkBranchConflict.RUnlock()
-	return calls
-}
-
 // GetWorkBranchByID calls GetWorkBranchByIDFunc.
 func (mock *querierMock) GetWorkBranchByID(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
 	if mock.GetWorkBranchByIDFunc == nil {
@@ -557,6 +471,42 @@ func (mock *querierMock) ListWorkBranchesCalls() []struct {
 	mock.lockListWorkBranches.RLock()
 	calls = mock.calls.ListWorkBranches
 	mock.lockListWorkBranches.RUnlock()
+	return calls
+}
+
+// MarkWorkBranchConflicted calls MarkWorkBranchConflictedFunc.
+func (mock *querierMock) MarkWorkBranchConflicted(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
+	if mock.MarkWorkBranchConflictedFunc == nil {
+		panic("querierMock.MarkWorkBranchConflictedFunc: method is nil but querier.MarkWorkBranchConflicted was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  pgtype.UUID
+	}{
+		Ctx: ctx,
+		ID:  id,
+	}
+	mock.lockMarkWorkBranchConflicted.Lock()
+	mock.calls.MarkWorkBranchConflicted = append(mock.calls.MarkWorkBranchConflicted, callInfo)
+	mock.lockMarkWorkBranchConflicted.Unlock()
+	return mock.MarkWorkBranchConflictedFunc(ctx, id)
+}
+
+// MarkWorkBranchConflictedCalls gets all the calls that were made to MarkWorkBranchConflicted.
+// Check the length with:
+//
+//	len(mockedquerier.MarkWorkBranchConflictedCalls())
+func (mock *querierMock) MarkWorkBranchConflictedCalls() []struct {
+	Ctx context.Context
+	ID  pgtype.UUID
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  pgtype.UUID
+	}
+	mock.lockMarkWorkBranchConflicted.RLock()
+	calls = mock.calls.MarkWorkBranchConflicted
+	mock.lockMarkWorkBranchConflicted.RUnlock()
 	return calls
 }
 

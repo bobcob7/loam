@@ -184,6 +184,42 @@ func TestList_ReturnsRowsAndTotal(t *testing.T) {
 	assert.Equal(t, int64(42), total, "total must be CountWorkBranches' value, not len(rows)")
 }
 
+// TestList_CountParamsMatchListParams_AllFilters proves List builds the
+// SAME five filter columns for both the ListWorkBranches and
+// CountWorkBranches calls, for every filter field populated at once.
+// Without this, a code change that only touches one of the two call sites
+// (e.g. dropping Column4 from CountWorkBranches alone) can silently pass
+// every other test: a mismatch here would make Count disagree with what
+// List actually returned, but nothing else in this package's unit suite
+// compares the two calls' params directly.
+func TestList_CountParamsMatchListParams_AllFilters(t *testing.T) {
+	t.Parallel()
+	repoID := uuid.Must(uuid.NewV7())
+	var listParams gen.ListWorkBranchesParams
+	var countParams gen.CountWorkBranchesParams
+	mock := &querierMock{
+		ListWorkBranchesFunc: func(_ context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error) {
+			listParams = arg
+			return nil, nil
+		},
+		CountWorkBranchesFunc: func(_ context.Context, arg gen.CountWorkBranchesParams) (int64, error) {
+			countParams = arg
+			return 0, nil
+		},
+	}
+	store := New(mock, testLogger())
+	filter := ListFilter{RepoID: &repoID, Target: "main", Author: "grace-hopper-3-author", State: StateReviewable, AwaitingVerdictReviewer: "ada-lovelace-7-reviewer"}
+	_, _, err := store.List(t.Context(), filter, 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, listParams.Column1, countParams.Column1, "repo_id filter must match between List and Count")
+	assert.Equal(t, listParams.Column2, countParams.Column2, "target filter must match between List and Count")
+	assert.Equal(t, listParams.Column3, countParams.Column3, "author filter must match between List and Count")
+	assert.Equal(t, listParams.Column4, countParams.Column4, "state filter must match between List and Count")
+	assert.Equal(t, listParams.Column5, countParams.Column5, "awaiting-verdict filter must match between List and Count")
+	assert.Equal(t, "main", listParams.Column2, "sanity: the filter actually reached the mock")
+	assert.Equal(t, string(StateReviewable), listParams.Column4)
+}
+
 // transitionCase names one (method, guard-miss) scenario shared by every
 // transition method's not-found vs illegal-transition mapping tests below.
 type transitionCase struct {
@@ -206,11 +242,8 @@ var transitionCases = []transitionCase{
 	{name: "Complete", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
 		return s.Complete(ctx, testID)
 	}},
-	{name: "FlagConflict", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
-		return s.FlagConflict(ctx, testID)
-	}},
-	{name: "DemoteOnConflict", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
-		return s.DemoteOnConflict(ctx, testID)
+	{name: "MarkConflicted", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
+		return s.MarkConflicted(ctx, testID)
 	}},
 	{name: "ClearConflict", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
 		return s.ClearConflict(ctx, testID)
@@ -281,6 +314,33 @@ func TestTransitionMethods_OtherError_NotMapped(t *testing.T) {
 	}
 }
 
+// TestTransitionMethods_ClassificationGetFails_WrapsTransportError proves
+// transitionErr's follow-up Get is itself fallible in a THIRD way beyond
+// "row exists" (errIllegalTransition) and "no row" (errNotFound): a
+// genuine transport failure (dropped connection, cancelled context) during
+// that classification Get must be reported as its own wrapped error, not
+// misreported as errIllegalTransition -- errors.Is(getErr, pgx.ErrNoRows)
+// is false for both a real row AND a transport failure, so the two must be
+// told apart explicitly rather than by falling through.
+func TestTransitionMethods_ClassificationGetFails_WrapsTransportError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range transitionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mock := allTransitionsNoRows()
+			mock.GetWorkBranchByIDFunc = func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
+				return gen.WorkBranch{}, errBoom
+			}
+			store := New(mock, testLogger())
+			_, err := tc.call(t.Context(), store)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errBoom, "a transport failure classifying the transition must not be swallowed")
+			assert.NotErrorIs(t, err, errIllegalTransition, "a failed classification must not default to illegal-transition")
+			assert.NotErrorIs(t, err, errNotFound)
+		})
+	}
+}
+
 // allTransitionsNoRows builds a querierMock whose every transition method
 // returns pgx.ErrNoRows, the shape a guarded UPDATE produces when its
 // WHERE clause matches nothing.
@@ -304,10 +364,7 @@ func allTransitionsError(err error) *querierMock {
 		CompleteWorkBranchFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
 			return gen.WorkBranch{}, err
 		},
-		FlagWorkBranchConflictFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
-			return gen.WorkBranch{}, err
-		},
-		DemoteWorkBranchOnConflictFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
+		MarkWorkBranchConflictedFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
 			return gen.WorkBranch{}, err
 		},
 		ClearWorkBranchConflictFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
