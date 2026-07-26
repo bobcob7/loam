@@ -628,3 +628,263 @@ func TestSymbolHistory_CascadesWithSymbolDelete(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM symbol_history WHERE symbol_id = $1`, sym).Scan(&after))
 	assert.Equal(t, 0, after, "deleting the owning repo must cascade through symbols down to symbol_history")
 }
+
+// --- LookupSymbolsByName (loam-awr): name -> []Symbol, the not-found
+// signal a handler needs to produce docs/cli-spec.md's exit 3, and the
+// resolution step Dependents/Deps/History need before they can accept a
+// name instead of a uuid.UUID. ---
+
+// insertRepo seeds an additional repos row -- distinct from newTestStore's
+// own repo -- so scoping tests can build a second, out-of-scope repo
+// sharing the same sharedPool/Store.
+func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name string) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx,
+		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch) VALUES ($1, $2, 'https://example.com/repo.git', 'example.com', 'main')`,
+		id, name,
+	)
+	require.NoError(t, err)
+	return id
+}
+
+// insertSymbolOnBranch mirrors insertSymbol but lets the caller pick
+// target_branch, for tests that must prove branch scoping specifically
+// (insertSymbol hardcodes 'main').
+func insertSymbolOnBranch(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID, targetBranch, file, name string) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx,
+		`INSERT INTO symbols (id, repo_id, target_branch, file, line, name, kind) VALUES ($1, $2, $3, $4, 1, $5, 'function')`,
+		id, repoID, targetBranch, file, name,
+	)
+	require.NoError(t, err)
+	return id
+}
+
+// TestLookupSymbolsByName_ExactlyOneMatch is the unambiguous case: one
+// symbol named "Login" resolves to exactly one row.
+func TestLookupSymbolsByName_ExactlyOneMatch(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	loginID := insertSymbol(ctx, t, pool, repoID, "auth.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 1, "an unambiguous name must resolve to exactly one row")
+	assert.Equal(t, loginID, symbols[0].ID)
+	assert.Equal(t, "auth.go", symbols[0].File)
+}
+
+// TestLookupSymbolsByName_AmbiguousReturnsAllMatches proves
+// docs/cli-spec.md:528-533's "ambiguous target is data, not an error":
+// three distinct "Login" symbols in three different files must all come
+// back, not an error and not just one of them.
+func TestLookupSymbolsByName_AmbiguousReturnsAllMatches(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	a := insertSymbol(ctx, t, pool, repoID, "web/login.go", "Login")
+	b := insertSymbol(ctx, t, pool, repoID, "cli/login.go", "Login")
+	c := insertSymbol(ctx, t, pool, repoID, "api/login.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 3, "an ambiguous name must return every matching symbol, not fail or pick one")
+	assert.ElementsMatch(t, []uuid.UUID{a, b, c}, symbolIDsFromSymbols(symbols))
+}
+
+// TestLookupSymbolsByName_NoMatchIsEmptyNotError is this bead's central
+// contract, proved against a real database: a name with zero matching
+// symbols must come back as an empty, non-error result -- the
+// authoritative not-found signal docs/cli-spec.md maps to exit 3, never a
+// sentinel error a handler would otherwise have to special-case.
+func TestLookupSymbolsByName_NoMatchIsEmptyNotError(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertSymbol(ctx, t, pool, repoID, "auth.go", "Login") // some unrelated symbol exists in scope
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "NoSuchSymbol", "", 0)
+	require.NoError(t, err, "a genuine not-found must not be an error")
+	assert.False(t, truncated)
+	assert.Empty(t, symbols, "zero matches must come back as an empty slice, the authoritative not-found signal")
+}
+
+// TestLookupSymbolsByName_DistinguishesNotFoundFromZeroEdges is the
+// acceptance criterion this bead exists to satisfy, exercised end-to-end
+// against the real store: "a handler can distinguish 'no such symbol' from
+// 'symbol with zero edges'" (loam-awr ACCEPTANCE CRITERIA). Before this
+// bead, Dependents/Deps took a uuid.UUID a handler had no way to obtain
+// from a name, and both cases collapsed to (nil, nil) at that layer. Now:
+// looking up a name that resolves to zero symbols is the not-found case
+// (exit 3); looking up a name that resolves to exactly one symbol, then
+// calling Dependents/Deps on its id and getting an empty, untruncated set,
+// is the "exists but isolated" case (exit 0, empty results) -- genuinely
+// distinguishable by a caller.
+func TestLookupSymbolsByName_DistinguishesNotFoundFromZeroEdges(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	isolatedID := insertSymbol(ctx, t, pool, repoID, "isolated.go", "Orphan")
+
+	notFound, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "DoesNotExist", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, notFound, "no symbol named DoesNotExist exists -- this is the not-found case")
+
+	found, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Orphan", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, found, 1, "Orphan exists -- this is NOT the not-found case, even though it has no edges")
+	assert.Equal(t, isolatedID, found[0].ID)
+
+	deps, truncated, err := store.Dependents(ctx, repoID, "main", isolatedID, 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, deps, "Orphan has no dependents -- an empty edge set, not a not-found condition")
+}
+
+// TestLookupSymbolsByName_NarrowedByFile proves --file narrows an
+// ambiguous name down to the definition in exactly one file
+// (docs/cli-spec.md: "--file <path> narrows the target to the definition
+// in one file").
+func TestLookupSymbolsByName_NarrowedByFile(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertSymbol(ctx, t, pool, repoID, "web/login.go", "Login")
+	cliLogin := insertSymbol(ctx, t, pool, repoID, "cli/login.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "cli/login.go", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 1, "--file must narrow an otherwise-ambiguous name to one match")
+	assert.Equal(t, cliLogin, symbols[0].ID)
+}
+
+// TestLookupSymbolsByName_NarrowedByFile_NoMatchIsNotFound proves --file
+// narrowing an existing name down to a file with no matching definition is
+// itself a not-found result (empty, not an error) -- e.g. a symbol that
+// really is defined elsewhere, not in the file the caller asked about.
+func TestLookupSymbolsByName_NarrowedByFile_NoMatchIsNotFound(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertSymbol(ctx, t, pool, repoID, "web/login.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "cli/login.go", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, symbols, "Login is defined in web/login.go, not cli/login.go -- narrowing to the wrong file is not-found")
+}
+
+// TestLookupSymbolsByName_ExcludesOutOfScopeRepo is the discriminating
+// scoping test the brief asks for, mirroring
+// internal/chunkstore's TestSearch_ScopedByRepoIDs_ExcludesOutOfScopeRepos:
+// it seeds a symbol with the SAME name in a repo NOT in the lookup's scope
+// -- one that would sort first (file "aaa.go", alphabetically ahead of the
+// in-scope symbol's file) if the repo-id filter were dropped or broadened
+// -- and proves it never appears.
+func TestLookupSymbolsByName_ExcludesOutOfScopeRepo(t *testing.T) {
+	t.Parallel()
+	store, pool, inScopeRepo := newTestStore(t)
+	ctx := t.Context()
+	outOfScopeRepo := insertRepo(ctx, t, pool, "group/lookup-out-of-scope")
+
+	inScopeID := insertSymbol(ctx, t, pool, inScopeRepo, "zzz.go", "Login")
+	insertSymbol(ctx, t, pool, outOfScopeRepo, "aaa.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{inScopeRepo}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 1, "the out-of-scope repo's same-named symbol must never appear")
+	assert.Equal(t, inScopeID, symbols[0].ID)
+}
+
+// TestLookupSymbolsByName_ExcludesOtherTargetBranch proves target_branch
+// scoping specifically: a same-named symbol on a different branch of the
+// SAME repo must not appear, seeded in a file that would sort first if
+// branch filtering were dropped.
+func TestLookupSymbolsByName_ExcludesOtherTargetBranch(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	mainID := insertSymbolOnBranch(ctx, t, pool, repoID, "main", "zzz.go", "Login")
+	insertSymbolOnBranch(ctx, t, pool, repoID, "feature", "aaa.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 1, "a same-named symbol on a different target_branch must never appear")
+	assert.Equal(t, mainID, symbols[0].ID)
+}
+
+// TestLookupSymbolsByName_IncludesMultipleInScopeRepos proves the plural
+// repoIDs scope (matching internal/chunkstore.Search's convention) is a
+// genuine multi-repo OR, not silently narrowed to the first id: two
+// different in-scope repos each declaring "Login" must both be returned
+// from one call.
+func TestLookupSymbolsByName_IncludesMultipleInScopeRepos(t *testing.T) {
+	t.Parallel()
+	store, pool, repoA := newTestStore(t)
+	ctx := t.Context()
+	repoB := insertRepo(ctx, t, pool, "group/lookup-second-in-scope")
+
+	idA := insertSymbol(ctx, t, pool, repoA, "a.go", "Login")
+	idB := insertSymbol(ctx, t, pool, repoB, "b.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoA, repoB}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, symbols, 2, "both in-scope repos' matches must be returned from a single call")
+	assert.ElementsMatch(t, []uuid.UUID{idA, idB}, symbolIDsFromSymbols(symbols))
+}
+
+// TestLookupSymbolsByName_TruncatesAndReportsTruncated proves the
+// limit/truncated contract against a real database, not just a mock:
+// docs/cli-spec.md:535-537 requires truncated: true on a capped `graph`
+// response for every subquery, not only the blast-radius ones -- this
+// seeds 4 same-named symbols and asks for at most 2.
+func TestLookupSymbolsByName_TruncatesAndReportsTruncated(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	for i := range 4 {
+		insertSymbol(ctx, t, pool, repoID, fmt.Sprintf("f%d.go", i), "Login")
+	}
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
+	assert.Len(t, symbols, 2)
+}
+
+// TestLookupSymbolsByName_ExactlyLimitMatches_NotTruncated is the negative
+// case against a real database: exactly limit matches must not report
+// truncated=true.
+func TestLookupSymbolsByName_ExactlyLimitMatches_NotTruncated(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertSymbol(ctx, t, pool, repoID, "a.go", "Login")
+	insertSymbol(ctx, t, pool, repoID, "b.go", "Login")
+
+	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.False(t, truncated, "exactly 2 matches for a limit of 2 must not be reported as truncated")
+	assert.Len(t, symbols, 2)
+}
+
+// symbolIDsFromSymbols extracts symbol ids from a Symbol slice for
+// order-independent set comparisons.
+func symbolIDsFromSymbols(symbols []Symbol) []uuid.UUID {
+	ids := make([]uuid.UUID, len(symbols))
+	for i, s := range symbols {
+		ids[i] = s.ID
+	}
+	return ids
+}
