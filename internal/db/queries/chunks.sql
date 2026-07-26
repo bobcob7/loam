@@ -38,6 +38,82 @@ WHERE repo_id = $1 AND target_branch = $2 AND file = $3;
 -- (internal/chunkstore) is the only caller and hides this field behind
 -- its own Search(ctx, repoIDs []uuid.UUID, ...) method, so the awkward name
 -- never leaks past internal/db/gen.
+--
+-- DECISION (loam-962): ACCEPT the chunks_embedding HNSW index as shipped,
+-- with a documented caveat below. No production default is changed here --
+-- hnsw.iterative_scan stays off, no cost GUC is touched, no index
+-- parameter changes.
+--
+-- Measured with a real EXPLAIN (ANALYZE, BUFFERS) of this exact query
+-- (pgvector/pgvector:pg16, default HNSW params m=16/ef_construction=64,
+-- default hnsw.ef_search=40), single repo, single target_branch (so the
+-- WHERE filter matches ~100% of the table -- the realistic RAG-search
+-- shape), ANALYZE run immediately before every EXPLAIN so statistics were
+-- current:
+--
+--   rows    unforced plan          time
+--   100     Seq Scan + Sort        0.17ms
+--   750     Seq Scan + Sort        0.98ms
+--   1,000   Index Scan chunks_embedding   0.42ms   <- crossover (750->1,000)
+--   5,000   Index Scan chunks_embedding   1.08ms
+--   15,000  Index Scan chunks_embedding   1.15ms
+--   17,500  Seq Scan + Sort        47.6ms   <- CAVEAT, see below
+--   20,000  Seq Scan + Sort        51.4ms   <- CAVEAT, see below
+--   25,000  Index Scan chunks_embedding   2.06ms
+--   50,000  Index Scan chunks_embedding   3.43ms
+--
+-- So: an unforced production query reaches chunks_embedding unaided from
+-- ~1,000 chunks in a repo/branch onward -- comfortably below any realistic
+-- repo's chunk count -- and keeps reaching it through 50,000. No tuning is
+-- warranted for the general case.
+--
+-- THE CAVEAT: at 17,500 and 20,000 rows specifically, the unforced planner
+-- instead picks a Seq Scan + Sort, ~40x slower than the HNSW path it uses
+-- at every neighbouring size, with no error and nothing in the logs.
+-- Verified, not assumed, to rule out the two most likely benign causes:
+--   - NOT an artifact of incrementally growing one table: reproduced by
+--     seeding a FRESH container directly to 17,500 (and, separately, to
+--     20,000) with no smaller-size history.
+--   - NOT stale statistics or autovacuum interference: autovacuum was
+--     disabled on the table, ANALYZE ran exactly once immediately before
+--     the EXPLAIN (pg_stat_user_tables confirmed analyze_count=1,
+--     autoanalyze_count=0, n_mod_since_analyze=0 afterward), and three
+--     repeated plain EXPLAINs back to back returned the identical cost.
+--   - NOT HNSW build/maintenance lag: REINDEX INDEX chunks_embedding did
+--     not change the plan.
+-- At 17,500, disabling enable_seqscan alone still lands on the
+-- chunks_repo_id_target_branch_idx btree (cost ~1120), cheaper than
+-- chunks_embedding's own estimated cost there (~1159-1169) -- dropping the
+-- btree too is what finally forces the HNSW path (real time 2.27ms). At
+-- 20,000, disabling enable_seqscan alone is enough (HNSW cost ~1173 beats
+-- the btree unaided) -- so which non-vector plan wins even shifts within
+-- the caveat band itself.
+--
+-- LIKELY MECHANISM (read from pgvector's own cost estimator,
+-- github.com/pgvector/pgvector src/hnsw.c, hnswcostestimate): a conditional
+-- discount, `if (startupPages > path->indexinfo->rel->pages && ratio <
+-- 0.5)`, lowers the HNSW index's estimated startup cost whenever its
+-- estimated "startup pages" exceed the underlying HEAP table's own page
+-- count. chunks.embedding is vector(768) -- 3072 bytes, over Postgres's
+-- ~2KB inline threshold -- so it gets TOASTed out of the main heap,
+-- making the heap's page count small relative to the vector data the
+-- index itself must account for. Working through that formula against
+-- this experiment's own measured relpages and index sizes, the discount
+-- appears to be active at 15,000 rows and to stop applying by 17,500 (the
+-- heap's page count catches up to the discount threshold) -- which lines
+-- up with the observed band. This is a well-supported reading of
+-- pgvector's published source and this experiment's measured numbers, but
+-- it was NOT confirmed by directly instrumenting the running server's
+-- internal ratio/startupPages/entryLevel values, so treat the exact
+-- trigger row count as dependent on row width/TOASTing rather than a
+-- universal constant. Follow-up: loam-l73.
+--
+-- OPERATOR GUIDANCE: if a repo's RAG search feels unexpectedly slow, run
+-- `EXPLAIN (ANALYZE, BUFFERS)` on this exact query shape against that
+-- repo's chunk count. If it shows "Seq Scan on chunks" instead of "Index
+-- Scan using chunks_embedding", the repo is likely inside this band. No
+-- mitigation is identified yet (see loam-l73) beyond re-measuring and, if
+-- confirmed, filing/upvoting that bead.
 SELECT id, repo_id, target_branch, file, start_line, end_line, content, embedding, created_at
 FROM chunks
 WHERE repo_id = ANY($1::uuid[]) AND target_branch = $2
