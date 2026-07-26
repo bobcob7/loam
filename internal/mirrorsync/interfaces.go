@@ -85,8 +85,30 @@ type MergeabilityChecker interface {
 // IngestEnqueuer performs Mirror Sync step 4: enqueues ingest jobs for
 // advanced indexed branches (docs/ingestion-spec.md; owned by bead
 // loam-c94.2).
+//
+// enqueued reports whether ownership of this tick's terminal sync_state
+// write actually passed to the ingest worker -- it is NOT "did step 4
+// return without error" (loam-ax1: that conflation is exactly the bug this
+// return value fixes, since a no-op call -- e.g. advanced is empty, so
+// there is nothing to enqueue -- previously still surfaced as "true" and
+// permanently starved ReportIdle/ReportError). enqueued must be true
+// whenever, after this call returns, at least one ingest_jobs row is
+// queued or running for repo as a result of an advanced branch -- whether
+// this call inserted that row itself, or the row already existed and this
+// call's trigger coalesced into it (internal/ingest's Enqueue: "if a
+// queued job already exists for (repoID, targetBranch, kind), this call is
+// a no-op"). A coalesced trigger still counts as enqueued=true: the
+// existing row is still pending (coalescing only matches status='queued'
+// rows, per ingest.Enqueue's doc comment), so the ingest worker still owns
+// the eventual write for that branch regardless of which call created the
+// row, and letting ReportIdle/ReportError fire here would race that
+// worker's write over the same column exactly as the guard in
+// internal/mirrorsync/state is built to prevent. enqueued is false only
+// when this call queued or touched nothing at all -- advanced was empty,
+// or none of its branches are indexed branches ingest.Enqueue is called
+// for.
 type IngestEnqueuer interface {
-	EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) error
+	EnqueueIngest(ctx context.Context, repo RepoID, advanced []Advance) (enqueued bool, err error)
 }
 
 // PRPoller performs Mirror Sync step 5: polls the forge for the state of

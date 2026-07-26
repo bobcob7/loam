@@ -172,10 +172,11 @@ func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
 
 // runSteps runs the fixed 5-step Mirror Sync order for repo in order
 // (docs/sync-spec.md -> Mirror Sync, steps 1-5), returning whether step 4
-// enqueued an ingest job and the first step's wrapped error, if any. A
-// failing step aborts only repo's remaining steps for this tick; it
-// never retries within the cycle — the next tick is the retry, and the
-// tick interval is the backoff.
+// actually enqueued an ingest job (IngestEnqueuer.EnqueueIngest's own
+// enqueued return value, never synthesised here — loam-ax1) and the first
+// step's wrapped error, if any. A failing step aborts only repo's
+// remaining steps for this tick; it never retries within the cycle — the
+// next tick is the retry, and the tick interval is the backoff.
 func (s *Scheduler) runSteps(ctx context.Context, repo RepoID) (enqueuedIngest bool, err error) {
 	fetched, err := s.fetcher.Fetch(ctx, repo)
 	if err != nil {
@@ -188,11 +189,12 @@ func (s *Scheduler) runSteps(ctx context.Context, repo RepoID) (enqueuedIngest b
 	if err := s.mergeability.CheckMergeability(ctx, repo, advanced); err != nil {
 		return false, fmt.Errorf("checking mergeability for repo %s: %w", repo, err)
 	}
-	if err := s.ingest.EnqueueIngest(ctx, repo, advanced); err != nil {
+	enqueued, err := s.ingest.EnqueueIngest(ctx, repo, advanced)
+	if err != nil {
 		return false, fmt.Errorf("enqueuing ingest for repo %s: %w", repo, err)
 	}
 	if err := s.prPoller.PollPRs(ctx, repo); err != nil {
-		return true, fmt.Errorf("polling PRs for repo %s: %w", repo, err)
+		return enqueued, fmt.Errorf("polling PRs for repo %s: %w", repo, err)
 	}
-	return true, nil
+	return enqueued, nil
 }
