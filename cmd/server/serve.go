@@ -56,7 +56,22 @@ func newListener(addr string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s=%q: %w", listenerFDEnv, fdStr, err)
 	}
+	if fd < 0 {
+		return nil, fmt.Errorf("parsing %s=%q: file descriptor must not be negative", listenerFDEnv, fdStr)
+	}
 	file := os.NewFile(uintptr(fd), "loam-http-listener")
+	if file == nil {
+		return nil, fmt.Errorf("wrapping inherited listener fd %d: not a valid file descriptor", fd)
+	}
+	// net.FileListener dups fd into its own returned Listener (its doc
+	// comment: "closing the returned Listener does not put an end to
+	// file"). Without this Close, file -- and, since it is a dup of the
+	// same underlying socket, the fd 3 the OS actually keeps in LISTEN --
+	// stays open for this whole process's lifetime, including past
+	// httpServer.Shutdown closing the *returned* listener: the port would
+	// remain bound and accepting connections via this leaked duplicate,
+	// silently defeating "stop accepting connections" on shutdown.
+	defer file.Close()
 	listener, err := net.FileListener(file)
 	if err != nil {
 		return nil, fmt.Errorf("wrapping inherited listener fd %d: %w", fd, err)
@@ -95,8 +110,10 @@ func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, li
 		serveErr <- nil
 	}()
 	var serveResult error
+	var serveRead bool
 	select {
 	case serveResult = <-serveErr:
+		serveRead = true
 		stop()
 	case <-ctx.Done():
 		stop()
@@ -110,7 +127,13 @@ func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, li
 	case <-shutdownCtx.Done():
 		logger.Warn("background components did not drain within the shutdown grace period")
 	}
-	if serveResult == nil {
+	// serveRead, not "serveResult == nil", is what distinguishes "already
+	// read serveErr in the select above" from "haven't read it yet": nil
+	// is Serve's own legitimate success value (http.ErrServerClosed maps
+	// to it), not just a zero-value sentinel, so testing serveResult
+	// itself would block here forever on the ctx.Done() path whenever
+	// Serve's error also happens to be nil by the time this runs.
+	if !serveRead {
 		serveResult = <-serveErr
 	}
 	if shutdownErr != nil {

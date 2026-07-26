@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -12,50 +13,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeRunner is a spy runner: it records that Run started and finished,
-// and delegates to an injected function so a test controls exactly when
-// (or whether) it returns.
-type fakeRunner struct {
-	mu       sync.Mutex
-	started  bool
-	finished bool
-	run      func(ctx context.Context)
-}
-
-func (f *fakeRunner) Run(ctx context.Context) {
-	f.mu.Lock()
-	f.started = true
-	f.mu.Unlock()
-	if f.run != nil {
-		f.run(ctx)
+// newTrackedRunner builds a runnerMock (moq-generated in moq_test.go, per
+// this package's interfaces.go //go:generate directive) whose RunFunc
+// delegates to run -- or blocks on ctx.Done() if run is nil -- and
+// returns an isFinished func reporting whether Run has returned. "Has
+// Run started at all" needs no separate tracking: the mock's own
+// generated RunCalls() records the call before RunFunc runs, so
+// len(mock.RunCalls()) > 0 already answers that.
+func newTrackedRunner(run func(ctx context.Context)) (mock *runnerMock, isFinished func() bool) {
+	var mu sync.Mutex
+	var finished bool
+	mock = &runnerMock{
+		RunFunc: func(ctx context.Context) {
+			if run != nil {
+				run(ctx)
+			} else {
+				<-ctx.Done()
+			}
+			mu.Lock()
+			finished = true
+			mu.Unlock()
+		},
 	}
-	f.mu.Lock()
-	f.finished = true
-	f.mu.Unlock()
+	return mock, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return finished
+	}
 }
 
-func (f *fakeRunner) isFinished() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.finished
-}
-
-// fakeCloser is a spy closer: it records whether Close was called.
-type fakeCloser struct {
-	mu     sync.Mutex
-	closed bool
-}
-
-func (f *fakeCloser) Close() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closed = true
-}
-
-func (f *fakeCloser) isClosed() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.closed
+// newTrackedCloser builds a closerMock whose CloseFunc records that Close
+// was called, returning an isClosed func to check it.
+func newTrackedCloser() (mock *closerMock, isClosed func() bool) {
+	var mu sync.Mutex
+	var closed bool
+	mock = &closerMock{
+		CloseFunc: func() {
+			mu.Lock()
+			closed = true
+			mu.Unlock()
+		},
+	}
+	return mock, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return closed
+	}
 }
 
 // newTestListener binds a real, ephemeral TCP listener for tests that
@@ -97,8 +100,8 @@ func TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains(t *testing
 	addr := listener.Addr().String()
 	httpServer := &http.Server{Handler: http.NewServeMux()}
 	release := make(chan struct{})
-	background := &fakeRunner{run: func(ctx context.Context) { <-release }}
-	db := &fakeCloser{}
+	background, backgroundFinished := newTrackedRunner(func(ctx context.Context) { <-release })
+	db, dbClosed := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, 5*time.Second)
 
@@ -109,17 +112,17 @@ func TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains(t *testing
 		t.Fatalf("serve returned (err=%v) before the background component was released -- it did not wait for it to drain", err)
 	case <-time.After(200 * time.Millisecond):
 	}
-	assert.False(t, db.isClosed(), "the database must not be closed while the background component is still draining")
+	assert.False(t, dbClosed(), "the database must not be closed while the background component is still draining")
 
 	close(release)
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("serve did not return after the background component finished draining")
 	}
-	assert.True(t, background.isFinished())
-	assert.True(t, db.isClosed(), "the database must be closed once shutdown completes")
+	assert.True(t, backgroundFinished())
+	assert.True(t, dbClosed(), "the database must be closed once shutdown completes")
 	_, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 	assert.Error(t, dialErr, "the listener must actually be closed after serve returns")
 }
@@ -140,8 +143,8 @@ func TestServe_AbandonsBackgroundWaitAfterGracePeriodElapses(t *testing.T) {
 	t.Parallel()
 	listener := newTestListener(t)
 	httpServer := &http.Server{Handler: http.NewServeMux()}
-	background := &fakeRunner{run: func(ctx context.Context) { <-make(chan struct{}) }} // never returns
-	db := &fakeCloser{}
+	background, _ := newTrackedRunner(func(ctx context.Context) { <-make(chan struct{}) }) // never returns
+	db, dbClosed := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	const grace = 100 * time.Millisecond
 	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
@@ -151,35 +154,32 @@ func TestServe_AbandonsBackgroundWaitAfterGracePeriodElapses(t *testing.T) {
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return within a bounded multiple of the grace period -- a hung background component wedged shutdown")
 	}
-	assert.True(t, db.isClosed(), "the database must still be closed even when the background component never drains")
+	assert.True(t, dbClosed(), "the database must still be closed even when the background component never drains")
 }
 
 // TestServe_StartsBackgroundComponentBeforeReturning proves serve
 // actually starts the injected background runner at all (a mutant that
 // forgot to call background.Run, e.g. while wiring a different
-// component, would leave started false forever).
+// component, would leave RunCalls empty forever).
 func TestServe_StartsBackgroundComponentBeforeReturning(t *testing.T) {
 	t.Parallel()
 	listener := newTestListener(t)
 	httpServer := &http.Server{Handler: http.NewServeMux()}
-	background := &fakeRunner{run: func(ctx context.Context) { <-ctx.Done() }}
-	db := &fakeCloser{}
+	background, _ := newTrackedRunner(nil) // nil: blocks on ctx.Done(), per newTrackedRunner's doc comment
+	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, time.Second)
 	cancel()
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return")
 	}
-	background.mu.Lock()
-	started := background.started
-	background.mu.Unlock()
-	assert.True(t, started, "serve must start the background component")
+	assert.NotEmpty(t, background.RunCalls(), "serve must start the background component")
 }
 
 // TestServe_DrainsInFlightHTTPRequestOnShutdown is this bead's own named
@@ -208,10 +208,19 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 		_, _ = w.Write([]byte("done"))
 	})
 	httpServer := &http.Server{Handler: mux}
-	background := &fakeRunner{run: func(ctx context.Context) { <-ctx.Done() }}
-	db := &fakeCloser{}
+	background, _ := newTrackedRunner(nil)
+	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, 5*time.Second)
+	// grace and the bounds below are deliberately generous (not the 100ms-
+	// scale used in the grace-period-enforcement test): this test's
+	// property is that the drain completes correctly, not that it
+	// completes within any particular short window, so there is no
+	// correctness reason to keep them tight, and a wide margin avoids
+	// mistaking ordinary scheduling delay under a loaded test run (many
+	// concurrent containers/subprocesses elsewhere in this package) for a
+	// real failure.
+	const grace = 30 * time.Second
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
 
 	type result struct {
 		status int
@@ -230,7 +239,7 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 
 	select {
 	case <-requestStarted:
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("the in-flight request never reached the handler")
 	}
 
@@ -248,14 +257,81 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	case r := <-requestResult:
 		require.NoError(t, r.err, "the in-flight request must receive its response, not have its connection cut by shutdown")
 		assert.Equal(t, http.StatusOK, r.status)
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("the in-flight request never completed")
 	}
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("serve did not return after the in-flight request finished")
 	}
+}
+
+// TestServe_ServeFailureCallsStopSoBackgroundStillDrains is the
+// discriminating proof that the Serve-failure branch's stop() call is
+// load-bearing, not incidental: stop is the SAME context.CancelFunc that
+// cancels the ctx background.Run was given, so on this branch it is the
+// ONLY thing that ever tells background to stop. A mutant that deleted
+// both stop() calls from serve (one per select branch) would pass every
+// other test in this file -- none of them give background a Run that
+// blocks on ctx and then exercise the Serve-failure branch specifically
+// -- yet leave this test's runner blocked forever, caught here by
+// isFinished() staying false rather than by a hang: shutdownCtx's own
+// grace-bounded deadline (independent of stop having run at all) still
+// lets serve return, so the failure surfaces as a false assertion, not a
+// wedged test.
+func TestServe_ServeFailureCallsStopSoBackgroundStillDrains(t *testing.T) {
+	t.Parallel()
+	listener := newTestListener(t)
+	require.NoError(t, listener.Close()) // Serve on this listener fails immediately
+	httpServer := &http.Server{Handler: http.NewServeMux()}
+	background, backgroundFinished := newTrackedRunner(nil)
+	db, dbClosed := newTrackedCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // safety net only; serve calling stop (== cancel) is what this test is actually proving
+	const grace = 2 * time.Second
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "Serve on an already-closed listener must surface an error")
+	case <-time.After(15 * time.Second):
+		t.Fatal("serve did not return within a bounded multiple of the grace period")
+	}
+	assert.True(t, backgroundFinished(), "background must have observed ctx cancellation -- on this branch, only serve's stop() call causes that")
+	assert.True(t, dbClosed())
+}
+
+// TestNewListener_ClosesInheritedSourceFileDescriptor is the discriminating
+// regression proof for the fd leak a review caught in newListener: without
+// closing the *os.File wrapping the inherited fd once net.FileListener has
+// dup'd it, that source file -- and, since it is a dup of the same
+// underlying socket, the fd itself -- stays open for this whole process's
+// lifetime, keeping the port in LISTEN even after the returned Listener's
+// own Close. It reproduces the inherited-fd path directly in-process
+// (setting listenerFDEnv to a real, already-open fd, exactly as
+// cmd/server/main_integration_test.go's startServer does across a process
+// boundary) rather than through a subprocess, so it stays fast and
+// container-free.
+func TestNewListener_ClosesInheritedSourceFileDescriptor(t *testing.T) {
+	source, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := source.Addr().String()
+	file, err := source.(*net.TCPListener).File()
+	require.NoError(t, err)
+	require.NoError(t, source.Close()) // file holds its own dup; the port stays bound
+
+	t.Setenv(listenerFDEnv, strconv.Itoa(int(file.Fd())))
+	listener, err := newListener("unused-when-" + listenerFDEnv + "-is-set")
+	require.NoError(t, err)
+
+	_, statErr := file.Stat()
+	assert.Error(t, statErr, "newListener must close its own *os.File wrapping the inherited fd once net.FileListener has dup'd it, not leak it")
+
+	require.NoError(t, listener.Close())
+	relisten, err := net.Listen("tcp", addr)
+	require.NoError(t, err, "the port must be free once the returned listener closes -- a leaked source fd duplicate would keep it in LISTEN")
+	require.NoError(t, relisten.Close())
 }

@@ -2,6 +2,8 @@ package main
 
 import "context"
 
+//go:generate go tool moq -out moq_test.go . runner closer
+
 // runner is a long-lived background component whose Run blocks until ctx
 // is canceled and, per its own contract, every unit of work it already
 // started has drained (see ingest.Pool.Run's doc comment: "blocks until
@@ -22,8 +24,14 @@ type runner interface {
 // closer releases a resource whose lifetime must outlive every runner's
 // shutdown, since a still-draining job may still be querying it.
 // *pgxpool.Pool satisfies this structurally. serve defers this call until
-// after it has finished waiting on the background runner, so the pool is
-// never closed out from under an in-flight query.
+// after it has finished waiting on the background runner (bounded by the
+// shutdown grace period), so the pool is never closed out from under an
+// in-flight query THAT FINISHES WITHIN THAT WAIT. It offers no such
+// guarantee once the grace period itself elapses: serve stops waiting
+// either way (docs/server-spec.md -> Shutdown: work still running past
+// the grace period is killed, not protected), so a runner still
+// genuinely in flight at that point can observe db closing out from
+// under it.
 type closer interface {
 	Close()
 }

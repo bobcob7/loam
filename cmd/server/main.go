@@ -121,6 +121,17 @@ func run(cfg config.Config) error {
 		pool.Close()
 		return fmt.Errorf("requeuing orphaned ingest jobs: %w", err)
 	}
+	// loam-ofg.18 (the policy socket) MUST start here, before newListener,
+	// not as another background runner passed into serve alongside the
+	// ingest pool: docs/server-spec.md Startup step 5 orders the policy
+	// socket ahead of the HTTP listener specifically so git pushes are
+	// never accepted while it is down. newListener below already binds
+	// the port (making it visible to clients per this file's readiness
+	// doc comment); serve then starts httpServer.Serve concurrently with
+	// every runner it is given. Adding the policy socket as a same-tier
+	// background runner inside serve would let Serve start accepting
+	// connections before the socket is confirmed live -- it must be
+	// constructed and confirmed serving above this line instead.
 	listener, err := newListener(cfg.HTTPAddr)
 	if err != nil {
 		pool.Close()
