@@ -9,8 +9,10 @@ package codegraph
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -31,12 +33,24 @@ import (
 // and the CYCLE-clause recursive CTEs actually work.
 const pgvectorImage = "pgvector/pgvector:pg16"
 
-// newTestStore spins up a real pgvector-enabled Postgres, applies every
-// migration, and returns a Store wired over it plus a seeded repo id every
-// test can hang symbols off of. The pool and container are torn down via
-// t.Cleanup.
-func newTestStore(t *testing.T) (*Store, *pgxpool.Pool, uuid.UUID) {
-	t.Helper()
+// sharedPool is one migrated pgvector-backed Postgres for the whole test
+// binary, started once in TestMain rather than per test. Every test below
+// scopes its rows to its own freshly generated repoID (cascading FKs mean a
+// DELETE FROM repos in one test can never touch another test's rows), so
+// sharing one container/pool across tests is safe and is not a shortcut on
+// isolation. It is a direct fix for a real failure observed on first run:
+// starting an independent container per test (this package has 11 test
+// functions, all t.Parallel()) drove 11 concurrent container starts at the
+// local podman/docker daemon and the whole run blew the -timeout 300s
+// budget without a single test failing on its own merits -- see this
+// bead's final report for the raw goroutine dump that showed exactly that
+// (every stuck goroutine was inside testcontainers'/moby's container-start
+// HTTP call, not inside any query this package runs).
+var sharedPool *pgxpool.Pool
+
+// TestMain starts sharedPool once for the whole package, then tears it
+// down after every test has run.
+func TestMain(m *testing.M) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	container, err := postgres.Run(ctx, pgvectorImage,
@@ -45,20 +59,45 @@ func newTestStore(t *testing.T) (*Store, *pgxpool.Pool, uuid.UUID) {
 		postgres.WithPassword("loam"),
 		postgres.BasicWaitStrategies(),
 	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		assert.NoError(t, container.Terminate(context.Background()))
-	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "starting shared pgvector container:", err)
+		os.Exit(1)
+	}
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-	require.NoError(t, migrations.Migrate(ctx, dsn, logger))
-
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "resolving shared container DSN:", err)
+		os.Exit(1)
+	}
+	if err := migrations.Migrate(ctx, dsn, logger); err != nil {
+		fmt.Fprintln(os.Stderr, "migrating shared container:", err)
+		os.Exit(1)
+	}
 	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "opening shared pool:", err)
+		os.Exit(1)
+	}
+	sharedPool = pool
+
+	code := m.Run()
+
+	pool.Close()
+	if err := container.Terminate(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, "terminating shared pgvector container:", err)
+	}
+	os.Exit(code)
+}
+
+// newTestStore returns a Store wired over the package's sharedPool plus a
+// freshly seeded repo id this test alone owns.
+func newTestStore(t *testing.T) (*Store, *pgxpool.Pool, uuid.UUID) {
+	t.Helper()
+	ctx := t.Context()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pool := sharedPool
 
 	repoID := uuid.Must(uuid.NewV7())
-	_, err = pool.Exec(ctx,
+	_, err := pool.Exec(ctx,
 		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch) VALUES ($1, $2, 'https://example.com/repo.git', 'example.com', 'main')`,
 		repoID, "group/codegraph-"+repoID.String(),
 	)
