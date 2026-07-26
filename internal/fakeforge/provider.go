@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/bobcob7/loam/internal/forge"
@@ -68,8 +67,22 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, err := os.Stat(s.repoDir(req.Repo)); err != nil {
-		writeJSONError(w, http.StatusNotFound, errRepoNotFound)
+	repoDir := s.repoDir(req.Repo)
+	if err := s.requireRepo(repoDir); err != nil {
+		writeJSONError(w, statusForErr(err), err)
+		return
+	}
+	if err := s.requireBranch(r.Context(), repoDir, req.HeadBranch); err != nil {
+		writeJSONError(w, statusForErr(err), fmt.Errorf("head branch %s: %w", req.HeadBranch, err))
+		return
+	}
+	if err := s.requireBranch(r.Context(), repoDir, req.TargetBranch); err != nil {
+		writeJSONError(w, statusForErr(err), fmt.Errorf("target branch %s: %w", req.TargetBranch, err))
+		return
+	}
+	if existing, ok := s.prs.findOpen(req.Repo, req.HeadBranch, req.TargetBranch); ok {
+		err := fmt.Errorf("pr #%d already open for %s -> %s: %w", existing.number, req.HeadBranch, req.TargetBranch, errPRExists)
+		writeJSONError(w, statusForErr(errPRExists), err)
 		return
 	}
 	pr := s.prs.create(req.Repo, req.HeadBranch, req.TargetBranch, req.Title, req.Description)
@@ -92,6 +105,12 @@ func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, prStateResponse{State: pr.state})
 }
 
+// handleProviderClosePR asks the forge to close a PR without merging it.
+// A PR that is already merged is left alone rather than flipped to
+// "closed": real Forgejo's issue model treats a merged PR's issue as
+// already closed and sticky, so a later close request against it is a
+// no-op, not an error, matching the best-effort close-after-merge path
+// Loam's sync uses when it races a forge-side merge (loam-giq.8).
 func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	if !s.requireProviderAuth(w, r) {
 		return
@@ -100,11 +119,14 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, ok := s.prs.get(req.Repo, req.Number); !ok {
+	pr, ok := s.prs.get(req.Repo, req.Number)
+	if !ok {
 		writeJSONError(w, http.StatusNotFound, errPRNotFound)
 		return
 	}
-	s.prs.setState(req.Repo, req.Number, "closed")
+	if pr.state != "merged" {
+		s.prs.setState(req.Repo, req.Number, "closed")
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

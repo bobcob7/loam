@@ -221,7 +221,10 @@ func (s *Server) MergePR(ctx context.Context, repo string, number int) (err erro
 
 // ClosePR marks a recorded PR closed without merging, simulating someone
 // closing it directly on the forge (as opposed to Client.ClosePR, which is
-// Loam asking the forge to close a PR it opened).
+// Loam asking the forge to close a PR it opened). A PR already merged is
+// left alone: merging is sticky on a real forge, so closing a merged PR
+// from the forge side is a no-op, the same guard handleProviderClosePR
+// applies to the provider REST path.
 func (s *Server) ClosePR(_ context.Context, repo string, number int) (err error) {
 	s.logger.Info("fakeforge: control close-pr", "repo", repo, "number", number)
 	defer func() {
@@ -229,10 +232,13 @@ func (s *Server) ClosePR(_ context.Context, repo string, number int) (err error)
 			s.logger.Warn("fakeforge: control close-pr failed", "repo", repo, "number", number, "error", err)
 		}
 	}()
-	if _, err := s.lookupPR(repo, number); err != nil {
+	pr, err := s.lookupPR(repo, number)
+	if err != nil {
 		return err
 	}
-	s.prs.setState(repo, number, "closed")
+	if pr.state != "merged" {
+		s.prs.setState(repo, number, "closed")
+	}
 	return nil
 }
 
@@ -415,7 +421,7 @@ func statusForErr(err error) int {
 	switch codeForError(err) {
 	case "repo_not_found", "branch_not_found", "pr_not_found":
 		return http.StatusNotFound
-	case "repo_exists":
+	case "repo_exists", "pr_exists":
 		return http.StatusConflict
 	case "invalid_branch", "invalid_upstream":
 		return http.StatusBadRequest

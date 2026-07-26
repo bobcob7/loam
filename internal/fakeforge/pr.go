@@ -46,6 +46,23 @@ func (r *prRegistry) get(repo string, number int) (*prRecord, bool) {
 	return pr, ok
 }
 
+// findOpen returns the open PR (if any) already recorded for repo with the
+// given head/target branch pair. This is what lets handleCreatePR detect a
+// repeat CreatePR the way real Forgejo does: a second request for a pair
+// that already has an open PR is a conflict, not a fresh PR number. A PR
+// that has since closed or merged does not block a new one for the same
+// pair, matching Forgejo allowing re-opening after a prior PR concluded.
+func (r *prRegistry) findOpen(repo, headBranch, targetBranch string) (*prRecord, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, pr := range r.byNo[repo] {
+		if pr.state == "open" && pr.headBranch == headBranch && pr.targetBranch == targetBranch {
+			return pr, true
+		}
+	}
+	return nil, false
+}
+
 // setState transitions the PR's state; a no-op if the PR is unknown.
 func (r *prRegistry) setState(repo string, number int, state string) {
 	r.mu.Lock()
