@@ -18,7 +18,7 @@ var _ RoleStore = &RoleStoreMock{}
 //
 //		// make and configure a mocked RoleStore
 //		mockedRoleStore := &RoleStoreMock{
-//			RoleCapabilitiesFunc: func(ctx context.Context, role string) ([]string, error) {
+//			RoleCapabilitiesFunc: func(ctx context.Context, role string) ([]Capability, error) {
 //				panic("mock out the RoleCapabilities method")
 //			},
 //		}
@@ -29,7 +29,7 @@ var _ RoleStore = &RoleStoreMock{}
 //	}
 type RoleStoreMock struct {
 	// RoleCapabilitiesFunc mocks the RoleCapabilities method.
-	RoleCapabilitiesFunc func(ctx context.Context, role string) ([]string, error)
+	RoleCapabilitiesFunc func(ctx context.Context, role string) ([]Capability, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -45,7 +45,7 @@ type RoleStoreMock struct {
 }
 
 // RoleCapabilities calls RoleCapabilitiesFunc.
-func (mock *RoleStoreMock) RoleCapabilities(ctx context.Context, role string) ([]string, error) {
+func (mock *RoleStoreMock) RoleCapabilities(ctx context.Context, role string) ([]Capability, error) {
 	if mock.RoleCapabilitiesFunc == nil {
 		panic("RoleStoreMock.RoleCapabilitiesFunc: method is nil but RoleStore.RoleCapabilities was just called")
 	}
