@@ -107,6 +107,39 @@ func (s *Scheduler) waitIdle() {
 	s.wg.Wait()
 }
 
+// Shutdown blocks until every cycle already in flight when it is called
+// finishes, or ctx is done, whichever comes first. It exists because Run
+// returns the instant ctx is canceled while any cycle goroutines it
+// started keep running (loam-giq.1's per-repo WaitGroup has no drain
+// caller of its own) -- there was previously no seam for
+// docs/server-spec.md's Shutdown contract ("let ... the current sync ...
+// jobs drain, bounded by a grace period") to hook into: a caller that
+// just waited for Run to return would not actually be waiting for
+// anything. Callers should cancel the ctx passed to Run first (so no new
+// cycle starts), then call Shutdown with a context bounded by the
+// shutdown grace period; a cycle still running when that ctx's deadline
+// passes is abandoned here (this method returns ctx.Err()) and follows
+// the crash-recovery path on next startup, per that same Shutdown
+// contract's "killed ... and re-queued" clause -- Shutdown does not kill
+// or cancel the cycle itself, since Postgres reads/writes mid-cycle
+// should not be torn down mid-transaction; it only stops waiting for it.
+//
+// Safe to call concurrently with Run (whether Run's own ctx has been
+// canceled yet or not) and safe to call more than once.
+func (s *Scheduler) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.waitIdle()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Tick runs one cycle per enrolled repo and blocks until every cycle
 // started so far has finished -- not just the cycles this call started,
 // but any still in flight from an earlier call. This is the seam

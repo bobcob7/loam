@@ -49,11 +49,19 @@ type RepoID string
 // package) adapts Store.ListAllRepoNames to this interface, converting
 // each returned name to a RepoID (RepoID is repos.name, never repos.id --
 // loam-54o.7 NOTES). No production Scheduler is constructed anywhere in
-// the tree yet -- cmd/server/main.go does not connect to Postgres or wire
-// any of this package's other collaborators, all of it loam-ofg.21's
-// stated scope -- so StoreRepoLister has no call site to wire into today;
-// it is ready for loam-ofg.21 to pass to mirrorsync.New as the RepoLister
-// argument once that bead constructs the rest.
+// the tree yet: loam-ofg.21 now wires cmd/server/main.go's startup
+// sequence -- it connects to Postgres, in the correct migrate-then-pool
+// order, and constructs a real ingest worker pool -- but deliberately
+// stops short of building a Scheduler, since 5 of this package's other 7
+// collaborators (Fetcher, AdvanceDetector, MergeabilityChecker, the
+// IngestEnqueuer adapter, PRPoller) still have no production
+// implementation anywhere in the tree; only this package's own
+// StoreRepoLister and SyncStateReporter are real. So StoreRepoLister
+// still has no call site to wire into today; it remains ready for
+// whichever bead constructs the rest (giq.2/4/5/8, c94.2) to pass to
+// mirrorsync.New as the RepoLister argument, alongside
+// Scheduler.Shutdown (added by loam-ofg.21) as the drain seam its own
+// shutdown sequence needs.
 type RepoLister interface {
 	ListRepos(ctx context.Context) ([]RepoID, error)
 }
