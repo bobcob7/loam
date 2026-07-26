@@ -115,8 +115,21 @@ func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) 
 // *http.Server around it, and coordinating its shutdown with the rest of
 // the process, is NewHTTPServer's and loam-ofg.21's job respectively.
 //
-// The returned value is deliberately opaque (http.HandlerFunc, not the
-// *http.ServeMux itself): the mux underlying this Router is only ever
+// Before deferring to the mux, it checks whether the request would only
+// match the mux's least-specific registered pattern ("/", or none at all) —
+// i.e. no RegisterCLI/RegisterAdmin/RegisterGit call claimed it — and, if
+// so, whether the path falls under one of the three service-group prefixes
+// (/loam.v1., /loam.admin.v1., /git/) anyway. If it does, that request gets
+// the group's own 404 in the group's own wire format and auth regime
+// (loam-cjq), instead of silently falling through to the SPA's index.html.
+// A path already claimed by a more specific pattern is entirely unaffected
+// — mux.Handler's own precedence rules already routed it to that service's
+// handler before this check ever runs, so an unknown *procedure* within a
+// *registered* service keeps getting that service's own 404 exactly as
+// before.
+//
+// The returned value is deliberately opaque (a plain http.HandlerFunc, not
+// the *http.ServeMux itself): the mux underlying this Router is only ever
 // mutated by RegisterCLI/RegisterAdmin/RegisterGit/RegisterUnauthenticated/
 // RegisterSPA, each of which enforces which auth wrapper a path group gets.
 // Returning the concrete *http.ServeMux would let a type assertion recover
@@ -124,5 +137,15 @@ func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) 
 // defeating the whole structural guarantee this package exists to
 // establish.
 func (rt *Router) Handler() http.Handler {
-	return http.HandlerFunc(rt.mux.ServeHTTP)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := rt.mux.Handler(r); pattern != "" && pattern != "/" {
+			rt.mux.ServeHTTP(w, r)
+			return
+		}
+		if fallback, ok := rt.groupFallback(r.URL.Path); ok {
+			fallback.ServeHTTP(w, r)
+			return
+		}
+		rt.mux.ServeHTTP(w, r)
+	})
 }
