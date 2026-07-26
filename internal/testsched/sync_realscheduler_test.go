@@ -105,8 +105,15 @@ func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *t
 	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, fetcher,
 		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, state)
 	h := NewSyncHarness(scheduler)
-	tickDone := make(chan []mirrorsync.RepoID, 1)
-	go func() { tickDone <- h.Tick(t.Context()) }()
+	type tickResult struct {
+		repos []mirrorsync.RepoID
+		err   error
+	}
+	tickDone := make(chan tickResult, 1)
+	go func() {
+		repos, err := h.Tick(t.Context())
+		tickDone <- tickResult{repos: repos, err: err}
+	}()
 	<-fetcher.entered
 	select {
 	case <-tickDone:
@@ -115,12 +122,13 @@ func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *t
 	}
 	assert.False(t, idleReported.Load(), "the cycle cannot have reported idle before Fetch returned")
 	close(fetcher.release)
-	var repos []mirrorsync.RepoID
+	var result tickResult
 	select {
-	case repos = <-tickDone:
+	case result = <-tickDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Tick did not return after the real scheduler's blocked Fetch step was released")
 	}
-	require.Equal(t, []mirrorsync.RepoID{"repoA"}, repos)
+	require.NoError(t, result.err)
+	require.Equal(t, []mirrorsync.RepoID{"repoA"}, result.repos)
 	assert.True(t, idleReported.Load(), "Tick must not return before the real scheduler's ReportIdle actually ran")
 }

@@ -2,6 +2,7 @@ package testsched
 
 import (
 	"context"
+	"testing"
 
 	"github.com/bobcob7/loam/internal/mirrorsync"
 )
@@ -21,7 +22,11 @@ import (
 //
 // Then, once per "the next sync runs" / "the upstream PR merges" step:
 //
-//	repos := h.Tick(ctx)
+//	repos, err := h.Tick(ctx)
+//
+// or, from a Go test with a testing.TB in scope:
+//
+//	repos := h.TickT(ctx, t)
 //
 // Do NOT also call scheduler.Run: Tick drives a cycle directly, so the
 // injected tick channel goes unused in tests. Production wires
@@ -67,18 +72,31 @@ func NewSyncHarness(scheduler *mirrorsync.Scheduler) *SyncHarness {
 // Tick runs one cycle per enrolled repo and blocks until every cycle in
 // flight has finished, returning the repos this call actually started (a
 // repo already mid-cycle from a prior tick is skipped by the scheduler's
-// own per-repo guard and does not appear here). See the SyncHarness doc
-// comment above for the two constraints that come with this: no
-// concurrent Tick/Run on the same Scheduler, and no early return on ctx
-// cancellation.
+// own per-repo guard and does not appear here) alongside a ListRepos
+// failure, if one occurred. See the SyncHarness doc comment above for the
+// two constraints that come with this: no concurrent Tick/Run on the same
+// Scheduler, and no early return on ctx cancellation.
 //
-// It takes no lock of its own and returns no error: there is no failure
-// this layer can observe. mirrorsync logs and swallows a ListRepos
-// error, returning no started repos, so a listing failure is
-// indistinguishable here from an empty enrollment. See loam-hhh for
-// surfacing that distinction; until it lands, a step asserting on an
-// empty result should be read as "no repo started", not "no repo is
-// enrolled".
-func (h *SyncHarness) Tick(ctx context.Context) []mirrorsync.RepoID {
+// It takes no lock of its own; the error is mirrorsync.Scheduler.Tick's
+// own, propagated unchanged (loam-hhh), so a step that ticks and gets an
+// empty, nil-error result can now trust "no repo is enrolled" instead of
+// having to treat it as "no repo started, cause unknown". Before loam-hhh,
+// mirrorsync logged and swallowed a ListRepos error, returning no started
+// repos with nothing to distinguish that from an empty enrollment; that
+// gap is why TickT was dropped in wave 4 (there was no error to fail a
+// testing.TB on) and is restored below now that there is one.
+func (h *SyncHarness) Tick(ctx context.Context) ([]mirrorsync.RepoID, error) {
 	return h.scheduler.Tick(ctx)
+}
+
+// TickT is Tick for callers with a testing.TB in scope: a ListRepos
+// failure fails tb directly instead of returning an error a Go test would
+// otherwise have to check itself.
+func (h *SyncHarness) TickT(ctx context.Context, tb testing.TB) []mirrorsync.RepoID {
+	tb.Helper()
+	repos, err := h.Tick(ctx)
+	if err != nil {
+		tb.Fatalf("%v", err)
+	}
+	return repos
 }
