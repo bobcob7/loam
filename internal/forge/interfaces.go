@@ -16,7 +16,9 @@ import "context"
 type Provider interface {
 	// ValidateToken confirms token authenticates against host and has
 	// the REST scopes needed to open PRs. Returns an error wrapping
-	// ErrInvalidToken if the forge rejects the token.
+	// ErrInvalidToken if the token does not authenticate at all (empty,
+	// malformed, expired, or revoked), or ErrInsufficientScope if it
+	// authenticates but lacks the required scope.
 	ValidateToken(ctx context.Context, host, token string) error
 	// CheckRepo confirms upstreamURL exists and is accessible for both
 	// git read and git write, via an authenticated `git ls-remote` and
