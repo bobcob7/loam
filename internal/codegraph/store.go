@@ -213,6 +213,74 @@ func (s *Store) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targe
 	return count, nil
 }
 
+// LookupSymbolsByName resolves name to every matching symbols row, scoped
+// to repoIDs (the caller's repo scope, plural per chunkstore.Search's
+// convention -- see internal/db/queries/code_graph.sql's LookupSymbolsByName
+// comment for why this package's multi-value scoping now matches
+// chunkstore's rather than Dependents/Deps/History's single-repoID shape)
+// and targetBranch, optionally narrowed to one file (empty file means no
+// narrowing). Matching is exact-name; ambiguity -- several distinct symbols
+// sharing name, e.g. three Logins in three files -- is deliberately not an
+// error: docs/cli-spec.md:531-535 requires every match returned as data, so
+// a handler can build the per-row `of` disambiguation field itself.
+//
+// An empty result is the ONLY authoritative not-found signal this package
+// can offer a handler (docs/cli-spec.md exit 3, "Not found"): it means no
+// symbol named name exists in scope at all. That is genuinely different
+// from a real match whose Dependents/Deps/History comes back empty (a
+// symbol that exists but happens to have no edges/history) -- a
+// distinction the store previously could not make, since Dependents/Deps
+// took a uuid.UUID the caller had no way to obtain from a name and simply
+// returned (nil, nil, nil) for "no rows" regardless of which case that was.
+// A caller resolving `graph def/deps/dependents/history <name>` calls this
+// first: zero rows is exit 3, one row is the unambiguous case, and more
+// than one is the ambiguous-target case docs/cli-spec.md defines as data.
+//
+// truncated follows the same limit+1/clampLimit/fetchLimit contract as
+// Dependents/Deps/History (limit <= 0 uses defaultLimit): docs/cli-spec.md
+// :537-539 requires a capped `graph` response to set truncated: true
+// regardless of which subquery it backs, not only the blast-radius ones,
+// so a many-way name collision capped by limit must report it exactly like
+// a capped blast radius does.
+//
+// An empty repoIDs matches nothing, mirroring
+// internal/chunkstore.Search's treatment of an empty scope as "search
+// nothing", not "no filter" -- a caller that forgot to populate its scope
+// gets zero results rather than every repo's symbols. Unlike Search,
+// though, a non-positive limit here still means "use defaultLimit" (this
+// package's own convention), not Search's separate "non-positive limit
+// means zero results" rule -- the two packages scope multi-repo lookups
+// the same way but do not share every convention, since Search's caller
+// picks a limit for pagination page size while this package's callers
+// (Dependents/Deps/History call sites) already rely on clampLimit's
+// default-when-absent behavior.
+func (s *Store) LookupSymbolsByName(ctx context.Context, repoIDs []uuid.UUID, targetBranch, name, file string, limit int32) (symbols []Symbol, truncated bool, err error) {
+	if len(repoIDs) == 0 {
+		return nil, false, nil
+	}
+	effectiveLimit := clampLimit(limit)
+	ids := make([]pgtype.UUID, len(repoIDs))
+	for i, id := range repoIDs {
+		ids[i] = pgUUID(id)
+	}
+	rows, err := s.q.LookupSymbolsByName(ctx, gen.LookupSymbolsByNameParams{
+		Column1:      ids,
+		TargetBranch: targetBranch,
+		Name:         name,
+		Column4:      file,
+		Limit:        fetchLimit(effectiveLimit),
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("looking up symbols named %q: %w", name, err)
+	}
+	all := make([]Symbol, len(rows))
+	for i, r := range rows {
+		all[i] = fromGenSymbol(r)
+	}
+	symbols, truncated = trimSymbols(all, effectiveLimit)
+	return symbols, truncated, nil
+}
+
 // Dependents returns the reverse blast radius of symbolID: every symbol
 // that transitively depends on it, deduplicated (by minimum depth),
 // nearest-depth-first, up to limit rows (limit <= 0 uses defaultLimit).
@@ -354,6 +422,32 @@ func trimDependentsRows(rows []gen.DependentsRow, effectiveLimit int32) ([]Depen
 		}
 	}
 	return trimDependencies(all, effectiveLimit)
+}
+
+// fromGenSymbol converts a sqlc-generated symbols row (the LookupSymbolsByName
+// query selects the symbols table's own columns, so sqlc synthesizes the
+// built-in gen.Symbol model rather than a query-specific Row type) into this
+// package's exported Symbol type.
+func fromGenSymbol(r gen.Symbol) Symbol {
+	return Symbol{
+		ID:           uuidFromPg(r.ID),
+		RepoID:       uuidFromPg(r.RepoID),
+		TargetBranch: r.TargetBranch,
+		File:         r.File,
+		Line:         fromPgInt4(r.Line),
+		Name:         r.Name,
+		Kind:         r.Kind,
+	}
+}
+
+// trimSymbols trims symbols to effectiveLimit rows, reporting whether it
+// held more than that -- LookupSymbolsByName's analogue of
+// trimDependencies, over the plain Symbol shape rather than Dependency.
+func trimSymbols(symbols []Symbol, effectiveLimit int32) ([]Symbol, bool) {
+	if int32(len(symbols)) > effectiveLimit {
+		return symbols[:effectiveLimit], true
+	}
+	return symbols, false
 }
 
 // trimDependencies trims deps to effectiveLimit rows, reporting whether it

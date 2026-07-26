@@ -16,6 +16,68 @@ WHERE repo_id = $1 AND target_branch = $2 AND file = $3;
 INSERT INTO symbols (id, repo_id, target_branch, file, line, name, kind)
 VALUES ($1, $2, $3, $4, $5, $6, $7);
 
+-- name: LookupSymbolsByName :many
+-- Name -> symbols resolution (loam-awr, docs/cli-spec.md "Graph DB
+-- queries"): backs `graph def` directly, and is the uuid-resolution step
+-- `graph deps`/`dependents`/`history` need before they can call
+-- Dependents/Deps/SymbolHistory, which all take a symbol id rather than a
+-- name. Matching is exact-name, scoped to (repo_id, target_branch) --
+-- consistent with ResolveGraphEdgeCandidates' to_symbol_id match above,
+-- which is also exact-name within a repo/branch. "Approximate" in
+-- persistence-spec's description of graph_edges resolution refers to that
+-- edge-resolution step's lack of kind/file narrowing, not to fuzzy name
+-- matching here.
+--
+-- Scope is repo_id = ANY($1::uuid[]) rather than a single repo_id, matching
+-- internal/chunkstore.SearchChunksByEmbeddingScoped's convention (a
+-- caller-supplied set of repo ids, one target_branch) rather than
+-- Dependents/Deps/History's single-repoID convention -- deliberately, so
+-- the two store packages scope multi-value lookups the same way. See
+-- SearchChunksByEmbeddingScoped's comment for why sqlc surfaces the array
+-- param as an anonymous Column1 (sqlc#2635): the store layer
+-- (internal/codegraph.Store.LookupSymbolsByName) hides it behind a typed
+-- repoIDs []uuid.UUID parameter, same as chunkstore.Search does.
+--
+-- $4 is the optional --file narrowing (docs/cli-spec.md: "--file <path>
+-- narrows the target to the definition in one file"); an empty string
+-- means "no file filter" rather than "match the empty-string file", since
+-- file is NOT NULL text and never legitimately empty (every symbol has a
+-- real file path). This mirrors the "empty means no filter, not a
+-- distinct value" sentinel already used for other optional-narrowing
+-- params in this codebase's Go layer (e.g. IngestedRef's Ok flag,
+-- internal/reposstore) rather than a nullable/sqlc.narg param -- sqlc.yaml
+-- has no `database:` block (see its own comment), so a param needs no
+-- live-connection type inference here, just a plain OR-guarded predicate.
+--
+-- An empty result is the caller's ONLY not-found signal: this query
+-- returns zero rows both when no symbol named $3 exists at all and when
+-- one exists with zero graph_edges -- deliberately, so a handler can
+-- finally tell "no such symbol" (LookupSymbolsByName returns nothing) from
+-- "symbol exists with zero edges" (LookupSymbolsByName returns one match,
+-- then Dependents/Deps on its id returns an empty, non-truncated set).
+-- Ambiguity is NOT an error: several distinct symbols_id rows sharing $3's
+-- name is ordinary data (docs/cli-spec.md:531-535, three `Login`s in three
+-- files), so this returns every match, not just one.
+--
+-- Ordered by file, then line (NULLS LAST for file-level symbols, which
+-- carry no line -- SymbolInput's doc comment), then id as a final
+-- deterministic tiebreak -- there is no "depth" concept here (unlike
+-- Dependents/Deps), so this is a plain, stable ordering for a caller that
+-- needs one, not a truncation-quality ordering.
+--
+-- Callers pass limit+1 (this package's fetchLimit convention) so the Store
+-- can detect truncation itself, exactly as Dependents/Deps/History do --
+-- docs/cli-spec.md:537-539 requires `truncated: true` in the envelope for
+-- every graph subquery's capped response, not only the blast-radius ones.
+SELECT s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind
+FROM symbols s
+WHERE s.repo_id = ANY($1::uuid[])
+  AND s.target_branch = $2
+  AND s.name = $3
+  AND ($4::text = '' OR s.file = $4::text)
+ORDER BY s.file, s.line NULLS LAST, s.id
+LIMIT $5;
+
 -- name: DeleteSymbolReferencesForFile :exec
 -- Per-file delete half of "delete-and-replace" for symbol_references.
 DELETE FROM symbol_references
