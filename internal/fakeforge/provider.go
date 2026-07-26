@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/bobcob7/loam/internal/forge"
@@ -68,8 +67,22 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, err := os.Stat(s.repoDir(req.Repo)); err != nil {
-		writeJSONError(w, http.StatusNotFound, errRepoNotFound)
+	repoDir := s.repoDir(req.Repo)
+	if err := s.requireRepo(repoDir); err != nil {
+		writeJSONError(w, statusForErr(err), err)
+		return
+	}
+	if err := s.requireBranch(r.Context(), repoDir, req.HeadBranch); err != nil {
+		writeJSONError(w, statusForErr(err), fmt.Errorf("head branch %s: %w", req.HeadBranch, err))
+		return
+	}
+	if err := s.requireBranch(r.Context(), repoDir, req.TargetBranch); err != nil {
+		writeJSONError(w, statusForErr(err), fmt.Errorf("target branch %s: %w", req.TargetBranch, err))
+		return
+	}
+	if existing, ok := s.prs.findOpen(req.Repo, req.HeadBranch, req.TargetBranch); ok {
+		err := fmt.Errorf("pr #%d already open for %s -> %s: %w", existing.number, req.HeadBranch, req.TargetBranch, errPRExists)
+		writeJSONError(w, statusForErr(errPRExists), err)
 		return
 	}
 	pr := s.prs.create(req.Repo, req.HeadBranch, req.TargetBranch, req.Title, req.Description)
@@ -92,6 +105,13 @@ func (s *Server) handleGetPRState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, prStateResponse{State: pr.state})
 }
 
+// handleProviderClosePR asks the forge to close a PR without merging it.
+// A PR that is already merged rejects the close with errPRMerged (412)
+// instead of transitioning: verified against Forgejo 9.0.3, PATCH
+// .../pulls/{merged} {"state":"closed"} returns 412 Precondition Failed
+// with state unchanged — merging is a one-way transition, not a form of
+// "already closed." loam-giq.8's best-effort close-after-merge path must
+// special-case this error rather than rely on the fake silently no-oping.
 func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	if !s.requireProviderAuth(w, r) {
 		return
@@ -100,8 +120,14 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, ok := s.prs.get(req.Repo, req.Number); !ok {
+	pr, ok := s.prs.get(req.Repo, req.Number)
+	if !ok {
 		writeJSONError(w, http.StatusNotFound, errPRNotFound)
+		return
+	}
+	if pr.state == "merged" {
+		err := fmt.Errorf("closing pr %s#%d: %w", req.Repo, req.Number, errPRMerged)
+		writeJSONError(w, statusForErr(errPRMerged), err)
 		return
 	}
 	s.prs.setState(req.Repo, req.Number, "closed")

@@ -25,12 +25,25 @@ import (
 // error path (see forge/interfaces.go and Forgejo.ValidateToken, which
 // maps both 401 and 403 to ErrInvalidToken). There is no fourth
 // forge-level class for "valid token, wrong scope" to map onto.
+//
+// errPRExists and errPRMerged deliberately do not wrap a forge sentinel
+// either, but for the opposite reason from errPRNotFound (see loam-hza,
+// which tracks that gap separately and is not fixed here): Forgejo.
+// doPullRequest (internal/forge/forgejo.go) only classifies 404/401/403
+// into sentinels today. A 409 from a duplicate PR and a 412 from closing an
+// already-merged PR both fall through to its generic "unexpected status"
+// branch, so there is no forge-level class yet for either to map onto —
+// both sides are opaque errors, which is the parity loam-li0.9's contract
+// suite can actually observe. If forge later grows dedicated sentinels for
+// either status, this should be revisited alongside loam-hza.
 var (
 	errUnauthorized    = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
 	errRepoNotFound    = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)
 	errRepoExists      = errors.New("fakeforge: repo already exists")
 	errBranchNotFound  = errors.New("fakeforge: branch not found")
 	errPRNotFound      = errors.New("fakeforge: pull request not found")
+	errPRExists        = errors.New("fakeforge: an open pull request already exists for this head/target pair")
+	errPRMerged        = errors.New("fakeforge: pull request is already merged")
 	errInvalidBranch   = errors.New("fakeforge: invalid branch name")
 	errMergeConflict   = errors.New("fakeforge: merge conflict")
 	errGitUnavailable  = errors.New("fakeforge: git binary not available")
@@ -50,6 +63,8 @@ var errorCodes = []struct {
 	{errRepoExists, "repo_exists"},
 	{errBranchNotFound, "branch_not_found"},
 	{errPRNotFound, "pr_not_found"},
+	{errPRExists, "pr_exists"},
+	{errPRMerged, "pr_merged"},
 	{errInvalidBranch, "invalid_branch"},
 	{errMergeConflict, "merge_conflict"},
 	{errGitUnavailable, "git_unavailable"},
