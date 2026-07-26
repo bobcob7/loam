@@ -133,6 +133,36 @@ func TestWithPollInterval_OverridesTheDefault(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, pool.pollInterval)
 }
 
+// TestWithPollInterval_ClampsNonPositiveToTheFloor pins the review
+// finding that WithPollInterval(0) (or any non-positive value) reached
+// time.NewTicker directly and panicked ("PANIC: non-positive interval for
+// NewTicker") the moment Run started a worker -- a harder failure than
+// the backoff hot loop WithBackoff's clamp fixes, and just as reachable:
+// a caller reaching for 0 to mean "never poll, rely purely on the wake
+// channel" is a natural mistake for exactly the harness this option
+// exists to serve. Sibling to TestWithBackoff_ClampsNonPositiveAndInvertedBounds.
+func TestWithPollInterval_ClampsNonPositiveToTheFloor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		d    time.Duration
+		want time.Duration
+	}{
+		{name: "zero", d: 0, want: minPollInterval},
+		{name: "negative", d: -1 * time.Second, want: minPollInterval},
+		{name: "valid value below the floor is still clamped up", d: 1 * time.Millisecond, want: minPollInterval},
+		{name: "valid value above the floor passes through unchanged", d: 250 * time.Millisecond, want: 250 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := NewPool(testLogger(), nil, nil, 1, WithPollInterval(tt.d))
+			assert.Equal(t, tt.want, pool.pollInterval)
+			assert.Positive(t, pool.pollInterval, "a non-positive interval must never reach time.NewTicker")
+		})
+	}
+}
+
 // TestWithBackoff_ClampsNonPositiveAndInvertedBounds pins the review
 // finding that WithBackoff(0, 0) (or any non-positive base) silently gave
 // backoffDelay(attempts, 0, 0) == 0 at every attempt: time.NewTimer(0)

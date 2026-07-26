@@ -39,6 +39,20 @@ const (
 // retried" step can still use it without a real wall-clock wait.
 const minBackoffBase = 1 * time.Millisecond
 
+// minPollInterval is the floor WithPollInterval clamps a non-positive
+// interval to. time.NewTicker panics on a non-positive duration ("PANIC:
+// non-positive interval for NewTicker"), so WithPollInterval(0) --
+// plausibly reached for by a caller who wants "never poll, rely purely
+// on the wake channel" -- would crash Run the moment it started, rather
+// than degrade into a hot loop the way a too-small backoff does. Unlike
+// backoff, this ticker fires continuously for the pool's entire
+// lifetime, not just around a failed job's retries, so the floor is set
+// meaningfully higher than minBackoffBase's 1ms: 100ms is still fast
+// enough for a godog step to observe a poll-driven claim well within a
+// test's timeout, but does not become a busy-poll against Postgres if a
+// caller passes 0 expecting the wake channel to carry everything.
+const minPollInterval = 100 * time.Millisecond
+
 // Pool is an in-process worker pool that claims queued ingest_jobs rows
 // and runs them through an injected Orchestrator, serialized per repo: at
 // most one job per repo_id runs at a time, regardless of pool size
@@ -98,8 +112,13 @@ func WithBackoff(base, max time.Duration) Option {
 
 // WithPollInterval overrides the default fallback poll cadence
 // (defaultPollInterval's doc comment: a safety net behind the wake-up
-// channel, not the primary dispatch path).
+// channel, not the primary dispatch path). d below minPollInterval is
+// clamped up to it -- see minPollInterval's doc comment for why zero or
+// negative must not reach time.NewTicker directly.
 func WithPollInterval(d time.Duration) Option {
+	if d < minPollInterval {
+		d = minPollInterval
+	}
 	return func(p *Pool) {
 		p.pollInterval = d
 	}
