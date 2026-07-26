@@ -27,6 +27,9 @@ var _ Provider = &ProviderMock{}
 //			CreatePRFunc: func(ctx context.Context, repo string, headBranch string, targetBranch string, title string, description string) (string, int, error) {
 //				panic("mock out the CreatePR method")
 //			},
+//			FindOpenPRFunc: func(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error) {
+//				panic("mock out the FindOpenPR method")
+//			},
 //			GetPRStateFunc: func(ctx context.Context, repo string, prNumber int) (string, error) {
 //				panic("mock out the GetPRState method")
 //			},
@@ -51,6 +54,9 @@ type ProviderMock struct {
 
 	// CreatePRFunc mocks the CreatePR method.
 	CreatePRFunc func(ctx context.Context, repo string, headBranch string, targetBranch string, title string, description string) (string, int, error)
+
+	// FindOpenPRFunc mocks the FindOpenPR method.
+	FindOpenPRFunc func(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error)
 
 	// GetPRStateFunc mocks the GetPRState method.
 	GetPRStateFunc func(ctx context.Context, repo string, prNumber int) (string, error)
@@ -94,6 +100,17 @@ type ProviderMock struct {
 			// Description is the description argument value.
 			Description string
 		}
+		// FindOpenPR holds details about calls to the FindOpenPR method.
+		FindOpenPR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// HeadBranch is the headBranch argument value.
+			HeadBranch string
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+		}
 		// GetPRState holds details about calls to the GetPRState method.
 		GetPRState []struct {
 			// Ctx is the ctx argument value.
@@ -123,6 +140,7 @@ type ProviderMock struct {
 	lockCheckRepo      sync.RWMutex
 	lockClosePR        sync.RWMutex
 	lockCreatePR       sync.RWMutex
+	lockFindOpenPR     sync.RWMutex
 	lockGetPRState     sync.RWMutex
 	lockGitCredentials sync.RWMutex
 	lockValidateToken  sync.RWMutex
@@ -253,6 +271,50 @@ func (mock *ProviderMock) CreatePRCalls() []struct {
 	mock.lockCreatePR.RLock()
 	calls = mock.calls.CreatePR
 	mock.lockCreatePR.RUnlock()
+	return calls
+}
+
+// FindOpenPR calls FindOpenPRFunc.
+func (mock *ProviderMock) FindOpenPR(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error) {
+	if mock.FindOpenPRFunc == nil {
+		panic("ProviderMock.FindOpenPRFunc: method is nil but Provider.FindOpenPR was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+	}{
+		Ctx:          ctx,
+		Repo:         repo,
+		HeadBranch:   headBranch,
+		TargetBranch: targetBranch,
+	}
+	mock.lockFindOpenPR.Lock()
+	mock.calls.FindOpenPR = append(mock.calls.FindOpenPR, callInfo)
+	mock.lockFindOpenPR.Unlock()
+	return mock.FindOpenPRFunc(ctx, repo, headBranch, targetBranch)
+}
+
+// FindOpenPRCalls gets all the calls that were made to FindOpenPR.
+// Check the length with:
+//
+//	len(mockedProvider.FindOpenPRCalls())
+func (mock *ProviderMock) FindOpenPRCalls() []struct {
+	Ctx          context.Context
+	Repo         string
+	HeadBranch   string
+	TargetBranch string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+	}
+	mock.lockFindOpenPR.RLock()
+	calls = mock.calls.FindOpenPR
+	mock.lockFindOpenPR.RUnlock()
 	return calls
 }
 
