@@ -48,10 +48,37 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 		wantStoreOK bool // whether the role store is expected to be consulted at all.
 	}{
 		{
+			// Method-constraint case: GET on the git-receive-pack path (a
+			// POST-only endpoint) must not be silently accepted as if it
+			// were the POST form -- gitOperationCapability's r.Method
+			// guards are load-bearing, not redundant with the path check.
+			name:        "GET on git-receive-pack path is unrecognized, not a push",
+			method:      http.MethodGet,
+			target:      "/git/acme/widgets.git/git-receive-pack",
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
+			wantStatus:  http.StatusForbidden,
+			wantCalled:  false,
+			wantBodyHas: "loam: unrecognized git operation",
+			wantStoreOK: false,
+		},
+		{
+			// Method-constraint case: POST on the info/refs discovery path
+			// (a GET-only endpoint) must not be silently accepted as if it
+			// were the GET form, even with a recognized ?service= value.
+			name:        "POST on info/refs path is unrecognized, not a clone",
+			method:      http.MethodPost,
+			target:      "/git/acme/widgets.git/info/refs?service=git-upload-pack",
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
+			wantStatus:  http.StatusForbidden,
+			wantCalled:  false,
+			wantBodyHas: "loam: unrecognized git operation",
+			wantStoreOK: false,
+		},
+		{
 			name:        "clone via info/refs: author may clone",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/info/refs?service=git-upload-pack",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone, handler.CapabilityGitPush},
 			wantStatus:  http.StatusOK,
 			wantCalled:  true,
@@ -62,7 +89,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "clone via info/refs: reviewer may clone",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/info/refs?service=git-upload-pack",
-			ctx:         identityCtx("ada-lovelace", "reviewer"),
+			ctx:         identityCtx(t, "ada-lovelace", "reviewer"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone},
 			wantStatus:  http.StatusOK,
 			wantCalled:  true,
@@ -72,7 +99,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "clone via POST git-upload-pack: reviewer may clone",
 			method:      http.MethodPost,
 			target:      "/git/acme/widgets.git/git-upload-pack",
-			ctx:         identityCtx("ada-lovelace", "reviewer"),
+			ctx:         identityCtx(t, "ada-lovelace", "reviewer"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone},
 			wantStatus:  http.StatusOK,
 			wantCalled:  true,
@@ -82,7 +109,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "push via info/refs: author may push",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/info/refs?service=git-receive-pack",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone, handler.CapabilityGitPush},
 			wantStatus:  http.StatusOK,
 			wantCalled:  true,
@@ -92,7 +119,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "push via POST git-receive-pack: author may push",
 			method:      http.MethodPost,
 			target:      "/git/acme/widgets.git/git-receive-pack",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone, handler.CapabilityGitPush},
 			wantStatus:  http.StatusOK,
 			wantCalled:  true,
@@ -103,7 +130,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "push via POST git-receive-pack: reviewer denied",
 			method:      http.MethodPost,
 			target:      "/git/acme/widgets.git/git-receive-pack",
-			ctx:         identityCtx("ada-lovelace", "reviewer"),
+			ctx:         identityCtx(t, "ada-lovelace", "reviewer"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone},
 			wantStatus:  http.StatusForbidden,
 			wantCalled:  false,
@@ -114,7 +141,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "push via info/refs: reviewer denied",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/info/refs?service=git-receive-pack",
-			ctx:         identityCtx("ada-lovelace", "reviewer"),
+			ctx:         identityCtx(t, "ada-lovelace", "reviewer"),
 			roleCaps:    []handler.Capability{handler.CapabilityGitClone},
 			wantStatus:  http.StatusForbidden,
 			wantCalled:  false,
@@ -125,7 +152,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "unrecognized git operation is denied closed",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/HEAD",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			wantStatus:  http.StatusForbidden,
 			wantCalled:  false,
 			wantBodyHas: "loam: unrecognized git operation",
@@ -135,7 +162,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "info/refs with unrecognized service value is denied closed",
 			method:      http.MethodGet,
 			target:      "/git/acme/widgets.git/info/refs?service=git-upload-archive",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			wantStatus:  http.StatusForbidden,
 			wantCalled:  false,
 			wantBodyHas: "loam: unrecognized git operation",
@@ -158,7 +185,7 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			name:        "role store failure is a 500, not a policy 403",
 			method:      http.MethodPost,
 			target:      "/git/acme/widgets.git/git-upload-pack",
-			ctx:         identityCtx("grace-hopper-3", "author"),
+			ctx:         identityCtx(t, "grace-hopper-3", "author"),
 			roleErr:     errors.New("role store unreachable"),
 			wantStatus:  http.StatusInternalServerError,
 			wantCalled:  false,
@@ -188,6 +215,16 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 			if tt.wantBodyHas != "" {
 				assert.Contains(t, rec.Body.String(), tt.wantBodyHas)
 			}
+			if tt.wantStatus == http.StatusForbidden {
+				// Load-bearing against real git, not cosmetic: git's
+				// remote-curl only echoes a denial body back to the user
+				// when its Content-Type is text/plain -- confirmed against
+				// git 2.50.1 for clone/ls-remote/push. Any other value (or
+				// none) makes git silently discard every "loam: ..."
+				// reason above, so this must stay pinned alongside the
+				// body assertions, not just checked by hand.
+				assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain", "git's remote-curl discards the denial body unless Content-Type is text/plain")
+			}
 		})
 	}
 }
@@ -195,10 +232,13 @@ func TestGitRoleGate_Middleware(t *testing.T) {
 // identityCtx builds a context carrying a resolved agent identity, the
 // same shape internal/httpauth.GitIdentity places on a request context
 // before loam-ofg.16's handler (and, on top of it, this gate) ever sees
-// the request.
-func identityCtx(id, role string) func() context.Context {
+// the request. It roots the context in t.Context() -- consistent with the
+// sibling "no identity in context" table case below -- rather than
+// context.Background(), so every case in the table cancels along with the
+// subtest, like any other t.Context()-rooted context in this repo's tests.
+func identityCtx(t *testing.T, id, role string) func() context.Context {
 	return func() context.Context {
-		return httpauth.WithIdentity(context.Background(), httpauth.Identity{Name: "agent", ID: id, Role: role})
+		return httpauth.WithIdentity(t.Context(), httpauth.Identity{Name: "agent", ID: id, Role: role})
 	}
 }
 

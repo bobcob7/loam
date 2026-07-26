@@ -127,6 +127,15 @@ func gitServiceCapability(service string) (Capability, bool) {
 // but does not pin one for this HTTP-layer capability gate; the messages
 // here follow the same "loam: " prefix and style deliberately, as the
 // closest documented precedent, rather than inventing an unrelated shape.
+//
+// The Content-Type header is load-bearing, not cosmetic: git's own HTTP
+// client (remote-curl) only echoes a non-2xx response body back to the
+// user (as a "remote: ..." line ahead of its own "fatal: ..." line) when
+// the body's Content-Type is text/plain -- confirmed against real git
+// 2.50.1 for clone, ls-remote, and push. application/octet-stream or
+// text/html (or no header at all) makes git discard the body entirely,
+// silently downgrading every "loam: ..." reason here to a bare, opaque
+// 403 on the wire. Do not drop or "clean up" this header.
 func writeGitForbidden(w http.ResponseWriter, reason string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
@@ -140,6 +149,14 @@ func writeGitForbidden(w http.ResponseWriter, reason string) {
 // internal/httpauth.GitIdentity never lets a request reach next without a
 // resolved identity in the real mux, so this only fires if some future
 // caller wires Middleware in front of something other than GitIdentity.
+//
+// identity.Role is rendered with %q, not %s, deliberately: it is asserted
+// from a request header (docs/git-spec.md -> "Identity on Git Operations"
+// -- MVP identity is trusted, not verified), so an attacker-controlled
+// value could otherwise contain a literal newline. %q escapes it (and
+// wraps it in quotes), which stops a forged role value from injecting a
+// second "remote: loam: ..." line into git's stderr to spoof a different
+// (e.g. accepting) response. Do not simplify this back to %s.
 func gitRoleGateReason(ctx context.Context, capability Capability) string {
 	identity, ok := httpauth.IdentityFromContext(ctx)
 	if !ok {

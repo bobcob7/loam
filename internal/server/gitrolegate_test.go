@@ -156,6 +156,15 @@ func TestRouter_GitRoleGate_EndToEnd(t *testing.T) {
 			router.Handler().ServeHTTP(rec, req)
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			assert.Equal(t, tc.wantRan, ran, "stand-in git process invocation mismatch")
+			if tc.wantStatus == http.StatusForbidden {
+				// Real git 2.50.1 only surfaces a "remote: ..." line
+				// (clone/ls-remote/push alike) when this header is
+				// text/plain -- anything else silently drops the body,
+				// which would make Demo M2's rejection assertions fail
+				// against a real client while every Go-level test here
+				// stayed green.
+				assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain", "git's remote-curl discards the denial body unless Content-Type is text/plain")
+			}
 		})
 	}
 }
@@ -177,4 +186,5 @@ func TestRouter_GitRoleGate_MissingIdentityRejectionCarriesAReason(t *testing.T)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 	assert.False(t, ran)
 	assert.NotEmpty(t, rec.Body.String(), "a rejected push must carry a body a human can act on, not a bare 403")
+	assert.Contains(t, rec.Header().Get("Content-Type"), "text/plain", "git's remote-curl silently discards this body unless Content-Type is text/plain")
 }
