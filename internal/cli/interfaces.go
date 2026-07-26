@@ -3,7 +3,15 @@
 // See docs/cli-spec.md for the full command surface.
 package cli
 
-//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver
+import (
+	"context"
+
+	"connectrpc.com/connect"
+
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+)
+
+//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver gitBranchLookup ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
 
 // Config exposes the LOAM_* environment configuration every command may
 // need (see docs/cli-spec.md -> Environment Variables). Implemented by
@@ -45,17 +53,94 @@ type ErrorMapper interface {
 
 // WorkspaceResolver infers the repo and work-branch identifiers from the
 // current working directory when a command omits them (see docs/cli-spec.md
-// -> Workspace). Implemented by a later bead (loam-0pj.5).
+// -> Workspace), and locates the local staging path for a work branch's
+// unpublished comments (see docs/cli-spec.md -> comment (add), "Staging
+// location"). Implemented by workspace in workspace.go.
 type WorkspaceResolver interface {
+	// ResolveRepo infers the enrolled repo identifier from the current
+	// working directory: the directory name, when the caller is inside a
+	// clone (see docs/cli-spec.md -> Workspace). Returns an error when the
+	// caller is not inside a clone — resolveWorkBranchIdentity turns that
+	// into a usage error (exit 2) unless an explicit argument was given.
 	ResolveRepo() (string, error)
+	// ResolveWorkBranch infers the work branch from the current git branch
+	// checked out in the clone the caller is inside. Returns an error under
+	// the same condition as ResolveRepo (not inside a clone), or when the
+	// clone has no current branch to report (e.g. a detached HEAD).
 	ResolveWorkBranch() (string, error)
+	// StagingPath returns the local staging path for repo/workBranch,
+	// scoped to the calling agent's identifier so distinct agents sharing a
+	// workspace never collide (see docs/cli-spec.md -> "Staging location").
+	// It lives under the workspace's .loam/ directory, outside any clone,
+	// so a reviewer who never clones can still stage comments.
+	StagingPath(repo, workBranch string) string
 }
 
-// ConnectClient is a placeholder seam for the Connect RPC clients command
-// handlers will eventually call through (work branches, graph, search,
-// repo/clone). It is intentionally empty: the proto surface under
-// internal/gen is being reshaped concurrently by another bead, so this
-// package must not import it yet. A later bead replaces this with the real
-// generated Connect client interfaces, defined here where they are
-// consumed.
-type ConnectClient interface{}
+// gitBranchLookup resolves the git branch checked out at a directory, the
+// seam workspace inference uses to detect whether the caller is inside a
+// clone at all (see docs/cli-spec.md -> Workspace). Defined here,
+// consumer-side, so workspace.go's tests can mock it instead of shelling
+// out to a real git binary for every case; execGitBranchLookup in
+// workspace.go is the real implementation.
+type gitBranchLookup interface {
+	// CurrentBranch returns the checked-out branch name for the git working
+	// copy rooted exactly at dir. err is non-nil when dir is not the root
+	// of a git working copy (no dir/.git) or has no named branch checked
+	// out (e.g. detached HEAD) — either way, the signal that dir is not "a
+	// clone" for inference purposes.
+	CurrentBranch(dir string) (string, error)
+}
+
+// WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs
+// the work-branch commands call through (see docs/cli-spec.md -> Work
+// Branches). Its method set mirrors loamv1connect.WorkBranchServiceClient
+// exactly, so the real generated client satisfies it with no adapter.
+type WorkBranchClient interface {
+	CreateWorkBranch(context.Context, *connect.Request[loamv1.CreateWorkBranchRequest]) (*connect.Response[loamv1.CreateWorkBranchResponse], error)
+	UpdateWorkBranch(context.Context, *connect.Request[loamv1.UpdateWorkBranchRequest]) (*connect.Response[loamv1.UpdateWorkBranchResponse], error)
+	RequestReview(context.Context, *connect.Request[loamv1.RequestReviewRequest]) (*connect.Response[loamv1.RequestReviewResponse], error)
+	ListWorkBranches(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error)
+	GetWorkBranch(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error)
+	GetWorkBranchDiff(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error)
+	ListComments(context.Context, *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error)
+	ListVerdicts(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error)
+	SubmitVerdict(context.Context, *connect.Request[loamv1.SubmitVerdictRequest]) (*connect.Response[loamv1.SubmitVerdictResponse], error)
+	ReplyToThread(context.Context, *connect.Request[loamv1.ReplyToThreadRequest]) (*connect.Response[loamv1.ReplyToThreadResponse], error)
+}
+
+// RepoClient is the consumer-side seam for the RepoService RPC `clone` calls
+// through to resolve an enrolled repo (see docs/cli-spec.md -> clone).
+type RepoClient interface {
+	GetRepo(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error)
+}
+
+// GraphClient is the consumer-side seam for the GraphService RPC the `graph`
+// subqueries call through (see docs/cli-spec.md -> Graph DB queries).
+type GraphClient interface {
+	Query(context.Context, *connect.Request[loamv1.QueryRequest]) (*connect.Response[loamv1.QueryResponse], error)
+}
+
+// SearchClient is the consumer-side seam for the SearchService RPC `search`
+// calls through (see docs/cli-spec.md -> RAG queries).
+type SearchClient interface {
+	Search(context.Context, *connect.Request[loamv1.SearchRequest]) (*connect.Response[loamv1.SearchResponse], error)
+}
+
+// MetaClient is the consumer-side seam for the MetaService RPC
+// `instructions` calls through (see docs/cli-spec.md -> instructions).
+type MetaClient interface {
+	GetInstructions(context.Context, *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error)
+}
+
+// ConnectClient bundles the per-service Connect client seams above, one
+// accessor per loam.v1 service, so a single collaborator travels through
+// Deps (see deps.go) while each command handler group still depends only on
+// the narrow interface it actually calls. Implemented by connectClients in
+// connect.go.
+type ConnectClient interface {
+	WorkBranch() WorkBranchClient
+	Repo() RepoClient
+	Graph() GraphClient
+	Search() SearchClient
+	Meta() MetaClient
+}
