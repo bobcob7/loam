@@ -232,6 +232,135 @@ func TestForgejo_GitCredentials_EmptyToken(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidToken)
 }
 
+// TestForgejo_FindOpenPR_Found covers the case FindOpenPR exists to serve:
+// an open PR already recorded for the exact head/target pair. Verified
+// empirically against a real Forgejo 9.0.3 instance that GET
+// .../pulls?state=open takes no head/base query parameters — passing them
+// is silently ignored (confirmed live) — so this asserts the request only
+// carries state=open/limit/page, and that filtering on pr.head.ref/
+// pr.base.ref happens client-side against the full open-PR list.
+func TestForgejo_FindOpenPR_Found(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/repos/acme/widgets/pulls", r.URL.Path)
+		assert.Equal(t, "open", r.URL.Query().Get("state"))
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/3", "number": 3, "head": map[string]string{"ref": "other-branch"}, "base": map[string]string{"ref": "main"}},
+			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/9", "number": 9, "head": map[string]string{"ref": "feature"}, "base": map[string]string{"ref": "main"}},
+		})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	prURL, prNumber, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "https://forgejo.example.com/acme/widgets/pulls/9", prURL)
+	assert.Equal(t, 9, prNumber)
+}
+
+// TestForgejo_FindOpenPR_NotFound covers a repo whose open PRs never match
+// the requested head/target pair — the not-found case, distinct from an
+// error: found is false with a nil error.
+func TestForgejo_FindOpenPR_NotFound(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/3", "number": 3, "head": map[string]string{"ref": "other-branch"}, "base": map[string]string{"ref": "main"}},
+		})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	prURL, prNumber, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, prURL)
+	assert.Zero(t, prNumber)
+}
+
+// TestForgejo_FindOpenPR_NoOpenPRs covers the empty-list case (repo exists,
+// no open PRs at all): still not-found, not an error.
+func TestForgejo_FindOpenPR_NoOpenPRs(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	_, _, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestForgejo_FindOpenPR_RepoNotFound covers a repo (or owner) that does not
+// exist: verified live against a real Forgejo 9.0.3 instance, both a
+// missing repo and a missing owner 404 the list-pulls endpoint the same way
+// CreatePR/GetPRState/ClosePR's pulls endpoints do, so this maps to the same
+// ErrRepoNotFound sentinel via the same 404 branch.
+func TestForgejo_FindOpenPR_RepoNotFound(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"The target couldn't be found.","url":"https://x/api/swagger","errors":[]}`))
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	_, _, found, err := f.FindOpenPR(t.Context(), "acme/missing", "feature", "main")
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.ErrorIs(t, err, ErrRepoNotFound)
+}
+
+// TestForgejo_FindOpenPR_AuthFailure covers a rejected token on the list
+// endpoint, mapped the same way doPullRequest maps 401/403 on the single-PR
+// endpoints: verified live that an unrecognized token 401s the list
+// endpoint too.
+func TestForgejo_FindOpenPR_AuthFailure(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "bad", server.Client(), testLogger())
+	_, _, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.ErrorIs(t, err, ErrInvalidToken)
+}
+
+// TestForgejo_FindOpenPR_Paginates covers a repo with more open PRs than
+// fit on one page: the matching PR only appears on the second page, so
+// FindOpenPR must keep paging (real Forgejo's list endpoint pages via
+// page=/limit= with X-Total-Count, verified live) rather than stopping
+// after the first full page.
+func TestForgejo_FindOpenPR_Paginates(t *testing.T) {
+	t.Parallel()
+	var gotPages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		gotPages = append(gotPages, page)
+		if page == "1" {
+			prs := make([]map[string]any, listOpenPRsPageSize)
+			for i := range prs {
+				prs[i] = map[string]any{"html_url": "x", "number": i + 100, "head": map[string]string{"ref": "unrelated"}, "base": map[string]string{"ref": "main"}}
+			}
+			_ = json.NewEncoder(w).Encode(prs)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"html_url": "https://forgejo.example.com/acme/widgets/pulls/42", "number": 42, "head": map[string]string{"ref": "feature"}, "base": map[string]string{"ref": "main"}},
+		})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	prURL, prNumber, found, err := f.FindOpenPR(t.Context(), "acme/widgets", "feature", "main")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, 42, prNumber)
+	assert.Equal(t, "https://forgejo.example.com/acme/widgets/pulls/42", prURL)
+	assert.Equal(t, []string{"1", "2"}, gotPages)
+}
+
 func TestApiBaseURL(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "https://forgejo.example.com/api/v1", apiBaseURL("forgejo.example.com"))
