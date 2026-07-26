@@ -19,9 +19,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
@@ -263,30 +265,38 @@ func TestReplaceFileChunks_EmptyInputs_ClearsFile(t *testing.T) {
 	assert.Equal(t, 0, count)
 }
 
-// TestSearch_HNSWNearestNeighbourOrdering proves Store.Search's ORDER BY
-// embedding <=> :q actually returns rows nearest-first via the real HNSW
-// index, using three chunks at deterministic, non-tied cosine distances
-// from the query vector q = unit(0):
+// TestSearch_HNSWNearestNeighbourOrdering proves Store.Search returns rows
+// in ascending cosine-distance order, using three chunks at deterministic,
+// non-tied distances from the query vector q = unit(0):
 //
 //   - "near.go" = unit(0): identical to q, cosine distance 0.
 //   - "mid.go"  = unit(0)+unit(1): dot product 1, norm sqrt(2), so cosine
-//     similarity 1/sqrt(2) ~= 0.7071 and distance ~= 0.2929.
+//     similarity 1/sqrt(2) ~= 0.7071 and distance ~= 0.2928932188.
 //   - "far.go"  = unit(1): orthogonal to q, cosine similarity 0, distance 1.
 //
-// 0 < 0.2929 < 1 with no ties, so "nearest-first" has exactly one correct
-// order -- the file names read as a result (near/mid/far), not number soup.
+// 0 < 0.2928932188 < 1 with no ties, so "nearest-first" has exactly one
+// correct order -- the file names read as a result (near/mid/far), not
+// number soup.
 //
-// Calibration note: pgvector's HNSW is an *approximate* nearest-neighbour
-// index in general, so "returns the true nearest-first order" is not a
-// blanket guarantee of the index type. What this test actually relies on is
-// narrower and stable: with only three vectors in the whole table, per-repo
-// filtering during the index scan, and pgvector's default HNSW search
-// parameters (ef_search=40 >> 3 candidates), the graph exploration covers
-// every candidate, so the result is exact for a dataset this small -- not
-// merely likely. This is the same seeding shape (and the same reasoning)
-// internal/db/migrations/code_intel_integration_test.go already established
-// for the raw-SQL path; this test proves the STORE method produces the same
-// order, scoped across repos.
+// Calibration note, corrected after review: at this table's actual size --
+// a handful of rows shared across this package's TestMain container, since
+// every test in the package runs in parallel against sharedDSN -- Postgres
+// chooses a Seq Scan for this exact query, confirmed by EXPLAIN, not
+// assumed: the repo_id filter is highly selective and there is no btree on
+// (repo_id, target_branch), so the planner never reaches for the HNSW
+// index unaided. What THIS assertion actually proves is narrower than the
+// name first suggested: Postgres computes and sorts the <=> operator
+// correctly over the filtered rows. It is an exact sort here, not an
+// approximate HNSW traversal, and pgvector's ef_search value is irrelevant
+// to it because the index is never consulted for this query shape/size.
+// assertHNSWIndexReachable, below, is the assertion that actually exercises
+// the HNSW path: it forces the planner onto chunks_embedding with `SET
+// LOCAL enable_seqscan = off`, confirms the plan really says "Index Scan
+// using chunks_embedding" (not asserted, checked), and confirms the SAME
+// near/mid/far order comes back through it. loam-ejr's live demo should use
+// that forced-index form (or a dataset shaped so the planner reaches for
+// the index unaided) if the point is to visibly demonstrate the HNSW path
+// rather than an exact sort that happens to produce the same answer.
 func TestSearch_HNSWNearestNeighbourOrdering(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -314,6 +324,69 @@ func TestSearch_HNSWNearestNeighbourOrdering(t *testing.T) {
 	assert.Equal(t, []string{"near.go", "mid.go", "far.go"},
 		[]string{results[0].File, results[1].File, results[2].File},
 		"Search must return rows in ascending cosine-distance order")
+
+	assertHNSWIndexReachable(ctx, t, pool, repoID)
+}
+
+// assertHNSWIndexReachable proves the chunks_embedding HNSW index is not
+// merely present (internal/db/migrations/code_intel_integration_test.go
+// already checks that via pg_indexes) but actually reachable and correct.
+// `SET LOCAL enable_seqscan = off` alone is not enough here, verified
+// live: chunks also carries chunks_repo_id_target_branch_idx (a btree on
+// (repo_id, target_branch), from 0002_code_intel.up.sql), and with this
+// small a table the planner satisfies the WHERE filter via that btree and
+// sorts the tiny (often single-row) result directly -- cheaper than an
+// HNSW probe, and never touching chunks_embedding at all, even with
+// sequential scan disabled. So this also drops that btree for the
+// transaction (transactional DDL; rolled back at the end, never committed)
+// to remove the competing plan, leaving Postgres exactly two options for
+// the ORDER BY ... LIMIT with sequential scan penalized: the HNSW index, or
+// a full sort. Only then does EXPLAIN legitimately confirm
+// "Index Scan using chunks_embedding" instead of a different index
+// covering the same rows. Both the DROP INDEX and SET LOCAL are scoped to
+// this rolled-back transaction, so this never perturbs sharedDSN's schema
+// or session defaults for any other test in the package.
+func assertHNSWIndexReachable(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID) {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `SET LOCAL enable_seqscan = off`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `DROP INDEX chunks_repo_id_target_branch_idx`)
+	require.NoError(t, err, "dropping the competing btree must succeed inside the rolled-back transaction")
+
+	const query = `SELECT file FROM chunks WHERE repo_id = ANY($1::uuid[]) AND target_branch = $2 ORDER BY embedding <=> $3 LIMIT $4`
+	ids := []pgtype.UUID{pgUUID(repoID)}
+	q := pgvector.NewVector(unit(0))
+
+	explainRows, err := tx.Query(ctx, "EXPLAIN "+query, ids, "main", q, int32(3))
+	require.NoError(t, err)
+	var plan strings.Builder
+	for explainRows.Next() {
+		var line string
+		require.NoError(t, explainRows.Scan(&line))
+		plan.WriteString(line)
+		plan.WriteString("\n")
+	}
+	require.NoError(t, explainRows.Err())
+	explainRows.Close()
+	t.Logf("forced-index plan:\n%s", plan.String())
+	assert.Contains(t, plan.String(), "Index Scan using chunks_embedding",
+		"forcing enable_seqscan off must route this query through the HNSW index; actual plan:\n"+plan.String())
+
+	orderRows, err := tx.Query(ctx, query, ids, "main", q, int32(3))
+	require.NoError(t, err)
+	defer orderRows.Close()
+	var order []string
+	for orderRows.Next() {
+		var file string
+		require.NoError(t, orderRows.Scan(&file))
+		order = append(order, file)
+	}
+	require.NoError(t, orderRows.Err())
+	assert.Equal(t, []string{"near.go", "mid.go", "far.go"}, order,
+		"the real HNSW index path must return the same nearest-first order as the unforced query")
 }
 
 // TestSearch_ScopedByRepoIDs_ExcludesOutOfScopeRepos is the discriminating
