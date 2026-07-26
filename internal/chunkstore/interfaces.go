@@ -2,6 +2,10 @@
 // pgvector-backed chunks table (docs/persistence-spec.md "chunks"): per-file
 // delete-and-replace on re-embed, and nearest-neighbour search over the
 // chunks_embedding HNSW index, scoped to a caller-supplied set of repo ids.
+// Construct with New for a standalone caller (each ReplaceFileChunks call
+// commits on its own), or NewInTx to bind the Store to a transaction the
+// caller already opened and will commit itself -- see New's and NewInTx's
+// doc comments.
 package chunkstore
 
 import (

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bobcob7/loam/internal/db/gen"
 )
@@ -66,9 +67,23 @@ type VerdictStore struct {
 }
 
 // NewVerdictStore builds a VerdictStore backed by db, typically a
-// *pgxpool.Pool.
+// *pgxpool.Pool (standalone reads/writes) or a pgx.Tx (atomic with other
+// stores' writes in the same transaction) -- both satisfy querier (gen.
+// DBTX) directly. See NewVerdictStoreInTx for the latter as a named,
+// pgx.Tx-typed entry point matching this package's siblings.
 func NewVerdictStore(db querier, logger *slog.Logger) *VerdictStore {
 	return &VerdictStore{q: gen.New(db), logger: logger}
+}
+
+// NewVerdictStoreInTx builds a VerdictStore bound to tx, an already-open
+// transaction the caller owns and will commit or roll back itself: it is
+// exactly NewVerdictStore(tx, logger), given a name so callers composing
+// several stores' writes into one commit have one consistent constructor to
+// reach for across every store package. VerdictStore never calls
+// tx.Begin/Commit/Rollback itself, so there is no nested-transaction path to
+// guard against here.
+func NewVerdictStoreInTx(tx pgx.Tx, logger *slog.Logger) *VerdictStore {
+	return NewVerdictStore(tx, logger)
 }
 
 // Submit records reviewer's outcome for roundID. Re-submitting for the
