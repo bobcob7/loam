@@ -4,8 +4,11 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
+	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -212,33 +215,20 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	background, _ := newTrackedRunner(nil)
 	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	// grace and the select bounds below are deliberately left at
-	// loam-ofg.21's widened values, NOT restored to their pre-ofg.21
-	// 5s/3s scale, even though loam-nk6's actual fix is the isolated
-	// client just below (newIsolatedHTTPClient, its own private
-	// transport, never sharing http.DefaultTransport's process-global
-	// idle-connection pool with every other test in this package -- that
-	// sharing is what produced the exact "EOF"/"http: server closed idle
-	// connection" signature loam-nk6 diagnosed). Verified empirically on
-	// this repo's own dev sandbox: even with the isolated client, and
-	// even at grace values well above the pre-ofg.21 baseline (5s, 10s,
-	// 20s all still produced occasional failures -- including plain EOF
-	// well inside the grace window, not just grace-exceeded timeouts --
-	// across repeated full-package `go test -race -count=10`), this test
-	// runs cleanly in isolation every time (50/50 at -count=50) but can
-	// still flake under this specific package's full parallel load (~8
-	// other tests binding real listeners concurrently under -race). That
-	// residual flakiness reproduces on unmodified main with its ORIGINAL
-	// bounds too (confirmed by re-running the pre-loam-nk6 code under the
-	// same conditions), so it predates this bead and is not something a
-	// bound chosen here can reliably close out. Since this test's own
-	// property genuinely does not depend on tight timing (a real drain
-	// regression fails the assertion, it does not merely run slow), there
-	// is no correctness upside to tightening further, and real downside
-	// (spurious failures) to doing so -- see loam-6ob, filed against this
-	// residual, load-dependent flake directly (out of loam-nk6's scope,
-	// since it reproduces on unmodified main too).
-	const grace = 30 * time.Second
+	// loam-ofg.21 widened these to 30s/20s, misattributing the package's
+	// real cause (loam-6ob: a double-owned fd with an armed finalizer in
+	// TestNewListener_ClosesInheritedSourceFileDescriptor, closed later by
+	// GC, killing an unrelated live connection elsewhere in the binary --
+	// not a timing issue at all) to contention/slowness. With that fd bug
+	// fixed, this test has no real dependency on wall-clock slack: every
+	// step is a local goroutine handoff or a loopback round trip, and it
+	// completes in well under a second even under the full package's
+	// parallel `-race` load (measured: 200-300ms per run across `go test
+	// ./cmd/server/ -race -count=30`, 0 failures). 5s leaves an order of
+	// magnitude of headroom over that observed cost for slower/loaded CI
+	// runners while still failing fast, not after a real 30s hang, if
+	// draining ever regresses.
+	const grace = 5 * time.Second
 	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
 
 	type result struct {
@@ -259,7 +249,7 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 
 	select {
 	case <-requestStarted:
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("the in-flight request never reached the handler")
 	}
 
@@ -277,14 +267,14 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	case r := <-requestResult:
 		require.NoError(t, r.err, "the in-flight request must receive its response, not have its connection cut by shutdown")
 		assert.Equal(t, http.StatusOK, r.status)
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("the in-flight request never completed")
 	}
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return after the in-flight request finished")
 	}
 }
@@ -342,16 +332,79 @@ func TestNewListener_ClosesInheritedSourceFileDescriptor(t *testing.T) {
 	file, err := source.(*net.TCPListener).File()
 	require.NoError(t, err)
 	require.NoError(t, source.Close()) // file holds its own dup; the port stays bound
-
-	t.Setenv(listenerFDEnv, strconv.Itoa(int(file.Fd())))
+	// Ownership rule: exactly one *os.File per live fd number, always.
+	// Handing file's own fd straight to newListener via listenerFDEnv
+	// would leave TWO *os.File Go values -- this test's file and the one
+	// newListener builds with os.NewFile -- both wrapping the SAME fd
+	// number. newListener closes its copy deterministically (correct: see
+	// its own doc comment), but file's finalizer is still armed; whenever
+	// the GC gets around to collecting file, the finalizer closes that fd
+	// number a SECOND time, by which point the OS may have handed the
+	// number back out to an unrelated, live socket elsewhere in this test
+	// binary -- corrupting or killing that connection nondeterministically
+	// (loam-6ob). Dup the fd so newListener and this test each own a
+	// distinct fd number, with exactly one *os.File -- and one finalizer
+	// -- per number.
+	nfd, err := syscall.Dup(int(file.Fd()))
+	require.NoError(t, err)
+	t.Setenv(listenerFDEnv, strconv.Itoa(nfd)) // newListener owns and closes nfd
+	// file's own fd (N) is a separate dup of the same underlying open file
+	// description as nfd -- closing nfd alone does not release the port,
+	// since N is still an open reference to it. Close file deterministically
+	// here, now that nfd exists as an independent handle for newListener to
+	// take ownership of, rather than deferring to the end of the test: the
+	// later "port must be free" assertion below depends on N actually being
+	// closed by the time it runs, not merely scheduled to close on return.
+	require.NoError(t, file.Close())
 	listener, err := newListener("unused-when-" + listenerFDEnv + "-is-set")
 	require.NoError(t, err)
-
-	_, statErr := file.Stat()
+	// Confirm newListener closed its own *os.File wrapping nfd once
+	// net.FileListener had dup'd it, via a raw Fstat on the fd number --
+	// not by wrapping nfd in a fresh *os.File, which would just
+	// reintroduce the same double-owned-fd hazard for this assertion.
+	var stat syscall.Stat_t
+	statErr := syscall.Fstat(nfd, &stat)
 	assert.Error(t, statErr, "newListener must close its own *os.File wrapping the inherited fd once net.FileListener has dup'd it, not leak it")
-
 	require.NoError(t, listener.Close())
 	relisten, err := net.Listen("tcp", addr)
 	require.NoError(t, err, "the port must be free once the returned listener closes -- a leaked source fd duplicate would keep it in LISTEN")
 	require.NoError(t, relisten.Close())
+}
+
+// TestOSFileDoubleClose_ClobbersReusedDescriptor is a deterministic,
+// mechanism-level reproduction of loam-6ob: two independent *os.File Go
+// values wrapping the SAME raw fd number (exactly the shape
+// TestNewListener_ClosesInheritedSourceFileDescriptor had before its dup
+// fix -- newListener's os.NewFile(fd) as one owner, the test's own file as
+// the other), where the first owner closes explicitly and the second's
+// runtime finalizer only fires later, after the OS has already handed that
+// fd number to something unrelated. It does not depend on GC ever
+// happening to race a live connection during a real test run -- it forces
+// the collision on purpose, with a finalizer completion barrier instead of
+// a bare runtime.GC() call, so it fails every time the double-ownership
+// pattern is present rather than ~2 times in 10.
+func TestOSFileDoubleClose_ClobbersReusedDescriptor(t *testing.T) {
+	owner1, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	fd := owner1.Fd()
+	owner2 := os.NewFile(fd, "ghost-owner") // no dup: the same fd number, a second unrelated Go value
+	require.NoError(t, owner1.Close())      // the "newListener" role: explicit, correct close of its own copy
+	bystander, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	defer bystander.Close()
+	require.Equal(t, fd, bystander.Fd(), "POSIX guarantees the lowest free fd is reused; if this fails, the reuse assumption itself does not hold on this platform")
+	finalized := make(chan struct{})
+	runtime.SetFinalizer(owner2, func(f *os.File) {
+		_ = f.Close()
+		close(finalized)
+	})
+	owner2 = nil
+	runtime.GC()
+	select {
+	case <-finalized:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ghost-owner's finalizer did not run -- cannot demonstrate the collision")
+	}
+	_, statErr := bystander.Stat()
+	assert.Error(t, statErr, "the finalizer closing a stale, already-reassigned fd number must have clobbered the bystander's descriptor -- this is loam-6ob's exact mechanism")
 }
