@@ -1,9 +1,9 @@
 // Package migrations wires golang-migrate to apply the schema migrations
 // embedded under files/ against Postgres via the iofs source driver and the
-// pgx/v5 database driver. It owns no schema of its own: the migrations
-// directory starts with a trivial bootstrap file, and the beads that follow
-// (loam-54o.3 for metadata, loam-54o.4 for the derived code-intelligence
-// tables) add the real SQL.
+// pgx/v5 database driver. It owns no schema of its own: 0001_init carries
+// the metadata tables (loam-54o.3, docs/persistence-spec.md "Metadata"),
+// and the derived code-intelligence tables + pgvector extension land in a
+// later migration (loam-54o.4).
 package migrations
 
 import (
