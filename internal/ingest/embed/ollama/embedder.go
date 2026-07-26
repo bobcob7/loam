@@ -39,20 +39,40 @@ var (
 	// errRequestFailed means the embedder could not be reached at all
 	// (connection refused, DNS failure, timeout establishing/using the
 	// connection). This is a transient/infrastructure problem, distinct from
-	// the server being reachable but rejecting the request.
+	// the server being reachable but rejecting the request. Retryable — see
+	// IsRetryable.
 	errRequestFailed = errors.New("ollama: embedder request failed")
-	// errServerError means the embedder was reached but returned a non-2xx
-	// status — a permanent-until-fixed misconfiguration (bad model name,
-	// bad request shape), distinct from errRequestFailed.
-	errServerError = errors.New("ollama: embedder returned an error")
+	// errServerError means the embedder was reached but rejected the request
+	// with a 4xx — a permanent-until-fixed misconfiguration (bad model name,
+	// bad request shape, wrong endpoint) rather than a transient condition.
+	// Retrying the identical request will not help; only fixing the model,
+	// request, or server configuration will. Not retryable — see IsRetryable.
+	errServerError = errors.New("ollama: embedder rejected the request")
+	// errTransientServerError means the embedder was reached but returned a
+	// 5xx or 429 — a busy server, a model still loading, or a restart in
+	// progress. Unlike errServerError, the *same* request is likely to
+	// succeed after a backoff, since nothing about the request itself is
+	// wrong. Retryable — see IsRetryable.
+	errTransientServerError = errors.New("ollama: embedder returned a transient error")
+	// errContextLengthExceeded means the request was rejected because the
+	// input text was longer than the model's context window. Embed always
+	// sends truncate:false (see embedRequest) so Ollama errors instead of
+	// silently truncating (docs/ingestion-spec.md, "Consistency & Failure").
+	// It wraps errServerError — still permanent and not retryable, since
+	// this exact input will fail again until it is shortened — but is
+	// independently matchable so a caller can tell "this chunk is too big"
+	// apart from other permanent rejections.
+	errContextLengthExceeded = errors.New("ollama: input exceeds the model's context length")
 	// errMalformedResponse means the embedder returned 200 but the body
 	// could not be parsed into the expected shape, or the vector count did
-	// not match the input count.
+	// not match the input count. Not retryable — a 200 with a broken body is
+	// a protocol/version mismatch, not a transient condition.
 	errMalformedResponse = errors.New("ollama: embedder returned a malformed response")
 	// errDimensionMismatch means the embedder returned well-formed vectors
 	// of the wrong width for the configured model — the exact corruption
 	// that would otherwise silently pin the wrong vector(N) and surface
-	// later as bad search results.
+	// later as bad search results. Not retryable — the model is simply
+	// misconfigured for the pinned dimension.
 	errDimensionMismatch = errors.New("ollama: embedder returned a vector with unexpected dimension")
 )
 
@@ -121,10 +141,20 @@ func modelFamily(model string) string {
 	return model
 }
 
-// embedRequest is the /api/embed request body.
+// embedRequest is the /api/embed request body. Truncate is always sent as
+// false: Ollama's default (true) silently truncates input exceeding the
+// model's context window and embeds only the truncated text, so the
+// resulting vector would stop representing the chunk that was actually
+// persisted, with nothing downstream aware of the divergence
+// (docs/ingestion-spec.md, "Consistency & Failure"). Sending false instead
+// makes an oversized chunk fail this call loudly, through the same error
+// path as any other embedder failure — consistent with that section's
+// stale-but-consistent rule: the ingest transaction aborts and the previous
+// index stays live, rather than the index silently degrading.
 type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model    string   `json:"model"`
+	Input    []string `json:"input"`
+	Truncate bool     `json:"truncate"`
 }
 
 // embedResponse is the /api/embed response body.
@@ -145,7 +175,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	if len(texts) == 0 {
 		return [][]float32{}, nil
 	}
-	reqBody, err := json.Marshal(embedRequest{Model: e.model, Input: texts})
+	reqBody, err := json.Marshal(embedRequest{Model: e.model, Input: texts, Truncate: false})
 	if err != nil {
 		return nil, fmt.Errorf("ollama: encoding embed request: %w", err)
 	}
@@ -173,7 +203,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	}
 	if resp.StatusCode != http.StatusOK {
 		e.logger.Warn("ollama embedder returned an error status", "status", resp.StatusCode, "body", string(body))
-		return nil, fmt.Errorf("%w: status %d: %s", errServerError, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, classifyStatusError(resp.StatusCode, string(body), e.endpoint)
 	}
 	var parsed embedResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -188,6 +218,41 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 		}
 	}
 	return parsed.Embeddings, nil
+}
+
+// classifyStatusError turns a non-2xx /api/embed response into a classified,
+// wrapped error (see the sentinel doc comments above for the taxonomy):
+// 429/5xx are transient, everything else is a permanent 4xx, and 404 gets an
+// operator-actionable message since a bare "404 page not found" gives no
+// hint that the server predates /api/embed. status and body are the raw
+// response; endpoint is the request URL, included so the message is
+// actionable without needing to know the embedder's configuration.
+func classifyStatusError(status int, body, endpoint string) error {
+	trimmed := strings.TrimSpace(body)
+	if status == http.StatusNotFound {
+		return fmt.Errorf("%w: status 404 at %s: no route found — Ollama servers before v0.1.35 only expose the older /api/embeddings endpoint, not the batched /api/embed this client uses; confirm the configured URL or upgrade Ollama: %s", errServerError, endpoint, trimmed)
+	}
+	if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+		return fmt.Errorf("%w: status %d: %s", errTransientServerError, status, trimmed)
+	}
+	if strings.Contains(strings.ToLower(trimmed), "context length") {
+		return fmt.Errorf("%w: %w: status %d: %s", errServerError, errContextLengthExceeded, status, trimmed)
+	}
+	return fmt.Errorf("%w: status %d: %s", errServerError, status, trimmed)
+}
+
+// IsRetryable reports whether err represents a transient embedder failure
+// worth retrying with backoff — a transport failure (unreachable server,
+// DNS, timeout establishing the connection) or a 5xx/429 response — as
+// opposed to a permanent failure (a 4xx, a malformed response body, or a
+// dimension mismatch) that will recur unchanged until the model, request, or
+// server configuration is fixed. This is the single exported classification
+// the ingest retry driver (loam-c94.13, in another package) needs to decide
+// retry-vs-hard-fail; the underlying sentinels stay unexported so the
+// taxonomy itself remains owned by this package rather than four error
+// values a caller must independently know how to combine.
+func IsRetryable(err error) bool {
+	return errors.Is(err, errRequestFailed) || errors.Is(err, errTransientServerError)
 }
 
 // Dimension reports the fixed vector width for the configured model.

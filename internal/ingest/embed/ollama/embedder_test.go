@@ -3,6 +3,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -161,13 +162,14 @@ func TestEmbed_MalformedJSON_ReturnsError(t *testing.T) {
 func TestEmbed_NonOKStatus_ReturnsServerErrorNotRequestFailed(t *testing.T) {
 	t.Parallel()
 	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
-		return http.StatusInternalServerError, `{"error":"model not found"}`
+		return http.StatusBadRequest, `{"error":"model not found"}`
 	})
 	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
 	require.NoError(t, err)
 	vectors, err := e.Embed(t.Context(), []string{"hello"})
 	require.ErrorIs(t, err, errServerError)
 	assert.NotErrorIs(t, err, errRequestFailed)
+	assert.False(t, IsRetryable(err), "a 4xx must not be retryable")
 	assert.Nil(t, vectors)
 }
 
@@ -181,7 +183,140 @@ func TestEmbed_UnreachableServer_ReturnsRequestFailedNotServerError(t *testing.T
 	vectors, err := e.Embed(t.Context(), []string{"hello"})
 	require.ErrorIs(t, err, errRequestFailed)
 	assert.NotErrorIs(t, err, errServerError)
+	assert.True(t, IsRetryable(err), "a transport failure must be retryable")
 	assert.Nil(t, vectors)
+}
+
+// TestEmbed_StatusClassification is the exhaustive taxonomy test: every
+// status Ollama might plausibly return must land in exactly one bucket
+// (transient-and-retryable vs. permanent-and-not) and IsRetryable — the one
+// exported predicate loam-c94.13 drives retry-vs-hard-fail from — must agree.
+// This is also the mutation-test target: flipping any one of these
+// classifications in classifyStatusError should fail exactly the
+// corresponding case below.
+func TestEmbed_StatusClassification(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		status        int
+		body          string
+		wantRetryable bool
+		wantTransient bool
+	}{
+		{"500 internal server error is transient", http.StatusInternalServerError, `{"error":"model is loading"}`, true, true},
+		{"503 service unavailable is transient", http.StatusServiceUnavailable, `{"error":"server busy"}`, true, true},
+		{"429 too many requests is transient", http.StatusTooManyRequests, `{"error":"rate limited"}`, true, true},
+		{"400 bad request is permanent", http.StatusBadRequest, `{"error":"invalid request shape"}`, false, false},
+		{"404 not found is permanent", http.StatusNotFound, "404 page not found", false, false},
+		{"422 unprocessable entity is permanent", http.StatusUnprocessableEntity, `{"error":"unsupported model"}`, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+				return tc.status, tc.body
+			})
+			e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+			require.NoError(t, err)
+			vectors, err := e.Embed(t.Context(), []string{"hello"})
+			require.Error(t, err)
+			assert.Nil(t, vectors)
+			assert.Equal(t, tc.wantRetryable, IsRetryable(err), "IsRetryable")
+			assert.Equal(t, tc.wantTransient, errors.Is(err, errTransientServerError), "errors.Is(err, errTransientServerError)")
+			assert.Equal(t, !tc.wantTransient, errors.Is(err, errServerError), "errors.Is(err, errServerError)")
+		})
+	}
+}
+
+func TestEmbed_404_NamesEndpointAndOllamaVersion(t *testing.T) {
+	t.Parallel()
+	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		return http.StatusNotFound, "404 page not found"
+	})
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	vectors, err := e.Embed(t.Context(), []string{"hello"})
+	require.ErrorIs(t, err, errServerError)
+	assert.False(t, IsRetryable(err))
+	assert.Contains(t, err.Error(), "/api/embed", "a bare 404 body gives no hint the server is too old; the message must name the endpoint")
+	assert.Contains(t, err.Error(), "v0.1.35", "the message must name the version boundary so an operator knows to upgrade")
+	assert.Nil(t, vectors)
+}
+
+func TestEmbed_ContextLengthExceeded_IsDistinctFromOtherPermanentErrors(t *testing.T) {
+	t.Parallel()
+	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		return http.StatusBadRequest, `{"error":"input length exceeds maximum context length"}`
+	})
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	vectors, err := e.Embed(t.Context(), []string{"a very long chunk of text"})
+	require.ErrorIs(t, err, errServerError, "still a permanent 4xx classification")
+	require.ErrorIs(t, err, errContextLengthExceeded, "must be distinguishable from other 4xx causes")
+	assert.False(t, IsRetryable(err), "retrying the same oversized input would not help")
+	assert.Nil(t, vectors)
+}
+
+func TestEmbed_OtherBadRequest_IsNotMisclassifiedAsContextLengthExceeded(t *testing.T) {
+	t.Parallel()
+	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		return http.StatusBadRequest, `{"error":"invalid model name"}`
+	})
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	_, err = e.Embed(t.Context(), []string{"hello"})
+	require.ErrorIs(t, err, errServerError)
+	assert.NotErrorIs(t, err, errContextLengthExceeded)
+}
+
+func TestEmbed_MalformedResponse_And_DimensionMismatch_AreNotRetryable(t *testing.T) {
+	t.Parallel()
+	malformedServer, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		return http.StatusOK, "{not valid json"
+	})
+	e, err := New(malformedServer.URL, "nomic-embed-text", malformedServer.Client(), testLogger())
+	require.NoError(t, err)
+	_, err = e.Embed(t.Context(), []string{"hello"})
+	require.ErrorIs(t, err, errMalformedResponse)
+	assert.False(t, IsRetryable(err), "a malformed body is a version/protocol mismatch, not transient")
+
+	dimensionServer, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		resp := embedResponse{Embeddings: [][]float32{make([]float32, 384)}}
+		out, marshalErr := json.Marshal(resp)
+		require.NoError(t, marshalErr)
+		return http.StatusOK, string(out)
+	})
+	e2, err := New(dimensionServer.URL, "nomic-embed-text", dimensionServer.Client(), testLogger())
+	require.NoError(t, err)
+	_, err = e2.Embed(t.Context(), []string{"hello"})
+	require.ErrorIs(t, err, errDimensionMismatch)
+	assert.False(t, IsRetryable(err), "a dimension mismatch is a model misconfiguration, not transient")
+}
+
+// TestEmbed_SendsTruncateFalse locks in the loam-eg9 decision: Embed must
+// send truncate:false on every request, not rely on the field's zero value
+// happening to match, so an oversized chunk fails loudly via Ollama's error
+// path (docs/ingestion-spec.md, "Consistency & Failure") instead of being
+// silently truncated and embedded from partial text.
+func TestEmbed_SendsTruncateFalse(t *testing.T) {
+	t.Parallel()
+	var rawBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = string(b)
+		vec := make([]float32, 768)
+		out, err := json.Marshal(embedResponse{Embeddings: [][]float32{vec}})
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(server.Close)
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	_, err = e.Embed(t.Context(), []string{"hello"})
+	require.NoError(t, err)
+	assert.Contains(t, rawBody, `"truncate":false`)
 }
 
 func TestEmbed_AlreadyCanceledContext_ReturnsPromptlyWithoutRequest(t *testing.T) {
