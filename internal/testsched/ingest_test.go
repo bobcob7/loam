@@ -13,20 +13,20 @@ import (
 func TestIngestHarness_DrainIngestQueueDelegatesToDrainer(t *testing.T) {
 	t.Parallel()
 	drainer := &IngestDrainerMock{
-		DrainRepoFunc: func(ctx context.Context, repo mirrorsync.RepoID) error { return nil },
+		DrainRepoFunc: func(ctx context.Context, repo string) error { return nil },
 	}
 	h := NewIngestHarness(drainer)
-	err := h.DrainIngestQueue(t.Context(), "repoA")
+	err := h.DrainIngestQueue(t.Context(), mirrorsync.RepoID("repoA"))
 	require.NoError(t, err)
 	require.Len(t, drainer.DrainRepoCalls(), 1)
-	assert.Equal(t, mirrorsync.RepoID("repoA"), drainer.DrainRepoCalls()[0].Repo)
+	assert.Equal(t, "repoA", drainer.DrainRepoCalls()[0].Repo, "IngestDrainer takes a plain string, not mirrorsync.RepoID")
 }
 
 func TestIngestHarness_DrainIngestQueueWrapsDrainerError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("worker pool unreachable")
 	drainer := &IngestDrainerMock{
-		DrainRepoFunc: func(ctx context.Context, repo mirrorsync.RepoID) error { return wantErr },
+		DrainRepoFunc: func(ctx context.Context, repo string) error { return wantErr },
 	}
 	h := NewIngestHarness(drainer)
 	err := h.DrainIngestQueue(t.Context(), "repoA")
@@ -36,7 +36,7 @@ func TestIngestHarness_DrainIngestQueueWrapsDrainerError(t *testing.T) {
 func TestIngestHarness_DrainIngestQueueTFailsTBOnError(t *testing.T) {
 	t.Parallel()
 	drainer := &IngestDrainerMock{
-		DrainRepoFunc: func(ctx context.Context, repo mirrorsync.RepoID) error { return errors.New("boom") },
+		DrainRepoFunc: func(ctx context.Context, repo string) error { return errors.New("boom") },
 	}
 	h := NewIngestHarness(drainer)
 	stub := &fatalRecordingTB{TB: t}

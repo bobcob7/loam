@@ -275,7 +275,7 @@ var _ IngestDrainer = &IngestDrainerMock{}
 //
 //		// make and configure a mocked IngestDrainer
 //		mockedIngestDrainer := &IngestDrainerMock{
-//			DrainRepoFunc: func(ctx context.Context, repo mirrorsync.RepoID) error {
+//			DrainRepoFunc: func(ctx context.Context, repo string) error {
 //				panic("mock out the DrainRepo method")
 //			},
 //		}
@@ -286,7 +286,7 @@ var _ IngestDrainer = &IngestDrainerMock{}
 //	}
 type IngestDrainerMock struct {
 	// DrainRepoFunc mocks the DrainRepo method.
-	DrainRepoFunc func(ctx context.Context, repo mirrorsync.RepoID) error
+	DrainRepoFunc func(ctx context.Context, repo string) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -295,20 +295,20 @@ type IngestDrainerMock struct {
 			// Ctx is the ctx argument value.
 			Ctx context.Context
 			// Repo is the repo argument value.
-			Repo mirrorsync.RepoID
+			Repo string
 		}
 	}
 	lockDrainRepo sync.RWMutex
 }
 
 // DrainRepo calls DrainRepoFunc.
-func (mock *IngestDrainerMock) DrainRepo(ctx context.Context, repo mirrorsync.RepoID) error {
+func (mock *IngestDrainerMock) DrainRepo(ctx context.Context, repo string) error {
 	if mock.DrainRepoFunc == nil {
 		panic("IngestDrainerMock.DrainRepoFunc: method is nil but IngestDrainer.DrainRepo was just called")
 	}
 	callInfo := struct {
 		Ctx  context.Context
-		Repo mirrorsync.RepoID
+		Repo string
 	}{
 		Ctx:  ctx,
 		Repo: repo,
@@ -325,11 +325,11 @@ func (mock *IngestDrainerMock) DrainRepo(ctx context.Context, repo mirrorsync.Re
 //	len(mockedIngestDrainer.DrainRepoCalls())
 func (mock *IngestDrainerMock) DrainRepoCalls() []struct {
 	Ctx  context.Context
-	Repo mirrorsync.RepoID
+	Repo string
 } {
 	var calls []struct {
 		Ctx  context.Context
-		Repo mirrorsync.RepoID
+		Repo string
 	}
 	mock.lockDrainRepo.RLock()
 	calls = mock.calls.DrainRepo

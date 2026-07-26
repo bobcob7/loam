@@ -89,12 +89,23 @@ type syncStateReporter interface {
 
 // IngestDrainer is the synchronous per-repo drain primitive
 // IngestHarness needs from the ingest worker pool (loam-c94.1): block
-// until repo has no queued or running ingest_jobs row left. Nothing in
-// the tree implements this today -- see this package's doc comment and
-// the implementation report for what is being requested and why.
+// until repo has no queued or running ingest_jobs row left.
+//
+// repo is a plain string (repos.name, an "owner/repo" identifier), not
+// mirrorsync.RepoID, deliberately: internal/ingest keys its production
+// seam (Enqueue, Job) on repos.id (uuid.UUID, the ingest_jobs.repo_id FK
+// column) since every real caller already holds it, and exposes this
+// harness-facing method as a separate DrainRepo(ctx, name string) that
+// resolves name to id internally. Typing this interface's parameter as
+// mirrorsync.RepoID (or uuid.UUID) would either force internal/ingest to
+// import internal/mirrorsync for a single string-newtype, or force this
+// package to import a uuid dependency it otherwise has no need for;
+// plain string avoids both. IngestHarness.DrainIngestQueue still takes a
+// mirrorsync.RepoID from callers -- the right vocabulary for a godog step
+// -- and converts at this boundary.
 type IngestDrainer interface {
 	// DrainRepo blocks until repo has no queued or running ingest job,
 	// including any job coalesced in while a prior one was running, or
 	// until ctx is done.
-	DrainRepo(ctx context.Context, repo mirrorsync.RepoID) error
+	DrainRepo(ctx context.Context, repo string) error
 }
