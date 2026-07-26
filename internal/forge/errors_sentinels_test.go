@@ -12,29 +12,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAllSentinelsDiscoversEveryExportedErrVar closes the direction
-// TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass's require.Len canary
-// cannot: that guard (internal/fakeforge/errors_test.go) catches a sentinel
-// silently REMOVED from AllSentinels(), because its `want` column names
-// each of the five by identity — but both AllSentinels() and its own
-// hand-counted length are maintained by the same hand, so a sentinel
-// declared here and never ADDED to AllSentinels() passes every existing
-// test green (loam-ddv review, mutation "declare a sixth Err* var, do not
-// add it to AllSentinels()"). That is exactly the drift class loam-ddv was
-// widened to eliminate — errMissingScope's stale wrap to ErrInvalidToken
-// survived unnoticed for the same structural reason.
+// TestAllSentinelsDiscoversEveryExportedErrVar is the stronger half of a
+// two-test pairing with TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass
+// (internal/fakeforge/errors_test.go). This test parses this package's own
+// non-test source (stdlib go/parser, no new dependency) for every exported
+// top-level `Err*` var declaration and checks AllSentinels() against it two
+// ways:
 //
-// This test parses this package's own non-test source (stdlib go/parser,
-// no new dependency) for every exported top-level `Err*` var declaration
-// and requires AllSentinels() to have exactly that many entries. It is
-// deliberately a count check, not an identity check: go/ast gives names,
-// not the runtime error values those names are bound to, so it cannot
-// (and does not try to) confirm AllSentinels() contains the RIGHT five —
-// only that it contains as many as this package declares. Catching a
-// wrong-identity swap is what TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass's
-// `want` column does; catching a same-count swap (one sentinel dropped,
-// a different one added, net count unchanged) is the one gap neither test
-// closes alone — the two are a pairing, not each individually complete.
+//  1. Count equality — catches a sentinel declared here and never added to
+//     AllSentinels() (loam-ddv review, "declare a sixth Err* var, do not add
+//     it to AllSentinels()": every existing test at the time passed green)
+//     AND the reverse, a sentinel quietly dropped from AllSentinels() while
+//     its declaration stays. Either direction changes the declared-vs-
+//     returned count, so this one check is two-sided: it catches additions
+//     left unwired and plain removals on its own, without needing a paired
+//     guard elsewhere.
+//  2. Uniqueness over AllSentinels()'s own return value — catches a
+//     sentinel silently DUPLICATED in place of a dropped one, which the
+//     count check alone cannot see because the count doesn't change. The
+//     reviewer validated this against a live mutation: AllSentinels()
+//     returning {ErrInvalidToken, ErrInvalidToken, ErrRepoNotFound,
+//     ErrNoWriteAccess, ErrDuplicatePR} — still 5 entries, still every
+//     fakeforge `want` column's target — silently drops ErrInsufficientScope,
+//     which is loam-ddv's original bug reproduced by a single-line
+//     copy-paste slip in one return statement, the single most likely way
+//     that line is ever edited wrong.
+//
+// It is deliberately not an identity check: go/ast gives names, not the
+// runtime error values those names are bound to, so it cannot (and does not
+// try to) confirm AllSentinels() contains the RIGHT five, only that it
+// contains as many DISTINCT entries as this package declares. Catching a
+// wrong-identity swap — AllSentinels() unchanged, but a fakeforge sentinel
+// wraps the wrong member of it — is what
+// TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass's `want` column does;
+// that test's own require.Len canary is the narrower of the two guards,
+// only catching a change to AllSentinels()'s length. Between the count
+// check, the uniqueness check, and that `want` column, the pair is tight
+// against additions, removals, and duplicate-swaps.
+//
+// This also depends on every forge-level sentinel following the `Err*`
+// naming convention: a var named, say, RateLimitedError and left out of
+// AllSentinels() is invisible to this test (verified empirically) —
+// acceptable because `Err*` is the universal Go convention and all five
+// current sentinels follow it, but worth stating plainly rather than
+// leaving a reader to assume the discovery is name-agnostic.
 func TestAllSentinelsDiscoversEveryExportedErrVar(t *testing.T) {
 	t.Parallel()
 	fset := token.NewFileSet()
@@ -65,6 +86,13 @@ func TestAllSentinelsDiscoversEveryExportedErrVar(t *testing.T) {
 		}
 	}
 	sort.Strings(declared)
+	require.NotEmpty(t, declared, "found no exported Err* vars in internal/forge — the AST discovery walked zero declarations, which is a sign it is looking in the wrong place, not that forge has no sentinels")
 	require.Len(t, AllSentinels(), len(declared),
 		"internal/forge declares these exported Err* vars: %v — AllSentinels() must return exactly one entry per sentinel, or fakeforge's regression guard cannot see it either", declared)
+	unique := make(map[error]struct{}, len(declared))
+	for _, sentinel := range AllSentinels() {
+		unique[sentinel] = struct{}{}
+	}
+	require.Len(t, unique, len(declared),
+		"AllSentinels() has the right length but contains a duplicate, which silently drops a distinct sentinel while the count check above stays green")
 }

@@ -164,11 +164,23 @@ func TestClientAuthedActionBadTokenIsForgeErrInvalidToken(t *testing.T) {
 // last touched, which is exactly how errMissingScope's drift to
 // ErrInvalidToken (it should have followed forge.ErrInsufficientScope)
 // passed this guard green — the three-element literal here never gave the
-// loop a chance to check the new class at all. The require.Len canary
-// below forces a human to notice and reconcile the table above the moment
-// forge grows a sentinel, rather than relying on the loop's NotErrorIs
-// checks alone: those pass trivially for a class nobody has been told to
-// think about yet, which is no protection by itself.
+// loop a chance to check the new class at all.
+//
+// The require.Len canary below is what actually catches a sentinel
+// dropped from AllSentinels(), NOT the `want`-column loop: the loop only
+// ever iterates over forgeSentinels (i.e. AllSentinels()'s own current
+// members), so if a sentinel is removed there, the row whose `want` names
+// it simply never meets it in the inner loop — its positive ErrorIs never
+// runs, and its remaining NotErrorIs checks against the sentinels that
+// ARE still present all pass trivially. Without the canary this test would
+// stay green on a straight removal. The stronger, two-sided guard against
+// AllSentinels() itself drifting (additions, removals, AND a same-count
+// duplicate silently masking a drop) is
+// forge.TestAllSentinelsDiscoversEveryExportedErrVar
+// (internal/forge/errors_sentinels_test.go); this file's canary is the
+// narrower of the two, only tripping on a length change, which is exactly
+// why it still needs a human to reconcile the `want` column by hand rather
+// than verifying anything about it automatically.
 func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
