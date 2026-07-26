@@ -1,0 +1,4 @@
+loam-placeholder-spa: stand-in for a hashed Vite asset (e.g. assets/index-abc123.js),
+present only so the embedded SPA's static-asset route (docs/web-spec.md ->
+Hosting & Routing: "/assets/* serves embedded files") has a real file to serve
+before the frontend epic (loam-nvb) ships real build output to web/dist/assets/.
