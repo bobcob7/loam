@@ -58,10 +58,16 @@ var (
 	// input text was longer than the model's context window. Embed always
 	// sends truncate:false (see embedRequest) so Ollama errors instead of
 	// silently truncating (docs/ingestion-spec.md, "Consistency & Failure").
-	// It wraps errServerError — still permanent and not retryable, since
-	// this exact input will fail again until it is shortened — but is
-	// independently matchable so a caller can tell "this chunk is too big"
-	// apart from other permanent rejections.
+	// Verified live against Ollama v0.32.4: with truncate:false this returns
+	// HTTP 400 with body {"error":"the input length exceeds the context
+	// length"} (see isContextLengthExceededBody); the same oversized input
+	// with truncate:true instead returns 200 and a well-formed but silently
+	// partial vector, which is exactly the corruption this policy exists to
+	// avoid. errContextLengthExceeded wraps errServerError — still permanent
+	// and not retryable, since this exact input will fail again until it is
+	// shortened. It stays unexported like the other three sentinels; a
+	// caller outside this package matches it via IsContextLengthExceeded,
+	// not this value directly.
 	errContextLengthExceeded = errors.New("ollama: input exceeds the model's context length")
 	// errMalformedResponse means the embedder returned 200 but the body
 	// could not be parsed into the expected shape, or the vector count did
@@ -222,23 +228,56 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 
 // classifyStatusError turns a non-2xx /api/embed response into a classified,
 // wrapped error (see the sentinel doc comments above for the taxonomy):
-// 429/5xx are transient, everything else is a permanent 4xx, and 404 gets an
-// operator-actionable message since a bare "404 page not found" gives no
-// hint that the server predates /api/embed. status and body are the raw
-// response; endpoint is the request URL, included so the message is
-// actionable without needing to know the embedder's configuration.
+// 429/5xx are transient, everything else is a permanent 4xx. status and body
+// are the raw response; endpoint is the request URL, included so 404's
+// message is actionable without needing to know the embedder's
+// configuration.
 func classifyStatusError(status int, body, endpoint string) error {
 	trimmed := strings.TrimSpace(body)
 	if status == http.StatusNotFound {
-		return fmt.Errorf("%w: status 404 at %s: no route found — Ollama servers before v0.1.35 only expose the older /api/embeddings endpoint, not the batched /api/embed this client uses; confirm the configured URL or upgrade Ollama: %s", errServerError, endpoint, trimmed)
+		return classifyNotFound(trimmed, endpoint)
 	}
 	if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
 		return fmt.Errorf("%w: status %d: %s", errTransientServerError, status, trimmed)
 	}
-	if strings.Contains(strings.ToLower(trimmed), "context length") {
+	if isContextLengthExceededBody(trimmed) {
 		return fmt.Errorf("%w: %w: status %d: %s", errServerError, errContextLengthExceeded, status, trimmed)
 	}
 	return fmt.Errorf("%w: status %d: %s", errServerError, status, trimmed)
+}
+
+// classifyNotFound distinguishes the two 404s Ollama's /api/embed can
+// return, verified live against Ollama v0.32.4:
+//   - a routing 404 — this server predates /api/embed (pre-v0.1.35) or the
+//     configured URL is wrong — whose body is the bare Go default "404 page
+//     not found", carrying no JSON and no mention of a model; and
+//   - a model-not-found 404 — by far the more common case in practice (a
+//     typo'd or unpulled model name) — whose body is JSON containing "try
+//     pulling it first", e.g. {"error":"model \"X\" not found, try pulling
+//     it first"}.
+//
+// Conflating them is a real operator-facing bug: the single likeliest 404 an
+// operator hits (forgot to `ollama pull` the model) would otherwise be told
+// to upgrade Ollama, which does nothing to fix it.
+func classifyNotFound(trimmed, endpoint string) error {
+	if strings.Contains(strings.ToLower(trimmed), "try pulling") {
+		return fmt.Errorf("%w: status 404: model not found on the embedder — pull it first (ollama pull <model>): %s", errServerError, trimmed)
+	}
+	return fmt.Errorf("%w: status 404 at %s: no route found — Ollama servers before v0.1.35 only expose the older /api/embeddings endpoint, not the batched /api/embed this client uses; confirm the configured URL or upgrade Ollama: %s", errServerError, endpoint, trimmed)
+}
+
+// isContextLengthExceededBody reports whether a 4xx body describes a
+// context-length rejection, verified live against Ollama v0.32.4: with
+// truncate:false (see embedRequest) an oversized input returns 400 with body
+// {"error":"the input length exceeds the context length"}. The match
+// requires both "exceeds" and "context length" rather than "context length"
+// alone, so an unrelated rejection that merely mentions the phrase — e.g.
+// "model does not support setting context length via options" — is not
+// misclassified; that distinction matters once a caller outside this
+// package can observe it (see IsContextLengthExceeded).
+func isContextLengthExceededBody(trimmed string) bool {
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(lower, "exceeds") && strings.Contains(lower, "context length")
 }
 
 // IsRetryable reports whether err represents a transient embedder failure
@@ -251,8 +290,34 @@ func classifyStatusError(status int, body, endpoint string) error {
 // retry-vs-hard-fail; the underlying sentinels stay unexported so the
 // taxonomy itself remains owned by this package rather than four error
 // values a caller must independently know how to combine.
+//
+// ctx contract: Embed returns context.Canceled / context.DeadlineExceeded
+// unclassified — unwrapped by any of this package's sentinels — whenever
+// ctx, not the embedder's response, is why the call ended. This package has
+// no way to tell a job-level deadline ("give up") from a per-request timeout
+// ("retry the embedder call"); only the caller's ctx usage knows which one
+// applies. Concretely, IsRetryable(context.Canceled) is false — correct for
+// "the caller gave up," but misleading if mistaken for "the embedder
+// permanently failed." Callers MUST check for a ctx error (e.g.
+// errors.Is(err, context.Canceled)) before consulting IsRetryable, not
+// after.
 func IsRetryable(err error) bool {
 	return errors.Is(err, errRequestFailed) || errors.Is(err, errTransientServerError)
+}
+
+// IsContextLengthExceeded reports whether err is a permanent rejection
+// because the input text exceeded the embedding model's context window
+// (Embed always sends truncate:false — see embedRequest — so this surfaces
+// as an error rather than a silently truncated vector;
+// docs/ingestion-spec.md, "Consistency & Failure"). Exported separately from
+// IsRetryable — which already reports false for this case, since retrying
+// unchanged input cannot succeed — because a caller that wants to react
+// specifically to "this input is too big" (e.g. the chunker, loam-zoa,
+// shrinking its budget for the offending file) needs a way to tell that
+// apart from other permanent embedder rejections it can't act on the same
+// way.
+func IsContextLengthExceeded(err error) bool {
+	return errors.Is(err, errContextLengthExceeded)
 }
 
 // Dimension reports the fixed vector width for the configured model.

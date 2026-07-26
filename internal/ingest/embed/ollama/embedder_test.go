@@ -228,7 +228,10 @@ func TestEmbed_StatusClassification(t *testing.T) {
 	}
 }
 
-func TestEmbed_404_NamesEndpointAndOllamaVersion(t *testing.T) {
+// TestEmbed_404Routing_NamesEndpointAndOllamaVersion covers the routing 404:
+// the bare Go default body, with no JSON and no model reference, that means
+// this server predates /api/embed (pre-v0.1.35) or the URL is wrong.
+func TestEmbed_404Routing_NamesEndpointAndOllamaVersion(t *testing.T) {
 	t.Parallel()
 	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
 		return http.StatusNotFound, "404 page not found"
@@ -240,13 +243,35 @@ func TestEmbed_404_NamesEndpointAndOllamaVersion(t *testing.T) {
 	assert.False(t, IsRetryable(err))
 	assert.Contains(t, err.Error(), "/api/embed", "a bare 404 body gives no hint the server is too old; the message must name the endpoint")
 	assert.Contains(t, err.Error(), "v0.1.35", "the message must name the version boundary so an operator knows to upgrade")
+	assert.NotContains(t, err.Error(), "pull it first", "a routing 404 must not tell the operator to pull a model")
+	assert.Nil(t, vectors)
+}
+
+// TestEmbed_404ModelNotFound_NamesPullInstructionNotOllamaVersion covers the
+// far more common 404 in practice: a typo'd or unpulled model name, which
+// Ollama reports as JSON mentioning "try pulling it first". Conflating this
+// with the routing 404 would tell an operator to upgrade Ollama when they
+// actually just need to pull the model.
+func TestEmbed_404ModelNotFound_NamesPullInstructionNotOllamaVersion(t *testing.T) {
+	t.Parallel()
+	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+		return http.StatusNotFound, `{"error":"model \"nomic-embed-text\" not found, try pulling it first"}`
+	})
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	vectors, err := e.Embed(t.Context(), []string{"hello"})
+	require.ErrorIs(t, err, errServerError)
+	assert.False(t, IsRetryable(err))
+	assert.Contains(t, err.Error(), "pull it first", "the likeliest 404 an operator hits must say to pull the model")
+	assert.NotContains(t, err.Error(), "v0.1.35", "a model-not-found 404 must not send the operator chasing an Ollama upgrade")
 	assert.Nil(t, vectors)
 }
 
 func TestEmbed_ContextLengthExceeded_IsDistinctFromOtherPermanentErrors(t *testing.T) {
 	t.Parallel()
 	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
-		return http.StatusBadRequest, `{"error":"input length exceeds maximum context length"}`
+		// Verified live against Ollama v0.32.4 with truncate:false.
+		return http.StatusBadRequest, `{"error":"the input length exceeds the context length"}`
 	})
 	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
 	require.NoError(t, err)
@@ -254,43 +279,78 @@ func TestEmbed_ContextLengthExceeded_IsDistinctFromOtherPermanentErrors(t *testi
 	require.ErrorIs(t, err, errServerError, "still a permanent 4xx classification")
 	require.ErrorIs(t, err, errContextLengthExceeded, "must be distinguishable from other 4xx causes")
 	assert.False(t, IsRetryable(err), "retrying the same oversized input would not help")
+	assert.True(t, IsContextLengthExceeded(err), "the exported predicate must agree with the internal sentinel")
 	assert.Nil(t, vectors)
 }
 
+// TestEmbed_OtherBadRequest_IsNotMisclassifiedAsContextLengthExceeded pins
+// the tightened match (isContextLengthExceededBody requires both "exceeds"
+// and "context length"): a body that merely mentions "context length"
+// without "exceeds" — a real-shaped rejection, not a contrived one — must
+// not be misclassified as the input being too big.
 func TestEmbed_OtherBadRequest_IsNotMisclassifiedAsContextLengthExceeded(t *testing.T) {
 	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unrelated 400", `{"error":"invalid model name"}`},
+		{"mentions context length without exceeding it", `{"error":"model does not support setting context length via options"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+				return http.StatusBadRequest, tc.body
+			})
+			e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+			require.NoError(t, err)
+			_, err = e.Embed(t.Context(), []string{"hello"})
+			require.ErrorIs(t, err, errServerError)
+			assert.NotErrorIs(t, err, errContextLengthExceeded)
+			assert.False(t, IsContextLengthExceeded(err))
+		})
+	}
+}
+
+func TestEmbed_MalformedResponse_IsNotRetryable(t *testing.T) {
+	t.Parallel()
 	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
-		return http.StatusBadRequest, `{"error":"invalid model name"}`
+		return http.StatusOK, "{not valid json"
 	})
 	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
 	require.NoError(t, err)
 	_, err = e.Embed(t.Context(), []string{"hello"})
-	require.ErrorIs(t, err, errServerError)
-	assert.NotErrorIs(t, err, errContextLengthExceeded)
-}
-
-func TestEmbed_MalformedResponse_And_DimensionMismatch_AreNotRetryable(t *testing.T) {
-	t.Parallel()
-	malformedServer, _ := serveEmbed(t, func(req embedRequest) (int, string) {
-		return http.StatusOK, "{not valid json"
-	})
-	e, err := New(malformedServer.URL, "nomic-embed-text", malformedServer.Client(), testLogger())
-	require.NoError(t, err)
-	_, err = e.Embed(t.Context(), []string{"hello"})
 	require.ErrorIs(t, err, errMalformedResponse)
 	assert.False(t, IsRetryable(err), "a malformed body is a version/protocol mismatch, not transient")
+}
 
-	dimensionServer, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+func TestEmbed_DimensionMismatch_IsNotRetryable(t *testing.T) {
+	t.Parallel()
+	server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
 		resp := embedResponse{Embeddings: [][]float32{make([]float32, 384)}}
 		out, marshalErr := json.Marshal(resp)
 		require.NoError(t, marshalErr)
 		return http.StatusOK, string(out)
 	})
-	e2, err := New(dimensionServer.URL, "nomic-embed-text", dimensionServer.Client(), testLogger())
+	e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
 	require.NoError(t, err)
-	_, err = e2.Embed(t.Context(), []string{"hello"})
+	_, err = e.Embed(t.Context(), []string{"hello"})
 	require.ErrorIs(t, err, errDimensionMismatch)
 	assert.False(t, IsRetryable(err), "a dimension mismatch is a model misconfiguration, not transient")
+}
+
+// TestIsRetryable_ContextErrors_ReturnFalse pins the ctx contract documented
+// on IsRetryable: Embed returns context.Canceled / context.DeadlineExceeded
+// unwrapped by any sentinel, so IsRetryable reports false for them — correct
+// for "the caller gave up," not "the embedder permanently failed." A caller
+// wired to `if !IsRetryable(err) { markFailed() }` must check for a ctx
+// error before consulting IsRetryable, or a graceful shutdown mid-ingest
+// would be recorded as a permanent embedder failure.
+func TestIsRetryable_ContextErrors_ReturnFalse(t *testing.T) {
+	t.Parallel()
+	assert.False(t, IsRetryable(context.Canceled), "ctx errors are unclassified; callers must check ctx before consulting IsRetryable")
+	assert.False(t, IsRetryable(context.DeadlineExceeded), "ctx errors are unclassified; callers must check ctx before consulting IsRetryable")
 }
 
 // TestEmbed_SendsTruncateFalse locks in the loam-eg9 decision: Embed must

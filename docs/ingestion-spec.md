@@ -95,6 +95,13 @@ cheap enough to keep simple.
 - The chosen model **pins `vector(N)`**. Changing the model requires a full re-embed and a
   migration of the `chunks.embedding` dimension — hence a full rebuild.
 - Only changed files are re-embedded (incremental); embeddings land in `pgvector`.
+- **Oversized chunks fail loudly, not silently.** Ollama's embed request always sends
+  `truncate: false` (its default is `true`), so a chunk exceeding the model's context window
+  errors instead of being embedded from silently truncated text — a vector that stopped
+  representing the persisted chunk, undetectable downstream, is exactly the kind of
+  partial-degrade this pipeline forbids (see Consistency & Failure below). The failure rides
+  the same embedder error path as any other embed failure, so the enclosing ingest
+  transaction aborts and the previous index stays live, per the stale-but-consistent rule.
 
 ## Consistency & Failure
 
