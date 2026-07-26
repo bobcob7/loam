@@ -28,9 +28,9 @@ const migrationsDir = "files"
 //go:embed files/*.sql
 var migrationFiles embed.FS
 
-// errEmptyDSN is returned when Migrate is called with an empty DSN, so the
-// failure is immediate and legible instead of surfacing deep inside pgx's
-// connection-string parser.
+// errEmptyDSN is returned when Migrate or Down is called with an empty DSN,
+// so the failure is immediate and legible instead of surfacing deep inside
+// pgx's connection-string parser.
 var errEmptyDSN = errors.New("dsn is required")
 
 // Migrate applies every pending migration embedded under files/ to the
@@ -41,29 +41,11 @@ var errEmptyDSN = errors.New("dsn is required")
 // after it. It is idempotent: run again against an already-current
 // database, it is a no-op.
 func Migrate(ctx context.Context, dsn string, logger *slog.Logger) error {
-	if dsn == "" {
-		return fmt.Errorf("migrating: %w", errEmptyDSN)
-	}
-	sourceDriver, err := iofs.New(migrationFiles, migrationsDir)
+	m, db, err := newMigrator(ctx, dsn)
 	if err != nil {
-		return fmt.Errorf("opening embedded migration source: %w", err)
-	}
-	db, err := sql.Open("pgx/v5", dsn)
-	if err != nil {
-		return fmt.Errorf("opening migration database connection: %w", err)
+		return err
 	}
 	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("connecting to migration database: %w", err)
-	}
-	databaseDriver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
-	if err != nil {
-		return fmt.Errorf("creating migration database driver: %w", err)
-	}
-	m, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", databaseDriver)
-	if err != nil {
-		return fmt.Errorf("constructing migrator: %w", err)
-	}
 	defer closeMigrator(ctx, m, logger)
 	logger.InfoContext(ctx, "applying migrations")
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
@@ -77,9 +59,72 @@ func Migrate(ctx context.Context, dsn string, logger *slog.Logger) error {
 	return nil
 }
 
+// Down reverts every applied migration embedded under files/ against the
+// database at dsn, running each NNNN_name.down.sql in reverse order. It
+// shares newMigrator's source/database driver wiring with Migrate rather
+// than reconstructing it a second time, so callers that need a real down
+// migration -- production rollback tooling, and this bead's own
+// migrations-are-idempotent integration proof (loam-li0.6, testing-spec
+// Layer 2 Store: "migrations apply cleanly up AND down and are idempotent")
+// -- do not each hand-roll the golang-migrate instance a package-external
+// test previously had to (internal/db/migrations/integration_test.go's
+// migrateDown, now just a thin call to Down). Idempotent the same way
+// Migrate is: reverting an already-empty schema is migrate.ErrNoChange, not
+// an error. Migrate has no "stop after N" mode and neither does Down -- both
+// always run the full chain (loam-maq tracks per-migration target control as
+// separate, follow-up work).
+func Down(ctx context.Context, dsn string, logger *slog.Logger) error {
+	m, db, err := newMigrator(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	defer closeMigrator(ctx, m, logger)
+	logger.InfoContext(ctx, "reverting migrations")
+	if err := m.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("reverting migrations: %w", err)
+	}
+	logger.InfoContext(ctx, "migrations reverted")
+	return nil
+}
+
+// newMigrator opens dsn and wires the embedded iofs source driver plus the
+// pgx/v5 database driver Migrate and Down both need, returning a
+// migrate.Migrate ready for Up() or Down() alongside the *sql.DB the caller
+// must also close. Each call opens its own connection, independent of any
+// *pgxpool.Pool the caller may separately build.
+func newMigrator(ctx context.Context, dsn string) (*migrate.Migrate, *sql.DB, error) {
+	if dsn == "" {
+		return nil, nil, fmt.Errorf("migrating: %w", errEmptyDSN)
+	}
+	sourceDriver, err := iofs.New(migrationFiles, migrationsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening embedded migration source: %w", err)
+	}
+	db, err := sql.Open("pgx/v5", dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening migration database connection: %w", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("connecting to migration database: %w", err)
+	}
+	databaseDriver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
+	if err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("creating migration database driver: %w", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", databaseDriver)
+	if err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("constructing migrator: %w", err)
+	}
+	return m, db, nil
+}
+
 // closeMigrator closes the migrator's source and database drivers. Failures
-// are logged rather than swallowed: Migrate has already returned by the
-// time this runs, so there is no error path left to report through.
+// are logged rather than swallowed: Migrate/Down have already returned by
+// the time this runs, so there is no error path left to report through.
 func closeMigrator(ctx context.Context, m *migrate.Migrate, logger *slog.Logger) {
 	sourceErr, dbErr := m.Close()
 	if sourceErr != nil || dbErr != nil {

@@ -25,15 +25,10 @@ package migrations
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
-	"github.com/golang-migrate/migrate/v4"
-	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -296,28 +291,12 @@ func roleOperations(ctx context.Context, t *testing.T, pool *pgxpool.Pool, roleN
 	return ops
 }
 
-// migrateDown drives golang-migrate's Down() directly (Migrate only exposes
-// Up), through the same iofs source + pgx/v5 WithInstance wiring
-// migrations.go's Migrate uses, so the down.sql files run through the real
-// harness rather than a hand-rolled SQL exec.
+// migrateDown drives the package's own Down (loam-li0.6), which wires the
+// same iofs source + pgx/v5 WithInstance instance Migrate uses, so the
+// down.sql files run through the real production harness rather than a
+// second, hand-rolled construction of it.
 func migrateDown(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
-	sourceDriver, err := iofs.New(migrationFiles, migrationsDir)
-	require.NoError(t, err)
-	defer sourceDriver.Close()
-	db, err := sql.Open("pgx/v5", dsn)
-	require.NoError(t, err)
-	defer db.Close()
-	require.NoError(t, db.PingContext(ctx))
-	databaseDriver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
-	require.NoError(t, err)
-	m, err := migrate.NewWithInstance("iofs", sourceDriver, "pgx5", databaseDriver)
-	require.NoError(t, err)
-	defer func() {
-		_, _ = m.Close()
-	}()
-	err = m.Down()
-	if !errors.Is(err, migrate.ErrNoChange) {
-		require.NoError(t, err)
-	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	require.NoError(t, Down(ctx, dsn, logger))
 }

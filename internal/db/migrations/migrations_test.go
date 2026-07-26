@@ -136,3 +136,22 @@ func TestMigrateContextCancellation(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled in error chain, got: %v", err)
 }
+
+// TestDownEmptyDSN mirrors TestMigrateEmptyDSN: Down shares newMigrator with
+// Migrate, so the same errEmptyDSN guard must fire for both entry points.
+func TestDownEmptyDSN(t *testing.T) {
+	t.Parallel()
+	err := Down(t.Context(), "", testLogger())
+	require.ErrorIs(t, err, errEmptyDSN)
+}
+
+// TestDownUnreachableDSN mirrors TestMigrateUnreachableDSN: a live-looking
+// but unreachable DSN must fail at the same "connecting to migration
+// database" step for Down as it does for Migrate, since both go through
+// newMigrator's shared db.PingContext call.
+func TestDownUnreachableDSN(t *testing.T) {
+	t.Parallel()
+	err := Down(t.Context(), "postgres://localhost:1/nonexistent?sslmode=disable&connect_timeout=1", testLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connecting to migration database")
+}
