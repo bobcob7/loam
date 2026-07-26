@@ -141,16 +141,31 @@ func TestReplaceFileChunks_InsertFails_WrapsError(t *testing.T) {
 func TestReplaceFileChunks_TransactionFails_PropagatesError(t *testing.T) {
 	t.Parallel()
 	beginErr := errors.New("beginning transaction: connection refused")
+	// deleteCalled must stay false: ReplaceFileChunks must route every write
+	// through s.tx.withinTx, never call s.queries directly. A queriesMock
+	// with real (non-nil) funcs, rather than a bare &queriesMock{}, means a
+	// mutation that bypasses withinTx fails this test by the assertion
+	// below instead of panicking on a nil mock func -- a panic would abort
+	// the whole test binary and mask every other test in the package,
+	// which is strictly worse evidence than an assertion failure.
+	deleteCalled := false
+	q := &queriesMock{
+		DeleteChunksByFileFunc: func(_ context.Context, _ gen.DeleteChunksByFileParams) error {
+			deleteCalled = true
+			return nil
+		},
+	}
 	tx := &transactorMock{
 		withinTxFunc: func(_ context.Context, _ func(q queries) error) error {
 			return beginErr
 		},
 	}
-	s := newStore(&queriesMock{}, tx, testLogger())
+	s := newStore(q, tx, testLogger())
 	result, err := s.ReplaceFileChunks(t.Context(), uuid.New(), "main", "a.go", nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, beginErr)
 	assert.Nil(t, result)
+	assert.False(t, deleteCalled, "writes must run inside withinTx, never against the pool directly")
 }
 
 func TestReplaceFileChunks_InsertedChunkHasInvalidID_ReturnsErrInvalidUUID(t *testing.T) {
@@ -181,6 +196,22 @@ func TestSearch_EmptyRepoIDs_ReturnsNilWithoutQuerying(t *testing.T) {
 	result, err := s.Search(t.Context(), nil, "main", []float32{1, 0}, 5)
 	require.NoError(t, err)
 	assert.Nil(t, result)
+}
+
+func TestSearch_NonPositiveLimit_ReturnsNilWithoutQuerying(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{0, -1} {
+		q := &queriesMock{
+			SearchChunksByEmbeddingScopedFunc: func(_ context.Context, _ gen.SearchChunksByEmbeddingScopedParams) ([]gen.Chunk, error) {
+				t.Fatalf("SearchChunksByEmbeddingScoped must not be called for limit=%d", limit)
+				return nil, nil
+			},
+		}
+		s := newStore(q, realTx(q), testLogger())
+		result, err := s.Search(t.Context(), []uuid.UUID{uuid.New()}, "main", []float32{1, 0}, limit)
+		require.NoError(t, err)
+		assert.Nil(t, result)
+	}
 }
 
 func TestSearch_BuildsScopedQueryAndPreservesOrder(t *testing.T) {

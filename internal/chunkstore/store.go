@@ -140,10 +140,8 @@ func (s *Store) ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetB
 	if err != nil {
 		return nil, fmt.Errorf("replacing chunks for repo %s file %s: %w", repoID, file, err)
 	}
-	if s.logger != nil {
-		s.logger.InfoContext(ctx, "replaced file chunks",
-			"repo_id", repoID, "target_branch", targetBranch, "file", file, "chunks", len(result))
-	}
+	s.logger.InfoContext(ctx, "replaced file chunks",
+		"repo_id", repoID, "target_branch", targetBranch, "file", file, "chunks", len(result))
 	return result, nil
 }
 
@@ -153,9 +151,13 @@ func (s *Store) ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetB
 // (docs/persistence-spec.md "chunks": "filtered by the scope repo ids").
 // An empty repoIDs matches nothing: it is treated as an empty scope, not as
 // "no filter", so a caller that forgot to populate its scope gets zero
-// results rather than every repo's chunks.
+// results rather than every repo's chunks. A non-positive limit is treated
+// the same way (zero results) rather than reaching Postgres as `LIMIT 0`
+// (a wasted round trip) or `LIMIT -1` (a syntax error): callers ask for "no
+// more than limit results", and asking for at most zero (or fewer) has
+// exactly one sensible answer.
 func (s *Store) Search(ctx context.Context, repoIDs []uuid.UUID, targetBranch string, embedding []float32, limit int) ([]Chunk, error) {
-	if len(repoIDs) == 0 {
+	if len(repoIDs) == 0 || limit <= 0 {
 		return nil, nil
 	}
 	ids := make([]pgtype.UUID, len(repoIDs))
