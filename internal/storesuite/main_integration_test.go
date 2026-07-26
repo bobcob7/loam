@@ -64,12 +64,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	testcontainers "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db"
 	"github.com/bobcob7/loam/internal/db/migrations"
 	"github.com/bobcob7/loam/internal/testdb"
 )
+
+// demoContainerName is the fixed name `task demo:m1` (loam-ejr) gives this
+// package's shared container when LOAM_DEMO_KEEP_CONTAINER=1, instead of
+// the random name testcontainers-go would otherwise assign. A fixed,
+// well-known name lets the Taskfile target address the container directly
+// (`docker exec loam-demo-m1 psql ...`, `docker rm -f loam-demo-m1`)
+// without parsing an id out of this process's stdout -- which matters
+// because several early-exit paths below (a failed ConnectionString or
+// Migrate, or a panicking test) never reach the code that would print such
+// an id at all, leaving nothing for a stdout-parsing cleanup step to find.
+// Naming the container up front, before any of those paths can run, means
+// the Taskfile's unconditional `docker rm -f loam-demo-m1` (both before
+// starting, to self-heal a container leaked by a previous Ctrl-C'd run,
+// and after finishing) always has a name to target, regardless of where
+// this process exits.
+const demoContainerName = "loam-demo-m1"
 
 // sharedDSN is the one migrated Postgres container's connection string every
 // test in this package runs against.
@@ -93,30 +110,47 @@ var sharedPool *pgxpool.Pool
 // runs every test, then tears the container down.
 //
 // LOAM_DEMO_KEEP_CONTAINER=1 (loam-ejr, `task demo:m1`) skips that teardown
-// and instead prints the container's id and resolved DSN to stdout on
-// well-known marker lines, so a wrapping shell step can capture them and
-// `docker exec` a psql peek at the seeded rows AFTER this process exits --
-// testcontainers-go owns the container's lifecycle inside this binary, so
-// there is no way to peek from outside while it is still running this
-// suite. The container is NOT left to ryuk in this mode: ryuk is disabled
-// on this repo's podman setups (TESTCONTAINERS_RYUK_DISABLED=true, see
-// Taskfile.yml's test:integration desc), so on a developer machine ryuk
-// is not running at all and would never reap it. `task demo:m1` reads the
-// printed LOAM_DEMO_CONTAINER_ID line and issues its own `docker rm -f`
-// once the psql peek finishes, so the keep flag never causes a real leak
-// when driven through the task -- only a manual, non-Taskfile invocation
-// of this test binary with the env var set would leak, and that risk is
-// documented at the call site (Taskfile.yml).
+// so a wrapping shell step can `docker exec` a psql peek at the seeded rows
+// AFTER this process exits -- testcontainers-go owns the container's
+// lifecycle inside this binary, so there is no way to peek from outside
+// while it is still running this suite. In this mode the container is
+// created under the fixed demoContainerName (see that constant) rather
+// than a random name, so the Taskfile target can address and remove it by
+// name without depending on anything this process prints.
+//
+// ryuk is NOT a usable backstop for that kept container, on ANY platform:
+// `task demo:m1` sets TESTCONTAINERS_RYUK_DISABLED=true scoped to its own
+// go test invocation specifically because a running ryuk would prune this
+// container ~10s after this process exits (RYUK_RECONNECTION_TIMEOUT's
+// default, testcontainers-go@v0.43.0 internal/config/config.go:72) --
+// exactly when LOAM_DEMO_KEEP_CONTAINER=1 needs the container to still be
+// there for the psql peek. That is a real race on a real Docker daemon
+// with ryuk enabled, not just a podman-only concern: without disabling
+// ryuk for this specific invocation, the container could vanish mid-peek
+// on CI-shaped Docker hosts too. Scoping the var to this one `go test`
+// command (Taskfile.yml), rather than exporting it repo-wide the way
+// podman users must for `task test:integration`, means demo:m1 behaves
+// identically on Docker and podman and never disables ryuk for any other
+// integration run (CI's `integration` job relies on ryuk as its reaper and
+// must keep seeing it enabled). Cleanup of the kept container is instead
+// `task demo:m1`'s own explicit responsibility: it removes
+// demoContainerName by name both before starting (self-healing a
+// container leaked by a previous Ctrl-C'd run) and after finishing.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	fmt.Println("=== loam-li0.6 store integration suite: starting pgvector container ===")
-	container, err := postgres.Run(ctx, testdb.PostgresImage,
+	keepContainer := os.Getenv("LOAM_DEMO_KEEP_CONTAINER") == "1"
+	opts := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
 		postgres.BasicWaitStrategies(),
-	)
+	}
+	if keepContainer {
+		opts = append(opts, testcontainers.WithName(demoContainerName))
+	}
+	container, err := postgres.Run(ctx, testdb.PostgresImage, opts...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "starting shared pgvector container:", err)
 		os.Exit(1)
@@ -136,10 +170,10 @@ func TestMain(m *testing.M) {
 	if sharedPool != nil {
 		sharedPool.Close()
 	}
-	if os.Getenv("LOAM_DEMO_KEEP_CONTAINER") == "1" {
+	if keepContainer {
 		fmt.Println("=== LOAM_DEMO_KEEP_CONTAINER=1: skipping teardown for the psql peek ===")
-		fmt.Println("LOAM_DEMO_CONTAINER_ID=" + container.GetContainerID())
-		fmt.Println("LOAM_DEMO_DSN=" + dsn)
+		fmt.Println("LOAM_DEMO_CONTAINER_NAME=" + demoContainerName)
+		fmt.Println("LOAM_DEMO_DSN=" + dsn + " (informational only -- task demo:m1 addresses the container by name via docker exec, not this DSN)")
 		os.Exit(code)
 	}
 	if err := container.Terminate(context.Background()); err != nil {
