@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,7 +12,10 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorsync"
 )
 
-const testRepoID = mirrorsync.RepoID("019f9c4b-0474-7952-8c7d-509aecb334d4")
+// testRepoID is a name-shaped RepoID -- "<group>/<repo_name>", the only
+// identifier the proto surface and the rest of mirrorsync's collaborators
+// ever key a repo by (docs/persistence-spec.md's repos.name, unique).
+const testRepoID = mirrorsync.RepoID("bobcob7/doc-server")
 
 // updateOne is the CommandTag a single-row UPDATE reports, the shape every
 // happy-path test in this file expects Exec to return.
@@ -43,16 +45,19 @@ func TestReportSyncing_WritesSyncingState(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, mock.ExecCalls(), 1)
 	assert.Contains(t, gotSQL, "sync_state = 'syncing'")
+	assert.Contains(t, gotSQL, "WHERE name = $1")
 	require.Len(t, gotArgs, 1)
-	assert.Equal(t, uuid.MustParse(string(testRepoID)), gotArgs[0])
+	assert.Equal(t, string(testRepoID), gotArgs[0])
 }
 
 func TestReportIdle_EnqueuedIngestFalse_WritesIdleAndClearsError(t *testing.T) {
 	t.Parallel()
 	var gotSQL string
+	var gotArgs []any
 	mock := &execerMock{
-		ExecFunc: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+		ExecFunc: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 			gotSQL = sql
+			gotArgs = args
 			return updateOne()
 		},
 	}
@@ -63,6 +68,9 @@ func TestReportIdle_EnqueuedIngestFalse_WritesIdleAndClearsError(t *testing.T) {
 	assert.Contains(t, gotSQL, "sync_state = 'idle'")
 	assert.Contains(t, gotSQL, "last_synced_at = now()")
 	assert.Contains(t, gotSQL, "sync_error = NULL")
+	assert.Contains(t, gotSQL, "WHERE name = $1")
+	require.Len(t, gotArgs, 1)
+	assert.Equal(t, string(testRepoID), gotArgs[0])
 }
 
 // TestReportIdle_EnqueuedIngestTrue_DoesNotWrite is the exact race this bead
@@ -78,6 +86,20 @@ func TestReportIdle_EnqueuedIngestTrue_DoesNotWrite(t *testing.T) {
 	err := r.ReportIdle(t.Context(), testRepoID, true)
 	require.NoError(t, err)
 	assert.Empty(t, mock.ExecCalls(), "ReportIdle must not write when ownership has transferred to the ingest worker")
+}
+
+func TestReportIdle_ExecFails_WrapsError(t *testing.T) {
+	t.Parallel()
+	execErr := errors.New("connection reset")
+	mock := &execerMock{
+		ExecFunc: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, execErr
+		},
+	}
+	r := New(mock)
+	err := r.ReportIdle(t.Context(), testRepoID, false)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, execErr)
 }
 
 func TestReportError_EnqueuedIngestFalse_WritesErrorMessage(t *testing.T) {
@@ -97,8 +119,31 @@ func TestReportError_EnqueuedIngestFalse_WritesErrorMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, mock.ExecCalls(), 1)
 	assert.Contains(t, gotSQL, "sync_state = 'error'")
+	assert.Contains(t, gotSQL, "WHERE name = $2")
 	require.Len(t, gotArgs, 2)
 	assert.Equal(t, "fetching repo x: connection refused", gotArgs[0])
+	assert.Equal(t, string(testRepoID), gotArgs[1])
+}
+
+// TestReportError_NilSyncErr_WritesEmptyMessage exercises the defensive nil
+// fallback: the scheduler never calls ReportError with a nil error (it only
+// does so from its own error path), but Reporter must not panic if it ever
+// did -- it writes sync_state = 'error' with an empty sync_error rather than
+// crash the caller.
+func TestReportError_NilSyncErr_WritesEmptyMessage(t *testing.T) {
+	t.Parallel()
+	var gotArgs []any
+	mock := &execerMock{
+		ExecFunc: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			gotArgs = args
+			return updateOne()
+		},
+	}
+	r := New(mock)
+	err := r.ReportError(t.Context(), testRepoID, nil, false)
+	require.NoError(t, err)
+	require.Len(t, gotArgs, 2)
+	assert.Equal(t, "", gotArgs[0])
 }
 
 // TestReportError_EnqueuedIngestTrue_DoesNotWrite mirrors the idle case: step
@@ -113,13 +158,18 @@ func TestReportError_EnqueuedIngestTrue_DoesNotWrite(t *testing.T) {
 	assert.Empty(t, mock.ExecCalls(), "ReportError must not write when ownership has transferred to the ingest worker")
 }
 
-func TestReportSyncing_InvalidRepoID_ReturnsErrorWithoutWriting(t *testing.T) {
+func TestReportError_ExecFails_WrapsError(t *testing.T) {
 	t.Parallel()
-	mock := &execerMock{}
+	execErr := errors.New("connection reset")
+	mock := &execerMock{
+		ExecFunc: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, execErr
+		},
+	}
 	r := New(mock)
-	err := r.ReportSyncing(t.Context(), mirrorsync.RepoID("not-a-uuid"))
+	err := r.ReportError(t.Context(), testRepoID, errors.New("boom"), false)
 	require.Error(t, err)
-	assert.Empty(t, mock.ExecCalls())
+	assert.ErrorIs(t, err, execErr)
 }
 
 func TestReportSyncing_RepoNotFound_ReturnsErrRepoNotFound(t *testing.T) {

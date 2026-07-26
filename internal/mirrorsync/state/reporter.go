@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
-
 	"github.com/bobcob7/loam/internal/mirrorsync"
 )
 
@@ -24,6 +22,15 @@ var errRepoNotFound = errors.New("repo not found")
 // resolves, so ReportIdle/ReportError become no-ops whenever enqueuedIngest
 // is true — writing anyway would race the ingest-side writer over the same
 // column and tick (loam-giq.9 DESIGN).
+//
+// Reports key on repos.name, not repos.id: RepoID is the "<group>/<repo_name>"
+// identifier the whole proto surface uses (no repo UUID is ever exposed to a
+// client, per proto/loam/v1/common.proto's EnrolledRepo), and the four other
+// mirrorsync collaborators that key on RepoID (Fetcher, AdvanceDetector,
+// MergeabilityChecker, PRPoller) resolve it straight to the mirror on disk
+// (docs/persistence-spec.md: "path derived from repos.name") or the forge —
+// never to an id. repos_name_key makes `WHERE name = $1` a single indexed
+// row.
 type Reporter struct {
 	db execer
 }
@@ -39,11 +46,7 @@ var _ mirrorsync.SyncStateReporter = (*Reporter)(nil)
 // cycle. It always writes: the running state is never contested by another
 // writer, so there is no ownership hand-off to honor here.
 func (r *Reporter) ReportSyncing(ctx context.Context, repo mirrorsync.RepoID) error {
-	id, err := parseRepoID(repo)
-	if err != nil {
-		return fmt.Errorf("reporting sync syncing for repo %s: %w", repo, err)
-	}
-	tag, err := r.db.Exec(ctx, `UPDATE repos SET sync_state = 'syncing', updated_at = now() WHERE id = $1`, id)
+	tag, err := r.db.Exec(ctx, `UPDATE repos SET sync_state = 'syncing', updated_at = now() WHERE name = $1`, string(repo))
 	if err != nil {
 		return fmt.Errorf("reporting sync syncing for repo %s: %w", repo, err)
 	}
@@ -63,13 +66,9 @@ func (r *Reporter) ReportIdle(ctx context.Context, repo mirrorsync.RepoID, enque
 	if enqueuedIngest {
 		return nil
 	}
-	id, err := parseRepoID(repo)
-	if err != nil {
-		return fmt.Errorf("reporting sync idle for repo %s: %w", repo, err)
-	}
 	tag, err := r.db.Exec(ctx,
-		`UPDATE repos SET sync_state = 'idle', last_synced_at = now(), sync_error = NULL, updated_at = now() WHERE id = $1`,
-		id)
+		`UPDATE repos SET sync_state = 'idle', last_synced_at = now(), sync_error = NULL, updated_at = now() WHERE name = $1`,
+		string(repo))
 	if err != nil {
 		return fmt.Errorf("reporting sync idle for repo %s: %w", repo, err)
 	}
@@ -84,22 +83,20 @@ func (r *Reporter) ReportIdle(ctx context.Context, repo mirrorsync.RepoID, enque
 // ReportIdle, enqueuedIngest true means step 4 already handed ownership of
 // this tick's terminal write to the ingest worker — the case where step 4
 // succeeds but step 5 (PR polling) subsequently fails — so ReportError does
-// nothing and returns nil.
+// nothing and returns nil. syncErr is expected to be non-nil (the scheduler
+// only calls ReportError from its own error path); a nil syncErr still
+// writes, with an empty sync_error, rather than panic.
 func (r *Reporter) ReportError(ctx context.Context, repo mirrorsync.RepoID, syncErr error, enqueuedIngest bool) error {
 	if enqueuedIngest {
 		return nil
-	}
-	id, err := parseRepoID(repo)
-	if err != nil {
-		return fmt.Errorf("reporting sync error for repo %s: %w", repo, err)
 	}
 	message := ""
 	if syncErr != nil {
 		message = syncErr.Error()
 	}
 	tag, err := r.db.Exec(ctx,
-		`UPDATE repos SET sync_state = 'error', sync_error = $1, updated_at = now() WHERE id = $2`,
-		message, id)
+		`UPDATE repos SET sync_state = 'error', sync_error = $1, updated_at = now() WHERE name = $2`,
+		message, string(repo))
 	if err != nil {
 		return fmt.Errorf("reporting sync error for repo %s: %w", repo, err)
 	}
@@ -107,19 +104,4 @@ func (r *Reporter) ReportError(ctx context.Context, repo mirrorsync.RepoID, sync
 		return fmt.Errorf("reporting sync error for repo %s: %w", repo, errRepoNotFound)
 	}
 	return nil
-}
-
-// parseRepoID validates repo as UUID text before it reaches Postgres,
-// surfacing a clear error rather than a driver-level "invalid input syntax
-// for type uuid". repos.id is a UUID(v7) primary key (docs/persistence-spec.md
-// -> "Conventions"); RepoID's producer (repo enrollment, loam-54o.7) is not
-// implemented yet, so this package's operating assumption is that RepoID
-// carries that id's text form. See this bead's ASSUMPTIONS in the final
-// report.
-func parseRepoID(repo mirrorsync.RepoID) (uuid.UUID, error) {
-	id, err := uuid.Parse(string(repo))
-	if err != nil {
-		return uuid.UUID{}, fmt.Errorf("invalid repo id: %w", err)
-	}
-	return id, nil
 }

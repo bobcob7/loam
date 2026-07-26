@@ -12,6 +12,24 @@
 // integration_test.go for why: podman's Docker-compat API does not resolve
 // the reaper sidecar's expected `bridge` network, so the container never
 // starts without it). This is a local convenience only, not a CI setting.
+//
+// DEFERRED-WIP: enrollment.feature: Enrolled repos report sync status ->
+// TestReporter_IdleOnSuccessSetsLastSyncedAtAndClearsError,
+// TestReporter_ErrorCarriesTheMessage (covers the persistence side of
+// repos.sync_state for the non-ingest steps (1,2,3,5) only. Does NOT cover
+// the ingest-owned half of the column, written by loam-c94.13's worker when
+// step 4 enqueues a job, nor "I view the repo" -- the web-visible sync
+// status surface, which docs/testing-spec.md :60-67 drives through the
+// connect-go admin client rather than this package. The godog scenario
+// stays @wip pending loam-li0.5.)
+//
+// DEFERRED-WIP: sync.feature: Sync failures are retried on the next cycle ->
+// TestReporter_ErrorCarriesTheMessage, TestReporter_IdleOnSuccessSetsLastSyncedAtAndClearsError
+// (this is the persistence-of-repos.sync_state half that
+// internal/mirrorsync/scheduler_test.go:283 (giq.1) explicitly disclaimed as
+// "owned by giq.9" -- landed here. Still does NOT cover the real "upstream
+// forge unreachable" condition (giq.2 + fake-forge) or the web-visible sync
+// status (testing-spec :60-67). The godog scenario stays @wip.)
 package state
 
 import (
@@ -21,7 +39,6 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,27 +57,26 @@ type syncRow struct {
 	syncError    *string
 }
 
-func readSyncRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, id uuid.UUID) syncRow {
+func readSyncRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name string) syncRow {
 	t.Helper()
 	var row syncRow
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT sync_state, last_synced_at::text, sync_error FROM repos WHERE id = $1`, id,
+		`SELECT sync_state, last_synced_at::text, sync_error FROM repos WHERE name = $1`, name,
 	).Scan(&row.state, &row.lastSyncedAt, &row.syncError))
 	return row
 }
 
 // insertRepo inserts a minimal repos row (idle, no last_synced_at, no
-// sync_error -- the migration's own defaults) and returns its id.
-func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name string) uuid.UUID {
+// sync_error -- the migration's own defaults) under name, the identifier
+// Reporter itself keys writes by.
+func insertRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool, name string) {
 	t.Helper()
-	var id uuid.UUID
-	require.NoError(t, pool.QueryRow(ctx,
+	_, err := pool.Exec(ctx,
 		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
-		 VALUES (gen_random_uuid(), $1, 'https://example.com/repo.git', 'example.com', 'main')
-		 RETURNING id`,
+		 VALUES (gen_random_uuid(), $1, 'https://example.com/repo.git', 'example.com', 'main')`,
 		name,
-	).Scan(&id))
-	return id
+	)
+	require.NoError(t, err)
 }
 
 // newTestPool spins up a real Postgres via testcontainers-go, applies the
@@ -96,10 +112,11 @@ func TestReporter_SyncingSetAtCycleStart(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pool := newTestPool(t)
-	id := insertRepo(ctx, t, pool, "group/syncing-repo")
+	const name = "group/syncing-repo"
+	insertRepo(ctx, t, pool, name)
 	r := New(pool)
-	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(id.String())))
-	row := readSyncRow(ctx, t, pool, id)
+	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(name)))
+	row := readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "syncing", row.state)
 	assert.Nil(t, row.lastSyncedAt)
 }
@@ -112,13 +129,14 @@ func TestReporter_IdleOnSuccessSetsLastSyncedAtAndClearsError(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pool := newTestPool(t)
-	id := insertRepo(ctx, t, pool, "group/idle-repo")
-	_, err := pool.Exec(ctx, `UPDATE repos SET sync_state = 'error', sync_error = 'stale failure' WHERE id = $1`, id)
+	const name = "group/idle-repo"
+	insertRepo(ctx, t, pool, name)
+	_, err := pool.Exec(ctx, `UPDATE repos SET sync_state = 'error', sync_error = 'stale failure' WHERE name = $1`, name)
 	require.NoError(t, err)
 	r := New(pool)
-	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(id.String())))
-	require.NoError(t, r.ReportIdle(ctx, mirrorsync.RepoID(id.String()), false))
-	row := readSyncRow(ctx, t, pool, id)
+	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(name)))
+	require.NoError(t, r.ReportIdle(ctx, mirrorsync.RepoID(name), false))
+	row := readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "idle", row.state)
 	require.NotNil(t, row.lastSyncedAt)
 	assert.NotEmpty(t, *row.lastSyncedAt)
@@ -132,12 +150,13 @@ func TestReporter_ErrorCarriesTheMessage(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pool := newTestPool(t)
-	id := insertRepo(ctx, t, pool, "group/error-repo")
+	const name = "group/error-repo"
+	insertRepo(ctx, t, pool, name)
 	r := New(pool)
-	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(id.String())))
+	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(name)))
 	cycleErr := errors.New("fetching repo group/error-repo: connection refused")
-	require.NoError(t, r.ReportError(ctx, mirrorsync.RepoID(id.String()), cycleErr, false))
-	row := readSyncRow(ctx, t, pool, id)
+	require.NoError(t, r.ReportError(ctx, mirrorsync.RepoID(name), cycleErr, false))
+	row := readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "error", row.state)
 	require.NotNil(t, row.syncError)
 	assert.Equal(t, cycleErr.Error(), *row.syncError)
@@ -157,17 +176,18 @@ func TestReporter_OwnershipTransfer_IdleDoesNotClobberIngestWorker(t *testing.T)
 	t.Parallel()
 	ctx := t.Context()
 	pool := newTestPool(t)
-	id := insertRepo(ctx, t, pool, "group/handoff-idle-repo")
+	const name = "group/handoff-idle-repo"
+	insertRepo(ctx, t, pool, name)
 	r := New(pool)
-	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(id.String())))
-	require.NoError(t, r.ReportIdle(ctx, mirrorsync.RepoID(id.String()), true))
-	row := readSyncRow(ctx, t, pool, id)
+	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(name)))
+	require.NoError(t, r.ReportIdle(ctx, mirrorsync.RepoID(name), true))
+	row := readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "syncing", row.state, "ReportIdle must not write the terminal state once ownership has transferred")
 	assert.Nil(t, row.lastSyncedAt)
 	_, err := pool.Exec(ctx,
-		`UPDATE repos SET sync_state = 'idle', last_synced_at = now() WHERE id = $1`, id)
+		`UPDATE repos SET sync_state = 'idle', last_synced_at = now() WHERE name = $1`, name)
 	require.NoError(t, err, "simulated ingest-worker write")
-	row = readSyncRow(ctx, t, pool, id)
+	row = readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "idle", row.state, "the ingest worker's own write must land untouched by Reporter")
 	assert.NotNil(t, row.lastSyncedAt)
 }
@@ -179,17 +199,18 @@ func TestReporter_OwnershipTransfer_ErrorDoesNotClobberIngestWorker(t *testing.T
 	t.Parallel()
 	ctx := t.Context()
 	pool := newTestPool(t)
-	id := insertRepo(ctx, t, pool, "group/handoff-error-repo")
+	const name = "group/handoff-error-repo"
+	insertRepo(ctx, t, pool, name)
 	r := New(pool)
-	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(id.String())))
-	require.NoError(t, r.ReportError(ctx, mirrorsync.RepoID(id.String()), errors.New("polling PRs: timeout"), true))
-	row := readSyncRow(ctx, t, pool, id)
+	require.NoError(t, r.ReportSyncing(ctx, mirrorsync.RepoID(name)))
+	require.NoError(t, r.ReportError(ctx, mirrorsync.RepoID(name), errors.New("polling PRs: timeout"), true))
+	row := readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "syncing", row.state, "ReportError must not write the terminal state once ownership has transferred")
 	assert.Nil(t, row.syncError)
 	_, err := pool.Exec(ctx,
-		`UPDATE repos SET sync_state = 'error', sync_error = 'ingest job failed' WHERE id = $1`, id)
+		`UPDATE repos SET sync_state = 'error', sync_error = 'ingest job failed' WHERE name = $1`, name)
 	require.NoError(t, err, "simulated ingest-worker write")
-	row = readSyncRow(ctx, t, pool, id)
+	row = readSyncRow(ctx, t, pool, name)
 	assert.Equal(t, "error", row.state)
 	require.NotNil(t, row.syncError)
 	assert.Equal(t, "ingest job failed", *row.syncError)
@@ -202,7 +223,7 @@ func TestReporter_RepoNotFound(t *testing.T) {
 	ctx := t.Context()
 	pool := newTestPool(t)
 	r := New(pool)
-	err := r.ReportSyncing(ctx, mirrorsync.RepoID(uuid.New().String()))
+	err := r.ReportSyncing(ctx, mirrorsync.RepoID("group/does-not-exist"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errRepoNotFound)
 }
