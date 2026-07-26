@@ -37,15 +37,21 @@ import (
 
 	"github.com/bobcob7/loam/internal/db"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testdb"
 )
 
 // newTestPool spins up a real Postgres via testcontainers-go, applies the
 // real embedded migrations (so this exercises the actual ingest_jobs shape
 // loam-54o.3 shipped, not a hand-rolled schema), and returns a connected
 // pool the caller does not need to close (t.Cleanup handles it).
+//
+// The image must carry pgvector, for two independent reasons (loam-75w):
+// Migrate applies every migration, and 0002_code_intel runs CREATE EXTENSION
+// IF NOT EXISTS vector unconditionally; and db.NewPool's AfterConnect runs
+// pgxvec.RegisterTypes, which resolves to_regtype('vector').
 func newTestPool(ctx context.Context, t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
 		postgres.WithUsername("loam"),
 		postgres.WithPassword("loam"),
