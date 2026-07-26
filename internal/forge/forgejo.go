@@ -135,13 +135,32 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 }
 
 // forgejoPullRequest is the subset of the Forgejo pull-request response
-// this package consumes.
+// this package consumes. Head and Base are only populated (and only
+// needed) by the list response FindOpenPR reads; the single-PR
+// responses CreatePR/GetPRState/ClosePR read simply leave them zero.
 type forgejoPullRequest struct {
-	HTMLURL string `json:"html_url"`
-	Number  int    `json:"number"`
-	State   string `json:"state"`
-	Merged  bool   `json:"merged"`
+	HTMLURL string           `json:"html_url"`
+	Number  int              `json:"number"`
+	State   string           `json:"state"`
+	Merged  bool             `json:"merged"`
+	Head    forgejoBranchRef `json:"head"`
+	Base    forgejoBranchRef `json:"base"`
 }
+
+// forgejoBranchRef is the branch-name subset of Forgejo's PR head/base
+// object.
+type forgejoBranchRef struct {
+	Ref string `json:"ref"`
+}
+
+// listOpenPRsPageSize is the page size FindOpenPR requests from
+// Forgejo's list-pulls endpoint; listOpenPRsMaxPages bounds how many
+// pages it will walk (25,000 open PRs) before giving up, so a
+// pathological repo cannot make FindOpenPR loop forever.
+const (
+	listOpenPRsPageSize = 50
+	listOpenPRsMaxPages = 500
+)
 
 // CreatePR opens a pull request from headBranch into targetBranch on
 // repo (a Forgejo "<owner>/<repo>" path).
@@ -189,6 +208,75 @@ func (f *Forgejo) GitCredentials(ctx context.Context, token string) (string, str
 		return "", "", fmt.Errorf("git credentials: %w", ErrInvalidToken)
 	}
 	return gitUsername, token, nil
+}
+
+// FindOpenPR looks up the open pull request (if any) from headBranch
+// into targetBranch on repo, via GET .../pulls?state=open. Verified
+// empirically against a real Forgejo 9.0.3 instance: that endpoint
+// takes no head/base query parameters (undocumented in its own
+// swagger, and passing them is silently ignored — confirmed live), so
+// every open PR on the repo is paged through and filtered on
+// pr.Head.Ref/pr.Base.Ref here, client-side. This is deliberately not a
+// parse of CreatePR's ErrDuplicatePR message: that message's "id" is
+// the PR's internal id, not the per-repo number this method returns,
+// and the two only coincide on a repo's first PR (see ErrDuplicatePR's
+// godoc) — confirmed live on a second repo, where the first PR's
+// number=1 came back behind internal id=64.
+//
+// The loop terminates on an EMPTY page, never a page shorter than
+// listOpenPRsPageSize: verified live that Forgejo silently caps the
+// effective page size at its own api.MAX_RESPONSE_ITEMS
+// (admin-tunable) regardless of the limit= this method requests — a
+// 62-open-PR repo returned exactly 50 items whether limit was 62, 100,
+// or 1000. Treating a server-shortened full page as the last page
+// would silently stop paging before reaching a real match on a later
+// page, on any instance configured with MAX_RESPONSE_ITEMS below this
+// method's own page size.
+func (f *Forgejo) FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (string, int, bool, error) {
+	for page := 1; page <= listOpenPRsMaxPages; page++ {
+		prs, err := f.listOpenPRsPage(ctx, repo, page)
+		if err != nil {
+			return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: %w", repo, headBranch, targetBranch, err)
+		}
+		if len(prs) == 0 {
+			return "", 0, false, nil
+		}
+		for _, pr := range prs {
+			if pr.Head.Ref == headBranch && pr.Base.Ref == targetBranch {
+				return pr.HTMLURL, pr.Number, true, nil
+			}
+		}
+	}
+	return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: exhausted %d pages of open PRs without reaching the end of the list", repo, headBranch, targetBranch, listOpenPRsMaxPages)
+}
+
+// listOpenPRsPage fetches one page of repo's open pull requests.
+func (f *Forgejo) listOpenPRsPage(ctx context.Context, repo string, page int) ([]forgejoPullRequest, error) {
+	url := fmt.Sprintf("%s/repos/%s/pulls?state=open&limit=%d&page=%d", apiBaseURL(f.host), repo, listOpenPRsPageSize, page)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building list-PRs request: %w", err)
+	}
+	req.Header.Set("Authorization", "token "+f.token)
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling GET %s: %w", url, err)
+	}
+	defer drainAndClose(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrRepoNotFound
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, ErrInvalidToken
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	var prs []forgejoPullRequest
+	if err := json.NewDecoder(resp.Body).Decode(&prs); err != nil {
+		return nil, fmt.Errorf("decoding pull request list: %w", err)
+	}
+	return prs, nil
 }
 
 // doPullRequest issues a pull-request REST call against repo using the

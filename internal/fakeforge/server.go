@@ -173,6 +173,7 @@ func (s *Server) newMux() *http.ServeMux {
 	mux.HandleFunc("POST /provider/create-pr", s.handleCreatePR)
 	mux.HandleFunc("POST /provider/pr-state", s.handleGetPRState)
 	mux.HandleFunc("POST /provider/close-pr", s.handleProviderClosePR)
+	mux.HandleFunc("POST /provider/find-open-pr", s.handleFindOpenPR)
 	mux.HandleFunc("POST /control/advance-branch", s.handleControlAdvanceBranch)
 	mux.HandleFunc("POST /control/force-push-branch", s.handleControlForcePushBranch)
 	mux.HandleFunc("POST /control/delete-branch", s.handleControlDeleteBranch)

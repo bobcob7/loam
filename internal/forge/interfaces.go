@@ -42,6 +42,16 @@ type Provider interface {
 	// for authenticating git-over-HTTPS with token (e.g. Forgejo takes
 	// the token as the password with any username).
 	GitCredentials(ctx context.Context, token string) (username, password string, err error)
+	// FindOpenPR looks up the open pull request (if any) from headBranch
+	// into targetBranch on repo, by listing and filtering — never by
+	// parsing CreatePR's ErrDuplicatePR message, whose embedded "id" is
+	// the PR's internal id, not the per-repo number this method returns.
+	// found is false, with prURL/prNumber zero and err nil, when no such
+	// PR is open; err is non-nil only when the lookup itself failed
+	// (wrapping ErrRepoNotFound or ErrInvalidToken on the same terms as
+	// CreatePR/GetPRState/ClosePR). Callers use this to adopt the PR a
+	// 409 from CreatePR reported as already existing.
+	FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (prURL string, prNumber int, found bool, err error)
 }
 
 //go:generate go tool moq -out moq_test.go . Provider
