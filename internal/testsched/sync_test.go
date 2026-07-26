@@ -30,138 +30,96 @@ func newStateMock() *syncStateReporterMock {
 	}
 }
 
+// newTestScheduler builds a real mirrorsync.Scheduler over lister and
+// state, with noop stand-ins for the five collaborators this package
+// neither consumes nor wraps (see sync_realscheduler_test.go for why they
+// are hand-written rather than moq-generated). The tick channel is
+// unused: every test in this file drives the scheduler via
+// SyncHarness.Tick directly and never calls scheduler.Run.
+func newTestScheduler(lister mirrorsync.RepoLister, state mirrorsync.SyncStateReporter) *mirrorsync.Scheduler {
+	unusedTicks := make(chan time.Time)
+	return mirrorsync.New(testLogger(), unusedTicks, lister, noopFetcher{},
+		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+}
+
 func TestSyncHarness_TickReturnsNoReposWhenNoneEnrolled(t *testing.T) {
 	t.Parallel()
 	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) { return nil, nil }}
-	state := newStateMock()
-	h := NewSyncHarness(lister, state)
-	go driveTickOnce(t.Context(), h.Ticks(), h.RepoLister(), h.SyncStateReporter(), nil)
-	repos, err := h.Tick(t.Context())
-	require.NoError(t, err)
+	h := NewSyncHarness(newTestScheduler(lister, newStateMock()))
+	repos := h.Tick(t.Context())
 	assert.Empty(t, repos)
 }
 
-// TestSyncHarness_TickWaitsForAllStartedReposEvenWithArtificialDelay is
-// this package's mutation-test proof (docs/testing-spec.md, wave-4
-// brief): it drives an outcome function for "repoSlow" that blocks on an
-// explicit gate, then proves -- via a non-blocking select, not a sleep or
-// timeout guess -- that Tick has NOT returned while the gate is closed,
-// and only returns, with the correct repo set, once the gate opens. If
-// Tick raced instead of waiting, the non-blocking select below would
-// observe a premature result.
-func TestSyncHarness_TickWaitsForAllStartedReposEvenWithArtificialDelay(t *testing.T) {
+// TestSyncHarness_TickRunsCycleToCompletionForEveryEnrolledRepo proves the
+// core contract in the bead's DESIGN: by the time Tick returns, every
+// enrolled repo has reported a terminal outcome -- checked synchronously,
+// right after Tick returns, with no wait of its own needed in the test.
+// If Tick only started cycles without waiting for them, ReportIdleCalls
+// below would be flaky (sometimes short) rather than reliably complete.
+func TestSyncHarness_TickRunsCycleToCompletionForEveryEnrolledRepo(t *testing.T) {
 	t.Parallel()
-	gate := make(chan struct{})
-	entered := make(chan struct{})
 	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) {
-		return []mirrorsync.RepoID{"repoFast", "repoSlow"}, nil
+		return []mirrorsync.RepoID{"repoA", "repoB"}, nil
 	}}
 	state := newStateMock()
-	h := NewSyncHarness(lister, state)
-	outcome := func(repo mirrorsync.RepoID) error {
-		if repo == "repoSlow" {
-			close(entered)
-			<-gate
-		}
-		return nil
-	}
-	go driveTickOnce(t.Context(), h.Ticks(), h.RepoLister(), h.SyncStateReporter(), outcome)
-	tickDone := make(chan []mirrorsync.RepoID, 1)
-	tickErr := make(chan error, 1)
-	go func() {
-		repos, err := h.Tick(t.Context())
-		tickErr <- err
-		tickDone <- repos
-	}()
-	<-entered
-	select {
-	case <-tickDone:
-		t.Fatal("Tick returned before repoSlow's outcome was released -- the wait is not a real happens-before")
-	default:
-	}
-	close(gate)
-	var repos []mirrorsync.RepoID
-	select {
-	case repos = <-tickDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Tick did not return after the gated outcome was released")
-	}
-	require.NoError(t, <-tickErr)
-	assert.ElementsMatch(t, []mirrorsync.RepoID{"repoFast", "repoSlow"}, repos)
+	h := NewSyncHarness(newTestScheduler(lister, state))
+	repos := h.Tick(t.Context())
+	assert.ElementsMatch(t, []mirrorsync.RepoID{"repoA", "repoB"}, repos)
+	require.Len(t, state.ReportIdleCalls(), 2, "Tick must not return before both repos have reported idle")
 }
 
-func TestSyncHarness_TickUnblocksOnErrorOutcomeToo(t *testing.T) {
+// TestSyncHarness_TickUnblocksEvenWhenACycleErrors mirrors mirrorsync's
+// own TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails class of
+// case at this package's boundary: Tick must still return promptly (and
+// with the repo in its result) when a repo's cycle ends in ReportError
+// rather than ReportIdle.
+func TestSyncHarness_TickUnblocksEvenWhenACycleErrors(t *testing.T) {
 	t.Parallel()
 	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) {
 		return []mirrorsync.RepoID{"repoA"}, nil
 	}}
 	state := newStateMock()
-	h := NewSyncHarness(lister, state)
 	wantErr := errors.New("merge-tree exploded")
-	go driveTickOnce(t.Context(), h.Ticks(), h.RepoLister(), h.SyncStateReporter(), func(repo mirrorsync.RepoID) error { return wantErr })
-	repos, err := h.Tick(t.Context())
-	require.NoError(t, err, "Tick itself does not fail on a cycle error -- ReportError still unblocks it")
+	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, noopFetcher{},
+		noopAdvanceDetector{}, failingMergeabilityChecker{err: wantErr}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+	h := NewSyncHarness(scheduler)
+	repos := h.Tick(t.Context())
 	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, repos)
 	require.Len(t, state.ReportErrorCalls(), 1)
 	assert.ErrorIs(t, state.ReportErrorCalls()[0].Err, wantErr)
 }
 
-func TestSyncHarness_TickPropagatesCtxCancellationBeforeSchedulerConsumes(t *testing.T) {
+// TestSyncHarness_TickSkipsRepoAlreadyMidCycle proves the per-repo guard
+// still holds through the exported Tick: a second Tick call, issued while
+// the first repo's cycle is still blocked inside Fetch, must not start a
+// second cycle for that repo -- its own returned slice must be empty --
+// even though both calls only return once the blocked cycle finishes
+// (Tick's happens-before is scheduler-wide, not per-call). Both
+// synchronization points (waiting for the second call's own ListRepos to
+// have run before releasing the gate) are channel receives, never a
+// sleep.
+func TestSyncHarness_TickSkipsRepoAlreadyMidCycle(t *testing.T) {
 	t.Parallel()
-	lister := &repoListerMock{}
-	state := newStateMock()
-	h := NewSyncHarness(lister, state)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	_, err := h.Tick(ctx)
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestSyncHarness_TickSuccessiveTicksDriveIndependentCycles(t *testing.T) {
-	t.Parallel()
+	ctx := t.Context()
+	listCalled := make(chan struct{}, 2)
 	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) {
+		listCalled <- struct{}{}
 		return []mirrorsync.RepoID{"repoA"}, nil
 	}}
-	state := newStateMock()
-	h := NewSyncHarness(lister, state)
-	go driveTickOnce(t.Context(), h.Ticks(), h.RepoLister(), h.SyncStateReporter(), nil)
-	first, err := h.Tick(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, first)
-	go driveTickOnce(t.Context(), h.Ticks(), h.RepoLister(), h.SyncStateReporter(), nil)
-	second, err := h.Tick(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, second)
-	assert.Len(t, state.ReportIdleCalls(), 2, "each tick must independently observe its own repoA cycle")
-}
-
-// driveTickOnce simulates exactly the call pattern mirrorsync.Scheduler.Run
-// drives on one tick (see internal/mirrorsync/scheduler.go: tick lists
-// repos synchronously, then spawns one goroutine per repo which reports
-// syncing, runs its steps, then reports a terminal outcome) without
-// depending on mirrorsync itself, so these tests isolate SyncHarness's
-// own synchronization logic from the real scheduler's orchestration
-// (which is internal/mirrorsync's own test suite's job). outcome may be
-// nil, meaning every repo succeeds immediately.
-func driveTickOnce(ctx context.Context, ticks <-chan time.Time, lister mirrorsync.RepoLister, reporter mirrorsync.SyncStateReporter, outcome func(repo mirrorsync.RepoID) error) {
-	<-ticks
-	repos, err := lister.ListRepos(ctx)
-	if err != nil {
-		return
-	}
-	for _, repo := range repos {
-		go func(repo mirrorsync.RepoID) {
-			_ = reporter.ReportSyncing(ctx, repo)
-			var cycleErr error
-			if outcome != nil {
-				cycleErr = outcome(repo)
-			}
-			if cycleErr != nil {
-				_ = reporter.ReportError(ctx, repo, cycleErr, false)
-				return
-			}
-			_ = reporter.ReportIdle(ctx, repo, false)
-		}(repo)
-	}
+	fetcher := &blockingFetcher{entered: make(chan struct{}), release: make(chan struct{})}
+	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, fetcher,
+		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, newStateMock())
+	h := NewSyncHarness(scheduler)
+	firstDone := make(chan []mirrorsync.RepoID, 1)
+	go func() { firstDone <- h.Tick(ctx) }()
+	<-listCalled      // first Tick's ListRepos has run
+	<-fetcher.entered // and its cycle has reached (and is blocked in) Fetch, so tryStart has already claimed repoA
+	secondDone := make(chan []mirrorsync.RepoID, 1)
+	go func() { secondDone <- h.Tick(ctx) }()
+	<-listCalled // second Tick's ListRepos has also run -- its tryStart has already evaluated (and must have skipped) repoA
+	close(fetcher.release)
+	first := <-firstDone
+	second := <-secondDone
+	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, first, "the first call started repoA's cycle")
+	assert.Empty(t, second, "the second call must skip repoA -- its cycle was still in flight when tryStart ran")
 }

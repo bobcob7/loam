@@ -25,8 +25,14 @@ import (
 // explicit -pkg flag this repo's go:generate convention forbids (source
 // and destination packages differ). So they are trivial, deliberately
 // inert stand-ins: noopFetcher et al. return zero values and nothing else,
-// except blockingFetcher, which exists solely to gate the mutation-test
-// proof below on an explicit signal instead of a sleep.
+// except blockingFetcher and failingMergeabilityChecker, which exist
+// solely to gate or fail a cycle deterministically for a specific test.
+
+type noopFetcher struct{}
+
+func (noopFetcher) Fetch(context.Context, mirrorsync.RepoID) (mirrorsync.FetchResult, error) {
+	return mirrorsync.FetchResult{}, nil
+}
 
 type noopAdvanceDetector struct{}
 
@@ -38,6 +44,14 @@ type noopMergeabilityChecker struct{}
 
 func (noopMergeabilityChecker) CheckMergeability(context.Context, mirrorsync.RepoID, []mirrorsync.Advance) error {
 	return nil
+}
+
+// failingMergeabilityChecker always fails with err, so a test can force a
+// cycle down the ReportError path deterministically.
+type failingMergeabilityChecker struct{ err error }
+
+func (f failingMergeabilityChecker) CheckMergeability(context.Context, mirrorsync.RepoID, []mirrorsync.Advance) error {
+	return f.err
 }
 
 type noopIngestEnqueuer struct{}
@@ -68,21 +82,16 @@ func (f *blockingFetcher) Fetch(ctx context.Context, repo mirrorsync.RepoID) (mi
 }
 
 // TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes is
-// the mutation-test proof required by the wave-4 brief: it wires
-// SyncHarness's decorated RepoLister/SyncStateReporter into a real
-// mirrorsync.New/Run, gates one repo's Fetch step on an explicit release
-// (an artificial delay in a real collaborator, not a sleep), and shows
-// that Tick provably has not returned while Fetch is blocked (a
-// non-blocking select, not a timing guess) and only returns -- with the
-// terminal report already recorded -- once the gate opens. If Tick raced
-// Run's goroutines instead of synchronizing with them through the wrapped
-// interfaces, closing the gate late would either be unnecessary (Tick
-// would already have returned) or the reported-idle flag would lag
-// Tick's return; neither is observed here.
+// the mutation-test proof required by the wave-4 brief: it gates one
+// repo's Fetch step on an explicit release (an artificial delay in a real
+// collaborator, not a sleep), and shows that Tick provably has not
+// returned while Fetch is blocked (a non-blocking select, not a timing
+// guess) and only returns -- with the terminal report already recorded --
+// once the gate opens. Tick is called directly; scheduler.Run is never
+// started, since Tick drives a cycle in-line rather than through the tick
+// channel.
 func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 	lister := &repoListerMock{ListReposFunc: func(ctx context.Context) ([]mirrorsync.RepoID, error) {
 		return []mirrorsync.RepoID{"repoA"}, nil
 	}}
@@ -92,18 +101,12 @@ func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *t
 		idleReported.Store(true)
 		return nil
 	}
-	h := NewSyncHarness(lister, state)
 	fetcher := &blockingFetcher{entered: make(chan struct{}), release: make(chan struct{})}
-	scheduler := mirrorsync.New(testLogger(), h.Ticks(), h.RepoLister(), fetcher,
-		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, h.SyncStateReporter())
-	go scheduler.Run(ctx)
+	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, fetcher,
+		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+	h := NewSyncHarness(scheduler)
 	tickDone := make(chan []mirrorsync.RepoID, 1)
-	tickErr := make(chan error, 1)
-	go func() {
-		repos, err := h.Tick(ctx)
-		tickErr <- err
-		tickDone <- repos
-	}()
+	go func() { tickDone <- h.Tick(t.Context()) }()
 	<-fetcher.entered
 	select {
 	case <-tickDone:
@@ -118,7 +121,6 @@ func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *t
 	case <-time.After(5 * time.Second):
 		t.Fatal("Tick did not return after the real scheduler's blocked Fetch step was released")
 	}
-	require.NoError(t, <-tickErr)
-	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, repos)
+	require.Equal(t, []mirrorsync.RepoID{"repoA"}, repos)
 	assert.True(t, idleReported.Load(), "Tick must not return before the real scheduler's ReportIdle actually ran")
 }
