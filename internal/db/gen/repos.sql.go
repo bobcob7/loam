@@ -109,6 +109,36 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 	return i, err
 }
 
+const listRepoNames = `-- name: ListRepoNames :many
+SELECT name FROM repos ORDER BY name
+`
+
+// Unpaginated enumeration of every enrolled repo's name, ordered by name.
+// Backs mirrorsync.RepoLister (loam-13z): the scheduler re-lists every
+// enrolled repo on every tick, so it needs the full enrollment, not one
+// page of full Repo rows plus a total count -- LIMIT/OFFSET pagination
+// (ListRepos, above) is the admin API's list view's primitive, the only
+// caller rendering a bounded page for a human.
+func (q *Queries) ListRepoNames(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listRepoNames)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRepos = `-- name: ListRepos :many
 SELECT id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at FROM repos ORDER BY name LIMIT $1 OFFSET $2
 `

@@ -23,6 +23,15 @@ SELECT * FROM repos ORDER BY name LIMIT $1 OFFSET $2;
 -- name: CountRepos :one
 SELECT count(*) FROM repos;
 
+-- name: ListRepoNames :many
+-- Unpaginated enumeration of every enrolled repo's name, ordered by name.
+-- Backs mirrorsync.RepoLister (loam-13z): the scheduler re-lists every
+-- enrolled repo on every tick, so it needs the full enrollment, not one
+-- page of full Repo rows plus a total count -- LIMIT/OFFSET pagination
+-- (ListRepos, above) is the admin API's list view's primitive, the only
+-- caller rendering a bounded page for a human.
+SELECT name FROM repos ORDER BY name;
+
 -- name: UpdateRepo :one
 -- Updates the enrollment-config fields an admin can change post-enroll
 -- (RepoAdminService.SetTargetBranches's indexed_branch change; a future
