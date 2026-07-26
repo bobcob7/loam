@@ -18,6 +18,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	"github.com/bobcob7/loam/internal/testembed"
 )
 
 // codeIntelTables is the exact derived-table set 0002_code_intel.up.sql must
@@ -129,8 +131,12 @@ func assertCodeIntelTablesExist(ctx context.Context, t *testing.T, dsn string) {
 		require.NoError(t, err)
 		assert.Truef(t, exists, "expected table %q to exist after migrate up", table)
 	}
-	// embedding must be vector(768) -- the documented constant, matching
-	// both production nomic-embed-text and internal/testembed.Dimension.
+	// embedding must be vector(testembed.Dimension) -- the SQL literal in
+	// 0002_code_intel.up.sql can't reference a Go constant, so THIS
+	// assertion is the enforced invariant that keeps it byte-identical to
+	// production nomic-embed-text and internal/testembed: if
+	// testembed.Dimension ever changes, this fails instead of silently
+	// drifting from a stale comment.
 	var udtName string
 	require.NoError(t, pool.QueryRow(ctx,
 		`SELECT udt_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'chunks' AND column_name = 'embedding'`,
@@ -140,7 +146,7 @@ func assertCodeIntelTablesExist(ctx context.Context, t *testing.T, dsn string) {
 	require.NoError(t, pool.QueryRow(ctx,
 		`SELECT atttypmod FROM pg_attribute WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'`,
 	).Scan(&dim))
-	assert.Equal(t, 768, dim, "chunks.embedding must be vector(768)")
+	assert.Equal(t, testembed.Dimension, dim, "chunks.embedding must be vector(testembed.Dimension)")
 }
 
 // assertCodeIntelTablesAbsent is the down-migration mirror.
@@ -225,11 +231,12 @@ func seedRepo(ctx context.Context, t *testing.T, pool *pgxpool.Pool) string {
 	return repoID
 }
 
-// unitVector returns a 768-dim vector.Vector that is all zero except index i
-// set to 1, so distinct i values are maximally distinguishable under cosine
-// distance and a nearest-neighbour query has an unambiguous expected order.
+// unitVector returns a testembed.Dimension-wide vector.Vector that is all
+// zero except index i set to 1, so distinct i values are maximally
+// distinguishable under cosine distance and a nearest-neighbour query has
+// an unambiguous expected order.
 func unitVector(i int) pgvector.Vector {
-	v := make([]float32, 768)
+	v := make([]float32, testembed.Dimension)
 	v[i] = 1
 	return pgvector.NewVector(v)
 }
@@ -244,12 +251,12 @@ func assertHNSWNearestNeighbourOrdering(ctx context.Context, t *testing.T, pool 
 	t.Helper()
 	near := unitVector(0)
 	mid := pgvector.NewVector(func() []float32 {
-		v := make([]float32, 768)
+		v := make([]float32, testembed.Dimension)
 		v[0] = 1
 		v[1] = 1
 		return v
 	}())
-	far := unitVector(767)
+	far := unitVector(testembed.Dimension - 1)
 	seedChunk(ctx, t, pool, repoID, "near.go", near)
 	seedChunk(ctx, t, pool, repoID, "mid.go", mid)
 	seedChunk(ctx, t, pool, repoID, "far.go", far)

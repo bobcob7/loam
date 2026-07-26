@@ -71,8 +71,12 @@ CREATE INDEX symbol_history_symbol_id_idx ON symbol_history (symbol_id);
 -- internal/testembed.Dimension, so the test schema this migration produces
 -- under testcontainers is byte-identical to what production runs. Changing
 -- the embedding model changes this literal and requires a full re-embed plus
--- a dimension migration (docs/ingestion-spec.md "Chunk -> Embed -> Vectors"):
--- there is deliberately no second place this number is written.
+-- a dimension migration (docs/ingestion-spec.md "Chunk -> Embed -> Vectors").
+-- This SQL literal can't reference the Go constant directly -- the enforced
+-- invariant lives in code instead:
+-- internal/db/migrations/code_intel_integration_test.go asserts the live
+-- atttypmod against internal/testembed.Dimension, so a Dimension change
+-- fails that test instead of silently drifting from this comment.
 CREATE TABLE chunks (
     id              uuid PRIMARY KEY,
     repo_id         uuid NOT NULL REFERENCES repos (id) ON DELETE CASCADE,

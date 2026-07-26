@@ -30,6 +30,18 @@ sql:
         # docs/persistence-spec.md "Conventions" -- evolvable without ALTER
         # TYPE) -- so pgx/v5's default text->string mapping already applies
         # and they surface as plain Go strings.
+        # NOT LOAD-BEARING against sqlc v1.30.0: its pgx/v5 codegen already
+        # maps a `vector` column to pgvector.Vector by default (see
+        # postgresql_type.go's "vector" case upstream) -- deleting this
+        # entire overrides block and regenerating still produces
+        # `Embedding pgvector.Vector` with the import unaliased, verified
+        # directly against this repo's schema. This block is kept anyway as
+        # an explicit VERSION GUARD: it is what makes a future sqlc release
+        # that changes or drops that built-in default fail loudly (a
+        # generation/compile error against a stale/renamed type) instead of
+        # silently changing the nine store beads' generated field type.
+        # Store beads should treat sqlc.yaml, not sqlc's current default
+        # behavior, as the source of truth for this mapping.
         overrides:
           - db_type: "vector"
             go_type:

@@ -24,6 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/testembed"
 )
 
 func pgUUID(id uuid.UUID) pgtype.UUID {
@@ -80,7 +81,7 @@ func TestGeneratedQueriesAgainstRealPostgres(t *testing.T) {
 	assert.Equal(t, "syncing", updated.SyncState, "the text+CHECK sync_state column must round-trip as a plain Go string, not a generated enum type")
 
 	near := pgvector.NewVector(unit(0))
-	far := pgvector.NewVector(unit(767))
+	far := pgvector.NewVector(unit(testembed.Dimension - 1))
 	_, err = q.InsertChunk(ctx, InsertChunkParams{
 		ID:           pgUUID(uuid.New()),
 		RepoID:       repoID,
@@ -116,9 +117,13 @@ func TestGeneratedQueriesAgainstRealPostgres(t *testing.T) {
 	assert.Equal(t, "far.go", results[1].File)
 }
 
-// unit returns a 768-dim vector that is all zero except index i set to 1.
+// unit returns a testembed.Dimension-wide vector that is all zero except
+// index i set to 1. Sized off testembed.Dimension (not a bare 768 literal)
+// so this test tracks the same width internal/testembed and production
+// nomic-embed-text use, per 0002_code_intel.up.sql's chunks.embedding
+// comment.
 func unit(i int) []float32 {
-	v := make([]float32, 768)
+	v := make([]float32, testembed.Dimension)
 	v[i] = 1
 	return v
 }
