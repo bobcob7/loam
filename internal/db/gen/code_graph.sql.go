@@ -303,6 +303,98 @@ type InsertSymbolsParams struct {
 	Kind         string
 }
 
+const lookupReferencesByName = `-- name: LookupReferencesByName :many
+SELECT sr.id, sr.repo_id, sr.target_branch, sr.file, sr.name, sr.kind, sr.line
+FROM symbol_references sr
+WHERE sr.repo_id = ANY($1::uuid[])
+  AND sr.target_branch = $2
+  AND sr.name = $3
+  AND ($4::text = '' OR sr.file = $4::text)
+ORDER BY sr.file, sr.line, sr.id
+LIMIT $5
+`
+
+type LookupReferencesByNameParams struct {
+	Column1      []pgtype.UUID
+	TargetBranch string
+	Name         string
+	Column4      string
+	Limit        int32
+}
+
+// Name -> symbol_references resolution (loam-4na, docs/cli-spec.md "Graph DB
+// queries"): backs `graph refs` directly, mirroring LookupSymbolsByName
+// above in shape, scoping, and the limit/truncated contract -- deliberately,
+// per this bead's DESIGN CONSTRAINT, so `graph def`'s and `graph refs`'s
+// store seams do not silently diverge just because their target tables
+// happen to be column-for-column compatible.
+//
+// symbol_references carries no symbol_id and no FK to symbols
+// (0002_code_intel.up.sql) -- unlike the from/to sides of graph_edges,
+// which resolve to real symbols.id foreign keys, references are only ever
+// addressable by (repo_id, target_branch, name), the same triple
+// LookupSymbolsByName resolves against the symbols table. That is why this
+// query selects straight from symbol_references rather than joining
+// through symbols: there is no id to join on, and the two tables answer
+// different questions ("where is this defined" vs "where is this used") --
+// see internal/codegraph.Reference's doc comment for why that is also
+// reason enough to give the row a distinct Go type rather than reusing
+// Symbol.
+//
+// Scope is repo_id = ANY($1::uuid[]) for the identical reason
+// LookupSymbolsByName's is: `graph refs --all` fans out and unions across
+// enrolled repos (docs/cli-spec.md:550-557), and an empty repoIDs matches
+// nothing (internal/codegraph.Store.LookupReferencesByName), mirroring
+// internal/chunkstore.Search's "empty scope means search nothing" rule.
+//
+// $4 is the optional --file narrowing, same empty-string-means-no-filter
+// sentinel as LookupSymbolsByName's $4 (symbol_references.file is NOT NULL
+// text and never legitimately empty).
+//
+// Ordered by file, then line, then id as a final deterministic tiebreak.
+// Unlike LookupSymbolsByName's `s.line NULLS LAST` (symbols.line is
+// nullable for file-level symbols), symbol_references.line is NOT NULL
+// (0002_code_intel.up.sql) -- every reference is a real use site with a
+// concrete line -- so no NULLS LAST is needed here.
+//
+// Callers pass limit+1 (this package's fetchLimit convention) so the Store
+// can detect truncation itself, exactly as LookupSymbolsByName does --
+// docs/cli-spec.md:535-537 requires `truncated: true` in the envelope for
+// every graph subquery's capped response, refs included.
+func (q *Queries) LookupReferencesByName(ctx context.Context, arg LookupReferencesByNameParams) ([]SymbolReference, error) {
+	rows, err := q.db.Query(ctx, lookupReferencesByName,
+		arg.Column1,
+		arg.TargetBranch,
+		arg.Name,
+		arg.Column4,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SymbolReference
+	for rows.Next() {
+		var i SymbolReference
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.TargetBranch,
+			&i.File,
+			&i.Name,
+			&i.Kind,
+			&i.Line,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lookupSymbolsByName = `-- name: LookupSymbolsByName :many
 SELECT s.id, s.repo_id, s.target_branch, s.file, s.line, s.name, s.kind
 FROM symbols s
