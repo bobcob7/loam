@@ -206,6 +206,9 @@ func TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails(t *testing.T) {
 	defer cancel()
 	h := newHarness("repoA")
 	wantErr := errors.New("forge unreachable")
+	h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) {
+		return []Advance{{Branch: "main", OldSHA: "aaa", NewSHA: "bbb"}}, nil
+	}
 	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) { return true, nil }
 	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return wantErr }
 	go h.scheduler.Run(ctx)
@@ -228,14 +231,22 @@ func TestScheduler_ReportsEnqueuedIngestWhenLaterStepFails(t *testing.T) {
 // error; only the IngestEnqueuer mock's own answer differs, so a
 // hardcoded-true runSteps passes the "true" subtest but fails the
 // "false" one by assertion, not by hang or panic.
+//
+// Each subtest's harness is kept internally consistent with
+// IngestEnqueuer's own contract ("enqueued is false only when advanced was
+// empty ..."): the false subtest leaves DetectAdvances at the harness
+// default (no advances), and the true subtest wires a real advance
+// alongside the enqueuer's true answer, so neither fixture models a
+// combination the interface itself declares impossible.
 func TestScheduler_PropagatesWhatIngestEnqueuerActuallyReports(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		enqueued bool
+		name       string
+		hasAdvance bool
+		enqueued   bool
 	}{
-		{name: "nothing enqueued lets the terminal report through", enqueued: false},
-		{name: "a genuine enqueue hands off ownership", enqueued: true},
+		{name: "nothing enqueued lets the terminal report through", hasAdvance: false, enqueued: false},
+		{name: "a genuine enqueue hands off ownership", hasAdvance: true, enqueued: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -243,6 +254,11 @@ func TestScheduler_PropagatesWhatIngestEnqueuerActuallyReports(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			h := newHarness("repoA")
+			if tt.hasAdvance {
+				h.advances.DetectAdvancesFunc = func(ctx context.Context, repo RepoID, fetched FetchResult) ([]Advance, error) {
+					return []Advance{{Branch: "main", OldSHA: "aaa", NewSHA: "bbb"}}, nil
+				}
+			}
 			h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
 				return tt.enqueued, nil
 			}
@@ -253,6 +269,32 @@ func TestScheduler_PropagatesWhatIngestEnqueuerActuallyReports(t *testing.T) {
 			assert.Equal(t, tt.enqueued, outcome.enqueuedIngest, "enqueuedIngest must equal exactly what IngestEnqueuer reported")
 		})
 	}
+}
+
+// TestScheduler_PropagatesEnqueuedEvenWhenEnqueueIngestErrors covers
+// IngestEnqueuer's documented partial-failure contract: advanced is a
+// slice, so a real implementation can enqueue an earlier branch and then
+// fail on a later one, returning (true, err) -- not (false, err). Before
+// this fix, runSteps discarded the returned enqueued on EnqueueIngest's
+// error path and always reported false there, which would silently drop
+// an ownership hand-off that had already happened and let ReportError
+// clobber a row the ingest worker now owns -- the same synthesised-value
+// defect this bead exists to remove, just on the error path instead of
+// the success path.
+func TestScheduler_PropagatesEnqueuedEvenWhenEnqueueIngestErrors(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	wantErr := errors.New("enqueuing branch b: connection refused")
+	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) {
+		return true, wantErr
+	}
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	outcome := <-h.outcomes
+	require.ErrorIs(t, outcome.err, wantErr)
+	assert.True(t, outcome.enqueuedIngest, "a partial enqueue before the error must still be reported, not coerced to false")
 }
 
 // TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight drives the
