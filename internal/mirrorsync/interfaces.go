@@ -10,7 +10,7 @@ package mirrorsync
 
 import "context"
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -26,17 +26,44 @@ type RepoID string
 
 // RepoLister supplies the set of enrolled repos to cycle on a tick. The
 // scheduler re-lists on every tick, so enrollment changes take effect on
-// the next cycle without a restart. No bead supplies this enumeration
-// today: internal/reposstore (loam-54o.7) owns repo enrollment but
-// exposes only a paginated page of full Repo rows plus a total count
+// the next cycle without a restart.
+//
+// internal/reposstore (loam-54o.7) owns repo enrollment but exposes only
+// a paginated page of full Repo rows plus a total count
 // (Store.ListRepos(ctx, Page) (ListReposResult, error), where
 // ListReposResult is {Repos []Repo; Total int}), not the bare []RepoID
 // this interface needs -- both the pagination parameter and the return
-// type differ, not just the element type -- so a producer still has to
-// be wired (loam-13z): adapting Store's output to this interface, or
-// adding a dedicated name-listing query, before a real Scheduler can run.
+// type differ, not just the element type -- so Store itself never
+// satisfies RepoLister. loam-13z resolved the gap not with a paging
+// adapter but with a second, unpaginated query,
+// Store.ListAllRepoNames(ctx) ([]string, error): the scheduler enumerates
+// *every* enrolled repo on *every* tick (docs/sync-spec.md -> Mirror
+// Sync), a bulk-read access pattern LIMIT/OFFSET does not fit -- offset
+// pagination exists for the admin API's list view, a human paging a
+// bounded screen, not a producer read wholesale on a fixed interval. A
+// RepoID is a short string, so even a deployment enrolling in the tens of
+// thousands of repos holds a trivial amount of memory this way, and the
+// scheduler needs the entire enrollment in hand before it starts
+// per-repo cycles regardless -- paging it in would only add round trips
+// with no bound this caller could act on early. StoreRepoLister (this
+// package) adapts Store.ListAllRepoNames to this interface, converting
+// each returned name to a RepoID (RepoID is repos.name, never repos.id --
+// loam-54o.7 NOTES). No production Scheduler is constructed anywhere in
+// the tree yet -- cmd/server/main.go does not connect to Postgres or wire
+// any of this package's other collaborators, all of it loam-ofg.21's
+// stated scope -- so StoreRepoLister has no call site to wire into today;
+// it is ready for loam-ofg.21 to pass to mirrorsync.New as the RepoLister
+// argument once that bead constructs the rest.
 type RepoLister interface {
 	ListRepos(ctx context.Context) ([]RepoID, error)
+}
+
+// repoNameLister is the reposstore.Store surface StoreRepoLister adapts to
+// RepoLister, defined here at the consumer per package convention. The
+// production implementation is *reposstore.Store itself
+// (Store.ListAllRepoNames), which satisfies this interface structurally.
+type repoNameLister interface {
+	ListAllRepoNames(ctx context.Context) ([]string, error)
 }
 
 // RefUpdate is one ref's SHA transition observed by a single fetch, as
