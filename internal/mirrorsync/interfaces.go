@@ -28,11 +28,13 @@ type RepoID string
 // scheduler re-lists on every tick, so enrollment changes take effect on
 // the next cycle without a restart. No bead supplies this enumeration
 // today: internal/reposstore (loam-54o.7) owns repo enrollment but
-// exposes only paginated, full Repo rows (Store.ListRepos(ctx, Page)
-// ([]Repo, error)), not the bare []RepoID this interface needs, so a
-// producer still has to be wired -- adapting Store's output to this
-// interface, or adding a dedicated name-listing query -- before a real
-// Scheduler can run.
+// exposes only a paginated page of full Repo rows plus a total count
+// (Store.ListRepos(ctx, Page) (ListReposResult, error), where
+// ListReposResult is {Repos []Repo; Total int}), not the bare []RepoID
+// this interface needs -- both the pagination parameter and the return
+// type differ, not just the element type -- so a producer still has to
+// be wired (loam-13z): adapting Store's output to this interface, or
+// adding a dedicated name-listing query, before a real Scheduler can run.
 type RepoLister interface {
 	ListRepos(ctx context.Context) ([]RepoID, error)
 }
