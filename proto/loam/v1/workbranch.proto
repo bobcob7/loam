@@ -55,8 +55,9 @@ service WorkBranchService {
 
 message CreateWorkBranchRequest {
   string repo = 1;
-  // Target branch to base off; defaults to the repo's default target.
-  optional string from = 2;
+  // Target branch to base off. Always explicit -- there is no default base
+  // branch; the CLI (`loam work start <repo> <from>`) requires it.
+  string from = 2;
 }
 
 message CreateWorkBranchResponse {

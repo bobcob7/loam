@@ -71,10 +71,8 @@ type GetRepoResponse struct {
 	Repo  string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	// Branches eligible as targets for work branches.
 	TargetBranches []string `protobuf:"bytes,2,rep,name=target_branches,json=targetBranches,proto3" json:"target_branches,omitempty"`
-	// The branch `clone` / `work start` default to when none is specified.
-	DefaultTargetBranch string `protobuf:"bytes,3,opt,name=default_target_branch,json=defaultTargetBranch,proto3" json:"default_target_branch,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GetRepoResponse) Reset() {
@@ -121,24 +119,16 @@ func (x *GetRepoResponse) GetTargetBranches() []string {
 	return nil
 }
 
-func (x *GetRepoResponse) GetDefaultTargetBranch() string {
-	if x != nil {
-		return x.DefaultTargetBranch
-	}
-	return ""
-}
-
 var File_loam_v1_repo_proto protoreflect.FileDescriptor
 
 const file_loam_v1_repo_proto_rawDesc = "" +
 	"\n" +
 	"\x12loam/v1/repo.proto\x12\aloam.v1\"$\n" +
 	"\x0eGetRepoRequest\x12\x12\n" +
-	"\x04repo\x18\x01 \x01(\tR\x04repo\"\x82\x01\n" +
+	"\x04repo\x18\x01 \x01(\tR\x04repo\"k\n" +
 	"\x0fGetRepoResponse\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12'\n" +
-	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\x122\n" +
-	"\x15default_target_branch\x18\x03 \x01(\tR\x13defaultTargetBranch2K\n" +
+	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranchesJ\x04\b\x03\x10\x04R\x15default_target_branch2K\n" +
 	"\vRepoService\x12<\n" +
 	"\aGetRepo\x12\x17.loam.v1.GetRepoRequest\x1a\x18.loam.v1.GetRepoResponseB\x8a\x01\n" +
 	"\vcom.loam.v1B\tRepoProtoP\x01Z3github.com/bobcob7/loam/internal/gen/loam/v1;loamv1\xa2\x02\x03LXX\xaa\x02\aLoam.V1\xca\x02\aLoam\\V1\xe2\x02\x13Loam\\V1\\GPBMetadata\xea\x02\bLoam::V1b\x06proto3"

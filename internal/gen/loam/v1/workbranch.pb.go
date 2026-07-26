@@ -24,8 +24,9 @@ const (
 type CreateWorkBranchRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Repo  string                 `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
-	// Target branch to base off; defaults to the repo's default target.
-	From          *string `protobuf:"bytes,2,opt,name=from,proto3,oneof" json:"from,omitempty"`
+	// Target branch to base off. Always explicit -- there is no default base
+	// branch; the CLI (`loam work start <repo> <from>`) requires it.
+	From          string `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -68,8 +69,8 @@ func (x *CreateWorkBranchRequest) GetRepo() string {
 }
 
 func (x *CreateWorkBranchRequest) GetFrom() string {
-	if x != nil && x.From != nil {
-		return *x.From
+	if x != nil {
+		return x.From
 	}
 	return ""
 }
@@ -1181,11 +1182,10 @@ var File_loam_v1_workbranch_proto protoreflect.FileDescriptor
 
 const file_loam_v1_workbranch_proto_rawDesc = "" +
 	"\n" +
-	"\x18loam/v1/workbranch.proto\x12\aloam.v1\x1a\x14loam/v1/common.proto\"O\n" +
+	"\x18loam/v1/workbranch.proto\x12\aloam.v1\x1a\x14loam/v1/common.proto\"A\n" +
 	"\x17CreateWorkBranchRequest\x12\x12\n" +
-	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x17\n" +
-	"\x04from\x18\x02 \x01(\tH\x00R\x04from\x88\x01\x01B\a\n" +
-	"\x05_from\"P\n" +
+	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x12\n" +
+	"\x04from\x18\x02 \x01(\tR\x04from\"P\n" +
 	"\x18CreateWorkBranchResponse\x124\n" +
 	"\vwork_branch\x18\x01 \x01(\v2\x13.loam.v1.WorkBranchR\n" +
 	"workBranch\"\xaa\x01\n" +
@@ -1380,7 +1380,6 @@ func file_loam_v1_workbranch_proto_init() {
 		return
 	}
 	file_loam_v1_common_proto_init()
-	file_loam_v1_workbranch_proto_msgTypes[0].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[2].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[6].OneofWrappers = []any{}
 	file_loam_v1_workbranch_proto_msgTypes[16].OneofWrappers = []any{}

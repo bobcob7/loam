@@ -5,7 +5,7 @@ package loam.v1;
 // Repo metadata. The git data itself (clone, fetch, push) moves over the git wire
 // protocol, not these RPCs; work branch creation lives in WorkBranchService.
 service RepoService {
-  // Resolve an enrolled repo: its target branches and the default target.
+  // Resolve an enrolled repo and the branches eligible as work-branch targets.
   // Backs the metadata lookup in `loam clone`.
   rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
 }
@@ -19,6 +19,6 @@ message GetRepoResponse {
   string repo = 1;
   // Branches eligible as targets for work branches.
   repeated string target_branches = 2;
-  // The branch `clone` / `work start` default to when none is specified.
-  string default_target_branch = 3;
+  reserved 3;
+  reserved "default_target_branch";
 }
