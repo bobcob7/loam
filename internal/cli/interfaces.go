@@ -11,7 +11,7 @@ import (
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver gitBranchLookup ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
+//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver gitLookup ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
 
 // Config exposes the LOAM_* environment configuration every command may
 // need (see docs/cli-spec.md -> Environment Variables). Implemented by
@@ -57,38 +57,55 @@ type ErrorMapper interface {
 // unpublished comments (see docs/cli-spec.md -> comment (add), "Staging
 // location"). Implemented by workspace in workspace.go.
 type WorkspaceResolver interface {
-	// ResolveRepo infers the enrolled repo identifier from the current
-	// working directory: the directory name, when the caller is inside a
-	// clone (see docs/cli-spec.md -> Workspace). Returns an error when the
-	// caller is not inside a clone — resolveWorkBranchIdentity turns that
+	// ResolveRepo infers the enrolled repo identifier ("<group>/<repo_name>",
+	// see docs/cli-spec.md -> clone) from the clone the caller is inside
+	// (at any depth — cli-spec: "run from inside a repo directory"),
+	// derived from that clone's origin remote. Returns an error when the
+	// caller is not inside a clone, or the clone's origin remote is not
+	// shaped like a Loam clone URL — resolveWorkBranchIdentity turns either
 	// into a usage error (exit 2) unless an explicit argument was given.
+	// It never falls back to the bare clone-directory name: that string is
+	// not an identifier any RPC accepts.
 	ResolveRepo() (string, error)
 	// ResolveWorkBranch infers the work branch from the current git branch
-	// checked out in the clone the caller is inside. Returns an error under
-	// the same condition as ResolveRepo (not inside a clone), or when the
-	// clone has no current branch to report (e.g. a detached HEAD).
+	// checked out in the clone the caller is inside (at any depth). Returns
+	// an error when the caller is not inside a clone, or the clone has no
+	// current branch to report (e.g. a detached HEAD) — independent of
+	// ResolveRepo, so a clone with an unparseable origin remote can still
+	// resolve its work branch.
 	ResolveWorkBranch() (string, error)
 	// StagingPath returns the local staging path for repo/workBranch,
 	// scoped to the calling agent's identifier so distinct agents sharing a
 	// workspace never collide (see docs/cli-spec.md -> "Staging location").
-	// It lives under the workspace's .loam/ directory, outside any clone,
-	// so a reviewer who never clones can still stage comments.
+	// It always lives under the workspace root's .loam/ directory — the
+	// clone's parent, never inside the clone itself, so it stays the same
+	// regardless of how deep inside (or outside) a clone the caller is, and
+	// a reviewer who never clones can still stage comments.
 	StagingPath(repo, workBranch string) string
 }
 
-// gitBranchLookup resolves the git branch checked out at a directory, the
-// seam workspace inference uses to detect whether the caller is inside a
-// clone at all (see docs/cli-spec.md -> Workspace). Defined here,
-// consumer-side, so workspace.go's tests can mock it instead of shelling
-// out to a real git binary for every case; execGitBranchLookup in
-// workspace.go is the real implementation.
-type gitBranchLookup interface {
-	// CurrentBranch returns the checked-out branch name for the git working
-	// copy rooted exactly at dir. err is non-nil when dir is not the root
-	// of a git working copy (no dir/.git) or has no named branch checked
-	// out (e.g. detached HEAD) — either way, the signal that dir is not "a
-	// clone" for inference purposes.
-	CurrentBranch(dir string) (string, error)
+// gitLookup resolves the git facts workspace inference depends on: the root
+// of the working copy containing a directory (at any depth), that working
+// copy's configured "origin" remote URL (which `loam clone` points at
+// <LOAM_SERVER_URL>/git/<group>/<repo_name>.git — see docs/cli-spec.md ->
+// clone), and its currently checked-out branch. Defined here, consumer-side,
+// so workspace.go's tests can mock it instead of shelling out to a real git
+// binary for every case; execGitLookup in workspace.go is the real
+// implementation.
+type gitLookup interface {
+	// CloneRoot returns the top-level directory of the git working copy
+	// containing dir — dir itself, or an ancestor of it (matching `git
+	// rev-parse --show-toplevel`, which walks up from dir). err is non-nil
+	// when dir is not inside any git working copy at all.
+	CloneRoot(dir string) (string, error)
+	// OriginURL returns the "origin" remote URL configured at cloneRoot
+	// (matching `git remote get-url origin`). err is non-nil when there is
+	// no such remote.
+	OriginURL(cloneRoot string) (string, error)
+	// CurrentBranch returns the branch checked out at cloneRoot. err is
+	// non-nil when there is no named branch checked out (e.g. detached
+	// HEAD).
+	CurrentBranch(cloneRoot string) (string, error)
 }
 
 // WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs

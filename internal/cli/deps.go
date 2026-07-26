@@ -34,8 +34,8 @@ func NewErrorMapper() ErrorMapper { return newErrorMapper() }
 // NewProductionDeps builds the real Deps main() injects into the Router:
 // loadConfig's validated LOAM_* configuration, the output encoder it
 // selects, the real error mapper, the real workspace resolver (workspace.go
-// -> NewWorkspaceResolver), and the real Connect clients (connect.go ->
-// NewConnectClient) carrying the agent identity headers. httpClient is
+// -> newWorkspaceResolver), and the real Connect clients (connect.go ->
+// newConnectClient) carrying the agent identity headers. httpClient is
 // threaded through explicitly (main() passes http.DefaultClient) so tests
 // can substitute one pointed at an httptest server.
 //
@@ -52,11 +52,11 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
-	workspace, err := NewWorkspaceResolver(cfg)
+	workspace, err := newWorkspaceResolver(cfg)
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
-	connectClient, err := NewConnectClient(cfg, httpClient)
+	connectClient, err := newConnectClient(cfg, httpClient)
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
@@ -66,12 +66,17 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 // reportConstructionError encodes err through encoder in the same
 // errorPayload shape Run uses for a command failure, classifying it via
 // mapCommandError the same way (an unrecognized error is "internal", exit
-// 1), and returns err unchanged for the caller to propagate.
+// 1), and returns err unchanged for the caller to propagate. The message
+// comes from the classified *cliError when there is one (see run.go's
+// identical rationale: a raw *connect.Error's own Error() prepends its
+// code, which would duplicate errorDetail.Code).
 func reportConstructionError(encoder OutputEncoder, err error) error {
 	code := codeInternal
+	message := err.Error()
 	if ce := mapCommandError(err); ce != nil {
 		code = ce.code
+		message = ce.Error()
 	}
-	_ = encoder.Encode(errorPayload{Error: errorDetail{Code: code, Message: err.Error()}})
+	_ = encoder.Encode(errorPayload{Error: errorDetail{Code: code, Message: message}})
 	return err
 }

@@ -532,69 +532,157 @@ func (mock *WorkspaceResolverMock) StagingPathCalls() []struct {
 	return calls
 }
 
-// Ensure, that gitBranchLookupMock does implement gitBranchLookup.
+// Ensure, that gitLookupMock does implement gitLookup.
 // If this is not the case, regenerate this file with moq.
-var _ gitBranchLookup = &gitBranchLookupMock{}
+var _ gitLookup = &gitLookupMock{}
 
-// gitBranchLookupMock is a mock implementation of gitBranchLookup.
+// gitLookupMock is a mock implementation of gitLookup.
 //
-//	func TestSomethingThatUsesgitBranchLookup(t *testing.T) {
+//	func TestSomethingThatUsesgitLookup(t *testing.T) {
 //
-//		// make and configure a mocked gitBranchLookup
-//		mockedgitBranchLookup := &gitBranchLookupMock{
-//			CurrentBranchFunc: func(dir string) (string, error) {
+//		// make and configure a mocked gitLookup
+//		mockedgitLookup := &gitLookupMock{
+//			CloneRootFunc: func(dir string) (string, error) {
+//				panic("mock out the CloneRoot method")
+//			},
+//			CurrentBranchFunc: func(cloneRoot string) (string, error) {
 //				panic("mock out the CurrentBranch method")
+//			},
+//			OriginURLFunc: func(cloneRoot string) (string, error) {
+//				panic("mock out the OriginURL method")
 //			},
 //		}
 //
-//		// use mockedgitBranchLookup in code that requires gitBranchLookup
+//		// use mockedgitLookup in code that requires gitLookup
 //		// and then make assertions.
 //
 //	}
-type gitBranchLookupMock struct {
+type gitLookupMock struct {
+	// CloneRootFunc mocks the CloneRoot method.
+	CloneRootFunc func(dir string) (string, error)
+
 	// CurrentBranchFunc mocks the CurrentBranch method.
-	CurrentBranchFunc func(dir string) (string, error)
+	CurrentBranchFunc func(cloneRoot string) (string, error)
+
+	// OriginURLFunc mocks the OriginURL method.
+	OriginURLFunc func(cloneRoot string) (string, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
-		// CurrentBranch holds details about calls to the CurrentBranch method.
-		CurrentBranch []struct {
+		// CloneRoot holds details about calls to the CloneRoot method.
+		CloneRoot []struct {
 			// Dir is the dir argument value.
 			Dir string
 		}
+		// CurrentBranch holds details about calls to the CurrentBranch method.
+		CurrentBranch []struct {
+			// CloneRoot is the cloneRoot argument value.
+			CloneRoot string
+		}
+		// OriginURL holds details about calls to the OriginURL method.
+		OriginURL []struct {
+			// CloneRoot is the cloneRoot argument value.
+			CloneRoot string
+		}
 	}
+	lockCloneRoot     sync.RWMutex
 	lockCurrentBranch sync.RWMutex
+	lockOriginURL     sync.RWMutex
 }
 
-// CurrentBranch calls CurrentBranchFunc.
-func (mock *gitBranchLookupMock) CurrentBranch(dir string) (string, error) {
-	if mock.CurrentBranchFunc == nil {
-		panic("gitBranchLookupMock.CurrentBranchFunc: method is nil but gitBranchLookup.CurrentBranch was just called")
+// CloneRoot calls CloneRootFunc.
+func (mock *gitLookupMock) CloneRoot(dir string) (string, error) {
+	if mock.CloneRootFunc == nil {
+		panic("gitLookupMock.CloneRootFunc: method is nil but gitLookup.CloneRoot was just called")
 	}
 	callInfo := struct {
 		Dir string
 	}{
 		Dir: dir,
 	}
-	mock.lockCurrentBranch.Lock()
-	mock.calls.CurrentBranch = append(mock.calls.CurrentBranch, callInfo)
-	mock.lockCurrentBranch.Unlock()
-	return mock.CurrentBranchFunc(dir)
+	mock.lockCloneRoot.Lock()
+	mock.calls.CloneRoot = append(mock.calls.CloneRoot, callInfo)
+	mock.lockCloneRoot.Unlock()
+	return mock.CloneRootFunc(dir)
 }
 
-// CurrentBranchCalls gets all the calls that were made to CurrentBranch.
+// CloneRootCalls gets all the calls that were made to CloneRoot.
 // Check the length with:
 //
-//	len(mockedgitBranchLookup.CurrentBranchCalls())
-func (mock *gitBranchLookupMock) CurrentBranchCalls() []struct {
+//	len(mockedgitLookup.CloneRootCalls())
+func (mock *gitLookupMock) CloneRootCalls() []struct {
 	Dir string
 } {
 	var calls []struct {
 		Dir string
 	}
+	mock.lockCloneRoot.RLock()
+	calls = mock.calls.CloneRoot
+	mock.lockCloneRoot.RUnlock()
+	return calls
+}
+
+// CurrentBranch calls CurrentBranchFunc.
+func (mock *gitLookupMock) CurrentBranch(cloneRoot string) (string, error) {
+	if mock.CurrentBranchFunc == nil {
+		panic("gitLookupMock.CurrentBranchFunc: method is nil but gitLookup.CurrentBranch was just called")
+	}
+	callInfo := struct {
+		CloneRoot string
+	}{
+		CloneRoot: cloneRoot,
+	}
+	mock.lockCurrentBranch.Lock()
+	mock.calls.CurrentBranch = append(mock.calls.CurrentBranch, callInfo)
+	mock.lockCurrentBranch.Unlock()
+	return mock.CurrentBranchFunc(cloneRoot)
+}
+
+// CurrentBranchCalls gets all the calls that were made to CurrentBranch.
+// Check the length with:
+//
+//	len(mockedgitLookup.CurrentBranchCalls())
+func (mock *gitLookupMock) CurrentBranchCalls() []struct {
+	CloneRoot string
+} {
+	var calls []struct {
+		CloneRoot string
+	}
 	mock.lockCurrentBranch.RLock()
 	calls = mock.calls.CurrentBranch
 	mock.lockCurrentBranch.RUnlock()
+	return calls
+}
+
+// OriginURL calls OriginURLFunc.
+func (mock *gitLookupMock) OriginURL(cloneRoot string) (string, error) {
+	if mock.OriginURLFunc == nil {
+		panic("gitLookupMock.OriginURLFunc: method is nil but gitLookup.OriginURL was just called")
+	}
+	callInfo := struct {
+		CloneRoot string
+	}{
+		CloneRoot: cloneRoot,
+	}
+	mock.lockOriginURL.Lock()
+	mock.calls.OriginURL = append(mock.calls.OriginURL, callInfo)
+	mock.lockOriginURL.Unlock()
+	return mock.OriginURLFunc(cloneRoot)
+}
+
+// OriginURLCalls gets all the calls that were made to OriginURL.
+// Check the length with:
+//
+//	len(mockedgitLookup.OriginURLCalls())
+func (mock *gitLookupMock) OriginURLCalls() []struct {
+	CloneRoot string
+} {
+	var calls []struct {
+		CloneRoot string
+	}
+	mock.lockOriginURL.RLock()
+	calls = mock.calls.OriginURL
+	mock.lockOriginURL.RUnlock()
 	return calls
 }
 

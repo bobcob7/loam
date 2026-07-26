@@ -60,7 +60,7 @@ func TestIdentityInterceptor_SetsAllThreeHeadersVerbatim(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	cfg := validConnectCfg(srv.URL)
-	client, err := NewConnectClient(cfg, srv.Client())
+	client, err := newConnectClient(cfg, srv.Client())
 	require.NoError(t, err)
 	_, err = client.Meta().GetInstructions(t.Context(), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestIdentityInterceptor_HeaderNamesMatchHTTPAuthMiddleware(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	cfg := validConnectCfg(srv.URL)
-	client, err := NewConnectClient(cfg, srv.Client())
+	client, err := newConnectClient(cfg, srv.Client())
 	require.NoError(t, err)
 	resp, err := client.Meta().GetInstructions(t.Context(), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
 	require.NoError(t, err)
@@ -119,7 +119,7 @@ func TestNewConnectClient_IncompleteAgentIdentity_FailsAtConstruction(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			client, err := NewConnectClient(tt.cfg, http.DefaultClient)
+			client, err := newConnectClient(tt.cfg, http.DefaultClient)
 			require.Error(t, err)
 			assert.Nil(t, client)
 			assert.ErrorIs(t, err, errUsage)
@@ -133,11 +133,18 @@ func TestNewConnectClient_IncompleteAgentIdentity_FailsAtConstruction(t *testing
 // TestConnectError_NotFound_MapsToExitThreeAndEncodesCleanly proves the
 // other brief requirement: once the CLI is exercising real *connect.Error
 // values (rather than the mocked ConnectClient used elsewhere in this
-// package's tests), classifyConnectError/mapCommandError correctly maps a
-// CodeNotFound to exit 3, and the encoded payload carries the connect
-// error's own message exactly once — proving the wave-2 "doubled error"
-// regression (fixed in cli-core, but never exercised against a real
-// *connect.Error until this bead) stays fixed.
+// package's tests), a command handler that forgets to map its RPC error
+// still ends up correctly classified — CodeNotFound to exit 3 — with the
+// error's own message encoded exactly once.
+//
+// This routes the raw *connect.Error through the real Run() (not a
+// hand-built errorPayload): an earlier version of this test constructed
+// errorPayload{Message: ce.Error()} itself and then asserted a property of
+// the payload it had just built — which stayed green even when run.go
+// independently used the wrong message (its own err.Error(), which for a
+// *connect.Error prepends the code: "not_found: <message>", doubling the
+// code already carried in errorDetail.Code). Driving the real Run() is
+// what actually exercises the encoding path an agent's stdout depends on.
 func TestConnectError_NotFound_MapsToExitThreeAndEncodesCleanly(t *testing.T) {
 	t.Parallel()
 	const notFoundMessage = "work branch wb-9c2f1a not found in repo acme/web"
@@ -150,30 +157,31 @@ func TestConnectError_NotFound_MapsToExitThreeAndEncodesCleanly(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	cfg := validConnectCfg(srv.URL)
-	client, err := NewConnectClient(cfg, srv.Client())
+	client, err := newConnectClient(cfg, srv.Client())
 	require.NoError(t, err)
-	_, callErr := client.Meta().GetInstructions(t.Context(), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
-	require.Error(t, callErr)
-	var connErr *connect.Error
-	require.ErrorAs(t, callErr, &connErr)
-	assert.Equal(t, connect.CodeNotFound, connErr.Code())
-
-	mapper := newErrorMapper()
-	assert.Equal(t, 3, mapper.ExitCode(callErr), "CodeNotFound must map to exit 3")
-
-	ce := mapCommandError(callErr)
-	require.NotNil(t, ce)
-	assert.Equal(t, codeNotFound, ce.code)
 
 	var buf bytes.Buffer
 	encoder := newEncoder("json", &buf)
-	require.NoError(t, encoder.Encode(errorPayload{Error: errorDetail{Code: ce.code, Message: ce.Error()}}))
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, client)
+	router := &Router{deps: deps, commands: map[string]*command{
+		// This handler intentionally returns the raw RPC error unmapped —
+		// exactly the "a handler forgot to map it" case mapCommandError
+		// exists for (see errors.go's doc comment on mapCommandError).
+		"boom": {run: func(ctx context.Context, d *Deps, args []string) error {
+			_, callErr := d.connect.Meta().GetInstructions(ctx, connect.NewRequest(&loamv1.GetInstructionsRequest{}))
+			return callErr
+		}},
+	}}
+
+	exitCode := Run(t.Context(), router, []string{"boom"})
+	assert.Equal(t, 3, exitCode, "CodeNotFound must map to exit 3")
+
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &decoded))
 	errObj, ok := decoded["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "not_found", errObj["code"])
 	msg, _ := errObj["message"].(string)
-	assert.Equal(t, notFoundMessage, msg, "message must be exactly the connect.Error's own message, not doubled or re-wrapped")
+	assert.Equal(t, notFoundMessage, msg, "message must be exactly the connect.Error's own message — not doubled with its own code prefix (connect.Error.Error() == \"not_found: ...\")")
 	assert.Equal(t, 1, strings.Count(buf.String(), `"error"`), "the error object must be encoded exactly once, never doubled")
 }

@@ -30,7 +30,7 @@ const (
 
 // identityInterceptor attaches the three Loam-Agent-* headers to every
 // outbound unary request, from cfg's already-validated identity fields.
-// NewConnectClient refuses to construct a client at all when one of them is
+// newConnectClient refuses to construct a client at all when one of them is
 // empty (see its doc comment), so this never sends a partial set — a
 // partial set is exactly what the server's fail-closed rule (loam-gcg)
 // treats as no identity at all, 401ing with a message that gives no hint
@@ -71,7 +71,7 @@ func (c *connectClients) Search() SearchClient { return c.search }
 // Meta returns the MetaService seam.
 func (c *connectClients) Meta() MetaClient { return c.meta }
 
-// NewConnectClient builds the real ConnectClient targeting cfg.ServerURL()
+// newConnectClient builds the real ConnectClient targeting cfg.ServerURL()
 // for every loam.v1 service, with identityInterceptor attaching the agent
 // identity headers to every outbound request. It fails closed — before any
 // request is ever sent — if any LOAM_AGENT_* identity field is empty:
@@ -80,8 +80,11 @@ func (c *connectClients) Meta() MetaClient { return c.meta }
 // here (e.g. a hand-built test double), because the alternative is a
 // request with an incomplete header set silently reaching the server and
 // coming back as a confusing 401 (see docs/cli-spec.md's fail-closed note
-// for loam-gcg) instead of a clear local usage error.
-func NewConnectClient(cfg Config, httpClient connect.HTTPClient) (ConnectClient, error) {
+// for loam-gcg) instead of a clear local usage error. Unexported: only
+// deps.go's NewProductionDeps and this package's own tests call it —
+// cmd/loam imports NewProductionDeps, NewErrorMapper, NewRouter, and Run
+// only.
+func newConnectClient(cfg Config, httpClient connect.HTTPClient) (ConnectClient, error) {
 	if cfg.AgentName() == "" || cfg.AgentID() == "" || cfg.AgentRole() == "" {
 		return nil, newUsageCLIError("LOAM_AGENT_NAME, LOAM_AGENT_ID, and LOAM_AGENT_ROLE must all be set to make server requests", errMissingEnv)
 	}

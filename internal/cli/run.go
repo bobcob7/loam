@@ -25,9 +25,16 @@ func Run(ctx context.Context, router *Router, args []string) int {
 		return exitUsage
 	}
 	code := codeInternal
+	message := err.Error()
 	if ce := mapCommandError(err); ce != nil {
+		// ce.Error() is the classified message alone (e.g. a *connect.Error's
+		// own Message()); err.Error() on the raw error can be something else
+		// entirely — a *connect.Error's Error() prepends its own code string
+		// ("not_found: work branch wb-1 not found"), which would otherwise
+		// duplicate the code already carried separately in errorDetail.Code.
 		code = ce.code
+		message = ce.Error()
 	}
-	_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: code, Message: err.Error()}})
+	_ = router.deps.encoder.Encode(errorPayload{Error: errorDetail{Code: code, Message: message}})
 	return router.deps.errorMapper.ExitCode(err)
 }

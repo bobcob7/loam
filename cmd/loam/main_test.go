@@ -131,7 +131,7 @@ func TestLoam_MissingRequiredEnvVar_ExitsUsage(t *testing.T) {
 // from a valid environment, even though no command bodies exist yet (that
 // is later beads' work): whoami's stub returns errNotImplemented, which the
 // real ErrorMapper classifies as an unexpected internal error, exit 1. If
-// NewProductionDeps' wiring were broken (e.g. NewConnectClient failing on
+// NewProductionDeps' wiring were broken (e.g. newConnectClient failing on
 // a valid config), this test would see a construction-time usage/internal
 // error instead of ever reaching the command dispatch at all.
 func TestLoam_ValidEnv_CommandNotYetImplemented_ExitsInternal(t *testing.T) {
