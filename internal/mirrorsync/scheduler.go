@@ -1,4 +1,4 @@
-package sync
+package mirrorsync
 
 import (
 	"context"

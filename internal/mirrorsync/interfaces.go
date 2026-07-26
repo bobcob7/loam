@@ -1,11 +1,12 @@
-// Package sync runs the Mirror Sync cycle (docs/sync-spec.md -> Mirror
-// Sync) on a fixed interval, serialized per repo. The scheduler owns
-// orchestration only: every step of the cycle is a separate collaborator
-// reached through one of the small interfaces below, defined here at the
-// consumer per repo convention. The trigger is injected as a channel so
-// production wires a real time.Ticker while tests drive cycles with
-// explicit, hand-written ticks (docs/testing-spec.md -> Manual scheduler).
-package sync
+// Package mirrorsync runs the Mirror Sync cycle (docs/sync-spec.md ->
+// Mirror Sync) on a fixed interval, serialized per repo. The scheduler
+// owns orchestration only: every step of the cycle is a separate
+// collaborator reached through one of the small interfaces below, defined
+// here at the consumer per repo convention. The trigger is injected as a
+// channel so production wires a real time.Ticker while tests drive
+// cycles with explicit, hand-written ticks (docs/testing-spec.md ->
+// Manual scheduler).
+package mirrorsync
 
 import "context"
 
