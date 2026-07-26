@@ -87,7 +87,6 @@ func buildRouter(cfg config.Config) *server.Router {
 // drains in-flight requests for up to shutdownGrace before returning.
 func serve(logger *slog.Logger, addr string, httpServer *http.Server) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", addr)
@@ -100,8 +99,16 @@ func serve(logger *slog.Logger, addr string, httpServer *http.Server) error {
 	}()
 	select {
 	case err := <-serveErr:
+		stop()
 		return err
 	case <-ctx.Done():
+		// Stop watching for signals now, rather than deferring to the end
+		// of this function: a second SIGINT/SIGTERM during the drain below
+		// must fall through to Go's default terminate-immediately behavior
+		// (an operator's escape hatch out of a hung shutdown) instead of
+		// being silently absorbed by this same handler for the whole grace
+		// period.
+		stop()
 		logger.Info("shutdown signal received", "grace", shutdownGrace)
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)

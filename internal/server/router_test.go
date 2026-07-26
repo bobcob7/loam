@@ -26,6 +26,13 @@ const (
 	adminPrefix   = "/loam.admin.v1.RepoAdminService/"
 	gitPushPath   = "/git/acme/widgets.git/info/refs"
 	gitPrefix     = "/git/"
+
+	// wwwAuthenticateRealm mirrors internal/httpauth's unexported constant
+	// of the same value: the WWW-Authenticate challenge AdminOnly and CLI
+	// send with every 401 so a browser prompts for admin credentials.
+	// GitIdentity's 403 never sends this -- it is not a credential prompt,
+	// docs/git-spec.md wants unconfigured git clients to fail fast instead.
+	wwwAuthenticateRealm = `Basic realm="loam"`
 )
 
 // pingStub mimics a generated connect-go handler closely enough for this
@@ -98,31 +105,28 @@ func TestRouter_PathGroupCredentialMatrix(t *testing.T) {
 	t.Parallel()
 	router := newTestRouter(t)
 	tests := []struct {
-		name       string
-		path       string
-		setReq     func(r *http.Request)
-		wantStatus int
+		name                string
+		path                string
+		setReq              func(r *http.Request)
+		wantStatus          int
+		wantWWWAuthenticate string // "" asserts the header is absent.
 	}{
-		{"healthz_no_auth", "/healthz", nil, http.StatusOK},
-		{"readyz_no_auth", "/readyz", nil, http.StatusOK},
-
-		{"cli_admin_basic_auth_valid", cliPingPath, withValidAdminAuth, http.StatusOK},
-		{"cli_agent_headers_complete", cliPingPath, withCompleteAgentHeaders, http.StatusOK},
-		{"cli_agent_headers_incomplete", cliPingPath, withIncompleteAgentHeaders, http.StatusUnauthorized},
-		{"cli_no_auth", cliPingPath, nil, http.StatusUnauthorized},
-		{"cli_admin_basic_auth_wrong_password", cliPingPath, withWrongAdminAuth, http.StatusUnauthorized},
-
-		{"admin_valid_basic_auth", adminPingPath, withValidAdminAuth, http.StatusOK},
-		{"admin_agent_headers_rejected", adminPingPath, withCompleteAgentHeaders, http.StatusUnauthorized},
-		{"admin_no_auth", adminPingPath, nil, http.StatusUnauthorized},
-
-		{"static_root_agent_headers_rejected", "/", withCompleteAgentHeaders, http.StatusUnauthorized},
-		{"static_root_valid_admin_auth", "/", withValidAdminAuth, http.StatusOK},
-
-		{"git_agent_headers_complete", gitPushPath, withCompleteAgentHeaders, http.StatusOK},
-		{"git_admin_basic_auth_inert", gitPushPath, withValidAdminAuth, http.StatusForbidden},
-		{"git_agent_headers_incomplete", gitPushPath, withIncompleteAgentHeaders, http.StatusForbidden},
-		{"git_no_auth", gitPushPath, nil, http.StatusForbidden},
+		{"healthz_no_auth", "/healthz", nil, http.StatusOK, ""},
+		{"readyz_no_auth", "/readyz", nil, http.StatusOK, ""},
+		{"cli_admin_basic_auth_valid", cliPingPath, withValidAdminAuth, http.StatusOK, ""},
+		{"cli_agent_headers_complete", cliPingPath, withCompleteAgentHeaders, http.StatusOK, ""},
+		{"cli_agent_headers_incomplete", cliPingPath, withIncompleteAgentHeaders, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"cli_no_auth", cliPingPath, nil, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"cli_admin_basic_auth_wrong_password", cliPingPath, withWrongAdminAuth, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"admin_valid_basic_auth", adminPingPath, withValidAdminAuth, http.StatusOK, ""},
+		{"admin_agent_headers_rejected", adminPingPath, withCompleteAgentHeaders, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"admin_no_auth", adminPingPath, nil, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"static_root_agent_headers_rejected", "/", withCompleteAgentHeaders, http.StatusUnauthorized, wwwAuthenticateRealm},
+		{"static_root_valid_admin_auth", "/", withValidAdminAuth, http.StatusOK, ""},
+		{"git_agent_headers_complete", gitPushPath, withCompleteAgentHeaders, http.StatusOK, ""},
+		{"git_admin_basic_auth_inert", gitPushPath, withValidAdminAuth, http.StatusForbidden, ""},
+		{"git_agent_headers_incomplete", gitPushPath, withIncompleteAgentHeaders, http.StatusForbidden, ""},
+		{"git_no_auth", gitPushPath, nil, http.StatusForbidden, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +138,7 @@ func TestRouter_PathGroupCredentialMatrix(t *testing.T) {
 			rec := httptest.NewRecorder()
 			router.Handler().ServeHTTP(rec, req)
 			assert.Equal(t, tc.wantStatus, rec.Code)
+			assert.Equal(t, tc.wantWWWAuthenticate, rec.Header().Get("WWW-Authenticate"))
 		})
 	}
 }
@@ -150,12 +155,10 @@ func TestRouter_Healthz_ReachableRegardlessOfAuthorizationHeader(t *testing.T) {
 	noAuthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	noAuthRec := httptest.NewRecorder()
 	router.Handler().ServeHTTP(noAuthRec, noAuthReq)
-
 	garbageAuthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	withGarbageAuthorization(garbageAuthReq)
 	garbageAuthRec := httptest.NewRecorder()
 	router.Handler().ServeHTTP(garbageAuthRec, garbageAuthReq)
-
 	require.Equal(t, http.StatusOK, noAuthRec.Code)
 	require.Equal(t, http.StatusOK, garbageAuthRec.Code)
 	assert.Equal(t, noAuthRec.Body.String(), garbageAuthRec.Body.String())
@@ -203,6 +206,19 @@ func TestRouter_APINotFound_NotSwallowedBySPA(t *testing.T) {
 	router.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "SPA-INDEX")
+}
+
+// TestRouter_Handler_IsNotAssertableToServeMux proves Handler returns an
+// opaque http.Handler, not the *http.ServeMux underlying it. If this type
+// assertion ever succeeded, a caller could recover the mux and register
+// routes on it directly -- unwrapped by RegisterCLI/RegisterAdmin/
+// RegisterGit/RegisterUnauthenticated's auth-wrapper and prefix guards --
+// defeating this package's entire structural guarantee.
+func TestRouter_Handler_IsNotAssertableToServeMux(t *testing.T) {
+	t.Parallel()
+	router := newTestRouter(t)
+	_, ok := router.Handler().(*http.ServeMux)
+	assert.False(t, ok, "Router.Handler() must not be a *http.ServeMux the caller can register unwrapped routes on")
 }
 
 // TestRouter_RegisterCLI_WrongPathPrefixPanics proves the composition-root

@@ -21,16 +21,18 @@ const (
 	gitPathPrefix   = "/git/"
 )
 
-// healthPaths is the exhaustive allow-list for RegisterUnauthenticated.
+// isHealthPath is the exhaustive allow-list for RegisterUnauthenticated.
 // docs/server-spec.md calls /healthz and /readyz "the only such
 // exemption"; enforcing that here means a future accidental call with any
 // other pattern fails at process startup instead of quietly opening a new
 // unauthenticated route.
-var healthPaths = map[string]bool{
-	"/healthz":     true,
-	"/readyz":      true,
-	"GET /healthz": true,
-	"GET /readyz":  true,
+func isHealthPath(pattern string) bool {
+	switch pattern {
+	case "/healthz", "/readyz", "GET /healthz", "GET /readyz":
+		return true
+	default:
+		return false
+	}
 }
 
 // Router builds the single mux described in docs/web-spec.md -> Hosting &
@@ -102,7 +104,7 @@ func (rt *Router) RegisterGit(prefix string, handler http.Handler) {
 // pattern, so a future mistaken call cannot open an unintended
 // unauthenticated route.
 func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) {
-	if !healthPaths[pattern] {
+	if !isHealthPath(pattern) {
 		panic(fmt.Sprintf("server: RegisterUnauthenticated: %q is not a recognized health path (docs/server-spec.md: /healthz and /readyz are the only exemption)", pattern))
 	}
 	rt.mux.Handle(pattern, handler)
@@ -112,6 +114,15 @@ func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) 
 // (docs/server-spec.md -> Process Model). Building and running the
 // *http.Server around it, and coordinating its shutdown with the rest of
 // the process, is NewHTTPServer's and loam-ofg.21's job respectively.
+//
+// The returned value is deliberately opaque (http.HandlerFunc, not the
+// *http.ServeMux itself): the mux underlying this Router is only ever
+// mutated by RegisterCLI/RegisterAdmin/RegisterGit/RegisterUnauthenticated/
+// RegisterSPA, each of which enforces which auth wrapper a path group gets.
+// Returning the concrete *http.ServeMux would let a type assertion recover
+// it and register routes directly, unwrapped by any of those guards —
+// defeating the whole structural guarantee this package exists to
+// establish.
 func (rt *Router) Handler() http.Handler {
-	return rt.mux
+	return http.HandlerFunc(rt.mux.ServeHTTP)
 }
