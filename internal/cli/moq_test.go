@@ -396,14 +396,14 @@ var _ WorkspaceResolver = &WorkspaceResolverMock{}
 //
 //		// make and configure a mocked WorkspaceResolver
 //		mockedWorkspaceResolver := &WorkspaceResolverMock{
+//			OpenStagingFunc: func(repo string, workBranch string) (StagingArea, error) {
+//				panic("mock out the OpenStaging method")
+//			},
 //			ResolveRepoFunc: func() (string, error) {
 //				panic("mock out the ResolveRepo method")
 //			},
 //			ResolveWorkBranchFunc: func() (string, error) {
 //				panic("mock out the ResolveWorkBranch method")
-//			},
-//			StagingPathFunc: func(repo string, workBranch string) (string, error) {
-//				panic("mock out the StagingPath method")
 //			},
 //		}
 //
@@ -412,34 +412,70 @@ var _ WorkspaceResolver = &WorkspaceResolverMock{}
 //
 //	}
 type WorkspaceResolverMock struct {
+	// OpenStagingFunc mocks the OpenStaging method.
+	OpenStagingFunc func(repo string, workBranch string) (StagingArea, error)
+
 	// ResolveRepoFunc mocks the ResolveRepo method.
 	ResolveRepoFunc func() (string, error)
 
 	// ResolveWorkBranchFunc mocks the ResolveWorkBranch method.
 	ResolveWorkBranchFunc func() (string, error)
 
-	// StagingPathFunc mocks the StagingPath method.
-	StagingPathFunc func(repo string, workBranch string) (string, error)
-
 	// calls tracks calls to the methods.
 	calls struct {
+		// OpenStaging holds details about calls to the OpenStaging method.
+		OpenStaging []struct {
+			// Repo is the repo argument value.
+			Repo string
+			// WorkBranch is the workBranch argument value.
+			WorkBranch string
+		}
 		// ResolveRepo holds details about calls to the ResolveRepo method.
 		ResolveRepo []struct {
 		}
 		// ResolveWorkBranch holds details about calls to the ResolveWorkBranch method.
 		ResolveWorkBranch []struct {
 		}
-		// StagingPath holds details about calls to the StagingPath method.
-		StagingPath []struct {
-			// Repo is the repo argument value.
-			Repo string
-			// WorkBranch is the workBranch argument value.
-			WorkBranch string
-		}
 	}
+	lockOpenStaging       sync.RWMutex
 	lockResolveRepo       sync.RWMutex
 	lockResolveWorkBranch sync.RWMutex
-	lockStagingPath       sync.RWMutex
+}
+
+// OpenStaging calls OpenStagingFunc.
+func (mock *WorkspaceResolverMock) OpenStaging(repo string, workBranch string) (StagingArea, error) {
+	if mock.OpenStagingFunc == nil {
+		panic("WorkspaceResolverMock.OpenStagingFunc: method is nil but WorkspaceResolver.OpenStaging was just called")
+	}
+	callInfo := struct {
+		Repo       string
+		WorkBranch string
+	}{
+		Repo:       repo,
+		WorkBranch: workBranch,
+	}
+	mock.lockOpenStaging.Lock()
+	mock.calls.OpenStaging = append(mock.calls.OpenStaging, callInfo)
+	mock.lockOpenStaging.Unlock()
+	return mock.OpenStagingFunc(repo, workBranch)
+}
+
+// OpenStagingCalls gets all the calls that were made to OpenStaging.
+// Check the length with:
+//
+//	len(mockedWorkspaceResolver.OpenStagingCalls())
+func (mock *WorkspaceResolverMock) OpenStagingCalls() []struct {
+	Repo       string
+	WorkBranch string
+} {
+	var calls []struct {
+		Repo       string
+		WorkBranch string
+	}
+	mock.lockOpenStaging.RLock()
+	calls = mock.calls.OpenStaging
+	mock.lockOpenStaging.RUnlock()
+	return calls
 }
 
 // ResolveRepo calls ResolveRepoFunc.
@@ -496,39 +532,200 @@ func (mock *WorkspaceResolverMock) ResolveWorkBranchCalls() []struct {
 	return calls
 }
 
-// StagingPath calls StagingPathFunc.
-func (mock *WorkspaceResolverMock) StagingPath(repo string, workBranch string) (string, error) {
-	if mock.StagingPathFunc == nil {
-		panic("WorkspaceResolverMock.StagingPathFunc: method is nil but WorkspaceResolver.StagingPath was just called")
+// Ensure, that StagingAreaMock does implement StagingArea.
+// If this is not the case, regenerate this file with moq.
+var _ StagingArea = &StagingAreaMock{}
+
+// StagingAreaMock is a mock implementation of StagingArea.
+//
+//	func TestSomethingThatUsesStagingArea(t *testing.T) {
+//
+//		// make and configure a mocked StagingArea
+//		mockedStagingArea := &StagingAreaMock{
+//			CloseFunc: func() error {
+//				panic("mock out the Close method")
+//			},
+//			ReadFileFunc: func(name string) ([]byte, error) {
+//				panic("mock out the ReadFile method")
+//			},
+//			RemoveFunc: func(name string) error {
+//				panic("mock out the Remove method")
+//			},
+//			WriteFileFunc: func(name string, data []byte) error {
+//				panic("mock out the WriteFile method")
+//			},
+//		}
+//
+//		// use mockedStagingArea in code that requires StagingArea
+//		// and then make assertions.
+//
+//	}
+type StagingAreaMock struct {
+	// CloseFunc mocks the Close method.
+	CloseFunc func() error
+
+	// ReadFileFunc mocks the ReadFile method.
+	ReadFileFunc func(name string) ([]byte, error)
+
+	// RemoveFunc mocks the Remove method.
+	RemoveFunc func(name string) error
+
+	// WriteFileFunc mocks the WriteFile method.
+	WriteFileFunc func(name string, data []byte) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Close holds details about calls to the Close method.
+		Close []struct {
+		}
+		// ReadFile holds details about calls to the ReadFile method.
+		ReadFile []struct {
+			// Name is the name argument value.
+			Name string
+		}
+		// Remove holds details about calls to the Remove method.
+		Remove []struct {
+			// Name is the name argument value.
+			Name string
+		}
+		// WriteFile holds details about calls to the WriteFile method.
+		WriteFile []struct {
+			// Name is the name argument value.
+			Name string
+			// Data is the data argument value.
+			Data []byte
+		}
 	}
-	callInfo := struct {
-		Repo       string
-		WorkBranch string
-	}{
-		Repo:       repo,
-		WorkBranch: workBranch,
-	}
-	mock.lockStagingPath.Lock()
-	mock.calls.StagingPath = append(mock.calls.StagingPath, callInfo)
-	mock.lockStagingPath.Unlock()
-	return mock.StagingPathFunc(repo, workBranch)
+	lockClose     sync.RWMutex
+	lockReadFile  sync.RWMutex
+	lockRemove    sync.RWMutex
+	lockWriteFile sync.RWMutex
 }
 
-// StagingPathCalls gets all the calls that were made to StagingPath.
+// Close calls CloseFunc.
+func (mock *StagingAreaMock) Close() error {
+	if mock.CloseFunc == nil {
+		panic("StagingAreaMock.CloseFunc: method is nil but StagingArea.Close was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockClose.Lock()
+	mock.calls.Close = append(mock.calls.Close, callInfo)
+	mock.lockClose.Unlock()
+	return mock.CloseFunc()
+}
+
+// CloseCalls gets all the calls that were made to Close.
 // Check the length with:
 //
-//	len(mockedWorkspaceResolver.StagingPathCalls())
-func (mock *WorkspaceResolverMock) StagingPathCalls() []struct {
-	Repo       string
-	WorkBranch string
+//	len(mockedStagingArea.CloseCalls())
+func (mock *StagingAreaMock) CloseCalls() []struct {
 } {
 	var calls []struct {
-		Repo       string
-		WorkBranch string
 	}
-	mock.lockStagingPath.RLock()
-	calls = mock.calls.StagingPath
-	mock.lockStagingPath.RUnlock()
+	mock.lockClose.RLock()
+	calls = mock.calls.Close
+	mock.lockClose.RUnlock()
+	return calls
+}
+
+// ReadFile calls ReadFileFunc.
+func (mock *StagingAreaMock) ReadFile(name string) ([]byte, error) {
+	if mock.ReadFileFunc == nil {
+		panic("StagingAreaMock.ReadFileFunc: method is nil but StagingArea.ReadFile was just called")
+	}
+	callInfo := struct {
+		Name string
+	}{
+		Name: name,
+	}
+	mock.lockReadFile.Lock()
+	mock.calls.ReadFile = append(mock.calls.ReadFile, callInfo)
+	mock.lockReadFile.Unlock()
+	return mock.ReadFileFunc(name)
+}
+
+// ReadFileCalls gets all the calls that were made to ReadFile.
+// Check the length with:
+//
+//	len(mockedStagingArea.ReadFileCalls())
+func (mock *StagingAreaMock) ReadFileCalls() []struct {
+	Name string
+} {
+	var calls []struct {
+		Name string
+	}
+	mock.lockReadFile.RLock()
+	calls = mock.calls.ReadFile
+	mock.lockReadFile.RUnlock()
+	return calls
+}
+
+// Remove calls RemoveFunc.
+func (mock *StagingAreaMock) Remove(name string) error {
+	if mock.RemoveFunc == nil {
+		panic("StagingAreaMock.RemoveFunc: method is nil but StagingArea.Remove was just called")
+	}
+	callInfo := struct {
+		Name string
+	}{
+		Name: name,
+	}
+	mock.lockRemove.Lock()
+	mock.calls.Remove = append(mock.calls.Remove, callInfo)
+	mock.lockRemove.Unlock()
+	return mock.RemoveFunc(name)
+}
+
+// RemoveCalls gets all the calls that were made to Remove.
+// Check the length with:
+//
+//	len(mockedStagingArea.RemoveCalls())
+func (mock *StagingAreaMock) RemoveCalls() []struct {
+	Name string
+} {
+	var calls []struct {
+		Name string
+	}
+	mock.lockRemove.RLock()
+	calls = mock.calls.Remove
+	mock.lockRemove.RUnlock()
+	return calls
+}
+
+// WriteFile calls WriteFileFunc.
+func (mock *StagingAreaMock) WriteFile(name string, data []byte) error {
+	if mock.WriteFileFunc == nil {
+		panic("StagingAreaMock.WriteFileFunc: method is nil but StagingArea.WriteFile was just called")
+	}
+	callInfo := struct {
+		Name string
+		Data []byte
+	}{
+		Name: name,
+		Data: data,
+	}
+	mock.lockWriteFile.Lock()
+	mock.calls.WriteFile = append(mock.calls.WriteFile, callInfo)
+	mock.lockWriteFile.Unlock()
+	return mock.WriteFileFunc(name, data)
+}
+
+// WriteFileCalls gets all the calls that were made to WriteFile.
+// Check the length with:
+//
+//	len(mockedStagingArea.WriteFileCalls())
+func (mock *StagingAreaMock) WriteFileCalls() []struct {
+	Name string
+	Data []byte
+} {
+	var calls []struct {
+		Name string
+		Data []byte
+	}
+	mock.lockWriteFile.RLock()
+	calls = mock.calls.WriteFile
+	mock.lockWriteFile.RUnlock()
 	return calls
 }
 

@@ -60,7 +60,7 @@ func TestWorkspace_InsideCloneSubdirectory_StillInfersAndStagesOutsideClone(t *t
 	branch, err := ws.ResolveWorkBranch()
 	require.NoError(t, err)
 	assert.Equal(t, "wb-9c2f1a", branch)
-	staging, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	staging, err := ws.stagingPath("bobcob7/doc-server", "wb-9c2f1a")
 	require.NoError(t, err)
 	assert.False(t, strings.HasPrefix(staging, cloneRoot), "staging path %q must not be under the clone root %q (cli-spec: staging lives OUTSIDE any clone)", staging, cloneRoot)
 	assert.Equal(t, filepath.Join(filepath.Dir(cloneRoot), ".loam", "staging", "bobcob7", "doc-server", "wb-9c2f1a", "ada-lovelace-7-reviewer"), staging)
@@ -153,7 +153,7 @@ func TestWorkspace_StagingPath_DiffersPerRepoWorkBranchAndAgent(t *testing.T) {
 	other := newWorkspace(filepath.FromSlash("/workspace"), "grace-hopper-3-author", lookup)
 	mustStagingPath := func(t *testing.T, ws *workspace, repo, workBranch string) string {
 		t.Helper()
-		path, err := ws.StagingPath(repo, workBranch)
+		path, err := ws.stagingPath(repo, workBranch)
 		require.NoError(t, err)
 		return path
 	}
@@ -181,7 +181,7 @@ func TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained(t *t
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
 	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
 	root := filepath.Join(filepath.FromSlash("/workspace"), ".loam", "staging")
-	path, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	path, err := ws.stagingPath("bobcob7/doc-server", "wb-9c2f1a")
 	require.NoError(t, err)
 	assertPathContained(t, root, path)
 	assert.Equal(t, filepath.Join(root, "bobcob7", "doc-server", "wb-9c2f1a", "ada-lovelace-7-reviewer"), path)
@@ -243,7 +243,7 @@ func TestWorkspace_StagingPath_RejectsTraversalInRepoKey(t *testing.T) {
 	for _, tt := range stagingPathAttacks {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path, err := ws.StagingPath(tt.key, "wb-9c2f1a")
+			path, err := ws.stagingPath(tt.key, "wb-9c2f1a")
 			require.Errorf(t, err, "repo key %q must be rejected", tt.key)
 			assert.ErrorIs(t, err, errInvalidStagingKey)
 			assert.ErrorIs(t, err, errUsage, "rejection must classify as a usage error (exit 2)")
@@ -266,7 +266,7 @@ func TestWorkspace_StagingPath_RejectsTraversalInWorkBranchKey(t *testing.T) {
 	for _, tt := range attacks {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path, err := ws.StagingPath("bobcob7/doc-server", tt.key)
+			path, err := ws.stagingPath("bobcob7/doc-server", tt.key)
 			require.Errorf(t, err, "work-branch key %q must be rejected", tt.key)
 			assert.ErrorIs(t, err, errInvalidStagingKey)
 			assert.ErrorIs(t, err, errUsage, "rejection must classify as a usage error (exit 2)")
@@ -328,7 +328,7 @@ func TestWorkspace_StagingPath_ContainmentCheckCatchesTraversalNotCoveredByAllow
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
 	ws := newWorkspace(filepath.FromSlash("/workspace"), "../../../../etc", lookup)
-	path, err := ws.StagingPath("bobcob7/doc-server", "wb-9c2f1a")
+	path, err := ws.stagingPath("bobcob7/doc-server", "wb-9c2f1a")
 	require.Error(t, err, "an agent identifier that would escape the staging root must be rejected even though it bypassed key validation")
 	assert.ErrorIs(t, err, errInvalidStagingKey)
 	assert.Empty(t, path)

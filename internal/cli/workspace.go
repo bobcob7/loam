@@ -186,10 +186,9 @@ func (w *workspace) ResolveWorkBranch() (string, error) {
 	return w.workBranch, nil
 }
 
-// StagingPath returns the local staging path for repo/workBranch, keyed
-// also by the calling agent's identifier, under the workspace root's
-// .loam/ directory (see docs/cli-spec.md -> "Staging location") — the
-// clone's parent, never inside the clone itself.
+// stagingRel returns the staging tree path for repo/workBranch keyed by
+// the calling agent's identifier, RELATIVE to the staging root (see
+// OpenStaging, which resolves it against an os.Root).
 //
 // repo and workBranch reach here from CLI positionals (see
 // resolveWorkBranchIdentity): either typed explicitly by whoever invokes
@@ -203,7 +202,15 @@ func (w *workspace) ResolveWorkBranch() (string, error) {
 // (including a malicious agent identifier, which is not itself
 // user-supplied on this path but costs nothing extra to guard) rather than
 // relying solely on rejecting specific substrings.
-func (w *workspace) StagingPath(repo, workBranch string) (string, error) {
+//
+// Both layers are purely LEXICAL and neither can see the filesystem:
+// filepath.IsLocal's own godoc says it is "purely lexical" and "does not
+// account for the effect of any symbolic links". They exist to turn a bad
+// key into a precise usage error (exit 2) naming the offending key, and to
+// guarantee two distinct keys never collapse onto one directory. They are
+// NOT what keeps a write inside the workspace — OpenStaging's os.Root
+// handles are, and they hold even for a key both layers accept.
+func (w *workspace) stagingRel(repo, workBranch string) (string, error) {
 	if err := validateStagingKey("repo", repo, true); err != nil {
 		return "", newUsageCLIError(err.Error(), err)
 	}
@@ -215,7 +222,25 @@ func (w *workspace) StagingPath(repo, workBranch string) (string, error) {
 		err := fmt.Errorf("staging key %w: repo %q / work branch %q escapes the workspace", errInvalidStagingKey, repo, workBranch)
 		return "", newUsageCLIError(err.Error(), err)
 	}
-	return filepath.Join(w.root, ".loam", "staging", rel), nil
+	return rel, nil
+}
+
+// stagingPath composes the absolute staging path for repo/workBranch under
+// the workspace root's .loam/ directory (see docs/cli-spec.md -> "Staging
+// location") — the clone's parent, never inside the clone itself.
+//
+// Deliberately unexported, and deliberately NOT on WorkspaceResolver: a
+// path string is not a safe capability. Anything holding one can reach the
+// filesystem with plain os.MkdirAll/os.WriteFile, which follow symlinks
+// and would reintroduce the escape OpenStaging closes. Package-internal
+// callers use it only to name a location in diagnostics and tests;
+// everyone else goes through OpenStaging's StagingArea handle.
+func (w *workspace) stagingPath(repo, workBranch string) (string, error) {
+	rel, err := w.stagingRel(repo, workBranch)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(w.root, loamDirName, stagingDirName, rel), nil
 }
 
 // execGitLookup is the real gitLookup, backed by the git binary on PATH.

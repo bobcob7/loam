@@ -442,6 +442,13 @@ to everyone else until `verdict` publishes them.
 repo, work branch, and agent — outside any clone, so reviewers who never clone can still
 stage.
 
+Every staging read, write, and directory creation is confined to that directory at the
+syscall level (`os.Root`), so a symlinked component anywhere in `.loam/staging/…` — planted
+before or after the key was validated — fails the operation instead of relocating it. The
+repo/work-branch key checks are lexical and cannot see symlinks, so they are not what
+provides this; they exist to reject a malformed key with a precise usage error (exit `2`).
+The CLI never exposes a staging path string to write to directly.
+
 **Output** (JSON) — the staged item with a local staging id:
 
 ```json
