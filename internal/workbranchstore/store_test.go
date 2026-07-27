@@ -375,3 +375,139 @@ func allTransitionsError(err error) *querierMock {
 		},
 	}
 }
+
+// TestRecordUpstreamPR_WritesBothColumns proves the happy path passes both
+// values through in one statement -- a row carrying a number with no URL
+// (or the reverse) would be a half-accepted proposal no reader in the tree
+// knows how to interpret.
+func TestRecordUpstreamPR_WritesBothColumns(t *testing.T) {
+	t.Parallel()
+	id := uuid.Must(uuid.NewV7())
+	var got gen.RecordWorkBranchUpstreamPRParams
+	mock := &querierMock{
+		RecordWorkBranchUpstreamPRFunc: func(_ context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+			got = arg
+			row := validGenRow(id)
+			row.UpstreamPrUrl, row.UpstreamPrNumber = arg.UpstreamPrUrl, arg.UpstreamPrNumber
+			return row, nil
+		},
+	}
+	wb, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7)
+	require.NoError(t, err)
+	assert.Equal(t, "https://forge.example.com/g/r/pulls/7", got.UpstreamPrUrl.String)
+	assert.True(t, got.UpstreamPrUrl.Valid)
+	assert.Equal(t, int32(7), got.UpstreamPrNumber.Int32)
+	assert.True(t, got.UpstreamPrNumber.Valid)
+	require.NotNil(t, wb.UpstreamPRNumber)
+	assert.Equal(t, int32(7), *wb.UpstreamPRNumber)
+}
+
+// TestRecordUpstreamPR_RejectsAnUnusableIdentity proves a PR number or URL
+// that cannot name a real pull request never reaches the database at all.
+// The column pair has a one-shot guard, so writing #0 would BOTH park the
+// branch in the PR poller's poll set forever and consume the row's single
+// chance to record the real PR.
+func TestRecordUpstreamPR_RejectsAnUnusableIdentity(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		url    string
+		number int32
+	}{
+		"zero number":     {url: "https://forge.example.com/g/r/pulls/1", number: 0},
+		"negative number": {url: "https://forge.example.com/g/r/pulls/1", number: -3},
+		"empty url":       {url: "", number: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			mock := &querierMock{
+				RecordWorkBranchUpstreamPRFunc: func(context.Context, gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+					calls++
+					return validGenRow(uuid.Must(uuid.NewV7())), nil
+				},
+			}
+			_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), tc.url, tc.number)
+			require.ErrorIs(t, err, errInvalidUpstreamPR)
+			assert.Zero(t, calls, "an unusable identity must never reach the guarded UPDATE")
+		})
+	}
+}
+
+// TestRecordUpstreamPR_ZeroRowsWithARecordedNumberIsTheRace proves the
+// guarded UPDATE's zero-row outcome is reported as ErrPRAlreadyRecorded
+// when the row already carries a number -- the concurrent-accept case its
+// caller adopts, rather than a failure it retries.
+func TestRecordUpstreamPR_ZeroRowsWithARecordedNumberIsTheRace(t *testing.T) {
+	t.Parallel()
+	id := uuid.Must(uuid.NewV7())
+	existing := validGenRow(id)
+	existing.UpstreamPrNumber = pgtype.Int4{Int32: 42, Valid: true}
+	mock := &querierMock{
+		RecordWorkBranchUpstreamPRFunc: func(context.Context, gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, pgx.ErrNoRows
+		},
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) { return existing, nil },
+	}
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7)
+	require.ErrorIs(t, err, ErrPRAlreadyRecorded)
+	assert.NotErrorIs(t, err, ErrNotFound)
+	assert.Contains(t, err.Error(), "42", "the error must name the number that actually won the column")
+}
+
+// TestRecordUpstreamPR_ZeroRowsWithNoSuchRowIsNotFound proves the OTHER
+// cause of zero rows is kept distinct: a missing row is ErrNotFound, never
+// the race sentinel a caller would happily proceed on.
+func TestRecordUpstreamPR_ZeroRowsWithNoSuchRowIsNotFound(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		RecordWorkBranchUpstreamPRFunc: func(context.Context, gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, pgx.ErrNoRows
+		},
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, pgx.ErrNoRows
+		},
+	}
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
+}
+
+// TestRecordUpstreamPR_TransportFailureIsNotDowngraded proves a dropped
+// connection is reported as itself rather than misread as either
+// precondition sentinel -- the same rule transitionErr follows, and the
+// conflation class this repo has been bitten by before.
+func TestRecordUpstreamPR_TransportFailureIsNotDowngraded(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		RecordWorkBranchUpstreamPRFunc: func(context.Context, gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, errBoom
+		},
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, errBoom
+		},
+	}
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	require.ErrorIs(t, err, errBoom)
+	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
+	assert.NotErrorIs(t, err, ErrNotFound)
+}
+
+// TestRecordUpstreamPR_ClassificationFailureIsNotTheRace proves a
+// classification read that fails for a THIRD reason (a dropped connection
+// while looking the row up) is not reported as either sentinel -- a
+// "not found" reading there would be a guess.
+func TestRecordUpstreamPR_ClassificationFailureIsNotTheRace(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		RecordWorkBranchUpstreamPRFunc: func(context.Context, gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, pgx.ErrNoRows
+		},
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, errBoom
+		},
+	}
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	require.ErrorIs(t, err, errBoom)
+	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
+	assert.NotErrorIs(t, err, ErrNotFound)
+}

@@ -43,6 +43,7 @@ type acceptanceHarness struct {
 	adminPassword string
 	syncHarness   *testsched.SyncHarness
 	ingestHarness *testsched.IngestHarness
+	accepter      *mirrorsync.StoreProposalAccepter
 }
 
 // newAcceptanceHarness assembles the fixed, whole-suite acceptanceHarness.
@@ -67,7 +68,33 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 		adminPassword: cfg.AdminPassword,
 		syncHarness:   newSyncHarness(srv, transport, forgeClient),
 		ingestHarness: testsched.NewIngestHarness(srv.ingestPool),
+		accepter:      newAcceptanceAccepter(srv, transport, forgeClient, cfg),
 	}
+}
+
+// newAcceptanceAccepter builds the harness's own
+// *mirrorsync.StoreProposalAccepter over the SAME live pool run()
+// constructed, the same authenticated gittransport.Transport, and the
+// shared fakeforge's provider surface -- the production graph
+// cmd/server/sync.go's buildProposalAccepter wires, with the two
+// substitutions this whole harness makes everywhere (the fake forge for a
+// real one, a static token for the encrypted credential store).
+//
+// Attribution comes from the loaded config, not a literal, so
+// LOAM_PR_ATTRIBUTION's default reaches this suite exactly as it reaches
+// production.
+//
+// This is what makes the "an accepted work branch whose upstream PR has
+// merged" fixture a real accept rather than a hand-written UPDATE:
+// work_branches.upstream_pr_number is the entire poll set of
+// mirrorsync.StorePRPoller, nothing else in the tree writes it, and until
+// loam-giq.7 landed the only way to reach the poller at all was to seed
+// the column directly (see stepAnAcceptedWorkBranchWhosePRHasMerged).
+func newAcceptanceAccepter(srv acceptanceServer, transport *gittransport.Transport, forgeClient *fakeforge.Client, cfg config.Config) *mirrorsync.StoreProposalAccepter {
+	logger := acceptanceLogger()
+	repoStore := reposstore.NewStore(gen.New(srv.pool), logger)
+	workBranchStore := workbranchstore.New(gen.New(srv.pool), logger)
+	return mirrorsync.NewStoreProposalAccepter(srv.dataDir, logger, cfg.PRAttribution, repoStore, workBranchStore, workBranchStore, forgeClient, transport)
 }
 
 // staticTokenCredentialSource is a minimal credentialSource (gittransport's

@@ -178,10 +178,48 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 	return syncRunner{run: scheduler.Run, shutdown: scheduler.Shutdown, grace: grace, logger: cfg.Logger}, nil
 }
 
+// buildProposalAccepter constructs the production
+// *mirrorsync.StoreProposalAccepter -- Proposal Acceptance's push +
+// CreatePR + record leg (docs/sync-spec.md -> Proposal Acceptance) -- over
+// pool, wired exactly as buildSyncScheduler wires the collaborators it
+// shares (the same reposstore/workbranchstore over the same live pool, the
+// same gittransport.Transport resolving each host's credential per
+// invocation, and the same per-repo forgePRTracker for the forge REST
+// surface).
+//
+// This is the composition-root half of the seam that makes
+// work_branches.upstream_pr_number a column anything actually writes: no
+// other code in this tree writes it, and it is the whole poll set of
+// mirrorsync.StorePRPoller (Mirror Sync step 5), so until an accept runs
+// that step polls nothing.
+//
+// It is a constructor, not a runner: acceptance is synchronous and
+// admin-triggered (docs/sync-spec.md: "The RPC is synchronous and
+// idempotent by construction"), so nothing in serve's background tier
+// starts it. Its caller is the AcceptProposal RPC handler --
+// ProposalService, loam-ofg.14 -- which does not exist yet; this function
+// is what that bead constructs its handler over, and what keeps the
+// production wiring (per-repo forge binding, attribution from config,
+// mirror root from LOAM_DATA_DIR) in one place next to the sync graph it
+// mirrors rather than re-derived inside a handler.
+func buildProposalAccepter(cfg config.Config, pool *pgxpool.Pool, httpClient *http.Client) (*mirrorsync.StoreProposalAccepter, error) {
+	encryptor, err := crypto.NewEncryptor(cfg.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("building encryptor: %w", err)
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
+	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
+	return mirrorsync.NewStoreProposalAccepter(cfg.DataDir, cfg.Logger, cfg.PRAttribution, repos, workBranches, workBranches, tracker, transport), nil
+}
+
 // forgePRTracker is the production forge REST surface Mirror Sync step 5
-// reads PR state through: mirrorsync's pullRequestTracker seam, satisfied
-// by resolving each call's repo to its OWN forge host and token and
-// building a single-use *forge.Forgejo bound to that pair.
+// reads PR state through, and proposal acceptance opens a pull request
+// through: mirrorsync's pullRequestTracker and pullRequestOpener seams,
+// both satisfied by resolving each call's repo to its OWN forge host and
+// token and building a single-use *forge.Forgejo bound to that pair.
 //
 // A per-call instance is required, not an optimisation deferred: a
 // *forge.Forgejo is bound to one host and one token at construction
@@ -222,6 +260,30 @@ func (t forgePRTracker) ClosePR(ctx context.Context, repo string, prNumber int) 
 		return err
 	}
 	return provider.ClosePR(ctx, repo, prNumber)
+}
+
+// CreatePR implements mirrorsync's pullRequestOpener. It binds per call
+// exactly as GetPRState and ClosePR do -- the binding is a property of
+// *forge.Forgejo, not of which operation is being performed, so an
+// acceptance for a repo on one forge can never be sent with another
+// forge's token.
+func (t forgePRTracker) CreatePR(ctx context.Context, repo, headBranch, targetBranch, title, description string) (string, int, error) {
+	provider, err := t.provider(ctx, repo)
+	if err != nil {
+		return "", 0, err
+	}
+	return provider.CreatePR(ctx, repo, headBranch, targetBranch, title, description)
+}
+
+// FindOpenPR implements mirrorsync's pullRequestOpener -- the lookup the
+// accept engine adopts an already-existing PR through when CreatePR
+// answers forge.ErrDuplicatePR.
+func (t forgePRTracker) FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (string, int, bool, error) {
+	provider, err := t.provider(ctx, repo)
+	if err != nil {
+		return "", 0, false, err
+	}
+	return provider.FindOpenPR(ctx, repo, headBranch, targetBranch)
 }
 
 // provider resolves repo's enrolled forge host and that host's stored

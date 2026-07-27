@@ -18,7 +18,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter upstreamRefPusher workBranchByNameLookup workBranchPRRecorder pullRequestOpener
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -379,4 +379,74 @@ type pullRequestTracker interface {
 // poller.
 type upstreamRefDeleter interface {
 	DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstreamURL, ref string) ([]byte, error)
+}
+
+// upstreamRefPusher is the gittransport.Transport surface
+// StoreProposalAccepter pushes a proposal branch through, defined here at
+// the consumer. *gittransport.Transport satisfies it structurally.
+//
+// It is a separate seam from upstreamRefFetcher and upstreamRefDeleter for
+// the same reason those two are separate from each other: no collaborator
+// should gain a capability merely because it shares a transport with one
+// that has it.
+//
+// The signature is the no-force guarantee's structural half. There is no
+// force parameter, no argv slice, and no options struct -- a caller can
+// supply a refspec and nothing else, and gittransport.Transport.Push
+// behind it never adds --force. A forced update of an upstream ref is not
+// something a holder of this interface can express, which is why
+// StoreProposalAccepter's own doc comment can claim the property without
+// relying on a convention anyone has to remember.
+type upstreamRefPusher interface {
+	Push(ctx context.Context, host, mirrorDir, upstreamURL, refspec string) ([]byte, error)
+}
+
+// workBranchByNameLookup resolves one work branch by its (repo, name)
+// identity -- the shape an admin-facing accept arrives in, since the RPC
+// names a repo and a branch, never a UUID. Defined here at the consumer;
+// *workbranchstore.Store satisfies it structurally.
+//
+// StoreProposalAccepter needs the whole row, not just the id: the state
+// and conflict preconditions, the title and description that become the
+// PR, the target it opens against, and the upstream_pr_number whose
+// null-ness is the entire idempotency decision all come off the same read.
+type workBranchByNameLookup interface {
+	GetByName(ctx context.Context, repoID uuid.UUID, name string) (workbranchstore.WorkBranch, error)
+}
+
+// workBranchPRRecorder is the workbranchstore.Store surface
+// StoreProposalAccepter records an opened pull request through, defined
+// here at the consumer. *workbranchstore.Store satisfies it structurally.
+//
+// This is the only write seam the accepter holds, and it is deliberately
+// the narrowest one that exists: the accept path must never be able to
+// transition a work branch's state, clear its conflict, or close it. It
+// writes exactly the two columns nothing else in the tree writes, through
+// a guarded UPDATE that refuses a second write (see
+// workbranchstore.ErrPRAlreadyRecorded).
+type workBranchPRRecorder interface {
+	RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error)
+}
+
+// pullRequestOpener is the forge.Provider surface StoreProposalAccepter
+// opens a pull request through, defined here at the consumer.
+// forge.Provider itself (and *fakeforge.Client) satisfies it structurally.
+//
+// Both methods take repo as an ARGUMENT, exactly as pullRequestTracker's
+// do and for the identical reason: a *forge.Forgejo binds one host and one
+// token at construction, so the production implementation must resolve
+// repos.forge_host and that host's credential per call rather than share
+// one instance across repos enrolled on different forges
+// (cmd/server/sync.go's forgePRTracker).
+//
+// FindOpenPR is here, and not merely CreatePR, because the two answer
+// genuinely different questions and the pair is what makes the retry path
+// honest. CreatePR's forge.ErrDuplicatePR says only "a PR already exists
+// for this head/target pair"; the number this engine must record can be
+// recovered ONLY by a lookup, never from that rejection's message, whose
+// embedded id is Forgejo's internal one (see forge.ErrDuplicatePR's
+// godoc).
+type pullRequestOpener interface {
+	CreatePR(ctx context.Context, repo, headBranch, targetBranch, title, description string) (prURL string, prNumber int, err error)
+	FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (prURL string, prNumber int, found bool, err error)
 }

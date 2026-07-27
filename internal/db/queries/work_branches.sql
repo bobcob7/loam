@@ -230,3 +230,32 @@ WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
       )
     )
   );
+
+-- name: RecordWorkBranchUpstreamPR :one
+-- Proposal Acceptance's record leg (docs/sync-spec.md "Proposal
+-- Acceptance", step 2: "record upstream_pr_url and upstream_pr_number").
+-- The upstream PR is opened once per work branch and never re-opened: a
+-- re-accept after a catch-up fast-forwards the SAME branch upstream, which
+-- updates the SAME PR in place, so this statement's whole job is to write
+-- that identity exactly once.
+--
+-- upstream_pr_number IS NULL is therefore a guard, not a convenience. It is
+-- the second half of proposal acceptance's idempotency, the half that
+-- survives a race: the accept engine also skips CreatePR when the column it
+-- already read was non-NULL, but two concurrent accepts can both read NULL
+-- and both call CreatePR, and only one of them may win the column. Without
+-- this predicate the loser would overwrite the winner's number, and
+-- internal/mirrorsync's PR poller -- whose entire poll set is "rows with a
+-- recorded upstream_pr_number" -- would then poll a PR nobody can reach and
+-- silently stop tracking the real one. Zero rows here means "already
+-- recorded" (or "no such row"), which internal/workbranchstore separates
+-- into ErrPRAlreadyRecorded and ErrNotFound rather than folding into a
+-- silent no-op success.
+--
+-- The url and number are written in ONE statement, never separately: a row
+-- carrying a number with no url (or the reverse) would be a half-accepted
+-- proposal no reader in the tree knows how to interpret.
+UPDATE work_branches
+SET upstream_pr_url = $2, upstream_pr_number = $3, updated_at = now()
+WHERE id = $1 AND upstream_pr_number IS NULL
+RETURNING *;

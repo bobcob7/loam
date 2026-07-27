@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bobcob7/loam/internal/config"
 	"github.com/bobcob7/loam/internal/credentialstore"
 	"github.com/bobcob7/loam/internal/reposstore"
 )
@@ -177,6 +179,11 @@ type forgeAPIRecorder struct {
 	path          string
 	method        string
 	authorization string
+	// body is the decoded JSON request body, for the CreatePR call site
+	// whose payload (head, base, title, body) is itself part of what has
+	// to be pinned -- the PR body is where the attribution footer reaches
+	// the wire.
+	body map[string]any
 }
 
 func (r *forgeAPIRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -184,8 +191,22 @@ func (r *forgeAPIRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.path = req.URL.Path
 	r.method = req.Method
 	r.authorization = req.Header.Get("Authorization")
+	r.body = nil
+	if req.Body != nil {
+		var decoded map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&decoded); err == nil {
+			r.body = decoded
+		}
+	}
 	r.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	// The list endpoint FindOpenPR pages through wants an ARRAY; every
+	// single-PR endpoint wants an object. Both are served off the same
+	// recorder, keyed on the path shape Forgejo's own API uses.
+	if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls") {
+		_ = json.NewEncoder(w).Encode([]any{})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed", "merged": true})
 }
 
@@ -301,4 +322,134 @@ func TestForgePRTracker_UnknownRepoIsReported(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
 	assert.False(t, credentialsCalled, "an unresolvable repo must not reach the credential store at all")
+}
+
+// TestForgePRTracker_CreatePR_BindsTheSameWayAndPostsTheBody proves
+// proposal acceptance's forge call binds per repo exactly as the poller's
+// two do. This is the seam loam-0do's finding applies to: a *forge.Forgejo
+// carries one host and one token from construction, so a single shared
+// provider would open one repo's pull request against another repo's
+// forge, with that other forge's token.
+//
+// The body is asserted too, not just the binding: the PR body this engine
+// sends is the only place the attribution footer reaches the outside
+// world, so a wiring test that ignored it would leave the whole path from
+// LOAM_PR_ATTRIBUTION to the wire unpinned at the composition root.
+func TestForgePRTracker_CreatePR_BindsTheSameWayAndPostsTheBody(t *testing.T) {
+	t.Parallel()
+	recorder := &forgeAPIRecorder{}
+	server := httptest.NewServer(recorder)
+	t.Cleanup(server.Close)
+	tracker := forgePRTracker{
+		repos: &repoForgeLookupMock{GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
+			return reposstore.Repo{Name: name, ForgeHost: server.URL}, nil
+		}},
+		credentials: &forgeCredentialLookupMock{GetByHostFunc: func(_ context.Context, host string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{Host: host, Token: "tkn-create"}, nil
+		}},
+		httpClient: server.Client(),
+		logger:     syncTestLogger(),
+	}
+	_, number, err := tracker.CreatePR(t.Context(), "acme/widgets", "loam/wb-9c2f1a", "main", "Add the widget", "body\n\n---\nProposed via Loam.")
+	require.NoError(t, err)
+	assert.Equal(t, 7, number)
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	assert.Equal(t, http.MethodPost, recorder.method)
+	assert.Equal(t, "/api/v1/repos/acme/widgets/pulls", recorder.path,
+		"the request must reach the forge host recorded on the repo's own row")
+	assert.Equal(t, "token tkn-create", recorder.authorization,
+		"the request must carry the token the credential store returned for that host")
+	assert.Equal(t, "loam/wb-9c2f1a", recorder.body["head"])
+	assert.Equal(t, "main", recorder.body["base"])
+	assert.Equal(t, "body\n\n---\nProposed via Loam.", recorder.body["body"])
+}
+
+// TestForgePRTracker_FindOpenPR_BindsTheSameWay pins the adoption lookup's
+// binding. It is the call that recovers an existing PR's number after a
+// duplicate rejection, so sending it to the wrong forge would return a
+// number from an unrelated repo.
+func TestForgePRTracker_FindOpenPR_BindsTheSameWay(t *testing.T) {
+	t.Parallel()
+	recorder := &forgeAPIRecorder{}
+	server := httptest.NewServer(recorder)
+	t.Cleanup(server.Close)
+	tracker := forgePRTracker{
+		repos: &repoForgeLookupMock{GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
+			return reposstore.Repo{Name: name, ForgeHost: server.URL}, nil
+		}},
+		credentials: &forgeCredentialLookupMock{GetByHostFunc: func(_ context.Context, host string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{Host: host, Token: "tkn-find"}, nil
+		}},
+		httpClient: server.Client(),
+		logger:     syncTestLogger(),
+	}
+	_, _, _, err := tracker.FindOpenPR(t.Context(), "acme/widgets", "loam/wb-9c2f1a", "main")
+	require.NoError(t, err)
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	assert.Equal(t, http.MethodGet, recorder.method)
+	assert.Equal(t, "/api/v1/repos/acme/widgets/pulls", recorder.path)
+	assert.Equal(t, "token tkn-find", recorder.authorization)
+}
+
+// TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed
+// proves the accept path refuses to fall back to an anonymous request the
+// way the poll path does. It matters more here, not less: an anonymous
+// POST would fail against the forge anyway, but reporting the credential
+// problem as itself is what tells the admin why their accept did not open
+// a PR.
+func TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("no credential for host")
+	tracker := forgePRTracker{
+		repos: &repoForgeLookupMock{GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
+			return reposstore.Repo{Name: name, ForgeHost: "forge.example.com"}, nil
+		}},
+		credentials: &forgeCredentialLookupMock{GetByHostFunc: func(context.Context, string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{}, wantErr
+		}},
+		httpClient: &http.Client{},
+		logger:     syncTestLogger(),
+	}
+	_, _, err := tracker.CreatePR(t.Context(), "acme/widgets", "loam/wb-9c2f1a", "main", "t", "d")
+	require.ErrorIs(t, err, wantErr)
+	assert.Contains(t, err.Error(), "forge.example.com")
+	_, _, _, err = tracker.FindOpenPR(t.Context(), "acme/widgets", "loam/wb-9c2f1a", "main")
+	require.ErrorIs(t, err, wantErr)
+}
+
+// TestBuildProposalAccepter_WiresTheProductionGraph proves the
+// composition-root constructor loam-ofg.14's AcceptProposal handler will
+// build its engine from actually assembles -- and, by compiling at all,
+// that forgePRTracker satisfies mirrorsync's pullRequestOpener seam and
+// *gittransport.Transport its upstreamRefPusher seam.
+//
+// It takes a nil pool deliberately: every collaborator here is constructed
+// over the pool without touching it (gen.New, reposstore.NewStore,
+// workbranchstore.New, credentialstore.New are all plain struct
+// constructions), so this exercises the wiring without needing a database.
+// The one thing that CAN fail is the encryptor, which is why the config
+// carries a real key.
+func TestBuildProposalAccepter_WiresTheProductionGraph(t *testing.T) {
+	t.Parallel()
+	cfg := config.Config{
+		DataDir:       t.TempDir(),
+		EncryptionKey: make([]byte, 32),
+		PRAttribution: true,
+		Logger:        syncTestLogger(),
+	}
+	accepter, err := buildProposalAccepter(cfg, nil, &http.Client{})
+	require.NoError(t, err)
+	assert.NotNil(t, accepter)
+}
+
+// TestBuildProposalAccepter_RejectsABadEncryptionKey proves a wiring
+// failure fails startup rather than degrading to an engine that cannot
+// decrypt the token its pushes need.
+func TestBuildProposalAccepter_RejectsABadEncryptionKey(t *testing.T) {
+	t.Parallel()
+	cfg := config.Config{DataDir: t.TempDir(), EncryptionKey: []byte("too short"), Logger: syncTestLogger()}
+	_, err := buildProposalAccepter(cfg, nil, &http.Client{})
+	require.Error(t, err)
 }

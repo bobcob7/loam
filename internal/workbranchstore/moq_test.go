@@ -47,6 +47,9 @@ var _ querier = &querierMock{}
 //			MarkWorkBranchConflictedFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
 //				panic("mock out the MarkWorkBranchConflicted method")
 //			},
+//			RecordWorkBranchUpstreamPRFunc: func(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+//				panic("mock out the RecordWorkBranchUpstreamPR method")
+//			},
 //			SetWorkBranchTitleDescriptionFunc: func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error) {
 //				panic("mock out the SetWorkBranchTitleDescription method")
 //			},
@@ -86,6 +89,9 @@ type querierMock struct {
 
 	// MarkWorkBranchConflictedFunc mocks the MarkWorkBranchConflicted method.
 	MarkWorkBranchConflictedFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
+
+	// RecordWorkBranchUpstreamPRFunc mocks the RecordWorkBranchUpstreamPR method.
+	RecordWorkBranchUpstreamPRFunc func(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error)
 
 	// SetWorkBranchTitleDescriptionFunc mocks the SetWorkBranchTitleDescription method.
 	SetWorkBranchTitleDescriptionFunc func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error)
@@ -158,6 +164,13 @@ type querierMock struct {
 			// ID is the id argument value.
 			ID pgtype.UUID
 		}
+		// RecordWorkBranchUpstreamPR holds details about calls to the RecordWorkBranchUpstreamPR method.
+		RecordWorkBranchUpstreamPR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.RecordWorkBranchUpstreamPRParams
+		}
 		// SetWorkBranchTitleDescription holds details about calls to the SetWorkBranchTitleDescription method.
 		SetWorkBranchTitleDescription []struct {
 			// Ctx is the ctx argument value.
@@ -182,6 +195,7 @@ type querierMock struct {
 	lockGetWorkBranchByName           sync.RWMutex
 	lockListWorkBranches              sync.RWMutex
 	lockMarkWorkBranchConflicted      sync.RWMutex
+	lockRecordWorkBranchUpstreamPR    sync.RWMutex
 	lockSetWorkBranchTitleDescription sync.RWMutex
 	lockUpdateWorkBranchState         sync.RWMutex
 }
@@ -507,6 +521,42 @@ func (mock *querierMock) MarkWorkBranchConflictedCalls() []struct {
 	mock.lockMarkWorkBranchConflicted.RLock()
 	calls = mock.calls.MarkWorkBranchConflicted
 	mock.lockMarkWorkBranchConflicted.RUnlock()
+	return calls
+}
+
+// RecordWorkBranchUpstreamPR calls RecordWorkBranchUpstreamPRFunc.
+func (mock *querierMock) RecordWorkBranchUpstreamPR(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
+	if mock.RecordWorkBranchUpstreamPRFunc == nil {
+		panic("querierMock.RecordWorkBranchUpstreamPRFunc: method is nil but querier.RecordWorkBranchUpstreamPR was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.RecordWorkBranchUpstreamPRParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockRecordWorkBranchUpstreamPR.Lock()
+	mock.calls.RecordWorkBranchUpstreamPR = append(mock.calls.RecordWorkBranchUpstreamPR, callInfo)
+	mock.lockRecordWorkBranchUpstreamPR.Unlock()
+	return mock.RecordWorkBranchUpstreamPRFunc(ctx, arg)
+}
+
+// RecordWorkBranchUpstreamPRCalls gets all the calls that were made to RecordWorkBranchUpstreamPR.
+// Check the length with:
+//
+//	len(mockedquerier.RecordWorkBranchUpstreamPRCalls())
+func (mock *querierMock) RecordWorkBranchUpstreamPRCalls() []struct {
+	Ctx context.Context
+	Arg gen.RecordWorkBranchUpstreamPRParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.RecordWorkBranchUpstreamPRParams
+	}
+	mock.lockRecordWorkBranchUpstreamPR.RLock()
+	calls = mock.calls.RecordWorkBranchUpstreamPR
+	mock.lockRecordWorkBranchUpstreamPR.RUnlock()
 	return calls
 }
 
