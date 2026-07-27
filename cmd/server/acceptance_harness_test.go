@@ -120,11 +120,20 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // this suite only ever sees the returned *testsched.SyncHarness, whose own
 // type has no Run method (internal/testsched/sync.go).
 //
-// production has already reached the same conclusion from the other
-// direction: cmd/server/main.go's run() does not construct a Scheduler at
-// all today (see its own doc comment), so there is no risk of this
-// harness's Tick calls ever racing a production goroutine's Run -- the two
-// Schedulers are not just logically separate, one of them does not exist.
+// production reaches the same constraint from the other direction.
+// cmd/server/main.go's run() DOES construct a Scheduler now (loam-0do) --
+// an earlier version of this comment said it did not, which stopped being
+// true the moment that bead landed -- but buildSyncScheduler (sync.go)
+// keeps that Scheduler as a local too and returns only a runner, so its
+// Tick is just as unreachable as this one's Run. The two Schedulers are
+// distinct objects, and loam-f75's panic ("WaitGroup is reused before
+// previous Wait has returned") is per instance, so no Tick here can ever
+// collide with that Run there.
+//
+// The production scheduler's wall-clock TICKS are kept away from this
+// suite separately, by acceptanceConfig's LOAM_SYNC_INTERVAL -- see
+// acceptanceSyncInterval for why interval, not the per-repo guard, is the
+// mechanism that has to do that job.
 func newSyncHarness(srv acceptanceServer, transport *gittransport.Transport, forgeClient *fakeforge.Client) *testsched.SyncHarness {
 	logger := acceptanceLogger()
 	repoStore := reposstore.NewStore(gen.New(srv.pool), logger)
