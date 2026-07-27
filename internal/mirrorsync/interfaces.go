@@ -56,23 +56,18 @@ type RepoID string
 // with no bound this caller could act on early. StoreRepoLister (this
 // package) adapts Store.ListAllRepoNames to this interface, converting
 // each returned name to a RepoID (RepoID is repos.name, never repos.id --
-// loam-54o.7 NOTES). No production Scheduler is constructed anywhere in
-// the tree yet: loam-ofg.21 wires cmd/server/main.go's startup sequence --
-// it connects to Postgres, in the correct migrate-then-pool order, and
-// constructs a real ingest worker pool -- but deliberately stopped short
-// of building a Scheduler while most of this package's collaborators had
-// no production implementation. As of loam-giq.5 exactly ONE of the
-// scheduler's 7 collaborators still lacks one: PRPoller (loam-giq.8).
-// Fetcher is MirrorFetcher (giq.2), AdvanceDetector is
-// StoreAdvanceDetector (giq.4), MergeabilityChecker is
-// StoreMergeabilityChecker (giq.5), IngestEnqueuer is StoreIngestEnqueuer
-// (c94.2), and RepoLister/SyncStateReporter are this package's own
-// StoreRepoLister and internal/mirrorsync/state -- all real. So
-// StoreRepoLister still has no call site to wire into today; it remains
-// ready for whichever bead constructs the last collaborator (giq.8) to
-// pass to mirrorsync.New as the RepoLister argument, alongside
-// Scheduler.Shutdown (added by loam-ofg.21) as the drain seam its own
-// shutdown sequence needs.
+// loam-54o.7 NOTES).
+//
+// This comment deliberately no longer carries an inventory of which
+// sibling collaborators do or do not have production implementations. It
+// used to, and that inventory went stale by construction -- every bead
+// that landed invalidated it, nothing failed when it did, and three
+// separate readers reached a wrong conclusion from it in a single session
+// (including a claim that SyncStateReporter had no implementation when
+// internal/mirrorsync/state has provided one all along). The compile-time
+// assertions in production_assertions.go are the honest version of that
+// inventory: they fail loudly the moment a production type stops
+// satisfying its seam, which a prose list cannot do.
 type RepoLister interface {
 	ListRepos(ctx context.Context) ([]RepoID, error)
 }
