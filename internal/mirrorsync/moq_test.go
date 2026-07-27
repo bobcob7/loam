@@ -1263,3 +1263,159 @@ func (mock *ingestJobEnqueuerMock) EnqueueCalls() []struct {
 	mock.lockEnqueue.RUnlock()
 	return calls
 }
+
+// Ensure, that mergeTreeRunnerMock does implement mergeTreeRunner.
+// If this is not the case, regenerate this file with moq.
+var _ mergeTreeRunner = &mergeTreeRunnerMock{}
+
+// mergeTreeRunnerMock is a mock implementation of mergeTreeRunner.
+//
+//	func TestSomethingThatUsesmergeTreeRunner(t *testing.T) {
+//
+//		// make and configure a mocked mergeTreeRunner
+//		mockedmergeTreeRunner := &mergeTreeRunnerMock{
+//			MergeTreeFunc: func(ctx context.Context, mirrorDir string, ours string, theirs string) (bool, error) {
+//				panic("mock out the MergeTree method")
+//			},
+//		}
+//
+//		// use mockedmergeTreeRunner in code that requires mergeTreeRunner
+//		// and then make assertions.
+//
+//	}
+type mergeTreeRunnerMock struct {
+	// MergeTreeFunc mocks the MergeTree method.
+	MergeTreeFunc func(ctx context.Context, mirrorDir string, ours string, theirs string) (bool, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// MergeTree holds details about calls to the MergeTree method.
+		MergeTree []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// MirrorDir is the mirrorDir argument value.
+			MirrorDir string
+			// Ours is the ours argument value.
+			Ours string
+			// Theirs is the theirs argument value.
+			Theirs string
+		}
+	}
+	lockMergeTree sync.RWMutex
+}
+
+// MergeTree calls MergeTreeFunc.
+func (mock *mergeTreeRunnerMock) MergeTree(ctx context.Context, mirrorDir string, ours string, theirs string) (bool, error) {
+	if mock.MergeTreeFunc == nil {
+		panic("mergeTreeRunnerMock.MergeTreeFunc: method is nil but mergeTreeRunner.MergeTree was just called")
+	}
+	callInfo := struct {
+		Ctx       context.Context
+		MirrorDir string
+		Ours      string
+		Theirs    string
+	}{
+		Ctx:       ctx,
+		MirrorDir: mirrorDir,
+		Ours:      ours,
+		Theirs:    theirs,
+	}
+	mock.lockMergeTree.Lock()
+	mock.calls.MergeTree = append(mock.calls.MergeTree, callInfo)
+	mock.lockMergeTree.Unlock()
+	return mock.MergeTreeFunc(ctx, mirrorDir, ours, theirs)
+}
+
+// MergeTreeCalls gets all the calls that were made to MergeTree.
+// Check the length with:
+//
+//	len(mockedmergeTreeRunner.MergeTreeCalls())
+func (mock *mergeTreeRunnerMock) MergeTreeCalls() []struct {
+	Ctx       context.Context
+	MirrorDir string
+	Ours      string
+	Theirs    string
+} {
+	var calls []struct {
+		Ctx       context.Context
+		MirrorDir string
+		Ours      string
+		Theirs    string
+	}
+	mock.lockMergeTree.RLock()
+	calls = mock.calls.MergeTree
+	mock.lockMergeTree.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchConflictMarkerMock does implement workBranchConflictMarker.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchConflictMarker = &workBranchConflictMarkerMock{}
+
+// workBranchConflictMarkerMock is a mock implementation of workBranchConflictMarker.
+//
+//	func TestSomethingThatUsesworkBranchConflictMarker(t *testing.T) {
+//
+//		// make and configure a mocked workBranchConflictMarker
+//		mockedworkBranchConflictMarker := &workBranchConflictMarkerMock{
+//			MarkConflictedFunc: func(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the MarkConflicted method")
+//			},
+//		}
+//
+//		// use mockedworkBranchConflictMarker in code that requires workBranchConflictMarker
+//		// and then make assertions.
+//
+//	}
+type workBranchConflictMarkerMock struct {
+	// MarkConflictedFunc mocks the MarkConflicted method.
+	MarkConflictedFunc func(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// MarkConflicted holds details about calls to the MarkConflicted method.
+		MarkConflicted []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+		}
+	}
+	lockMarkConflicted sync.RWMutex
+}
+
+// MarkConflicted calls MarkConflictedFunc.
+func (mock *workBranchConflictMarkerMock) MarkConflicted(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error) {
+	if mock.MarkConflictedFunc == nil {
+		panic("workBranchConflictMarkerMock.MarkConflictedFunc: method is nil but workBranchConflictMarker.MarkConflicted was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  uuid.UUID
+	}{
+		Ctx: ctx,
+		ID:  id,
+	}
+	mock.lockMarkConflicted.Lock()
+	mock.calls.MarkConflicted = append(mock.calls.MarkConflicted, callInfo)
+	mock.lockMarkConflicted.Unlock()
+	return mock.MarkConflictedFunc(ctx, id)
+}
+
+// MarkConflictedCalls gets all the calls that were made to MarkConflicted.
+// Check the length with:
+//
+//	len(mockedworkBranchConflictMarker.MarkConflictedCalls())
+func (mock *workBranchConflictMarkerMock) MarkConflictedCalls() []struct {
+	Ctx context.Context
+	ID  uuid.UUID
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  uuid.UUID
+	}
+	mock.lockMarkConflicted.RLock()
+	calls = mock.calls.MarkConflicted
+	mock.lockMarkConflicted.RUnlock()
+	return calls
+}
