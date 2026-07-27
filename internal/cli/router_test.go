@@ -89,6 +89,14 @@ var stillStubbedExemptions = map[string]bool{
 	// work comment is covered by TestRouterDispatch_WorkComment_
 	// ReachesRealHandler in commands_work_comment_test.go (loam-0pj.12).
 	"work comment": true,
+	// work list/show/diff/comments/verdicts are covered by
+	// TestRouterDispatch_WorkReadCommands_ReachRealHandlers in
+	// commands_work_read_test.go (loam-0pj.10).
+	"work list":     true,
+	"work show":     true,
+	"work diff":     true,
+	"work comments": true,
+	"work verdicts": true,
 	// graph def/refs/deps/dependents/history are covered by
 	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
 	// commands_graph_test.go (loam-0pj.14).
@@ -154,13 +162,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"instructions", []string{"instructions"}},
 		{"instructions with target", []string{"instructions", "work list"}},
 		{"whoami", []string{"whoami"}},
-		{"work list", []string{"work", "list"}},
-		{"work list with filters", []string{"work", "list", "--repo", "acme/repo", "--awaiting-review", "--limit", "5"}},
-		{"work show", []string{"work", "show", "acme/repo", "wb-1"}},
-		{"work diff", []string{"work", "diff", "acme/repo", "wb-1"}},
-		{"work comments", []string{"work", "comments", "acme/repo", "wb-1"}},
-		{"work comments staged", []string{"work", "comments", "acme/repo", "wb-1", "--staged"}},
-		{"work verdicts", []string{"work", "verdicts", "acme/repo", "wb-1"}},
 		{"work reply", []string{"work", "reply", "acme/repo", "wb-1", "--thread", "t1"}},
 		{"work verdict", []string{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"}},
 	}
@@ -233,12 +234,20 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	// an extra positional: its flags are still registered and parsed, but it
 	// stops on the argument count before reading stdin or opening a staging
 	// area, neither of which newTestDeps provides.
-	commentErr := router.Dispatch(t.Context(), []string{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"})
-	var commentUsage *usageError
-	assert.ErrorAs(t, commentErr, &commentUsage)
+	// `work comment` and the read commands (`work comments`, `work list`)
+	// are implemented, so each is dispatched with an argument-count error:
+	// their flags are still registered and parsed, but each stops on the
+	// positional count before reading stdin, opening a staging area, or
+	// calling an RPC -- none of which newTestDeps provides.
 	for _, args := range [][]string{
-		{"work", "comments", "a", "b", "--staged"},
-		{"work", "list", "--limit", "5"},
+		{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"},
+		{"work", "comments", "a", "b", "c", "--staged"},
+		{"work", "list", "extra", "--limit", "5"},
+	} {
+		var ue *usageError
+		assert.ErrorAs(t, router.Dispatch(t.Context(), args), &ue, "args %v", args)
+	}
+	for _, args := range [][]string{
 		{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"},
 	} {
 		err := router.Dispatch(t.Context(), args)
