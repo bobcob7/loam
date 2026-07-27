@@ -94,6 +94,9 @@ var stillStubbedExemptions = map[string]bool{
 	"graph deps":       true,
 	"graph dependents": true,
 	"graph history":    true,
+	// search is covered by TestRouterDispatch_Search_ReachesRealHandler in
+	// commands_search_test.go (loam-0pj.15).
+	"search": true,
 }
 
 // leafCommandKeys walks tree and returns the set of dispatchable leaf
@@ -158,8 +161,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"work comment", []string{"work", "comment", "acme/repo", "wb-1", "--file", "a.go", "--line", "3"}},
 		{"work reply", []string{"work", "reply", "acme/repo", "wb-1", "--thread", "t1"}},
 		{"work verdict", []string{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"}},
-		{"search", []string{"search", "how does auth work"}},
-		{"search with flags", []string{"search", "auth", "--repo", "acme/repo", "--limit", "3"}},
 	}
 
 	covered := make(map[string]bool, len(tests))
@@ -230,7 +231,6 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 		{"work", "comment", "a", "b", "--file", "x.go", "--line", "3"},
 		{"work", "list", "--limit", "5"},
 		{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"},
-		{"search", "q", "--limit", "3"},
 	} {
 		err := router.Dispatch(t.Context(), args)
 		assert.ErrorIs(t, err, errNotImplemented)

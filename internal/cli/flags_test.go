@@ -177,7 +177,7 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 		{"graph refs", func() *flag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags("graph refs"); return fs }, []flagExpectation{
 			{"repo", ""}, {"all", "false"}, {"file", ""}, {"limit", "50"},
 		}},
-		{"search", func() *flag.FlagSet { fs, _, _ := newSearchFlags(); return fs }, []flagExpectation{
+		{"search", func() *flag.FlagSet { fs, _, _, _ := newSearchFlags(); return fs }, []flagExpectation{
 			{"repo", ""}, {"all", "false"}, {"limit", "10"},
 		}},
 	}
