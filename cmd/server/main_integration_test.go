@@ -30,6 +30,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -411,27 +414,36 @@ func TestServer_RequeuesOrphanedIngestJobsOnStartup(t *testing.T) {
 // no mirror on disk required. The cycle therefore reaches ReportError,
 // which is the observable.
 //
-// THE SIGNAL IS repos.sync_error, NOT repos.sync_state, and that choice is
-// load-bearing (loam-4q2). sync_state CYCLES while a live scheduler runs:
-// every tick writes 'syncing' at cycle start and 'error' at cycle end,
-// forever, so a single sample of it cannot distinguish "never ticked"
-// (still the 'idle' default) from "ticked and currently mid-cycle" -- and
-// polling for one specific value of a cycling column is how
-// TestServer_RequeuesOrphanedIngestJobsOnStartup turned CI red.
-// sync_error has no such trouble here. It is NULL on every freshly
-// inserted repos row (0001_init.up.sql leaves it nullable with no
-// default), the ONLY writers anywhere in this tree are
-// internal/mirrorsync/state's ReportError (sets it) and ReportIdle (clears
-// it), and ReportIdle is unreachable for this fixture because step 1 can
-// never succeed without a credential. So a non-NULL sync_error is
-// reachable if and only if a real cycle ran and failed -- it never returns
-// to NULL, and there is no window to lose a race in.
+// THE SIGNAL IS A SPECIFIC repos.sync_error TEXT, NOT repos.sync_state,
+// and that choice is load-bearing (loam-4q2). sync_state CYCLES while a
+// live scheduler runs: every tick writes 'syncing' at cycle start and
+// 'error' at cycle end, forever, so a single sample of it cannot
+// distinguish "never ticked" (still the 'idle' default) from "ticked and
+// currently mid-cycle" -- and polling for one specific value of a cycling
+// column is how TestServer_RequeuesOrphanedIngestJobsOnStartup turned CI
+// red.
 //
-// The asserted text goes further than "non-empty": "fetching repo <name>"
-// is the wrapper mirrorsync.Scheduler.runSteps puts on step 1's error and
-// appears nowhere else in the tree, so it pins that the write came from a
-// scheduler cycle rather than from any other path that might one day touch
-// the column.
+// sync_error has no such trouble here, on two counts.
+//
+// It does not cycle for THIS fixture: it is NULL on every freshly inserted
+// repos row (0001_init.up.sql leaves it nullable with no default; the
+// helper below asserts that precondition rather than assuming it), it is
+// set by internal/mirrorsync/state's ReportError, and the only writer that
+// clears it is that package's ReportIdle -- which is unreachable here,
+// because step 1 can never succeed without a credential. So once written
+// it stays written; there is no window to lose a race in.
+//
+// And it is attributed, which is what keeps this honest as more writers
+// appear. loam-c94.13 makes ingest.Pool a SECOND writer of sync_state and
+// sync_error (claim/succeed/fail), so "sync_error is non-empty" would stop
+// being proof of a SYNC tick the moment that lands. The polled predicate
+// is therefore not "non-empty" but "contains 'fetching repo <name>'" --
+// the wrapper mirrorsync.Scheduler.runSteps puts on step 1's error, which
+// no other writer produces (the ingest-side writer prefixes its own text
+// with ingest.SyncErrorPrefix). Classifying by author, not by
+// non-emptiness, is what makes the assertion survive that merge; the
+// fixture additionally never enqueues an ingest job at all, since the
+// cycle aborts at step 1 and never reaches step 4.
 func TestServer_RunsARealSyncCycleForEnrolledRepos(t *testing.T) {
 	dsn := newPostgres(t)
 	migrateOnce(t, dsn)
@@ -465,26 +477,59 @@ func seedEnrolledRepo(t *testing.T, dsn, name string) uuid.UUID {
 	return repoID
 }
 
-// assertSyncCycleRan polls repos.sync_error until the scheduler's own
-// step-1 failure text lands there. See
+// assertSyncCycleRan polls repos.sync_error until mirrorsync.Scheduler's
+// OWN step-1 failure text lands there. The author-identifying fragment is
+// inside the polled predicate, not asserted after it: any other writer of
+// this column (loam-c94.13's ingest-side writer, once it lands) must not
+// be able to satisfy the wait. See
 // TestServer_RunsARealSyncCycleForEnrolledRepos's doc comment for why this
-// signal cannot race.
+// signal neither cycles nor races.
 func assertSyncCycleRan(t *testing.T, dsn, repoName string, rs *runningServer) {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	defer conn.Close()
-	var syncError *string
+	want := "fetching repo " + repoName
+	observed := &lastObserved{}
 	require.Eventuallyf(t, func() bool {
+		var syncError *string
 		if err := conn.QueryRow(ctx, `SELECT sync_error FROM repos WHERE name = $1`, repoName).Scan(&syncError); err != nil {
 			return false
 		}
-		return syncError != nil && *syncError != ""
+		if syncError == nil {
+			return false
+		}
+		observed.set(*syncError)
+		return strings.Contains(*syncError, want)
 	}, 30*time.Second, 100*time.Millisecond,
-		"the shipped binary must run a sync cycle on its own ticker; repos.sync_error was never written. stderr: %s", rs.stderr.String())
-	assert.Contains(t, *syncError, "fetching repo "+repoName,
-		"sync_error must carry mirrorsync.Scheduler's own step-1 wrapper, proving a real Mirror Sync cycle wrote it")
+		"the shipped binary must run a sync cycle on its own ticker and record %q in repos.sync_error; last observed value was %s. stderr: %s",
+		want, observed, rs.stderr.String())
+}
+
+// lastObserved carries the most recent value a polling predicate saw, so a
+// require.Eventuallyf failure message can report it. The indirection is
+// needed because Eventuallyf's message ARGUMENTS are evaluated before
+// polling begins (when nothing has been observed yet) while the message
+// itself is FORMATTED only on failure -- a *lastObserved passed with %s
+// therefore renders whatever the last poll stored. testify runs the
+// predicate on its own goroutine, hence the mutex.
+type lastObserved struct {
+	mu    sync.Mutex
+	value string
+}
+
+func (l *lastObserved) set(value string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.value = value
+}
+
+// String implements fmt.Stringer.
+func (l *lastObserved) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strconv.Quote(l.value)
 }
 
 // TestServer_NonPositiveSyncInterval_FailsFastInsteadOfPanicking proves
