@@ -208,7 +208,7 @@ func TestLifecycle_DraftToReviewableToReviewedToComplete(t *testing.T) {
 	assert.Equal(t, StateComplete, wb.State)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
 	require.Error(t, err, "complete is terminal: no transition out")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestUpdateState_SkippingReviewable_Rejected proves draft cannot jump
@@ -222,7 +222,7 @@ func TestUpdateState_SkippingReviewable_Rejected(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewed)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	unchanged, err := store.Get(ctx, wb.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StateDraft, unchanged.State, "a rejected transition must not partially apply")
@@ -242,17 +242,17 @@ func TestUpdateState_RequestReview_RequiresTitleAndDescription(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
 	require.Error(t, err, "neither title nor description is set yet")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	wb, err = store.SetTitleDescription(ctx, wb.ID, "", "Adds a login form")
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
 	require.Error(t, err, "description alone is not enough -- title is still empty")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	wb, err = store.SetTitleDescription(ctx, wb.ID, "Add login", "")
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
 	require.Error(t, err, "title alone is not enough -- description is now empty")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	_, err = store.SetTitleDescription(ctx, wb.ID, "Add login", "Adds a login form")
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
@@ -275,12 +275,12 @@ func TestUpdateState_DemotionNotReachableThroughGenericMethod(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateDraft)
 	require.Error(t, err, "reviewable -> draft must not be reachable through the generic UpdateState")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	wb, err = store.UpdateState(ctx, wb.ID, StateReviewed)
 	require.NoError(t, err)
 	_, err = store.UpdateState(ctx, wb.ID, StateDraft)
 	require.Error(t, err, "reviewed -> draft must not be reachable through the generic UpdateState either")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestClose_FromDraft_RecordsReason proves the admin-only close path works
@@ -310,7 +310,7 @@ func TestClose_AlreadyClosed_Rejected(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Close(ctx, wb.ID, "second close")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestSetTitleDescription_RejectedOnceComplete proves the State gates
@@ -331,7 +331,7 @@ func TestSetTitleDescription_RejectedOnceComplete(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.SetTitleDescription(ctx, wb.ID, "New title", "New description")
 	require.Error(t, err, "set must be rejected once the branch is complete")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestComplete_FromDraft_Rejected proves Complete's own guard --
@@ -348,7 +348,7 @@ func TestComplete_FromDraft_Rejected(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Complete(ctx, wb.ID)
 	require.Error(t, err, "a draft branch was never sent for review -- it must not be completable")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 	unchanged, err := store.Get(ctx, wb.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StateDraft, unchanged.State, "a rejected Complete must not partially apply")
@@ -426,7 +426,7 @@ func TestMarkConflicted_FromReviewed_DemotesToResetDraft(t *testing.T) {
 
 // TestMarkConflicted_Idempotent_OnAlreadyFlaggedDraft proves calling
 // MarkConflicted twice on a still-conflicting draft branch is a benign
-// no-op the second time, never errIllegalTransition -- the mergeability
+// no-op the second time, never ErrIllegalTransition -- the mergeability
 // checker re-evaluates every open work branch on EVERY target-branch
 // advance (docs/git-spec.md "Target Advances & Catch-Up"), so finding the
 // same branch still conflicting on a later advance is routine, not
@@ -488,7 +488,7 @@ func TestMarkConflicted_RejectedFromTerminalState(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.MarkConflicted(ctx, wb.ID)
 	require.Error(t, err, "a closed branch is outside the mergeability check's scope")
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestMarkConflictedSequence_ReconflictWhileReviewable_DemotesInsteadOfError
@@ -505,7 +505,7 @@ func TestMarkConflicted_RejectedFromTerminalState(t *testing.T) {
 // server tests each open (non-terminal) work branch" on EVERY advance, not
 // just the first) -- the old DemoteWorkBranchOnConflict required
 // conflict = 'none', so this call hit zero rows and returned
-// errIllegalTransition, leaving the branch STUCK reviewable while
+// ErrIllegalTransition, leaving the branch STUCK reviewable while
 // unmergeable, with no path back to draft.
 //
 // The fix folds both old methods into one idempotent, level-triggered
@@ -550,7 +550,7 @@ func TestClearConflict_NoConflictToClear_Rejected(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.ClearConflict(ctx, wb.ID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errIllegalTransition)
+	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
 // TestList_FiltersByRepoTargetAuthorState proves every plain List filter

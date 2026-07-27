@@ -80,3 +80,27 @@ func TestServer_MetaServiceIsRegistered_NotGroupFallback(t *testing.T) {
 	assert.Contains(t, names, "instructions", "always-ungated commands are always present")
 	assert.NotEmpty(t, resp.Msg.GetUsage())
 }
+
+// TestServer_WorkBranchServiceIsRegistered_NotGroupFallback is loam-ofg.8's
+// central acceptance proof, mirroring TestServer_RepoServiceIsRegistered_
+// NotGroupFallback above against the REAL, booted binary with a REAL
+// migrated Postgres. A genuinely unenrolled repo is CodeNotFound either
+// way -- from the real handler or the fallback -- so, exactly as that test
+// documents, the code alone cannot discriminate the fix from the bug it
+// replaces; the MESSAGE is the load-bearing assertion.
+func TestServer_WorkBranchServiceIsRegistered_NotGroupFallback(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := loamv1connect.NewWorkBranchServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.GetWorkBranch(ctx, connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/never-enrolled", WorkBranch: "wb-000000"}))
+	require.Error(t, err, "bobcob7/never-enrolled is genuinely not enrolled in this freshly migrated, empty database")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code(),
+		"a genuinely unenrolled repo must be CodeNotFound -- the same code the fallback would also have produced, which is exactly why the message below, not this code, is the discriminating assertion")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real WorkBranchServiceHandler this bead registers in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.v1.* service")
+	assert.Contains(t, connectErr.Message(), "bobcob7/never-enrolled",
+		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
+}
