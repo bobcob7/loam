@@ -49,6 +49,26 @@ func (q *Queries) DeleteSymbolReferencesForFile(ctx context.Context, arg DeleteS
 	return err
 }
 
+const deleteSymbolReferencesForRepoBranch = `-- name: DeleteSymbolReferencesForRepoBranch :exec
+DELETE FROM symbol_references
+WHERE repo_id = $1 AND target_branch = $2
+`
+
+type DeleteSymbolReferencesForRepoBranchParams struct {
+	RepoID       pgtype.UUID
+	TargetBranch string
+}
+
+// Repo-scoped companion to DeleteSymbolsForRepoBranch. symbol_references
+// has no foreign key to symbols (0002_code_intel.up.sql -- references are
+// stored unresolved and resolved on demand by
+// ResolveGraphEdgeCandidates), so deleting the branch's symbols does NOT
+// cascade to it and this must be issued separately.
+func (q *Queries) DeleteSymbolReferencesForRepoBranch(ctx context.Context, arg DeleteSymbolReferencesForRepoBranchParams) error {
+	_, err := q.db.Exec(ctx, deleteSymbolReferencesForRepoBranch, arg.RepoID, arg.TargetBranch)
+	return err
+}
+
 const deleteSymbolsForFile = `-- name: DeleteSymbolsForFile :exec
 
 DELETE FROM symbols
@@ -71,6 +91,30 @@ type DeleteSymbolsForFileParams struct {
 // caller can re-insert the freshly parsed set in the same transaction.
 func (q *Queries) DeleteSymbolsForFile(ctx context.Context, arg DeleteSymbolsForFileParams) error {
 	_, err := q.db.Exec(ctx, deleteSymbolsForFile, arg.RepoID, arg.TargetBranch, arg.File)
+	return err
+}
+
+const deleteSymbolsForRepoBranch = `-- name: DeleteSymbolsForRepoBranch :exec
+DELETE FROM symbols
+WHERE repo_id = $1 AND target_branch = $2
+`
+
+type DeleteSymbolsForRepoBranchParams struct {
+	RepoID       pgtype.UUID
+	TargetBranch string
+}
+
+// Repo-scoped delete for the full-rebuild path (loam-c94.12): a full
+// rebuild drops every derived row for (repo_id, target_branch) before
+// re-parsing the whole tree, rather than replacing file by file --
+// per-file replacement alone would strand rows for files that no longer
+// exist at the new ref at all. graph_edges and symbol_history both
+// reference symbols (id) ON DELETE CASCADE (0002_code_intel.up.sql), so
+// this one delete also clears the branch's edges and history; only
+// symbol_references (which carries no FK to symbols) needs its own
+// companion delete below.
+func (q *Queries) DeleteSymbolsForRepoBranch(ctx context.Context, arg DeleteSymbolsForRepoBranchParams) error {
+	_, err := q.db.Exec(ctx, deleteSymbolsForRepoBranch, arg.RepoID, arg.TargetBranch)
 	return err
 }
 

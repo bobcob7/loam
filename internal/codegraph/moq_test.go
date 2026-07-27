@@ -25,8 +25,14 @@ var _ querier = &querierMock{}
 //			DeleteSymbolReferencesForFileFunc: func(ctx context.Context, arg gen.DeleteSymbolReferencesForFileParams) error {
 //				panic("mock out the DeleteSymbolReferencesForFile method")
 //			},
+//			DeleteSymbolReferencesForRepoBranchFunc: func(ctx context.Context, arg gen.DeleteSymbolReferencesForRepoBranchParams) error {
+//				panic("mock out the DeleteSymbolReferencesForRepoBranch method")
+//			},
 //			DeleteSymbolsForFileFunc: func(ctx context.Context, arg gen.DeleteSymbolsForFileParams) error {
 //				panic("mock out the DeleteSymbolsForFile method")
+//			},
+//			DeleteSymbolsForRepoBranchFunc: func(ctx context.Context, arg gen.DeleteSymbolsForRepoBranchParams) error {
+//				panic("mock out the DeleteSymbolsForRepoBranch method")
 //			},
 //			DependentsFunc: func(ctx context.Context, arg gen.DependentsParams) ([]gen.DependentsRow, error) {
 //				panic("mock out the Dependents method")
@@ -71,8 +77,14 @@ type querierMock struct {
 	// DeleteSymbolReferencesForFileFunc mocks the DeleteSymbolReferencesForFile method.
 	DeleteSymbolReferencesForFileFunc func(ctx context.Context, arg gen.DeleteSymbolReferencesForFileParams) error
 
+	// DeleteSymbolReferencesForRepoBranchFunc mocks the DeleteSymbolReferencesForRepoBranch method.
+	DeleteSymbolReferencesForRepoBranchFunc func(ctx context.Context, arg gen.DeleteSymbolReferencesForRepoBranchParams) error
+
 	// DeleteSymbolsForFileFunc mocks the DeleteSymbolsForFile method.
 	DeleteSymbolsForFileFunc func(ctx context.Context, arg gen.DeleteSymbolsForFileParams) error
+
+	// DeleteSymbolsForRepoBranchFunc mocks the DeleteSymbolsForRepoBranch method.
+	DeleteSymbolsForRepoBranchFunc func(ctx context.Context, arg gen.DeleteSymbolsForRepoBranchParams) error
 
 	// DependentsFunc mocks the Dependents method.
 	DependentsFunc func(ctx context.Context, arg gen.DependentsParams) ([]gen.DependentsRow, error)
@@ -120,12 +132,26 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.DeleteSymbolReferencesForFileParams
 		}
+		// DeleteSymbolReferencesForRepoBranch holds details about calls to the DeleteSymbolReferencesForRepoBranch method.
+		DeleteSymbolReferencesForRepoBranch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.DeleteSymbolReferencesForRepoBranchParams
+		}
 		// DeleteSymbolsForFile holds details about calls to the DeleteSymbolsForFile method.
 		DeleteSymbolsForFile []struct {
 			// Ctx is the ctx argument value.
 			Ctx context.Context
 			// Arg is the arg argument value.
 			Arg gen.DeleteSymbolsForFileParams
+		}
+		// DeleteSymbolsForRepoBranch holds details about calls to the DeleteSymbolsForRepoBranch method.
+		DeleteSymbolsForRepoBranch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.DeleteSymbolsForRepoBranchParams
 		}
 		// Dependents holds details about calls to the Dependents method.
 		Dependents []struct {
@@ -198,19 +224,21 @@ type querierMock struct {
 			Arg gen.SymbolHistoryParams
 		}
 	}
-	lockDeleteGraphEdgesForRepoBranch sync.RWMutex
-	lockDeleteSymbolReferencesForFile sync.RWMutex
-	lockDeleteSymbolsForFile          sync.RWMutex
-	lockDependents                    sync.RWMutex
-	lockDeps                          sync.RWMutex
-	lockInsertGraphEdges              sync.RWMutex
-	lockInsertSymbolHistory           sync.RWMutex
-	lockInsertSymbolReferences        sync.RWMutex
-	lockInsertSymbols                 sync.RWMutex
-	lockLookupReferencesByName        sync.RWMutex
-	lockLookupSymbolsByName           sync.RWMutex
-	lockResolveGraphEdgeCandidates    sync.RWMutex
-	lockSymbolHistory                 sync.RWMutex
+	lockDeleteGraphEdgesForRepoBranch       sync.RWMutex
+	lockDeleteSymbolReferencesForFile       sync.RWMutex
+	lockDeleteSymbolReferencesForRepoBranch sync.RWMutex
+	lockDeleteSymbolsForFile                sync.RWMutex
+	lockDeleteSymbolsForRepoBranch          sync.RWMutex
+	lockDependents                          sync.RWMutex
+	lockDeps                                sync.RWMutex
+	lockInsertGraphEdges                    sync.RWMutex
+	lockInsertSymbolHistory                 sync.RWMutex
+	lockInsertSymbolReferences              sync.RWMutex
+	lockInsertSymbols                       sync.RWMutex
+	lockLookupReferencesByName              sync.RWMutex
+	lockLookupSymbolsByName                 sync.RWMutex
+	lockResolveGraphEdgeCandidates          sync.RWMutex
+	lockSymbolHistory                       sync.RWMutex
 }
 
 // DeleteGraphEdgesForRepoBranch calls DeleteGraphEdgesForRepoBranchFunc.
@@ -285,6 +313,42 @@ func (mock *querierMock) DeleteSymbolReferencesForFileCalls() []struct {
 	return calls
 }
 
+// DeleteSymbolReferencesForRepoBranch calls DeleteSymbolReferencesForRepoBranchFunc.
+func (mock *querierMock) DeleteSymbolReferencesForRepoBranch(ctx context.Context, arg gen.DeleteSymbolReferencesForRepoBranchParams) error {
+	if mock.DeleteSymbolReferencesForRepoBranchFunc == nil {
+		panic("querierMock.DeleteSymbolReferencesForRepoBranchFunc: method is nil but querier.DeleteSymbolReferencesForRepoBranch was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.DeleteSymbolReferencesForRepoBranchParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockDeleteSymbolReferencesForRepoBranch.Lock()
+	mock.calls.DeleteSymbolReferencesForRepoBranch = append(mock.calls.DeleteSymbolReferencesForRepoBranch, callInfo)
+	mock.lockDeleteSymbolReferencesForRepoBranch.Unlock()
+	return mock.DeleteSymbolReferencesForRepoBranchFunc(ctx, arg)
+}
+
+// DeleteSymbolReferencesForRepoBranchCalls gets all the calls that were made to DeleteSymbolReferencesForRepoBranch.
+// Check the length with:
+//
+//	len(mockedquerier.DeleteSymbolReferencesForRepoBranchCalls())
+func (mock *querierMock) DeleteSymbolReferencesForRepoBranchCalls() []struct {
+	Ctx context.Context
+	Arg gen.DeleteSymbolReferencesForRepoBranchParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.DeleteSymbolReferencesForRepoBranchParams
+	}
+	mock.lockDeleteSymbolReferencesForRepoBranch.RLock()
+	calls = mock.calls.DeleteSymbolReferencesForRepoBranch
+	mock.lockDeleteSymbolReferencesForRepoBranch.RUnlock()
+	return calls
+}
+
 // DeleteSymbolsForFile calls DeleteSymbolsForFileFunc.
 func (mock *querierMock) DeleteSymbolsForFile(ctx context.Context, arg gen.DeleteSymbolsForFileParams) error {
 	if mock.DeleteSymbolsForFileFunc == nil {
@@ -318,6 +382,42 @@ func (mock *querierMock) DeleteSymbolsForFileCalls() []struct {
 	mock.lockDeleteSymbolsForFile.RLock()
 	calls = mock.calls.DeleteSymbolsForFile
 	mock.lockDeleteSymbolsForFile.RUnlock()
+	return calls
+}
+
+// DeleteSymbolsForRepoBranch calls DeleteSymbolsForRepoBranchFunc.
+func (mock *querierMock) DeleteSymbolsForRepoBranch(ctx context.Context, arg gen.DeleteSymbolsForRepoBranchParams) error {
+	if mock.DeleteSymbolsForRepoBranchFunc == nil {
+		panic("querierMock.DeleteSymbolsForRepoBranchFunc: method is nil but querier.DeleteSymbolsForRepoBranch was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.DeleteSymbolsForRepoBranchParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockDeleteSymbolsForRepoBranch.Lock()
+	mock.calls.DeleteSymbolsForRepoBranch = append(mock.calls.DeleteSymbolsForRepoBranch, callInfo)
+	mock.lockDeleteSymbolsForRepoBranch.Unlock()
+	return mock.DeleteSymbolsForRepoBranchFunc(ctx, arg)
+}
+
+// DeleteSymbolsForRepoBranchCalls gets all the calls that were made to DeleteSymbolsForRepoBranch.
+// Check the length with:
+//
+//	len(mockedquerier.DeleteSymbolsForRepoBranchCalls())
+func (mock *querierMock) DeleteSymbolsForRepoBranchCalls() []struct {
+	Ctx context.Context
+	Arg gen.DeleteSymbolsForRepoBranchParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.DeleteSymbolsForRepoBranchParams
+	}
+	mock.lockDeleteSymbolsForRepoBranch.RLock()
+	calls = mock.calls.DeleteSymbolsForRepoBranch
+	mock.lockDeleteSymbolsForRepoBranch.RUnlock()
 	return calls
 }
 

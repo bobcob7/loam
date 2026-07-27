@@ -59,10 +59,29 @@ type Stats struct {
 // file's trouble rather than aborting the whole batch -- mirroring
 // internal/ingest/graph.IngestFiles's own per-file resilience:
 //   - A binary file (ChunkFile's ok=false) is counted in
-//     Stats.FilesSkippedBinary and contributes no FileChunks entry.
+//     Stats.FilesSkippedBinary.
 //   - A hard parse failure (ChunkFile's err!=nil, not a ctx error) is
-//     logged, counted in Stats.FilesFailed, and also contributes no
-//     FileChunks entry.
+//     logged and counted in Stats.FilesFailed.
+//
+// EVERY file in files gets exactly one FileChunks entry in the returned
+// slice, in input order, INCLUDING a skipped-binary or failed one -- that
+// entry simply carries zero units (loam-8uo). Omitting them, as this
+// function originally did, is a silent index-corruption bug: a file that
+// WAS text and BECOMES binary is in the plan's reparse set and therefore
+// not in its DropFiles, so if it never reaches internal/ingest/vectors
+// its previous chunks are never deleted and keep matching RAG search,
+// indefinitely, for content the file no longer has. A zero-unit entry is
+// exactly what vectors.IngestFileChunks already handles correctly -- it
+// still issues the file's ReplaceFileChunks call, with an empty inputs
+// slice, precisely so the stale chunks are dropped (pinned by that
+// package's TestIngestFileChunks_FileWithNoUnits_StillReplacesToDropStale
+// Chunks) -- so the drop path that already exists does the work and the
+// orchestrator needs no reparse-set-minus-output diffing of its own.
+//
+// Stats therefore still discriminates the three outcomes; the OUTPUT
+// deliberately does not, because every one of them means the same thing
+// downstream: "this file's chunks, whatever they were, must be replaced by
+// these (possibly zero) units."
 //
 // Only ctx's own error stops the batch outright, checked before each file
 // and surfacing again from any ChunkFile call that observes it mid-flight,
@@ -80,11 +99,14 @@ func (c *Chunker) ChunkFiles(ctx context.Context, files []FileInput, budgeter Bu
 				return out, stats, fmt.Errorf("chunking %s: %w", f.Path, err)
 			}
 			stats.FilesFailed++
-			c.logger.ErrorContext(ctx, "skipping file after chunk failure", "file", f.Path, "error", err)
+			c.logger.ErrorContext(ctx, "dropping chunks for file that failed to chunk", "file", f.Path, "error", err)
+			out = append(out, FileChunks{Path: f.Path})
 			continue
 		}
 		if !ok {
 			stats.FilesSkippedBinary++
+			c.logger.InfoContext(ctx, "dropping chunks for file that is now binary", "file", f.Path)
+			out = append(out, FileChunks{Path: f.Path})
 			continue
 		}
 		stats.FilesChunked++

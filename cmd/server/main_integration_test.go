@@ -356,9 +356,10 @@ func TestServer_StartupSucceedsAgainstAVirginDatabase(t *testing.T) {
 // The signal is `attempts`, NOT `status`, and that choice is load-bearing.
 // This binary wires a real, live ingest.Pool, so a requeued job does not
 // come to rest anywhere: RequeueOrphaned flips the row to 'queued', a
-// worker claims it (ingest.Pool.claim sets status='running' again),
-// notImplementedOrchestrator errors, fail records 'failed', and
-// scheduleRetry puts it back to 'queued' after a backoff -- forever. So
+// worker claims it (ingest.Pool.claim sets status='running' again), the
+// real orchestrator (loam-c94.12) errors -- this seeded repo has no
+// enrolled target branch and no mirror on disk -- fail records 'failed',
+// and scheduleRetry puts it back to 'queued' after a backoff -- forever. So
 // 'running' is a RECURRING state on the happy path, not a one-time
 // window, and any single-sample assertion of "status is not running" is
 // unfalsifiable: it cannot tell a job still stuck from a crash apart from
@@ -429,13 +430,18 @@ func seedOrphanedIngestJob(t *testing.T, dsn string) (repoID, jobID uuid.UUID) {
 // in. See TestServer_RequeuesOrphanedIngestJobsOnStartup's doc comment for
 // why attempts rather than status is the signal.
 //
-// Once attempts has moved, the recorded error must be the labeled
-// placeholder: the job is expected to fail (notImplementedOrchestrator
-// always errors), but it must fail for THAT reason and not some other one
-// this test would otherwise mask. error is read in the same row read as
-// attempts so the two cannot describe different attempts, and it is only
-// asserted when the row is at rest in 'failed' -- mid-claim the column
-// still holds the previous attempt's text.
+// Once attempts has moved, the recorded error must be the labeled one the
+// real orchestrator produces for this fixture: seedOrphanedIngestJob
+// inserts a repos row with NO repo_target_branches row, so the very first
+// thing loam-c94.12's Run does after resolving the repo is fail with
+// "target branch not enrolled". The job is EXPECTED to fail here (this
+// test is about RequeueOrphaned, not about a successful ingest), but it
+// must fail for THAT reason and not some other one this test would
+// otherwise mask -- in particular not a panic-turned-error or a database
+// fault. error is read in the same row read as attempts so the two cannot
+// describe different attempts, and it is only asserted when the row is at
+// rest in 'failed' -- mid-claim the column still holds the previous
+// attempt's text.
 func assertOrphanedJobWasRequeued(t *testing.T, dsn string, jobID uuid.UUID, rs *runningServer) {
 	t.Helper()
 	ctx := context.Background()
@@ -454,6 +460,6 @@ func assertOrphanedJobWasRequeued(t *testing.T, dsn string, jobID uuid.UUID, rs 
 		"a crash-orphaned job must be requeued on startup and attempted; attempts never left 0. stderr: %s", rs.stderr.String())
 	if status == "failed" {
 		require.NotNil(t, jobErr)
-		assert.Contains(t, *jobErr, "not implemented", "a claimed job should only fail via the labeled ingest-orchestrator placeholder, not some other error")
+		assert.Contains(t, *jobErr, "target branch not enrolled", "a claimed job for a repo with no enrolled target branch must fail with that labeled orchestrator error, not some other one")
 	}
 }
