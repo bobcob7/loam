@@ -683,3 +683,73 @@ func (c *concurrencyTracker) maxTotalConcurrent() int {
 	defer c.mu.Unlock()
 	return c.peakAll
 }
+
+// TestListJobs_FiltersByRepoAndStatusWithTotalCount proves ListJobs
+// (loam-ofg.12's RepoAdminService.ListIngestJobs backing store) reports
+// the joined repo NAME (not the bare repo_id ingest_jobs itself stores),
+// respects both the repo and status filters independently, and returns a
+// total count matching every row for the filter -- not just the page
+// returned -- against a real Postgres, since Pool's db field is a
+// concrete *pgxpool.Pool with no querier seam a moq mock could stand in
+// for here.
+func TestListJobs_FiltersByRepoAndStatusWithTotalCount(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
+	repoA := seedRepo(ctx, t, pgPool, "acme/widgets-list-a")
+	repoB := seedRepo(ctx, t, pgPool, "acme/widgets-list-b")
+	insertQueuedJob(ctx, t, pgPool, repoA, "main", KindFull)
+	insertRunningJob(ctx, t, pgPool, repoA, "main", KindIncremental)
+	insertQueuedJob(ctx, t, pgPool, repoB, "main", KindFull)
+
+	allJobs, allTotal, err := pool.ListJobs(ctx, ListJobsFilter{}, 50, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), allTotal)
+	assert.Len(t, allJobs, 3)
+
+	repoAJobs, repoATotal, err := pool.ListJobs(ctx, ListJobsFilter{Repo: "acme/widgets-list-a"}, 50, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), repoATotal)
+	for _, job := range repoAJobs {
+		assert.Equal(t, "acme/widgets-list-a", job.Repo, "every returned job must carry the joined repo NAME, not the FK id")
+	}
+
+	queuedJobs, queuedTotal, err := pool.ListJobs(ctx, ListJobsFilter{Status: "queued"}, 50, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), queuedTotal)
+	for _, job := range queuedJobs {
+		assert.Equal(t, "queued", job.Status)
+	}
+
+	scoped, scopedTotal, err := pool.ListJobs(ctx, ListJobsFilter{Repo: "acme/widgets-list-a", Status: "running"}, 50, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), scopedTotal)
+	require.Len(t, scoped, 1)
+	assert.Equal(t, "acme/widgets-list-a", scoped[0].Repo)
+	assert.Equal(t, "running", scoped[0].Status)
+	assert.Equal(t, KindIncremental, scoped[0].Kind)
+}
+
+// TestListJobs_PaginatesWithLimitAndOffset proves limit/offset actually
+// page through the result set, and that total keeps reporting every
+// matching row regardless of the page requested.
+func TestListJobs_PaginatesWithLimitAndOffset(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
+	repoID := seedRepo(ctx, t, pgPool, "acme/widgets-list-page")
+	for i := 0; i < 5; i++ {
+		insertQueuedJob(ctx, t, pgPool, repoID, fmt.Sprintf("branch-%d", i), KindFull)
+	}
+	firstPage, total, err := pool.ListJobs(ctx, ListJobsFilter{Repo: "acme/widgets-list-page"}, 2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), total)
+	assert.Len(t, firstPage, 2)
+	secondPage, total2, err := pool.ListJobs(ctx, ListJobsFilter{Repo: "acme/widgets-list-page"}, 2, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), total2)
+	assert.Len(t, secondPage, 2)
+	assert.NotEqual(t, firstPage[0].ID, secondPage[0].ID, "the second page must not repeat the first page's rows")
+}

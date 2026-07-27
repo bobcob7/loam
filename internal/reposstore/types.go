@@ -43,6 +43,22 @@ type UpdateRepoParams struct {
 	IndexedBranch string
 }
 
+// SyncState is one of repos.sync_state's three CHECK-constrained values
+// (docs/persistence-spec.md "repos"; 0001_init.up.sql's
+// repos_sync_state_check). RepoAdminService.EnrollRepo (loam-ofg.12) is
+// this type's first caller: it marks a repo Syncing for the duration of
+// the initial mirror clone, then Idle on success or Error on failure --
+// the same three states the (not yet wired) mirror-sync scheduler's own
+// SyncStateReporter reports on every later cycle.
+type SyncState string
+
+// The three values repos.sync_state's CHECK constraint allows.
+const (
+	SyncStateIdle    SyncState = "idle"
+	SyncStateSyncing SyncState = "syncing"
+	SyncStateError   SyncState = "error"
+)
+
 // Page is an offset-pagination request (docs/persistence-spec.md
 // "Conventions"; mirrors proto's loam.v1.Page). A non-positive Limit is
 // replaced with defaultListLimit by Store.ListRepos, matching the proto

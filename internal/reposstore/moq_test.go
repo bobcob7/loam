@@ -56,6 +56,9 @@ var _ querier = &querierMock{}
 //			UpdateRepoFunc: func(ctx context.Context, arg gen.UpdateRepoParams) (gen.Repo, error) {
 //				panic("mock out the UpdateRepo method")
 //			},
+//			UpdateRepoSyncStateFunc: func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+//				panic("mock out the UpdateRepoSyncState method")
+//			},
 //		}
 //
 //		// use mockedquerier in code that requires querier
@@ -98,6 +101,9 @@ type querierMock struct {
 
 	// UpdateRepoFunc mocks the UpdateRepo method.
 	UpdateRepoFunc func(ctx context.Context, arg gen.UpdateRepoParams) (gen.Repo, error)
+
+	// UpdateRepoSyncStateFunc mocks the UpdateRepoSyncState method.
+	UpdateRepoSyncStateFunc func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -181,19 +187,27 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.UpdateRepoParams
 		}
+		// UpdateRepoSyncState holds details about calls to the UpdateRepoSyncState method.
+		UpdateRepoSyncState []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.UpdateRepoSyncStateParams
+		}
 	}
-	lockAddTargetBranch    sync.RWMutex
-	lockAdvanceIngestedRef sync.RWMutex
-	lockCountRepos         sync.RWMutex
-	lockCreateRepo         sync.RWMutex
-	lockGetRepoByID        sync.RWMutex
-	lockGetRepoByName      sync.RWMutex
-	lockGetTargetBranch    sync.RWMutex
-	lockListRepoNames      sync.RWMutex
-	lockListRepos          sync.RWMutex
-	lockListTargetBranches sync.RWMutex
-	lockRemoveTargetBranch sync.RWMutex
-	lockUpdateRepo         sync.RWMutex
+	lockAddTargetBranch     sync.RWMutex
+	lockAdvanceIngestedRef  sync.RWMutex
+	lockCountRepos          sync.RWMutex
+	lockCreateRepo          sync.RWMutex
+	lockGetRepoByID         sync.RWMutex
+	lockGetRepoByName       sync.RWMutex
+	lockGetTargetBranch     sync.RWMutex
+	lockListRepoNames       sync.RWMutex
+	lockListRepos           sync.RWMutex
+	lockListTargetBranches  sync.RWMutex
+	lockRemoveTargetBranch  sync.RWMutex
+	lockUpdateRepo          sync.RWMutex
+	lockUpdateRepoSyncState sync.RWMutex
 }
 
 // AddTargetBranch calls AddTargetBranchFunc.
@@ -617,5 +631,41 @@ func (mock *querierMock) UpdateRepoCalls() []struct {
 	mock.lockUpdateRepo.RLock()
 	calls = mock.calls.UpdateRepo
 	mock.lockUpdateRepo.RUnlock()
+	return calls
+}
+
+// UpdateRepoSyncState calls UpdateRepoSyncStateFunc.
+func (mock *querierMock) UpdateRepoSyncState(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+	if mock.UpdateRepoSyncStateFunc == nil {
+		panic("querierMock.UpdateRepoSyncStateFunc: method is nil but querier.UpdateRepoSyncState was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.UpdateRepoSyncStateParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockUpdateRepoSyncState.Lock()
+	mock.calls.UpdateRepoSyncState = append(mock.calls.UpdateRepoSyncState, callInfo)
+	mock.lockUpdateRepoSyncState.Unlock()
+	return mock.UpdateRepoSyncStateFunc(ctx, arg)
+}
+
+// UpdateRepoSyncStateCalls gets all the calls that were made to UpdateRepoSyncState.
+// Check the length with:
+//
+//	len(mockedquerier.UpdateRepoSyncStateCalls())
+func (mock *querierMock) UpdateRepoSyncStateCalls() []struct {
+	Ctx context.Context
+	Arg gen.UpdateRepoSyncStateParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.UpdateRepoSyncStateParams
+	}
+	mock.lockUpdateRepoSyncState.RLock()
+	calls = mock.calls.UpdateRepoSyncState
+	mock.lockUpdateRepoSyncState.RUnlock()
 	return calls
 }

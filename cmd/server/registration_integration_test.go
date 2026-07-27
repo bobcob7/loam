@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 )
@@ -101,6 +103,34 @@ func TestServer_WorkBranchServiceIsRegistered_NotGroupFallback(t *testing.T) {
 		"a genuinely unenrolled repo must be CodeNotFound -- the same code the fallback would also have produced, which is exactly why the message below, not this code, is the discriminating assertion")
 	assert.NotContains(t, connectErr.Message(), "service registered",
 		"the request must reach the real WorkBranchServiceHandler this bead registers in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.v1.* service")
+	assert.Contains(t, connectErr.Message(), "bobcob7/never-enrolled",
+		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
+}
+
+// TestServer_RepoAdminServiceIsRegistered_NotGroupFallback is loam-ofg.12's
+// central acceptance proof, against the REAL, booted binary with a REAL
+// migrated Postgres -- mirroring TestServer_RepoServiceIsRegistered_
+// NotGroupFallback's reasoning exactly: before RepoAdminService had a
+// handler anywhere, every /loam.admin.v1.RepoAdminService/* request fell
+// through to internal/server's group-level 404 fallback, which ALSO
+// answers CodeNotFound for a genuinely-unenrolled repo -- so the code
+// alone cannot discriminate the fix from the bug it replaces. The MESSAGE
+// is what proves it: the fallback's is a fixed string ("no
+// /loam.admin.v1. service registered for ..."), unrelated to the request;
+// the real handler's names the specific repo that was not found.
+func TestServer_RepoAdminServiceIsRegistered_NotGroupFallback(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: adminRoundTripper{user: testAdminUser, password: testAdminPassword, base: newIsolatedTransport(t)}}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.GetRepo(ctx, connect.NewRequest(&adminv1.GetRepoRequest{Repo: "bobcob7/never-enrolled"}))
+	require.Error(t, err, "bobcob7/never-enrolled is genuinely not enrolled in this freshly migrated, empty database")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code(),
+		"a genuinely unenrolled repo must be CodeNotFound -- the same code the fallback would also have produced, which is exactly why the message below, not this code, is the discriminating assertion")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real RepoAdminServiceHandler this bead registers in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.admin.v1.* service")
 	assert.Contains(t, connectErr.Message(), "bobcob7/never-enrolled",
 		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
 }
