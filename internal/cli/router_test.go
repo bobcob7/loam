@@ -94,6 +94,14 @@ var stillStubbedExemptions = map[string]bool{
 	// ReachesRealHandler (loam-0pj.13).
 	"work reply":   true,
 	"work verdict": true,
+	// work list/show/diff/comments/verdicts are covered by
+	// TestRouterDispatch_WorkReadCommands_ReachRealHandlers in
+	// commands_work_read_test.go (loam-0pj.10).
+	"work list":     true,
+	"work show":     true,
+	"work diff":     true,
+	"work comments": true,
+	"work verdicts": true,
 	// graph def/refs/deps/dependents/history are covered by
 	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
 	// commands_graph_test.go (loam-0pj.14).
@@ -159,13 +167,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"instructions", []string{"instructions"}},
 		{"instructions with target", []string{"instructions", "work list"}},
 		{"whoami", []string{"whoami"}},
-		{"work list", []string{"work", "list"}},
-		{"work list with filters", []string{"work", "list", "--repo", "acme/repo", "--awaiting-review", "--limit", "5"}},
-		{"work show", []string{"work", "show", "acme/repo", "wb-1"}},
-		{"work diff", []string{"work", "diff", "acme/repo", "wb-1"}},
-		{"work comments", []string{"work", "comments", "acme/repo", "wb-1"}},
-		{"work comments staged", []string{"work", "comments", "acme/repo", "wb-1", "--staged"}},
-		{"work verdicts", []string{"work", "verdicts", "acme/repo", "wb-1"}},
 	}
 
 	covered := make(map[string]bool, len(tests))
@@ -236,22 +237,20 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	// an extra positional: its flags are still registered and parsed, but it
 	// stops on the argument count before reading stdin or opening a staging
 	// area, neither of which newTestDeps provides.
-	// `work reply` and `work verdict` (loam-0pj.13) are implemented too, and
-	// get the same treatment for the same reason.
+	// `work reply` and `work verdict` (loam-0pj.13) and the five read
+	// commands (loam-0pj.10) are implemented too, and get the same
+	// treatment for the same reason. As of those three beads no `work`
+	// leaf returns errNotImplemented any more, so the loop that used to
+	// assert that is gone rather than left iterating an empty list.
 	for _, args := range [][]string{
 		{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"},
 		{"work", "reply", "a", "b", "c", "--thread", "t1"},
 		{"work", "verdict", "a", "b", "c", "--outcome", "approve"},
+		{"work", "comments", "a", "b", "c", "--staged"},
+		{"work", "list", "extra", "--limit", "5"},
 	} {
 		var usage *usageError
-		assert.ErrorAs(t, router.Dispatch(t.Context(), args), &usage)
-	}
-	for _, args := range [][]string{
-		{"work", "comments", "a", "b", "--staged"},
-		{"work", "list", "--limit", "5"},
-	} {
-		err := router.Dispatch(t.Context(), args)
-		assert.ErrorIs(t, err, errNotImplemented)
+		assert.ErrorAs(t, router.Dispatch(t.Context(), args), &usage, "args %v", args)
 	}
 	flag.CommandLine.VisitAll(func(f *flag.Flag) {
 		assert.True(t, strings.HasPrefix(f.Name, "test."), "flag.CommandLine must contain only go test's own flags, found %q", f.Name)

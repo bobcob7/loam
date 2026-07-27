@@ -1,0 +1,758 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+)
+
+// --- scaffolding ---
+
+// jsonOf marshals whatever a handler encoded, so a test can pin the
+// documented WIRE shape (docs/cli-spec.md) rather than only the Go struct --
+// the difference that catches a missing `round`, a phantom `"file": ""`
+// anchor, or a `null` where an empty array is promised.
+func jsonOf(t *testing.T, encoded any) string {
+	t.Helper()
+	raw, err := json.Marshal(encoded)
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// notFoundError is the connect error the server returns for a work branch
+// that does not exist -- the exit 3 case of every read command.
+func notFoundError() error {
+	return connect.NewError(connect.CodeNotFound, errors.New("work branch bobcob7/doc-server/wb-9c2f1a not found"))
+}
+
+// anchoredThread builds a published thread anchored at file/line, raised in
+// round, whose single comment was posted in commentRound (which may be
+// later than round -- a reply).
+func anchoredThread(id, file string, line uint32, round, commentRound uint32) *loamv1.Thread {
+	return &loamv1.Thread{
+		Id:       id,
+		Resolved: false,
+		Anchor:   &loamv1.FileLine{File: file, Line: &line},
+		Round:    round,
+		Comments: []*loamv1.Comment{{Author: testReviewer, Body: "this leaks a token", Round: commentRound}},
+	}
+}
+
+// --- work list ---
+
+// TestRunWorkList_NoFlags_SendsReviewableDefaultAndEncodesEnvelope pins both
+// halves of `work list` with no flags: the request defaults to reviewable
+// with no other filter set, and the response is the {truncated, results}
+// envelope, NOT a bare array.
+func TestRunWorkList_NoFlags_SendsReviewableDefaultAndEncodesEnvelope(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.ListWorkBranchesRequest
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(_ context.Context, req *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.ListWorkBranchesResponse{WorkBranches: []*loamv1.WorkBranch{{
+				Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+				Author: "grace-hopper-3-author", State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
+			}}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), nil)
+	require.NoError(t, err)
+
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.State)
+	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE, captured.GetState(), "--state defaults to reviewable")
+	assert.Nil(t, captured.Repo, "an omitted --repo must not be sent as an empty filter")
+	assert.Nil(t, captured.Author, "an omitted --author must not be sent as an empty filter")
+	assert.Nil(t, captured.Target, "an omitted --target must not be sent as an empty filter")
+	assert.False(t, captured.GetAwaitingReview())
+	assert.Equal(t, uint32(100), captured.GetPage().GetLimit(), "--limit defaults to 100")
+
+	assert.JSONEq(t, `{"truncated":false,"results":[
+		{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
+		 "author":"grace-hopper-3-author","state":"reviewable"}]}`, jsonOf(t, encoded))
+}
+
+// TestRunWorkList_EveryFilterForwarded proves each flag reaches the request
+// as its own field -- a filter silently dropped here would list work
+// branches the caller did not ask for.
+func TestRunWorkList_EveryFilterForwarded(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.ListWorkBranchesRequest
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(_ context.Context, req *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.ListWorkBranchesResponse{}), nil
+		},
+	}
+	var encoded any
+	args := []string{"--repo", testRepo, "--author", "grace-hopper-3-author", "--target", "main", "--awaiting-review", "--state", "reviewed", "--limit", "5"}
+	require.NoError(t, runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), args))
+
+	require.NotNil(t, captured)
+	assert.Equal(t, testRepo, captured.GetRepo())
+	assert.Equal(t, "grace-hopper-3-author", captured.GetAuthor())
+	assert.Equal(t, "main", captured.GetTarget())
+	assert.True(t, captured.GetAwaitingReview())
+	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED, captured.GetState())
+	assert.Equal(t, uint32(5), captured.GetPage().GetLimit())
+}
+
+// TestRunWorkList_EveryStateValueMapsToItsEnum walks the five documented
+// --state values, so a renamed or mis-mapped state fails here rather than
+// silently listing a different lifecycle state.
+func TestRunWorkList_EveryStateValueMapsToItsEnum(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		value string
+		want  loamv1.WorkBranchState
+	}{
+		{"draft", loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT},
+		{"reviewable", loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE},
+		{"reviewed", loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED},
+		{"complete", loamv1.WorkBranchState_WORK_BRANCH_STATE_COMPLETE},
+		{"closed", loamv1.WorkBranchState_WORK_BRANCH_STATE_CLOSED},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Parallel()
+			var captured *loamv1.ListWorkBranchesRequest
+			client := &WorkBranchClientMock{
+				ListWorkBranchesFunc: func(_ context.Context, req *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+					captured = req.Msg
+					return connect.NewResponse(&loamv1.ListWorkBranchesResponse{}), nil
+				},
+			}
+			var encoded any
+			require.NoError(t, runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{"--state", tt.value}))
+			require.NotNil(t, captured)
+			assert.Equal(t, tt.want, captured.GetState())
+		})
+	}
+}
+
+// TestRunWorkList_BadFilterValue_ExitsTwoWithoutCallingServer covers
+// docs/cli-spec.md -> work list -> Errors ("exit 2 on a bad filter value"),
+// including `--state=` -- reachable only by passing it explicitly, and
+// refused rather than quietly treated as the default.
+func TestRunWorkList_BadFilterValue_ExitsTwoWithoutCallingServer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"unknown state", []string{"--state", "bogus"}},
+		{"empty state", []string{"--state", ""}},
+		{"negative limit", []string{"--limit", "-1"}},
+		{"positional argument", []string{"acme/repo"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			client := &WorkBranchClientMock{
+				ListWorkBranchesFunc: func(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+					called = true
+					return nil, errors.New("must not be called")
+				},
+			}
+			var encoded any
+			err := runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), tt.args)
+			require.Error(t, err)
+			assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+			assert.False(t, called, "a bad filter value must be rejected before any RPC")
+			assert.Nil(t, encoded)
+		})
+	}
+}
+
+// TestRunWorkList_EmptyResult_ExitsZeroAsAnEmptyArray covers "An empty
+// result is a normal exit 0" -- and that `results` is `[]`, not `null`,
+// which an agent parsing the response would have to special-case.
+func TestRunWorkList_EmptyResult_ExitsZeroAsAnEmptyArray(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			return connect.NewResponse(&loamv1.ListWorkBranchesResponse{}), nil
+		},
+	}
+	var encoded any
+	err := runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, newErrorMapper().ExitCode(err))
+	assert.JSONEq(t, `{"truncated":false,"results":[]}`, jsonOf(t, encoded))
+}
+
+// TestRunWorkList_TruncatedIsSurfaced proves the server's truncated flag
+// reaches the caller: without it a capped list is indistinguishable from a
+// complete one.
+func TestRunWorkList_TruncatedIsSurfaced(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			return connect.NewResponse(&loamv1.ListWorkBranchesResponse{Truncated: true}), nil
+		},
+	}
+	var encoded any
+	require.NoError(t, runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{"--limit", "1"}))
+	out, ok := encoded.(workListOutput)
+	require.True(t, ok, "work list must encode a workListOutput")
+	assert.True(t, out.Truncated)
+}
+
+func TestRunWorkList_UnenrolledRepo_ExitsThree(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("repo acme/nope is not enrolled"))
+		},
+	}
+	var encoded any
+	err := runWorkList(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{"--repo", "acme/nope"})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+// --- work show ---
+
+func TestRunWorkShow_Success_EncodesFullMetadata(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.GetWorkBranchRequest
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+				Description: "adds a login form", Author: "grace-hopper-3-author",
+				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
+			}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	require.NotNil(t, captured)
+	assert.Equal(t, testRepo, captured.GetRepo())
+	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
+	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
+		"description":"adds a login form","state":"reviewable","author":"grace-hopper-3-author"}`, jsonOf(t, encoded))
+}
+
+// TestRunWorkShow_OmittedPositionals_InferFromWorkspace proves the
+// [repo] [work-branch] convention: with neither given, both come from the
+// enclosing clone.
+func TestRunWorkShow_OmittedPositionals_InferFromWorkspace(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.GetWorkBranchRequest
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{Repo: testRepo, Name: testWorkBranch}}), nil
+		},
+	}
+	ws := &WorkspaceResolverMock{
+		ResolveRepoFunc:       func() (string, error) { return testRepo, nil },
+		ResolveWorkBranchFunc: func() (string, error) { return testWorkBranch, nil },
+	}
+	var encoded any
+	require.NoError(t, runWorkShow(t.Context(), workTestDeps(client, ws, "", &encoded), nil))
+	require.NotNil(t, captured)
+	assert.Equal(t, testRepo, captured.GetRepo())
+	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
+}
+
+func TestRunWorkShow_NotFound_ExitsThree(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return nil, notFoundError()
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+// TestRunWorkReadCommands_UnresolvableIdentifier_ExitTwoWithoutCallingServer
+// covers "exit 2 if the identifier cannot be resolved (not in a clone and
+// arguments omitted)" for every read command that takes the positional
+// pair, and proves none of them reaches the network first.
+func TestRunWorkReadCommands_UnresolvableIdentifier_ExitTwoWithoutCallingServer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		run  handlerFunc
+		args []string
+	}{
+		{"work show", runWorkShow, nil},
+		{"work diff", runWorkDiff, nil},
+		{"work comments", runWorkComments, nil},
+		{"work comments staged", runWorkComments, []string{"--staged"}},
+		{"work verdicts", runWorkVerdicts, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			fail := func() { called = true }
+			client := &WorkBranchClientMock{
+				GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+					fail()
+					return nil, errors.New("must not be called")
+				},
+				GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+					fail()
+					return nil, errors.New("must not be called")
+				},
+				ListCommentsFunc: func(context.Context, *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error) {
+					fail()
+					return nil, errors.New("must not be called")
+				},
+				ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+					fail()
+					return nil, errors.New("must not be called")
+				},
+			}
+			var encoded any
+			err := tt.run(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), tt.args)
+			require.Error(t, err)
+			assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+			assert.False(t, called, "an unresolvable identifier must be rejected before any RPC")
+			assert.Nil(t, encoded)
+		})
+	}
+}
+
+// TestRunWorkReadCommands_TooManyPositionals_ExitUsage pins the shared
+// "[repo] [work-branch], at most two" convention for every read command
+// that takes it.
+func TestRunWorkReadCommands_TooManyPositionals_ExitUsage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		run  handlerFunc
+	}{
+		{"work show", runWorkShow},
+		{"work diff", runWorkDiff},
+		{"work comments", runWorkComments},
+		{"work verdicts", runWorkVerdicts},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var encoded any
+			deps := workTestDeps(&WorkBranchClientMock{}, noResolveWorkspace(), "", &encoded)
+			err := tt.run(t.Context(), deps, []string{testRepo, testWorkBranch, "extra"})
+			require.Error(t, err)
+			var ue *usageError
+			assert.ErrorAs(t, err, &ue)
+			assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+		})
+	}
+}
+
+// --- work diff ---
+
+func TestRunWorkDiff_Success_EncodesTheDiffAsAField(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.GetWorkBranchDiffRequest
+	client := &WorkBranchClientMock{
+		GetWorkBranchDiffFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: "--- a/auth.go\n+++ b/auth.go\n"}), nil
+		},
+	}
+	var encoded any
+	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	require.NotNil(t, captured)
+	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
+	assert.JSONEq(t, `{"diff":"--- a/auth.go\n+++ b/auth.go\n"}`, jsonOf(t, encoded))
+}
+
+func TestRunWorkDiff_NotFound_ExitsThree(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+			return nil, notFoundError()
+		},
+	}
+	var encoded any
+	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+// TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed pins the
+// failure a user actually hits today: nothing creates a work branch's
+// refs/heads/<name> in the mirror at `work start` time (loam-5iu), so
+// GetWorkBranchDiff answers FailedPrecondition for essentially every work
+// branch. That must surface as exit 2 / precondition_failed carrying the
+// server's own message -- NOT as a fabricated empty diff, which an agent
+// would read as "no changes yet".
+func TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed(t *testing.T) {
+	t.Parallel()
+	const message = "computing diff for work branch bobcob7/doc-server/wb-9c2f1a: ref missing"
+	client := &WorkBranchClientMock{
+		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(message))
+		},
+	}
+	var encoded any
+	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	ce := mapCommandError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, codePreconditionFailed, ce.code)
+	assert.Equal(t, message, ce.Error(), "the server's own explanation must reach the caller verbatim")
+	assert.Nil(t, encoded, "a failed diff must encode nothing, least of all an empty diff")
+}
+
+// --- work comments (published) ---
+
+// TestRunWorkComments_PublishedThreads_PinTheDocumentedShape covers the
+// exact JSON docs/cli-spec.md -> comments (get) documents, including the
+// `round` on the thread AND on each comment.
+func TestRunWorkComments_PublishedThreads_PinTheDocumentedShape(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer(anchoredThread("t1", "auth.go", 42, 1, 1))
+	var encoded any
+	err := runWorkComments(t.Context(), workTestDeps(srv.client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.JSONEq(t, `[{"id":"t1","resolved":false,"file":"auth.go","line":42,"round":1,
+		"comments":[{"author":"ada-lovelace-7-reviewer","body":"this leaks a token","round":1}]}]`, jsonOf(t, encoded))
+}
+
+// TestRunWorkComments_ReplyKeepsItsOwnLaterRound proves a comment's round
+// is the comment's own, never inherited from the thread it lives in: a
+// thread raised in round 1 can carry a reply posted in round 2.
+func TestRunWorkComments_ReplyKeepsItsOwnLaterRound(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer(anchoredThread("t1", "auth.go", 42, 1, 2))
+	var encoded any
+	require.NoError(t, runWorkComments(t.Context(), workTestDeps(srv.client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	rows, ok := encoded.([]threadOutput)
+	require.True(t, ok, "work comments must encode []threadOutput")
+	require.Len(t, rows, 1)
+	require.Len(t, rows[0].Comments, 1)
+	assert.Equal(t, uint32(1), rows[0].Round, "the thread reports the round it was RAISED in")
+	assert.Equal(t, uint32(2), rows[0].Comments[0].Round, "a reply reports the round it was POSTED in")
+}
+
+// TestRunWorkComments_AnchorlessAndWholeFileThreads_OmitEmptyAnchorFields
+// keeps a top-level thread from reporting a phantom `"file": ""` and a
+// whole-file anchor from reporting a `"line": 0` an agent would parse as
+// line zero.
+func TestRunWorkComments_AnchorlessAndWholeFileThreads_OmitEmptyAnchorFields(t *testing.T) {
+	t.Parallel()
+	topLevel := &loamv1.Thread{Id: "t1", Round: 3, Comments: []*loamv1.Comment{{Author: testReviewer, Body: "a general remark", Round: 3}}}
+	wholeFile := &loamv1.Thread{Id: "t2", Resolved: true, Anchor: &loamv1.FileLine{File: "README.md"}, Round: 3,
+		Comments: []*loamv1.Comment{{Author: testReviewer, Body: "stale docs", Round: 3}}}
+	srv := newCommentServer(topLevel, wholeFile)
+	var encoded any
+	require.NoError(t, runWorkComments(t.Context(), workTestDeps(srv.client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	assert.JSONEq(t, `[
+		{"id":"t1","resolved":false,"round":3,"comments":[{"author":"ada-lovelace-7-reviewer","body":"a general remark","round":3}]},
+		{"id":"t2","resolved":true,"file":"README.md","round":3,"comments":[{"author":"ada-lovelace-7-reviewer","body":"stale docs","round":3}]}]`,
+		jsonOf(t, encoded))
+}
+
+// TestRunWorkComments_FollowsPagination proves `comments` returns the
+// threads on the work branch, not just the server's first page: with a page
+// size of one and three threads, all three come back.
+func TestRunWorkComments_FollowsPagination(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer(
+		anchoredThread("t1", "a.go", 1, 1, 1),
+		anchoredThread("t2", "b.go", 2, 1, 1),
+		anchoredThread("t3", "c.go", 3, 2, 2),
+	)
+	srv.pageSize = 1
+	var encoded any
+	require.NoError(t, runWorkComments(t.Context(), workTestDeps(srv.client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	rows, ok := encoded.([]threadOutput)
+	require.True(t, ok)
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	assert.Equal(t, []string{"t1", "t2", "t3"}, ids, "every page's threads must be returned, not just the first")
+	assert.Equal(t, 3, srv.listCalls, "each page must be fetched")
+}
+
+func TestRunWorkComments_NoThreads_EncodesEmptyArray(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer()
+	var encoded any
+	require.NoError(t, runWorkComments(t.Context(), workTestDeps(srv.client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+}
+
+// TestRunWorkComments_NotFound_ExitsThree covers the published path's exit
+// 3. ListComments resolves the work branch itself, so GetWorkBranch is wired
+// to a plain (unclassifiable, exit 1) error rather than left nil: published
+// mode must not spend a redundant existence check, and if it ever did, this
+// test reports the wrong exit code instead of panicking on an unconfigured
+// mock.
+func TestRunWorkComments_NotFound_ExitsThree(t *testing.T) {
+	t.Parallel()
+	getCalls := 0
+	client := &WorkBranchClientMock{
+		ListCommentsFunc: func(context.Context, *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error) {
+			return nil, notFoundError()
+		},
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			getCalls++
+			return nil, errors.New("published comments must not check existence separately")
+		},
+	}
+	var encoded any
+	err := runWorkComments(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Equal(t, 0, getCalls, "ListComments resolves the work branch itself")
+	assert.Nil(t, encoded)
+}
+
+// --- work comments: the staged / published boundary ---
+
+// stageTwoItems stages an anchored comment and a resolve-only item in a
+// real staging area under workspaceRoot, returning nothing: the point is
+// the on-disk state the two `comments` modes then disagree about.
+func stageTwoItems(t *testing.T, workspaceRoot string) {
+	t.Helper()
+	store := openTestStore(t, workspaceRoot, testReviewer)
+	_, err := store.add(stagedItem{File: "auth.go", Line: 42, Body: "unpublished thought"})
+	require.NoError(t, err)
+	_, err = store.add(stagedItem{Resolve: "t1"})
+	require.NoError(t, err)
+}
+
+// TestRunWorkComments_Published_ExcludeStagedItems is the headline
+// behaviour of docs/cli-spec.md -> comments (get): "Published threads only;
+// the caller's staged comments are excluded until submitted." With two
+// items staged on disk and one thread published, plain `comments` returns
+// exactly the published thread and nothing else.
+func TestRunWorkComments_Published_ExcludeStagedItems(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageTwoItems(t, workspaceRoot)
+	srv := newCommentServer(anchoredThread("t1", "auth.go", 42, 1, 1))
+	var encoded any
+	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, testReviewer), "", &encoded)
+	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch}))
+
+	assert.NotContains(t, jsonOf(t, encoded), "unpublished thought", "a staged body must never appear in the published listing")
+	assert.NotContains(t, jsonOf(t, encoded), `"s1"`, "a staged item's local id must never appear in the published listing")
+	rows, ok := encoded.([]threadOutput)
+	require.True(t, ok, "work comments without --staged must encode published threads, not staged items")
+	require.Len(t, rows, 1, "only the published thread may appear")
+	assert.Equal(t, "t1", rows[0].ID)
+}
+
+// TestRunWorkComments_Staged_ReturnsTheLocalItemsAndNeverListsPublished is
+// the other side of that boundary: `--staged` reports the caller's own
+// unpublished items, in staging order, in the shape `comment` produced --
+// and asks the server for no comments at all, since staged items are not
+// there to ask for.
+func TestRunWorkComments_Staged_ReturnsTheLocalItemsAndNeverListsPublished(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageTwoItems(t, workspaceRoot)
+	srv := newCommentServer(anchoredThread("t1", "auth.go", 42, 1, 1))
+	var encoded any
+	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, testReviewer), "", &encoded)
+	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
+
+	assert.JSONEq(t, `[
+		{"staged":true,"id":"s1","file":"auth.go","line":42,"body":"unpublished thought"},
+		{"staged":true,"id":"s2","resolve":"t1"}]`, jsonOf(t, encoded))
+	assert.Equal(t, 0, srv.listCalls, "--staged must not fetch published threads")
+	assert.NotContains(t, jsonOf(t, encoded), "this leaks a token", "a published comment must never appear in the staged listing")
+}
+
+// TestRunWorkComments_Staged_OnlyTheCallersOwnItems proves the staging area
+// is per-agent: another reviewer sharing the workspace sees none of these.
+func TestRunWorkComments_Staged_OnlyTheCallersOwnItems(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageTwoItems(t, workspaceRoot)
+	srv := newCommentServer()
+	var encoded any
+	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, "alan-turing-4-reviewer"), "", &encoded)
+	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
+	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+}
+
+func TestRunWorkComments_Staged_NothingStaged_EncodesEmptyArray(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer()
+	var encoded any
+	deps := workTestDeps(srv.client, stagingWorkspace(realTempDir(t), testReviewer), "", &encoded)
+	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
+	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+}
+
+// TestRunWorkComments_Staged_UnknownWorkBranch_ExitsThree proves --staged
+// still checks the work branch exists. Without it, a mistyped work branch
+// would name an empty staging directory and report "nothing staged" --
+// indistinguishable from a correct branch with nothing staged.
+func TestRunWorkComments_Staged_UnknownWorkBranch_ExitsThree(t *testing.T) {
+	t.Parallel()
+	srv := missingWorkBranchServer()
+	var encoded any
+	deps := workTestDeps(srv.client, stagingWorkspace(realTempDir(t), testReviewer), "", &encoded)
+	err := runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+// --- work verdicts ---
+
+// TestRunWorkVerdicts_PinTheDocumentedShape covers the exact JSON
+// docs/cli-spec.md -> verdicts documents, including `round` and `stale`.
+func TestRunWorkVerdicts_PinTheDocumentedShape(t *testing.T) {
+	t.Parallel()
+	var captured *loamv1.ListVerdictsRequest
+	client := &WorkBranchClientMock{
+		ListVerdictsFunc: func(_ context.Context, req *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			captured = req.Msg
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{Verdicts: []*loamv1.VerdictSummary{
+				{Reviewer: testReviewer, Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE, Round: 2, Stale: false},
+			}}), nil
+		},
+	}
+	var encoded any
+	require.NoError(t, runWorkVerdicts(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	require.NotNil(t, captured)
+	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
+	assert.JSONEq(t, `[{"reviewer":"ada-lovelace-7-reviewer","outcome":"approve","round":2,"stale":false}]`, jsonOf(t, encoded))
+}
+
+// TestRunWorkVerdicts_StaleIsCopiedNotDerived feeds a response whose stale
+// flags deliberately contradict what round numbers alone would suggest --
+// the LOWER round is current, the HIGHER one is stale. Only a CLI that
+// copies the server's flag through can reproduce it; any local
+// re-derivation ("stale unless this is the highest round") flips both rows.
+// Staleness is the server's to compute (internal/handler/workbranch/
+// review.go -> ListVerdicts: "Staleness is DERIVED, never stored").
+func TestRunWorkVerdicts_StaleIsCopiedNotDerived(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{Verdicts: []*loamv1.VerdictSummary{
+				{Reviewer: "alan-turing-4-reviewer", Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE, Round: 7, Stale: true},
+				{Reviewer: testReviewer, Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL, Round: 3, Stale: false},
+			}}), nil
+		},
+	}
+	var encoded any
+	require.NoError(t, runWorkVerdicts(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	rows, ok := encoded.([]workVerdictOutput)
+	require.True(t, ok, "work verdicts must encode []workVerdictOutput")
+	assert.Equal(t, []workVerdictOutput{
+		{Reviewer: "alan-turing-4-reviewer", Outcome: "disapprove", Round: 7, Stale: true},
+		{Reviewer: testReviewer, Outcome: "neutral", Round: 3, Stale: false},
+	}, rows, "rows must be reported exactly as the server returned them, stale ones included")
+}
+
+// TestRunWorkVerdicts_EveryOutcomeRendersItsSpecString pins the three
+// documented outcome strings against the proto enum.
+func TestRunWorkVerdicts_EveryOutcomeRendersItsSpecString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		outcome loamv1.VerdictOutcome
+		want    string
+	}{
+		{loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE, "approve"},
+		{loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE, "disapprove"},
+		{loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL, "neutral"},
+		{loamv1.VerdictOutcome_VERDICT_OUTCOME_UNSPECIFIED, "unspecified"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, verdictOutcomeString(tt.outcome))
+		})
+	}
+}
+
+func TestRunWorkVerdicts_NoVerdicts_EncodesEmptyArray(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{}), nil
+		},
+	}
+	var encoded any
+	require.NoError(t, runWorkVerdicts(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch}))
+	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+}
+
+func TestRunWorkVerdicts_NotFound_ExitsThree(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return nil, notFoundError()
+		},
+	}
+	var encoded any
+	err := runWorkVerdicts(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+// --- router dispatch reachability ---
+
+// TestRouterDispatch_WorkReadCommands_ReachRealHandlers proves the router
+// reaches the real handlers for all five commands this bead implements (not
+// the errNotImplemented stub, and not a routing usageError).
+func TestRouterDispatch_WorkReadCommands_ReachRealHandlers(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	client := &WorkBranchClientMock{
+		ListWorkBranchesFunc: func(context.Context, *connect.Request[loamv1.ListWorkBranchesRequest]) (*connect.Response[loamv1.ListWorkBranchesResponse], error) {
+			return connect.NewResponse(&loamv1.ListWorkBranchesResponse{}), nil
+		},
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{Repo: testRepo, Name: testWorkBranch}}), nil
+		},
+		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: ""}), nil
+		},
+		ListCommentsFunc: func(context.Context, *connect.Request[loamv1.ListCommentsRequest]) (*connect.Response[loamv1.ListCommentsResponse], error) {
+			return connect.NewResponse(&loamv1.ListCommentsResponse{}), nil
+		},
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{}), nil
+		},
+	}
+	var encoded any
+	router := NewRouter(workTestDeps(client, stagingWorkspace(workspaceRoot, testReviewer), "", &encoded))
+	for _, args := range [][]string{
+		{"work", "list"},
+		{"work", "list", "--repo", testRepo, "--awaiting-review", "--limit", "5"},
+		{"work", "show", testRepo, testWorkBranch},
+		{"work", "diff", testRepo, testWorkBranch},
+		{"work", "comments", testRepo, testWorkBranch},
+		{"work", "comments", testRepo, testWorkBranch, "--staged"},
+		{"work", "verdicts", testRepo, testWorkBranch},
+	} {
+		require.NoError(t, router.Dispatch(t.Context(), args), "args %v", args)
+	}
+}

@@ -189,22 +189,3 @@ func resolveThreadIDs(items []stagedItem) []string {
 	}
 	return ids
 }
-
-// verdictOutcomeString renders a loamv1.VerdictOutcome as the lowercase
-// string docs/cli-spec.md's output example uses. It is applied to the
-// SERVER's echoed outcome rather than to the --outcome flag, so the reported
-// outcome is the one that was actually recorded.
-// VERDICT_OUTCOME_UNSPECIFIED renders as "unspecified"; SubmitVerdict
-// rejects that value, so a real response never carries it.
-func verdictOutcomeString(o loamv1.VerdictOutcome) string {
-	switch o {
-	case loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE:
-		return "approve"
-	case loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE:
-		return "disapprove"
-	case loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL:
-		return "neutral"
-	default:
-		return "unspecified"
-	}
-}

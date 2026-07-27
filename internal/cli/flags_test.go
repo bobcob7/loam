@@ -160,12 +160,12 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 		build func() *flag.FlagSet
 		want  []flagExpectation
 	}{
-		{"work list", newWorkListFlags, []flagExpectation{
+		{"work list", func() *flag.FlagSet { fs, _ := newWorkListFlags(); return fs }, []flagExpectation{
 			{"repo", ""}, {"author", ""}, {"target", ""},
 			{"awaiting-review", "false"}, {"state", "reviewable"}, {"limit", "100"},
 		}},
 		{"work set", func() *flag.FlagSet { fs, _ := newWorkSetFlags(); return fs }, []flagExpectation{{"title", ""}}},
-		{"work comments", newWorkCommentsFlags, []flagExpectation{{"staged", "false"}}},
+		{"work comments", func() *flag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }, []flagExpectation{{"staged", "false"}}},
 		{"work comment", func() *flag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }, []flagExpectation{
 			{"file", ""}, {"line", "0"}, {"resolve", ""}, {"edit", ""}, {"discard", ""},
 		}},
