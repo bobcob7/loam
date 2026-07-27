@@ -1,8 +1,13 @@
 package main
 
-import "context"
+import (
+	"context"
 
-//go:generate go tool moq -out moq_test.go . runner closer repoNameLister
+	"github.com/bobcob7/loam/internal/credentialstore"
+	"github.com/bobcob7/loam/internal/reposstore"
+)
+
+//go:generate go tool moq -out moq_test.go . runner closer repoNameLister repoForgeLookup forgeCredentialLookup
 
 // runner is a long-lived background component whose Run blocks until ctx
 // is canceled and, per its own contract, every unit of work it already
@@ -11,12 +16,15 @@ import "context"
 // every background component uniformly through this interface: start it
 // in its own goroutine, then wait -- bounded by the shutdown grace period
 // -- for that goroutine to return. *ingest.Pool satisfies this
-// structurally today; *mirrorsync.Scheduler will too, once loam-ofg.21's
-// sibling sync-epic beads land enough real collaborators to construct one
-// (see run's doc comment) -- but Scheduler's Run does NOT itself drain
-// in-flight cycles the way Pool's does, so a caller wiring it in here
-// must also call its Shutdown method during shutdown, not rely on runner
-// alone.
+// structurally.
+//
+// *mirrorsync.Scheduler does NOT satisfy it usefully on its own: its Run
+// returns the instant ctx is canceled without draining the per-repo cycle
+// goroutines it started, unlike Pool's. syncRunner (sync.go) is the value
+// run() actually passes for the sync scheduler -- it pairs Scheduler.Run
+// with Scheduler.Shutdown so this interface's drain half genuinely holds,
+// and it is the only thing in this package that ever holds a reference to
+// the Scheduler at all.
 type runner interface {
 	Run(ctx context.Context)
 }
@@ -45,4 +53,22 @@ type closer interface {
 // across packages.
 type repoNameLister interface {
 	ListAllRepoNames(ctx context.Context) ([]string, error)
+}
+
+// repoForgeLookup resolves an enrolled repo's row -- forgePRTracker
+// (sync.go) reads repos.forge_host from it to bind a forge client to the
+// right instance. *reposstore.Store satisfies it structurally, mirroring
+// internal/mirrorsync's own repoByNameLookup, which is the same one-method
+// shape defined separately at its own consumer per this repo's convention.
+type repoForgeLookup interface {
+	GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error)
+}
+
+// forgeCredentialLookup resolves a forge host's stored token, so
+// forgePRTracker can authenticate the PR-state reads Mirror Sync step 5
+// makes. *credentialstore.Store satisfies it structurally, and it is the
+// same seam internal/gittransport already defines at its own consumer for
+// the git half of the same credential.
+type forgeCredentialLookup interface {
+	GetByHost(ctx context.Context, host string) (credentialstore.Credential, error)
 }

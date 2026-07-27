@@ -74,6 +74,26 @@ const (
 	acceptanceEncryptionKey = "nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
 )
 
+// acceptanceSyncInterval pushes the PRODUCTION sync scheduler -- which
+// run() now constructs and runs for real (loam-0do) -- far beyond this
+// suite's own runtime, so it never fires a tick while the suite is
+// running.
+//
+// This is not belt-and-braces. Every "the next sync runs" step drives
+// newSyncHarness's own, separate Scheduler through testsched, and the
+// scenarios then assert on what that one deterministic cycle produced. A
+// wall-clock tick landing in the middle of a scenario would cycle the same
+// repo concurrently through a SECOND scheduler -- two git fetches into one
+// mirror, two racing repos.sync_state writers, mergeability re-evaluated
+// against a half-fetched tip -- and would do it nondeterministically,
+// which is the one failure mode an acceptance suite must not have.
+//
+// The per-repo in-flight guard does not help here: it is per Scheduler
+// instance (a map on the struct), so it cannot see the other scheduler's
+// cycle at all. Interval, not the guard, is what keeps them apart. The
+// default (60s) is well inside a suite run that takes minutes.
+const acceptanceSyncInterval = "24h"
+
 // acceptanceLoamBinary is the path to the compiled `loam` CLI, built once
 // by TestMain for the whole acceptance test binary -- the Author/Reviewer
 // actor driver testing-spec Layer 1's table names (per-actor workspace
@@ -265,7 +285,7 @@ func acceptanceConfig(t *testing.T, databaseURL, dataDir string) config.Config {
 	t.Setenv("LOAM_DATABASE_URL", databaseURL)
 	t.Setenv("LOAM_ENCRYPTION_KEY", acceptanceEncryptionKey)
 	t.Setenv("LOAM_DATA_DIR", dataDir)
-	t.Setenv("LOAM_SYNC_INTERVAL", "")
+	t.Setenv("LOAM_SYNC_INTERVAL", acceptanceSyncInterval)
 	t.Setenv("LOAM_PR_ATTRIBUTION", "")
 	t.Setenv("LOAM_EMBEDDER_URL", "")
 	t.Setenv("LOAM_EMBEDDER_MODEL", "")
