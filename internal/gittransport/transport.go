@@ -1,0 +1,203 @@
+package gittransport
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// Transport runs upstream git subprocesses (fetch, push, branch delete)
+// with a forge host's token injected per invocation, per
+// docs/sync-spec.md "Upstream Transport". It never caches a token: every
+// call resolves the current credential from credStore and converts it
+// via gitCreds immediately before the one subprocess that needs it.
+type Transport struct {
+	credStore credentialSource
+	gitCreds  gitCredentialConverter
+	logger    *slog.Logger
+}
+
+// New builds a Transport backed by credStore (typically
+// *credentialstore.Store) and gitCreds (typically a *forge.Forgejo,
+// which satisfies gitCredentialConverter structurally via its
+// GitCredentials method -- only that method is used here).
+func New(credStore credentialSource, gitCreds gitCredentialConverter, logger *slog.Logger) *Transport {
+	return &Transport{credStore: credStore, gitCreds: gitCreds, logger: logger}
+}
+
+// Fetch runs a forced, pruning fetch of refspecs from upstreamURL into
+// the bare mirror at mirrorDir, with host's token injected per
+// invocation. refspecs is the caller's full set -- e.g. one wildcard
+// positive refspec plus a negative exclusion per registered work-branch
+// ref, per loam-giq.2's design; this package runs exactly what it is
+// given and builds no refspec of its own. The returned bytes are
+// --porcelain output with any secret scrubbed (see run), for a caller
+// that wants to derive ref SHA transitions itself.
+func (t *Transport) Fetch(ctx context.Context, host, mirrorDir, upstreamURL string, refspecs []string) ([]byte, error) {
+	args := append([]string{"fetch", "--prune", "--force", "--porcelain", upstreamURL}, refspecs...)
+	out, err := t.run(ctx, host, mirrorDir, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s into %s: %w", upstreamURL, mirrorDir, err)
+	}
+	return out, nil
+}
+
+// Push runs a git push of refspec to upstreamURL from the bare mirror at
+// mirrorDir, with host's token injected per invocation. Callers decide
+// the refspec (a fast-forward-only push for a first accept or a
+// re-accept after catch-up -- loam-giq.7's job); this package never adds
+// --force, so a non-fast-forward push is rejected by the upstream, not
+// silently forced.
+func (t *Transport) Push(ctx context.Context, host, mirrorDir, upstreamURL, refspec string) ([]byte, error) {
+	out, err := t.run(ctx, host, mirrorDir, "push", upstreamURL, refspec)
+	if err != nil {
+		return nil, fmt.Errorf("pushing %s to %s: %w", refspec, upstreamURL, err)
+	}
+	return out, nil
+}
+
+// DeleteRemoteRef runs a git push that deletes ref (a full ref path,
+// e.g. "refs/heads/loam/wb-9c2f1a") on upstreamURL, with host's token
+// injected per invocation -- used for upstream branch cleanup
+// (loam-giq.8) once a proposal's PR reaches a terminal state.
+func (t *Transport) DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstreamURL, ref string) ([]byte, error) {
+	out, err := t.run(ctx, host, mirrorDir, "push", upstreamURL, ":"+ref)
+	if err != nil {
+		return nil, fmt.Errorf("deleting %s on %s: %w", ref, upstreamURL, err)
+	}
+	return out, nil
+}
+
+// run executes one git subcommand against mirrorDir, resolving host's
+// credential and injecting it as a per-invocation HTTP Authorization
+// header (never argv, never a config file, never cached). host may be
+// empty to run anonymously with no credential resolution at all -- only
+// legitimate for a caller exercising an anonymous fixture (e.g. a
+// file:// URL in a test); every real forge host is enrolled with a
+// token, so production call sites always pass one.
+func (t *Transport) run(ctx context.Context, host, mirrorDir string, args ...string) ([]byte, error) {
+	var token, password, authHeaderValue string
+	if host != "" {
+		cred, err := t.credStore.GetByHost(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("resolving credential for host %s: %w", host, err)
+		}
+		token = cred.Token
+		username, pw, err := t.gitCreds.GitCredentials(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("converting credential for host %s to git auth: %w", host, err)
+		}
+		password = pw
+		authHeaderValue = base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	}
+	home, err := os.MkdirTemp("", "loam-gittransport-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating isolated git environment: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+	fullArgs := append([]string{"--git-dir=" + mirrorDir, "-c", "credential.helper="}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Env = gitEnv(home, authHeaderValue)
+	out, cmdErr := cmd.CombinedOutput()
+	scrubbed := scrubSecrets(string(out), token, password, authHeaderValue)
+	// args is echoed into both the log line and the returned error below.
+	// It never carries a secret today (Fetch/Push/DeleteRemoteRef pass
+	// upstreamURL/refspecs straight through; credentials live only in
+	// gitEnv's environment, never in args), but it is scrubbed here too,
+	// independently of scrubbing out/scrubbed above, so a future bug that
+	// did let a secret reach args could not surface it through this echo
+	// either -- the same belt-and-suspenders reasoning as gitEnv's
+	// GIT_TRACE*=0 overrides alongside this same scrubbing.
+	scrubbedArgs := scrubSecrets(strings.Join(args, " "), token, password, authHeaderValue)
+	if cmdErr != nil {
+		t.logger.ErrorContext(ctx, "git subprocess failed", "args", scrubbedArgs, "err", cmdErr, "output", strings.TrimSpace(scrubbed))
+		return nil, fmt.Errorf("git %s: %w: %s", scrubbedArgs, cmdErr, strings.TrimSpace(scrubbed))
+	}
+	t.logger.DebugContext(ctx, "git subprocess succeeded", "args", scrubbedArgs, "output", strings.TrimSpace(scrubbed))
+	return []byte(scrubbed), nil
+}
+
+// gitEnv builds the environment for one git subprocess invocation,
+// isolated from whatever the host machine has configured. This
+// isolation is load-bearing, not hygiene: macOS's Command Line Tools
+// ship a SYSTEM gitconfig
+// (/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig)
+// that sets credential.helper=osxkeychain, which keys entries by
+// protocol+host while IGNORING the port -- a real defect found today
+// against exactly this class of component, where an ambient cached
+// credential silently authenticated a request that was supposed to
+// fail. GIT_CONFIG_NOSYSTEM drops the system file; HOME/XDG_CONFIG_HOME
+// are redirected at home (a fresh, per-invocation temp directory the
+// caller removes when the subprocess returns) so no user-global config
+// is read either; credential.helper is separately cleared via a `-c`
+// flag in run's argv (harmless there -- it carries no secret) so an
+// inherited GIT_CONFIG_* cannot reintroduce a helper. The git tracing
+// knobs are explicitly forced off so an inherited
+// GIT_TRACE/GIT_CURL_VERBOSE/GIT_TRACE_CURL cannot print the injected
+// Authorization header -- and therefore the token -- to stderr, where it
+// would otherwise land in a returned error or a log line; scrubSecrets
+// is the second, independent layer against that same leak.
+//
+// GIT_CONFIG_GLOBAL is also pointed at a path inside home that never
+// exists, not left inherited: git treats that env var, when set, as an
+// authoritative override of the user-global config location that wins
+// over HOME -- so an ambient GIT_CONFIG_GLOBAL (e.g. set process-wide on
+// the host running this component) would otherwise reintroduce exactly
+// the ambient-credential-helper risk HOME's redirection is meant to
+// close. A path that does not exist is read by git the same way a
+// missing ~/.gitconfig is: silently, as "no global config."
+//
+// authHeaderValue is the base64(user:pass) half of "Authorization:
+// Basic <...>", injected via GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/
+// GIT_CONFIG_VALUE_0 (git >= 2.31): environment, never argv (a `-c
+// http.extraHeader=...` flag would put the token in every process's
+// `ps` output on the box) and never a config file (nothing here is ever
+// written to disk, so the mirror's .git/config carries no trace of it
+// once the subprocess exits). Empty authHeaderValue injects no header
+// at all, for an anonymous operation.
+func gitEnv(home, authHeaderValue string) []string {
+	env := append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(home, "unused-global-gitconfig"),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GIT_TRACE=0",
+		"GIT_TRACE_CURL=0",
+		"GIT_CURL_VERBOSE=0",
+		"GIT_TRACE_PACKET=0",
+		"GIT_TRACE_PACK_ACCESS=0",
+		"GIT_TRACE_SETUP=0",
+	)
+	if authHeaderValue == "" {
+		return env
+	}
+	return append(env,
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+authHeaderValue,
+	)
+}
+
+// scrubSecrets returns s with every occurrence of each non-empty value
+// in secrets replaced by a fixed marker, so a failing invocation's
+// returned output/error can never carry the token even if git itself
+// echoed it somehow. Belt and suspenders alongside gitEnv's explicit
+// GIT_TRACE*/GIT_CURL_VERBOSE=0 overrides, which stop git from producing
+// that trace in the first place.
+func scrubSecrets(s string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, secret, "[REDACTED]")
+	}
+	return s
+}
