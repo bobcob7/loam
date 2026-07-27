@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bobcob7/loam/internal/db/gen"
 )
@@ -123,4 +125,48 @@ func (s *Store) UpdateRepo(ctx context.Context, id uuid.UUID, params UpdateRepoP
 		return Repo{}, fmt.Errorf("updating repo %s: %w", id, err)
 	}
 	return fromGenRepo(row), nil
+}
+
+// UpdateSyncState sets the repos row's sync_state (+ last_synced_at, +
+// sync_error) for id -- the write RepoAdminService.EnrollRepo (loam-ofg.12)
+// uses to mark Syncing for the duration of the initial mirror clone, then
+// Idle (lastSyncedAt non-nil, syncErr nil) on success or Error (syncErr
+// non-nil) on failure; the same three-state contract the mirror-sync
+// scheduler's own SyncStateReporter will report on every later cycle, once
+// wired. lastSyncedAt nil clears the column to NULL (never touched yet, or
+// deliberately not advanced on this call, e.g. a Syncing/Error write);
+// syncErr nil clears sync_error to NULL (the normal case outside an Error
+// write). Returns a wrapped ErrNotFound if id does not exist.
+func (s *Store) UpdateSyncState(ctx context.Context, id uuid.UUID, state SyncState, lastSyncedAt *time.Time, syncErr *string) (Repo, error) {
+	row, err := s.db.UpdateRepoSyncState(ctx, gen.UpdateRepoSyncStateParams{
+		ID:           pgUUID(id),
+		SyncState:    string(state),
+		LastSyncedAt: pgTimestamptz(lastSyncedAt),
+		SyncError:    pgText(syncErr),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Repo{}, fmt.Errorf("updating sync state for repo %s: %w", id, ErrNotFound)
+		}
+		return Repo{}, fmt.Errorf("updating sync state for repo %s: %w", id, err)
+	}
+	return fromGenRepo(row), nil
+}
+
+// pgTimestamptz converts a nullable *time.Time to pgtype.Timestamptz,
+// NULL (Valid: false) when t is nil.
+func pgTimestamptz(t *time.Time) pgtype.Timestamptz {
+	if t == nil {
+		return pgtype.Timestamptz{}
+	}
+	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+// pgText converts a nullable *string to pgtype.Text, NULL (Valid: false)
+// when s is nil.
+func pgText(s *string) pgtype.Text {
+	if s == nil {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: *s, Valid: true}
 }

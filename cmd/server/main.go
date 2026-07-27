@@ -63,17 +63,24 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bobcob7/loam/internal/config"
+	"github.com/bobcob7/loam/internal/credentialstore"
+	"github.com/bobcob7/loam/internal/crypto"
 	"github.com/bobcob7/loam/internal/db"
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/forge"
+	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/git"
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/handler/repo"
+	"github.com/bobcob7/loam/internal/handler/repoadmin"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
@@ -134,6 +141,29 @@ type notImplementedDiffComputer struct{}
 // Diff implements workbranch.DiffComputer.
 func (notImplementedDiffComputer) Diff(_ context.Context, _ workbranchstore.WorkBranch) (string, error) {
 	return "", errDiffComputerNotImplemented
+}
+
+// errRepoDeleteNotImplemented is returned by notImplementedRepoDeleter in
+// place of loam-cwb's real cross-table repos-row delete path (a separate,
+// still-open bead: "no store can delete a repos row today"). See
+// internal/handler/repoadmin's RemoveRepo doc comment for the guard-vs-
+// delete split this bead's own scope draws -- the guard (enumerate
+// blocking non-terminal work branches, typed RemovalBlocked detail) is
+// wired below and genuinely enforced; only the final delete step fails
+// loudly until loam-cwb lands.
+var errRepoDeleteNotImplemented = errors.New("repo delete path not implemented (loam-cwb)")
+
+// notImplementedRepoDeleter stands in for loam-cwb's real repos-row
+// delete path, wired here instead of leaving RemoveRepo unregistered so
+// its guard (the half loam-ofg.12 owns) is genuinely reachable and
+// enforced. The same "loud failure over silent wrong behavior" choice
+// this file already makes for notImplementedOrchestrator and
+// notImplementedDiffComputer.
+type notImplementedRepoDeleter struct{}
+
+// DeleteRepo implements internal/handler/repoadmin's repoDeleter.
+func (notImplementedRepoDeleter) DeleteRepo(_ context.Context, _ uuid.UUID) error {
+	return errRepoDeleteNotImplemented
 }
 
 func main() {
@@ -199,7 +229,7 @@ func run(cfg config.Config) error {
 		pool.Close()
 		return fmt.Errorf("starting http listener: %w", err)
 	}
-	router := buildRouter(cfg, pool)
+	router := buildRouter(cfg, pool, ingestPool)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
 	return serve(ctx, stop, cfg.Logger, listener, httpServer, ingestPool, pool, defaultShutdownGrace)
 }
@@ -218,7 +248,10 @@ func run(cfg config.Config) error {
 // live database); registerMetadataServices no-ops in that case rather than
 // registering handlers that would panic on their first real request. run()
 // itself never passes nil -- see this file's package doc comment.
-func buildRouter(cfg config.Config, pool *pgxpool.Pool) *server.Router {
+// ingestPool is loam-ofg.21's worker pool (constructed in run() before this
+// is called), threaded through for registerRepoAdminService's EnrollRepo/
+// ReindexRepo/ListIngestJobs; it may be nil for the same reason pool may.
+func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool) *server.Router {
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
 	router := server.New(auth)
 	router.RegisterSPA(loamweb.Dist())
@@ -227,6 +260,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool) *server.Router {
 	registerMetadataServices(router, cfg, pool)
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
+	registerRepoAdminService(router, cfg, pool, ingestPool)
 	return router
 }
 
@@ -307,6 +341,53 @@ func registerGitService(router *server.Router, cfg config.Config, pool *pgxpool.
 	gate := handler.NewGitRoleGate(capabilities, cfg.Logger)
 	gitHandler := git.New(cfg.DataDir, repos, cfg.Logger)
 	router.RegisterGit("/git/", gate.Middleware(gitHandler))
+}
+
+// registerRepoAdminService wires loam.admin.v1.RepoAdminService
+// (loam-ofg.12) over pool and ingestPool -- the same live Postgres
+// connection and ingest worker pool run() already constructed -- plus a
+// gittransport.Transport (loam-giq.3) for the initial mirror clone/
+// ls-remote and a credentialstore.Store (loam-54o.8) for resolving each
+// upstream host's token. Unlike every /loam.v1.* handler this file
+// registers, RepoAdminService needs no handler.CapabilityChecker: the
+// entire /loam.admin.v1.* path group is already wrapped in
+// httpauth.Auth.AdminOnly before any request reaches a handler
+// (docs/web-spec.md -> Auth), so there is no per-RPC capability gate to
+// add on top of it. RemoveRepo's actual cross-table delete is wired to
+// notImplementedRepoDeleter until loam-cwb lands a real one; its guard
+// (enumerating blocking non-terminal work branches) is fully real.
+//
+// pool == nil or ingestPool == nil is the only guard here, for the same
+// reason and exercised the same way as registerMetadataServices' own
+// guard: run() always supplies both live values, so this is never hit in
+// production, only by buildRouter's own tests.
+func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool) {
+	if pool == nil || ingestPool == nil {
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	enc, err := crypto.NewEncryptor(cfg.EncryptionKey)
+	if err != nil {
+		cfg.Logger.Error("repo admin service: building encryptor, not registering", "error", err)
+		return
+	}
+	credentials := credentialstore.New(pool, enc, cfg.Logger)
+	httpClient := &http.Client{}
+	// A single, host-agnostic *forge.Forgejo (host/token both empty) is
+	// deliberately reused for gitCredentialConverter here, mirroring
+	// internal/mirrorsync's own tests and internal/gittransport's doc
+	// comment on GitCredentials: that method's Forgejo-token-as-password
+	// convention is the same for every Forgejo host, so it needs neither
+	// binding nor per-call reconstruction the way ForgeChecker's CheckRepo
+	// below does (CheckRepo enforces the instance's OWN bound host matches
+	// the upstream URL, so it must be rebuilt per host+token).
+	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	checker := repoadmin.ForgeChecker{HTTPClient: httpClient, Logger: cfg.Logger}
+	errorMapper := handler.NewErrorMapper(cfg.Logger)
+	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
+		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, mirrorreconcile.ReconcileMirror, ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
+	))
 }
 
 // roleStoreAdapter adapts internal/rolestore.Store's plain-string

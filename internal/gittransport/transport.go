@@ -73,14 +73,76 @@ func (t *Transport) DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstre
 	return out, nil
 }
 
-// run executes one git subcommand against mirrorDir, resolving host's
-// credential and injecting it as a per-invocation HTTP Authorization
-// header (never argv, never a config file, never cached). host may be
-// empty to run anonymously with no credential resolution at all -- only
-// legitimate for a caller exercising an anonymous fixture (e.g. a
-// file:// URL in a test); every real forge host is enrolled with a
-// token, so production call sites always pass one.
+// Clone creates a fresh bare mirror at mirrorDir by cloning upstreamURL,
+// with host's token injected per invocation -- the initial-enrollment leg
+// docs/sync-spec.md's Mirror Sync describes as its "degenerate first
+// cycle" and loam-giq.2's MirrorFetcher.Fetch itself never performs
+// (Fetch's --git-dir addressing assumes mirrorDir already exists;
+// nothing before loam-ofg.12 ever ran `git clone --mirror` or `git init
+// --bare` anywhere in production). Any pre-existing directory at
+// mirrorDir is removed first: the only legitimate way one can be present
+// at a fresh CreateRepo's derived path is debris from a previous, crashed
+// enrollment attempt for a repo of the same name (repos.name is unique,
+// so a live, successfully-enrolled repo's mirror is never re-cloned over
+// this path) -- `git clone` itself refuses a non-empty destination, so
+// leaving stale debris in place would fail every retry of a
+// once-interrupted enrollment. mirrorDir's parent directories are created
+// as needed. Runs through the same runRaw core as Fetch/Push/
+// DeleteRemoteRef, so it inherits every one of this package's isolation
+// properties (per-invocation credential injection via an environment
+// header, GIT_CONFIG_NOSYSTEM, redirected HOME/XDG_CONFIG_HOME, cleared
+// credential helper, output/error/log scrubbing) with no separate
+// implementation to keep in sync.
+func (t *Transport) Clone(ctx context.Context, host, mirrorDir, upstreamURL string) ([]byte, error) {
+	if err := os.RemoveAll(mirrorDir); err != nil {
+		return nil, fmt.Errorf("clearing stale mirror path %s before clone: %w", mirrorDir, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o755); err != nil {
+		return nil, fmt.Errorf("creating parent directory for mirror %s: %w", mirrorDir, err)
+	}
+	out, err := t.runRaw(ctx, host, "clone", "--mirror", upstreamURL, mirrorDir)
+	if err != nil {
+		return nil, fmt.Errorf("cloning %s into %s: %w", upstreamURL, mirrorDir, err)
+	}
+	return out, nil
+}
+
+// LsRemote lists upstreamURL's refs (including its HEAD symref, via
+// --symref) with host's token injected per invocation, needing no local
+// mirror at all -- RepoAdminService.ProbeRepo's (loam-ofg.12) read-only
+// pre-enrollment branch listing. Runs through the same runRaw core as
+// every other method here, for the same isolation-inheritance reason
+// Clone's doc comment explains.
+func (t *Transport) LsRemote(ctx context.Context, host, upstreamURL string) ([]byte, error) {
+	out, err := t.runRaw(ctx, host, "ls-remote", "--symref", upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("listing refs for %s: %w", upstreamURL, err)
+	}
+	return out, nil
+}
+
+// run executes one git subcommand against mirrorDir (via --git-dir),
+// resolving host's credential the same way runRaw always does. The
+// thin wrapper Fetch/Push/DeleteRemoteRef share, for the common case of
+// an operation against an already-existing local mirror; Clone and
+// LsRemote call runRaw directly instead, since neither operates against
+// a pre-existing --git-dir (Clone creates one; LsRemote needs none at
+// all).
 func (t *Transport) run(ctx context.Context, host, mirrorDir string, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"--git-dir=" + mirrorDir}, args...)
+	return t.runRaw(ctx, host, fullArgs...)
+}
+
+// runRaw executes one git subcommand with host's credential injected as a
+// per-invocation HTTP Authorization header (never argv, never a config
+// file, never cached). host may be empty to run anonymously with no
+// credential resolution at all -- only legitimate for a caller exercising
+// an anonymous fixture (e.g. a file:// URL in a test); every real forge
+// host is enrolled with a token, so production call sites always pass
+// one. This is the single seam every exported method (Fetch, Push,
+// DeleteRemoteRef via run; Clone, LsRemote directly) funnels through, so
+// the isolation properties below apply uniformly to all of them.
+func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]byte, error) {
 	var token, password, authHeaderValue string
 	if host != "" {
 		cred, err := t.credStore.GetByHost(ctx, host)
@@ -100,19 +162,19 @@ func (t *Transport) run(ctx context.Context, host, mirrorDir string, args ...str
 		return nil, fmt.Errorf("creating isolated git environment: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--git-dir=" + mirrorDir, "-c", "credential.helper="}, args...)
+	fullArgs := append([]string{"-c", "credential.helper="}, args...)
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
 	cmd.Env = gitEnv(home, authHeaderValue)
 	out, cmdErr := cmd.CombinedOutput()
 	scrubbed := scrubSecrets(string(out), token, password, authHeaderValue)
 	// args is echoed into both the log line and the returned error below.
-	// It never carries a secret today (Fetch/Push/DeleteRemoteRef pass
-	// upstreamURL/refspecs straight through; credentials live only in
-	// gitEnv's environment, never in args), but it is scrubbed here too,
-	// independently of scrubbing out/scrubbed above, so a future bug that
-	// did let a secret reach args could not surface it through this echo
-	// either -- the same belt-and-suspenders reasoning as gitEnv's
-	// GIT_TRACE*=0 overrides alongside this same scrubbing.
+	// It never carries a secret today (Fetch/Push/DeleteRemoteRef/Clone/
+	// LsRemote pass upstreamURL/refspecs straight through; credentials
+	// live only in gitEnv's environment, never in args), but it is
+	// scrubbed here too, independently of scrubbing out/scrubbed above, so
+	// a future bug that did let a secret reach args could not surface it
+	// through this echo either -- the same belt-and-suspenders reasoning
+	// as gitEnv's GIT_TRACE*=0 overrides alongside this same scrubbing.
 	scrubbedArgs := scrubSecrets(strings.Join(args, " "), token, password, authHeaderValue)
 	if cmdErr != nil {
 		t.logger.ErrorContext(ctx, "git subprocess failed", "args", scrubbedArgs, "err", cmdErr, "output", strings.TrimSpace(scrubbed))

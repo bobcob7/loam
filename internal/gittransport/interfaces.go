@@ -1,6 +1,7 @@
-// Package gittransport runs upstream git subprocesses (mirror fetch,
-// proposal-branch push, upstream branch delete) over HTTPS with the
-// forge token injected per invocation (docs/sync-spec.md -> "Upstream
+// Package gittransport runs upstream git subprocesses (the initial
+// enrollment mirror clone, mirror fetch, proposal-branch push, upstream
+// branch delete, pre-enrollment ls-remote) over HTTPS with the forge
+// token injected per invocation (docs/sync-spec.md -> "Upstream
 // Transport"). The token is decrypted just-in-time on every call from
 // the credential store (loam-54o.8) -- never cached in a package-level
 // variable -- converted into the forge's git username/password

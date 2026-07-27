@@ -211,3 +211,77 @@ func TestUpdateRepoOmitsNameFromParams(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, mock.UpdateRepoCalls(), 1)
 }
+
+// TestUpdateSyncStatePassesStateAndNilTimestampsAsNull proves the Syncing
+// write EnrollRepo makes for the duration of the initial clone -- no
+// lastSyncedAt yet, no syncErr -- reaches the query with both nullable
+// columns explicitly NULL (Valid: false), never a zero-value time.Time or
+// empty string silently written as a real value.
+func TestUpdateSyncStatePassesStateAndNilTimestampsAsNull(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		UpdateRepoSyncStateFunc: func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+			assert.Equal(t, "syncing", arg.SyncState)
+			assert.False(t, arg.LastSyncedAt.Valid, "no last_synced_at write for a syncing transition")
+			assert.False(t, arg.SyncError.Valid, "no sync_error write for a syncing transition")
+			return genRepoFixture(), nil
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.UpdateSyncState(t.Context(), [16]byte{1}, SyncStateSyncing, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, mock.UpdateRepoSyncStateCalls(), 1)
+}
+
+// TestUpdateSyncStateIdleWritesLastSyncedAt proves a successful cycle's
+// Idle write carries the real completion timestamp through as a valid
+// column, not silently dropped to NULL.
+func TestUpdateSyncStateIdleWritesLastSyncedAt(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(5000, 0).UTC()
+	mock := &querierMock{
+		UpdateRepoSyncStateFunc: func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+			assert.Equal(t, "idle", arg.SyncState)
+			require.True(t, arg.LastSyncedAt.Valid)
+			assert.True(t, arg.LastSyncedAt.Time.Equal(now))
+			assert.False(t, arg.SyncError.Valid)
+			return genRepoFixture(), nil
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.UpdateSyncState(t.Context(), [16]byte{1}, SyncStateIdle, &now, nil)
+	require.NoError(t, err)
+}
+
+// TestUpdateSyncStateErrorWritesSyncError proves a failed clone/reconcile's
+// Error write carries the failure message through as a valid column.
+func TestUpdateSyncStateErrorWritesSyncError(t *testing.T) {
+	t.Parallel()
+	message := "cloning acme/widgets: git clone: exit status 128"
+	mock := &querierMock{
+		UpdateRepoSyncStateFunc: func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+			assert.Equal(t, "error", arg.SyncState)
+			require.True(t, arg.SyncError.Valid)
+			assert.Equal(t, message, arg.SyncError.String)
+			return genRepoFixture(), nil
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.UpdateSyncState(t.Context(), [16]byte{1}, SyncStateError, nil, &message)
+	require.NoError(t, err)
+}
+
+// TestUpdateSyncStateNotFoundMapsToErrNotFound mirrors
+// TestUpdateRepoNotFoundMapsToErrNotFound for the sync-state write path.
+func TestUpdateSyncStateNotFoundMapsToErrNotFound(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		UpdateRepoSyncStateFunc: func(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error) {
+			return gen.Repo{}, pgx.ErrNoRows
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.UpdateSyncState(t.Context(), [16]byte{1}, SyncStateError, nil, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}

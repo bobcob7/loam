@@ -201,6 +201,128 @@ func TestRun_ScrubsEveryFormOfTheSecret(t *testing.T) {
 	assert.Contains(t, got, "fatal: could not read Username", "non-secret text must survive scrubbing")
 }
 
+// TestTransport_CloneCreatesPopulatedBareMirror is the acceptance-critical
+// proof for loam-ofg.12: cloning must actually produce a bare mirror on
+// disk carrying upstream's refs, not merely return without error. Every
+// hit for "git clone --mirror" or "git init --bare" in production before
+// this method existed was test-only (internal/fakeforge/seed.go,
+// internal/testfixture/fixture.go) -- MirrorFetcher.Fetch always assumed
+// the mirror already existed.
+func TestTransport_CloneCreatesPopulatedBareMirror(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	const token = "clone-test-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(token)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	credStore := &staticCredentialSource{token: token}
+	transport := New(credStore, newGitCredsConverter(), testLogger())
+	mirrorDir := filepath.Join(t.TempDir(), "nested", "acme", "widgets.git")
+	_, err := transport.Clone(t.Context(), host, mirrorDir, upstreamURL)
+	require.NoError(t, err)
+	out, err := runVerificationGit(t, "--git-dir="+mirrorDir, "rev-parse", "--is-bare-repository")
+	require.NoErrorf(t, err, "clone must produce a valid git directory: %s", out)
+	assert.Equal(t, "true", strings.TrimSpace(string(out)), "clone --mirror must produce a BARE repository")
+	shaOut, err := runVerificationGit(t, "--git-dir="+mirrorDir, "rev-parse", "refs/heads/main")
+	require.NoErrorf(t, err, "the mirror must carry upstream's main branch: %s", shaOut)
+	assert.NotEmpty(t, strings.TrimSpace(string(shaOut)))
+}
+
+// TestTransport_CloneRemovesStaleDirectoryFirst proves a leftover
+// directory at mirrorDir (debris from a crashed prior enrollment attempt)
+// does not make every retry fail forever -- `git clone` itself refuses a
+// non-empty destination, so Clone must clear the path first.
+func TestTransport_CloneRemovesStaleDirectoryFirst(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	const token = "clone-stale-test-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(token)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	credStore := &staticCredentialSource{token: token}
+	transport := New(credStore, newGitCredsConverter(), testLogger())
+	mirrorDir := filepath.Join(t.TempDir(), "widgets.git")
+	require.NoError(t, os.MkdirAll(mirrorDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mirrorDir, "debris.txt"), []byte("stale"), 0o644))
+	_, err := transport.Clone(t.Context(), host, mirrorDir, upstreamURL)
+	require.NoError(t, err, "a stale non-empty directory at mirrorDir must not permanently block re-cloning")
+	_, statErr := os.Stat(filepath.Join(mirrorDir, "debris.txt"))
+	assert.True(t, os.IsNotExist(statErr), "the stale debris file must be gone after Clone")
+}
+
+// TestTransport_CloneNeverLeaksTokenOnFailure mirrors
+// TestTransport_ErrorAndLogNeverContainToken for Clone: a rejected clone
+// (wrong token) must never surface the token in its returned error or a
+// log line.
+func TestTransport_CloneNeverLeaksTokenOnFailure(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	const correctToken = "clone-correct-secret-token"
+	const wrongToken = "clone-wrong-secret-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(correctToken)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	credStore := &staticCredentialSource{token: wrongToken}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	transport := New(credStore, newGitCredsConverter(), logger)
+	mirrorDir := filepath.Join(t.TempDir(), "widgets.git")
+	_, err := transport.Clone(t.Context(), host, mirrorDir, upstreamURL)
+	require.Error(t, err, "wrong token must be rejected by the upstream")
+	assert.NotContains(t, err.Error(), wrongToken)
+	assert.NotContains(t, logBuf.String(), wrongToken)
+}
+
+// TestTransport_LsRemoteListsBranchesAndSymref proves LsRemote lists
+// every upstream branch and its --symref HEAD pointer, needing no local
+// mirror at all -- RepoAdminService.ProbeRepo's read (loam-ofg.12).
+func TestTransport_LsRemoteListsBranchesAndSymref(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	const token = "ls-remote-test-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(token)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(t.Context(), "acme/widgets", "wb-release", ""))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	credStore := &staticCredentialSource{token: token}
+	transport := New(credStore, newGitCredsConverter(), testLogger())
+	out, err := transport.LsRemote(t.Context(), host, upstreamURL)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "refs/heads/main")
+	assert.Contains(t, string(out), "refs/heads/wb-release")
+	assert.Contains(t, string(out), "ref: refs/heads/main\tHEAD", "the symref line must name upstream's default branch")
+}
+
+// TestTransport_LsRemoteNeverLeaksTokenOnFailure mirrors the Fetch/Clone
+// token-secrecy tests for LsRemote.
+func TestTransport_LsRemoteNeverLeaksTokenOnFailure(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	const correctToken = "ls-remote-correct-secret-token"
+	const wrongToken = "ls-remote-wrong-secret-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(correctToken)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	credStore := &staticCredentialSource{token: wrongToken}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	transport := New(credStore, newGitCredsConverter(), logger)
+	_, err := transport.LsRemote(t.Context(), host, upstreamURL)
+	require.Error(t, err, "wrong token must be rejected by the upstream")
+	assert.NotContains(t, err.Error(), wrongToken)
+	assert.NotContains(t, logBuf.String(), wrongToken)
+}
+
 func TestTransport_ResolvesCredentialFreshEveryInvocation(t *testing.T) {
 	t.Parallel()
 	requireGit(t)

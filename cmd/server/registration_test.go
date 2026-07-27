@@ -15,8 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/config"
+	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/ingest"
 )
 
 // identityRoundTripper injects the three trusted Loam-Agent-* request
@@ -39,10 +42,24 @@ func (rt identityRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return rt.base.RoundTrip(req)
 }
 
+// testEncryptionKeyForRouter is an arbitrary-but-fixed 32-byte AES-256 key
+// (crypto.NewEncryptor's required size), needed so
+// registerRepoAdminService's credentialstore.Store construction succeeds
+// against this file's router-only tests -- without a validly-sized key,
+// NewEncryptor errors and registerRepoAdminService silently skips
+// registration, exactly the kind of "registered only under the right
+// conditions" trap loam-ofg.11 already hit once (see this file's own
+// TestBuildRouter_WithPool_RepoAdminServiceIsGenuinelyRegistered doc
+// comment). Real key material is never read by anything these tests
+// exercise -- registerRepoAdminService only needs a validly-shaped key to
+// construct the Encryptor at all.
+var testEncryptionKeyForRouter = []byte("01234567890123456789012345678901")
+
 func testConfigForRouter() config.Config {
 	return config.Config{
 		AdminUser:     "admin",
 		AdminPassword: "s3cret-pass",
+		EncryptionKey: testEncryptionKeyForRouter,
 		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 }
@@ -79,7 +96,7 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 // booted binary.
 func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil)
+	router := buildRouter(testConfigForRouter(), nil, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -115,7 +132,7 @@ func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool)
+	router := buildRouter(testConfigForRouter(), pool, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -137,7 +154,7 @@ func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool)
+	router := buildRouter(testConfigForRouter(), pool, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -168,7 +185,7 @@ func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 func TestBuildRouter_WithPool_WorkBranchServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool)
+	router := buildRouter(testConfigForRouter(), pool, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewWorkBranchServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -218,7 +235,7 @@ func gitInfoRefsRequest(t *testing.T, srv *httptest.Server) (status int, body st
 // against.
 func TestBuildRouter_NilPool_GitStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil)
+	router := buildRouter(testConfigForRouter(), nil, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	status, body := gitInfoRefsRequest(t, srv)
@@ -243,7 +260,7 @@ func TestBuildRouter_NilPool_GitStillHitsGroupFallback(t *testing.T) {
 func TestBuildRouter_WithPool_GitIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool)
+	router := buildRouter(testConfigForRouter(), pool, nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	status, body := gitInfoRefsRequest(t, srv)
@@ -251,4 +268,98 @@ func TestBuildRouter_WithPool_GitIsGenuinelyRegistered(t *testing.T) {
 		"a real (if unreachable-database) failure inside the gate/handler chain must not coincidentally look like the fallback's 404")
 	assert.NotEqual(t, "404 repository not found\n", body,
 		"the request must reach the real GitRoleGate/git.Handler chain, never the group fallback's fixed body, once a pool is wired in")
+}
+
+// adminRoundTripper injects valid admin basic auth on every request, so a
+// test client reaches an AdminOnly-wrapped /loam.admin.v1.* handler
+// instead of being rejected 401 before it is ever reached. base must be a
+// private transport (newIsolatedTransport), matching identityRoundTripper's
+// own convention above.
+type adminRoundTripper struct {
+	user, password string
+	base           http.RoundTripper
+}
+
+func (rt adminRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.SetBasicAuth(rt.user, rt.password)
+	return rt.base.RoundTrip(req)
+}
+
+// TestBuildRouter_NilPool_RepoAdminServiceStillHitsGroupFallback is
+// loam-ofg.12's "before" half of the registration proof, mirroring
+// TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback for the admin
+// surface: with no pool wired in, every /loam.admin.v1.RepoAdminService/*
+// request must still fall through to internal/server's group-level 404
+// fallback, exactly as it did before this bead's handler existed.
+func TestBuildRouter_NilPool_RepoAdminServiceStillHitsGroupFallback(t *testing.T) {
+	t.Parallel()
+	router := buildRouter(testConfigForRouter(), nil, nil)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetRepo(ctx, connect.NewRequest(&adminv1.GetRepoRequest{Repo: "bobcob7/doc-server"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code())
+	assert.Contains(t, connectErr.Message(), "no /loam.admin.v1. service registered",
+		"with no pool wired in, RepoAdminService must still be entirely unregistered -- the group fallback's own message")
+}
+
+// TestBuildRouter_WithPool_RepoAdminServiceIsGenuinelyRegistered is the
+// fast, container-free registration proof for loam-ofg.12 -- this bead's
+// own version of the nil-pool trap loam-ofg.11 hit (registered only when
+// a pool was supplied, but run() supplied nil, leaving the handler
+// unreachable in production while every test passed): a request no
+// longer hits internal/server's group-level fallback once a pool AND an
+// ingest pool are both supplied, the same shape registerRepoAdminService
+// requires. It does not need a live, reachable Postgres -- only that the
+// request reaches the REAL handler (whose GetRepoByName call attempts a
+// real query against the unreachable pool and fails with a connection
+// error, mapped to CodeInternal by handler.ErrorMapper) rather than the
+// fallback's hand-written "no service registered" 404.
+// TestServer_RepoAdminServiceIsRegistered_NotGroupFallback
+// (registration_integration_test.go) is the slower, real-Postgres version
+// of this same proof against the actual booted binary.
+func TestBuildRouter_WithPool_RepoAdminServiceIsGenuinelyRegistered(t *testing.T) {
+	t.Parallel()
+	pool := unreachablePool(t)
+	ingestPool := ingest.NewPool(testConfigForRouter().Logger, pool, nil, 1)
+	router := buildRouter(testConfigForRouter(), pool, ingestPool)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetRepo(ctx, connect.NewRequest(&adminv1.GetRepoRequest{Repo: "bobcob7/doc-server"}))
+	require.Error(t, err, "the underlying pool is unreachable, so this must still fail -- but for a REAL reason")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.NotEqual(t, connect.CodeNotFound, connectErr.Code(),
+		"a real (if unreachable-database) failure inside the handler must not coincidentally look like the fallback's CodeNotFound")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real RepoAdminServiceHandler, never the group fallback's canned message, once a pool is wired in")
+}
+
+// TestBuildRouter_NilPool_RepoAdminServiceRejectsAgentIdentity proves the
+// other half of AdminOnly's contract: /loam.admin.v1.* accepts admin
+// basic auth ONLY, never the agent identity headers /loam.v1.* accepts
+// (docs/web-spec.md -> Auth). This does not depend on whether a pool is
+// wired in -- AdminOnly rejects before any handler (real or fallback) is
+// ever reached.
+func TestBuildRouter_NilPool_RepoAdminServiceRejectsAgentIdentity(t *testing.T) {
+	t.Parallel()
+	router := buildRouter(testConfigForRouter(), nil, nil)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetRepo(ctx, connect.NewRequest(&adminv1.GetRepoRequest{Repo: "bobcob7/doc-server"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeUnauthenticated, connectErr.Code(), "agent identity headers alone must never satisfy AdminOnly")
 }
