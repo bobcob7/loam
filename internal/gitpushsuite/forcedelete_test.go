@@ -36,10 +36,8 @@ func TestRejection5_ForcePush_RejectedByGitOwnDenyNonFastForwards_NotTheHook(t *
 	require.NoError(t, err, "the initial create must succeed: %s", out)
 	firstSHA := mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-good")
 	require.NotEmpty(t, firstSHA)
-
 	runGit(t, clonePath, "commit", "--quiet", "--amend", "-m", "diverged, rewriting history")
 	out, err = pushRefs(t, clonePath, "--force", "HEAD:refs/heads/wb-good")
-
 	require.Error(t, err, "a force push must still be rejected: %s", out)
 	assert.NotContains(t, out, "loam:", "this rejection must be git's OWN wording, never the hook's -- the hook has no opinion on fast-forward-ness at all")
 	assert.Contains(t, out, "non-fast-forward", "git's own receive.denyNonFastForwards rejection names itself")
@@ -66,9 +64,7 @@ func TestRejection6_Delete_RejectedByGitOwnDenyDeletes_NotTheHook(t *testing.T) 
 	require.NoError(t, err, "the initial create must succeed: %s", out)
 	firstSHA := mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-good2")
 	require.NotEmpty(t, firstSHA)
-
 	out, err = pushRefs(t, clonePath, ":refs/heads/wb-good2")
-
 	require.Error(t, err, "a delete push must still be rejected: %s", out)
 	assert.NotContains(t, out, "loam:", "this rejection must be git's OWN wording, never the hook's -- the hook does not special-case a delete at all")
 	assert.Contains(t, out, "denying ref deletion", "git's own receive.denyDeletes rejection names itself")

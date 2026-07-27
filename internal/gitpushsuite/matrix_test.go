@@ -1,10 +1,15 @@
-// TestPushMatrix is loam-li0.7's own Definition of Done: one table-driven
-// test asserting all eight docs/git-spec.md push-rejection reasons, driven
-// by real `git` subprocesses against the EXACT production request chain
-// (see fixture_test.go's newStack doc comment). Four different mechanisms
-// do the rejecting, and each row's own comment names which one, plus
-// exactly how this suite proves it is that mechanism and not some other
-// "403 for some reason":
+// TestPushMatrix is six of loam-li0.7's eight push-matrix cases (1-4, 7,
+// 8; 5 and 6, force push and delete, are their own standalone tests in
+// forcedelete_test.go, since they need a create-then-mutate sequence the
+// rest of this table does not), driven by real `git` subprocesses against
+// the EXACT production request chain (see fixture_test.go's newStack doc
+// comment). Across all eight cases (this table plus forcedelete_test.go),
+// four different mechanisms do the rejecting; only 1-4 are docs/git-
+// spec.md's own four "Ref Policy (push)" reasons (docs/git-spec.md:148-
+// 151) -- 7 and 8 are httpauth's and the role gate's own spec sections,
+// not that table. Each row's own comment names which mechanism applies,
+// plus exactly how this suite proves it is that mechanism and not some
+// other "403 for some reason":
 //
 //   - Cases 1-4 (read-only ref, unknown ref, non-author, terminal state):
 //     internal/refpolicy.EvaluatePush, reached through the real compiled
@@ -39,7 +44,6 @@
 package gitpushsuite
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,7 +73,7 @@ func TestPushMatrix(t *testing.T) {
 		stripIdentity  bool
 		ref            string
 		wantReason     string // exact substring of the "remote: ..." line git relays
-		wantLoamPrefix bool   // whether the rejection is "loam:"-prefixed (hook-driven) or git's own wording
+		wantLoamPrefix bool   // whether the rejection is "loam:"-prefixed -- Loam wrote it (hook, httpauth, or the role gate) -- or git's own wording (force push, delete)
 		wantHookRan    bool   // whether callTracker must show the branch was looked up at all
 	}{
 		{
@@ -131,10 +135,11 @@ func TestPushMatrix(t *testing.T) {
 			// spawns and the policy socket is never dialed at all.
 			name:      "7 missing identity: no Loam-Agent-* headers at all",
 			agentName: "dave", agentID: "3", agentRole: "author",
-			stripIdentity: true,
-			ref:           "refs/heads/wb-anything",
-			wantReason:    "loam: forbidden: missing agent identity",
-			wantHookRan:   false,
+			stripIdentity:  true,
+			ref:            "refs/heads/wb-anything",
+			wantReason:     "loam: forbidden: missing agent identity",
+			wantLoamPrefix: true, // this IS loam:-prefixed (loam-j33), even though it never reaches the hook -- httpauth.GitIdentity writes it, not refpolicy
+			wantHookRan:    false,
 		},
 		{
 			// Rejection 8: wrong role -- a reviewer (git.clone only, no
@@ -157,6 +162,7 @@ func TestPushMatrix(t *testing.T) {
 				clearIdentity(t, clonePath)
 			}
 			commitFile(t, clonePath, "matrix.txt", "matrix push")
+			before := mirrorRefSHA(t, env.mirrorDir, tt.ref)
 			out, err := pushRef(t, clonePath, tt.ref)
 			require.Error(t, err, "this push must be rejected: %s", out)
 			assert.Contains(t, out, "remote: "+tt.wantReason, "git's own client must relay the exact reason")
@@ -168,7 +174,7 @@ func TestPushMatrix(t *testing.T) {
 			} else {
 				assert.Empty(t, env.tracker.Calls(), "the policy socket must NEVER be dialed: this case is rejected before any git process runs")
 			}
-			assert.False(t, strings.Contains(out, "PACK"), "a rejected push must never report having transferred a packfile")
+			assert.Equal(t, before, mirrorRefSHA(t, env.mirrorDir, tt.ref), "a rejected push must never move the target ref on the mirror, whether it pre-existed (main) or not (every other ref in this table)")
 		})
 	}
 }

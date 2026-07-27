@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -24,6 +23,7 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/server"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -85,13 +85,21 @@ func seedBareMirror(t *testing.T, mirrorDir string) {
 
 // mirrorRefSHA reads back ref's current commit SHA directly from the bare
 // mirror via a separate `git --git-dir=... rev-parse`, never trusting this
-// suite's own push helpers for the "did it actually move" proof -- an
-// empty string means the ref does not exist.
+// suite's own push helpers for the "did it actually move" proof. An empty
+// string means ref does not exist (git rev-parse --verify --quiet exits 1
+// for that, and only that, case -- confirmed against real git); any other
+// failure (a malformed mirrorDir, git missing, a permissions error) is a
+// hard test-fixture error, not silently folded into "absent", so it fails
+// the test immediately instead of letting a broken fixture masquerade as
+// "the ref was never created."
 func mirrorRefSHA(t *testing.T, mirrorDir, ref string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", "--git-dir="+mirrorDir, "rev-parse", "--verify", "--quiet", ref)
 	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		require.ErrorAsf(t, err, &exitErr, "mirrorRefSHA: git rev-parse failed in a way that was not a plain nonzero exit: %v", err)
+		require.Equal(t, 1, exitErr.ExitCode(), "mirrorRefSHA: git rev-parse --verify --quiet exited %d, not the documented 1-for-absent: %s", exitErr.ExitCode(), exitErr.Stderr)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
@@ -194,12 +202,13 @@ type stackEnv struct {
 // at the mirror's hooks/pre-receive -- production always passes
 // loamhookBinary; crosscheck_test.go substitutes a deliberately different
 // one to prove which mechanism actually rejects each case. startSocket
-// false never starts the policy socket at all, reproducing the
-// fail-closed scenario internal/hooksocket/e2e_test.go's own
-// TestE2E_PolicySocketDown_PushFailsClosed already proves; this suite
-// does not repeat that exact case (see matrix_test.go's package doc) but
-// newStack still supports it for completeness of the fixture's own
-// contract.
+// false never starts the policy socket at all, reproducing the fail-
+// closed scenario failclosed_test.go's TestFailClosed_PolicySocketDown_
+// PushRejectedThroughRealHTTPHeaders exercises through this suite's own
+// real-HTTP-identity fixture -- the one thing internal/hooksocket/
+// e2e_test.go's own TestE2E_PolicySocketDown_PushFailsClosed does not
+// cover, since that test injects identity into request context rather
+// than sending real Loam-Agent-* headers over HTTP.
 func newStack(t *testing.T, branches map[string]workbranchstore.WorkBranch, hookBinaryPath string, startSocket bool) stackEnv {
 	t.Helper()
 	dataDir := shortTempDir(t)
@@ -232,13 +241,15 @@ func newStack(t *testing.T, branches map[string]workbranchstore.WorkBranch, hook
 	checker := handler.NewCapabilityChecker(stubRoleStore{})
 	gate := handler.NewGitRoleGate(checker, testLogger())
 	auth := httpauth.New("admin", "unused-admin-password")
-	mux := http.NewServeMux()
-	// This is the EXACT chain cmd/server/main.go composes for /git/*:
-	// GitIdentity -> GitRoleGate -> git.Handler (see that file's own
-	// registerGitService doc comment: "the full chain a request passes
-	// through is GitIdentity -> GitRoleGate -> git.Handler").
-	mux.Handle("/git/", auth.GitIdentity(gate.Middleware(gitHandler)))
-	srv := httptest.NewServer(mux)
+	// Reusing internal/server.Router.RegisterGit itself -- rather than a
+	// hand-rolled http.NewServeMux() carrying the identical two-line
+	// wrap -- makes this the SAME code cmd/server/main.go's
+	// registerGitService runs, not merely code that looks equivalent by
+	// inspection: a future wrapper added inside RegisterGit is picked up
+	// here automatically.
+	router := server.New(auth)
+	router.RegisterGit("/git/", gate.Middleware(gitHandler))
+	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	return stackEnv{srv: srv, mirrorDir: mirrorDir, tracker: tracker}
 }

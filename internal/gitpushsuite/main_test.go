@@ -23,6 +23,18 @@
 // tests, it needs no container -- only a real git binary and a real
 // compiled cmd/loamhook (built once below), so it runs in the ordinary
 // `go test ./... -race` gate.
+//
+// This package covers the push-rejection matrix (failclosed_test.go,
+// matrix_test.go, forcedelete_test.go, atomicity_test.go,
+// crosscheck_test.go) and does not re-prove loam-li0.7's other two
+// Definition of Done items, which are already green against real
+// binaries elsewhere: single-branch clone bootstrap config (identity
+// headers, --single-branch narrowing) is cmd/server/
+// clonepush_integration_test.go's assertSingleBranchClone and
+// assertIdentityHeadersConfigured; startup reconciliation idempotency
+// (re-run twice, no drift in the installed hook or receive.deny* config)
+// is internal/mirrorreconcile/reconcile_test.go's
+// TestReconcileMirror_SecondCallIsNoopAndConfigStaysCorrect.
 package gitpushsuite
 
 import (

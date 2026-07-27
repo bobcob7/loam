@@ -20,20 +20,36 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-// alwaysAllowHookBinary writes a trivial script that unconditionally exits
-// 0 without ever reading its stdin or touching the network -- standing in
-// for "the hook allows everything" -- at a fresh path under t.TempDir(),
-// and returns it. mirrorreconcile.ReconcileMirror copies whatever bytes
-// sit at hookBinaryPath byte-for-byte and marks them executable (see that
+// alwaysAllowHookMarker is the file alwaysAllowHookBinary's script touches
+// inside the bare mirror's own git-dir every time it actually runs. A
+// hook's cwd is the repository it is invoked for -- for a bare mirror,
+// that IS the mirror's own root -- so filepath.Join(env.mirrorDir,
+// alwaysAllowHookMarker) is exactly where it lands.
+const alwaysAllowHookMarker = "always-allow-ran"
+
+// alwaysAllowHookBinary writes a trivial script that touches
+// alwaysAllowHookMarker and unconditionally exits 0, without ever reading
+// its stdin or touching the network -- standing in for "the hook allows
+// everything" -- at a fresh path under t.TempDir(), and returns it.
+// mirrorreconcile.ReconcileMirror copies whatever bytes sit at
+// hookBinaryPath byte-for-byte and marks them executable (see that
 // package's own doc comment: "a byte-for-byte copy of the compiled
-// cmd/loamhook binary"); it does not care whether those bytes are a real ELF binary or
-// a shell script, so this is a legitimate stand-in for "the real
-// loamhookBinary, but mutated to always allow" without needing to
+// cmd/loamhook binary"); it does not care whether those bytes are a real
+// ELF binary or a shell script, so this is a legitimate stand-in for "the
+// real loamhookBinary, but mutated to always allow" without needing to
 // recompile cmd/loamhook itself.
+//
+// The marker file is load-bearing, not decorative: without it, "the
+// always-allow hook ran and allowed this push" and "no hook ran at all"
+// are indistinguishable from a push's outcome alone -- both let the push
+// through. Every subtest below that asserts a flip to ACCEPTED also
+// asserts the marker file exists afterward, proving this specific script
+// is what actually executed.
 func alwaysAllowHookBinary(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "always-allow-hook")
-	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	script := "#!/bin/sh\ntouch \"$(git rev-parse --git-dir)/" + alwaysAllowHookMarker + "\"\nexit 0\n"
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 	return path
 }
 
@@ -44,16 +60,20 @@ func alwaysAllowHookBinary(t *testing.T) string {
 // eight matrix cases against it. Cases 1-4 (read-only ref, unknown ref,
 // non-author, terminal state) FLIP from rejected to ACCEPTED, proving the
 // real hook -- not something else -- was what rejected them in
-// matrix_test.go. Cases 5-8 (force push, delete, missing identity, wrong
-// role) are UNCHANGED: still rejected, because none of those four
-// mechanisms lives in the hook at all -- 5 and 6 are git's own
-// receive.deny* config (untouched by which hook binary is installed), and
-// 7 and 8 are httpauth.GitIdentity / handler.GitRoleGate, which run
-// before any hook could possibly be consulted.
+// matrix_test.go: 3 and 4 are the strongest of the four, since (unlike 1
+// and 2, where GetWorkBranch resolves to "not found") the real hook would
+// have gotten back a genuine, definitive owner/state answer for these
+// exact branches and still rejected the push on it -- the always-allow
+// script proves that answer is entirely bypassable, not merely that an
+// unregistered ref happens to behave differently. Cases 5-8 (force push,
+// delete, missing identity, wrong role) are UNCHANGED: still rejected,
+// because none of those four mechanisms lives in the hook at all -- 5 and
+// 6 are git's own receive.deny* config (untouched by which hook binary is
+// installed), and 7 and 8 are httpauth.GitIdentity / handler.GitRoleGate,
+// which run before any hook could possibly be consulted.
 func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.T) {
 	t.Parallel()
 	hookBinary := alwaysAllowHookBinary(t)
-
 	t.Run("1-analogue read-only ref: now ACCEPTED under an always-allow hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -62,8 +82,8 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 		out, err := pushRef(t, clonePath, "refs/heads/main")
 		assert.NoError(t, err, "under an always-allow hook, even a push to the read-only target branch must now succeed: %s", out)
 		assert.Empty(t, env.tracker.Calls(), "the always-allow hook never dials the policy socket at all")
+		assert.FileExists(t, filepath.Join(env.mirrorDir, alwaysAllowHookMarker), "the always-allow hook script must have actually run, not merely have no hook installed at all")
 	})
-
 	t.Run("2-analogue unknown ref: now ACCEPTED under an always-allow hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -71,8 +91,32 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 		commitFile(t, clonePath, "y.txt", "brand new unregistered ref")
 		out, err := pushRef(t, clonePath, "refs/heads/wb-never-registered")
 		assert.NoError(t, err, "under an always-allow hook, creating an unregistered ref must now succeed: %s", out)
+		assert.FileExists(t, filepath.Join(env.mirrorDir, alwaysAllowHookMarker), "the always-allow hook script must have actually run, not merely have no hook installed at all")
 	})
-
+	t.Run("3-analogue non-author: now ACCEPTED under an always-allow hook, even though the store holds a real owner", func(t *testing.T) {
+		t.Parallel()
+		branches := map[string]workbranchstore.WorkBranch{
+			"wb-owned-by-bob-analog": {Name: "wb-owned-by-bob-analog", Author: "bob", State: workbranchstore.StateDraft},
+		}
+		env := newStack(t, branches, hookBinary, true)
+		clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
+		commitFile(t, clonePath, "nonauthor.txt", "alice pushes bob's branch")
+		out, err := pushRef(t, clonePath, "refs/heads/wb-owned-by-bob-analog")
+		assert.NoError(t, err, "under an always-allow hook, pushing another agent's branch must now succeed even though the store correctly reports bob as the owner: %s", out)
+		assert.FileExists(t, filepath.Join(env.mirrorDir, alwaysAllowHookMarker), "the always-allow hook script must have actually run, not merely have no hook installed at all")
+	})
+	t.Run("4-analogue terminal state: now ACCEPTED under an always-allow hook, even though the store holds a real closed state", func(t *testing.T) {
+		t.Parallel()
+		branches := map[string]workbranchstore.WorkBranch{
+			"wb-closed-analog": {Name: "wb-closed-analog", Author: "alice", State: workbranchstore.StateClosed},
+		}
+		env := newStack(t, branches, hookBinary, true)
+		clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
+		commitFile(t, clonePath, "terminal.txt", "alice pushes her own closed branch")
+		out, err := pushRef(t, clonePath, "refs/heads/wb-closed-analog")
+		assert.NoError(t, err, "under an always-allow hook, pushing a closed branch must now succeed even though the store correctly reports it closed: %s", out)
+		assert.FileExists(t, filepath.Join(env.mirrorDir, alwaysAllowHookMarker), "the always-allow hook script must have actually run, not merely have no hook installed at all")
+	})
 	t.Run("5-analogue force push: STILL rejected -- git's own config, unaffected by the hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -85,7 +129,6 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 		assert.Error(t, err, "force push must still be rejected even when the hook allows everything: %s", out)
 		assert.Contains(t, out, "non-fast-forward")
 	})
-
 	t.Run("6-analogue delete: STILL rejected -- git's own config, unaffected by the hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -97,7 +140,6 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 		assert.Error(t, err, "delete must still be rejected even when the hook allows everything: %s", out)
 		assert.Contains(t, out, "denying ref deletion")
 	})
-
 	t.Run("7-analogue missing identity: STILL rejected -- never reaches the hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -108,7 +150,6 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 		assert.Error(t, err, "a push with no identity must still be rejected regardless of the hook: %s", out)
 		assert.Contains(t, out, "remote: loam: forbidden: missing agent identity")
 	})
-
 	t.Run("8-analogue wrong role: STILL rejected -- never reaches the hook", func(t *testing.T) {
 		t.Parallel()
 		env := newStack(t, nil, hookBinary, true)
@@ -138,7 +179,6 @@ func unsetMirrorConfig(t *testing.T, mirrorDir, key string) {
 // subtest actually unsets.
 func TestCrossCheck_RemovingDenyConfig_OnlyThatCaseFlips(t *testing.T) {
 	t.Parallel()
-
 	t.Run("removing denyNonFastForwards: force push now succeeds, delete is UNCHANGED (still rejected)", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
@@ -157,18 +197,14 @@ func TestCrossCheck_RemovingDenyConfig_OnlyThatCaseFlips(t *testing.T) {
 		commitFile(t, delClone, "del.txt", "first commit")
 		_, err = pushRef(t, delClone, "refs/heads/wb-del")
 		require.NoError(t, err)
-
 		unsetMirrorConfig(t, env.mirrorDir, "receive.denyNonFastForwards")
-
 		runGit(t, forceClone, "commit", "--quiet", "--amend", "-m", "diverged")
 		out, err := pushRefs(t, forceClone, "--force", "HEAD:refs/heads/wb-force")
 		assert.NoError(t, err, "with receive.denyNonFastForwards removed, a force push must now succeed: %s", out)
-
 		out, err = pushRefs(t, delClone, ":refs/heads/wb-del")
 		assert.Error(t, err, "delete must remain rejected: removing denyNonFastForwards must not affect denyDeletes: %s", out)
 		assert.Contains(t, out, "denying ref deletion")
 	})
-
 	t.Run("removing denyDeletes: delete now succeeds, force push is UNCHANGED (still rejected)", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
@@ -184,12 +220,9 @@ func TestCrossCheck_RemovingDenyConfig_OnlyThatCaseFlips(t *testing.T) {
 		commitFile(t, delClone, "del2.txt", "first commit")
 		_, err = pushRef(t, delClone, "refs/heads/wb-del2")
 		require.NoError(t, err)
-
 		unsetMirrorConfig(t, env.mirrorDir, "receive.denyDeletes")
-
 		out, err := pushRefs(t, delClone, ":refs/heads/wb-del2")
 		assert.NoError(t, err, "with receive.denyDeletes removed, a delete must now succeed: %s", out)
-
 		runGit(t, forceClone, "commit", "--quiet", "--amend", "-m", "diverged, unrelated to the delete test")
 		out, err = pushRefs(t, forceClone, "--force", "HEAD:refs/heads/wb-force2")
 		assert.Error(t, err, "force push must remain rejected: removing denyDeletes must not affect denyNonFastForwards: %s", out)

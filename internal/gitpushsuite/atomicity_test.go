@@ -38,9 +38,7 @@ func TestAtomicity_OneBadRefRejectsTheWholePush_GoodRefNeverLands(t *testing.T) 
 	require.Empty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-good"), "wb-good must not exist on the mirror before this push")
 	beforeMain := mirrorRefSHA(t, env.mirrorDir, "refs/heads/main")
 	require.NotEmpty(t, beforeMain, "main must already exist (seeded)")
-
 	out, err := pushRefs(t, clonePath, "HEAD:refs/heads/wb-good", "HEAD:refs/heads/main")
-
 	require.Error(t, err, "a push with even one bad ref must be rejected as a whole: %s", out)
 	assert.Contains(t, out, "remote: loam: refs/heads/main is read-only (target branch)", "the bad ref's own reason must still be relayed")
 	assert.Empty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-good"), "the individually-good ref must NOT have landed on the mirror: pre-receive semantics reject the WHOLE push")
