@@ -36,22 +36,27 @@ const defaultListLimit = 100
 // "<name>-<id>-<role>" identifier, which always carries two hyphens.
 const adminRoundActor = "admin"
 
-// Handler implements loamv1connect.WorkBranchServiceHandler's lifecycle
-// half (loam-ofg.8): CreateWorkBranch, UpdateWorkBranch, RequestReview,
-// ListWorkBranches, GetWorkBranch, GetWorkBranchDiff. loam-ofg.9 adds the
-// review/comments/verdicts methods (ListComments, ListVerdicts,
-// SubmitVerdict, ReplyToThread) to this same struct; until then it embeds
-// loamv1connect.UnimplementedWorkBranchServiceHandler so Handler already
-// satisfies the full generated interface -- required for
-// loamv1connect.NewWorkBranchServiceHandler to register it at all -- and
-// those four methods answer connect.CodeUnimplemented rather than the
-// route being unreachable.
+// Handler implements loamv1connect.WorkBranchServiceHandler in full: the
+// lifecycle half (loam-ofg.8) -- CreateWorkBranch, UpdateWorkBranch,
+// RequestReview, ListWorkBranches, GetWorkBranch, GetWorkBranchDiff -- in
+// this file, and the review half (loam-ofg.9) -- ListComments,
+// ListVerdicts, SubmitVerdict, ReplyToThread -- in review.go.
+//
+// The embedded loamv1connect.UnimplementedWorkBranchServiceHandler no
+// longer covers any method: every RPC the service declares is implemented
+// here. It stays only so that a future RPC added to the proto still
+// compiles into a registered-but-Unimplemented route instead of breaking
+// the build at loamv1connect.NewWorkBranchServiceHandler -- the same reason
+// the generated code offers it.
 type Handler struct {
 	loamv1connect.UnimplementedWorkBranchServiceHandler
 	workBranches WorkBranchStore
 	repos        RepoStore
 	rounds       RoundStore
 	diff         DiffComputer
+	threads      ThreadStore
+	verdicts     VerdictStore
+	publisher    VerdictPublisher
 	capabilities *handler.CapabilityChecker
 	errors       *handler.ErrorMapper
 	logger       *slog.Logger
@@ -62,8 +67,12 @@ var _ loamv1connect.WorkBranchServiceHandler = (*Handler)(nil)
 
 // New builds a Handler over the given seams, gating every RPC with
 // capabilities and mapping domain errors through errors.
-func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff DiffComputer, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
-	return &Handler{workBranches: workBranches, repos: repos, rounds: rounds, diff: diff, capabilities: capabilities, errors: errors, logger: logger}
+func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff DiffComputer, threads ThreadStore, verdicts VerdictStore, publisher VerdictPublisher, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
+	return &Handler{
+		workBranches: workBranches, repos: repos, rounds: rounds, diff: diff,
+		threads: threads, verdicts: verdicts, publisher: publisher,
+		capabilities: capabilities, errors: errors, logger: logger,
+	}
 }
 
 // CreateWorkBranch creates a work branch server-side from a target branch,

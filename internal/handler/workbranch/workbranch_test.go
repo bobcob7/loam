@@ -20,6 +20,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
@@ -65,7 +66,7 @@ func sampleTitledWorkBranch(state workbranchstore.State) workbranchstore.WorkBra
 	}
 }
 
-// allMocks builds a fully configured set of the four seams the Handler
+// allMocks builds a fully configured set of the seven seams the Handler
 // consumes, each answering a benign success, so a test that only cares
 // about one behavior (e.g. the capability gate) can override just the
 // relevant Func and trust every other mocked method is safe to call rather
@@ -73,7 +74,7 @@ func sampleTitledWorkBranch(state workbranchstore.State) workbranchstore.WorkBra
 // mutation that removes an early-return gate must fall through to a real,
 // observable success this test can assert against, never a panic that
 // would obscure the real failure.
-func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *workbranch.RoundStoreMock, *workbranch.DiffComputerMock) {
+func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *workbranch.RoundStoreMock, *workbranch.DiffComputerMock, *workbranch.ThreadStoreMock, *workbranch.VerdictStoreMock, *workbranch.VerdictPublisherMock) {
 	wb := sampleTitledWorkBranch(workbranchstore.StateDraft)
 	workBranches := &workbranch.WorkBranchStoreMock{
 		CreateFunc: func(_ context.Context, _ uuid.UUID, name, target, author string) (workbranchstore.WorkBranch, error) {
@@ -111,14 +112,16 @@ func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *wo
 		OpenRoundFunc: func(_ context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
 			return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1, RequestedBy: requestedBy}, nil
 		},
-		// A fresh draft (allMocks' default fixture, sampleTitledWorkBranch's
-		// StateDraft) realistically has no round yet; only the self-heal
-		// tests exercise this path (RequestReview only calls CurrentRound
-		// when the pre-transition state was already reviewable), but it is
-		// configured here too so the "beware the incomplete-mock trap"
-		// discipline holds even if a future code path reaches it.
+		// A benign success, like every other default here: a branch under
+		// review has a round, which is the shape ReplyToThread needs to
+		// reach its write at all. The three RequestReview self-heal tests
+		// and TestReplyToThread_NoReviewRound_FailedPrecondition each
+		// override this with reviewstore.ErrNoCurrentRound explicitly,
+		// since "there is no round" is the thing THOSE tests are about --
+		// making it the shared default instead would silently gate every
+		// other reply test behind an unrelated precondition.
 		CurrentRoundFunc: func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
-			return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, reviewstore.ErrNoCurrentRound)
+			return reviewstore.Round{ID: sampleRoundID, WorkBranchID: workBranchID, Number: 1}, nil
 		},
 	}
 	diff := &workbranch.DiffComputerMock{
@@ -126,16 +129,71 @@ func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *wo
 			return "--- a/f\n+++ b/f\n", nil
 		},
 	}
-	return workBranches, repos, rounds, diff
+	threads := &workbranch.ThreadStoreMock{
+		ListFunc: func(_ context.Context, _ uuid.UUID, _, _ int32) ([]reviewstore.ThreadWithComments, int64, error) {
+			return []reviewstore.ThreadWithComments{sampleThread()}, 1, nil
+		},
+		GetFunc: func(_ context.Context, workBranchID, id uuid.UUID) (reviewstore.Thread, error) {
+			return reviewstore.Thread{ID: id, WorkBranchID: workBranchID, RoundID: sampleRoundID, Author: sampleReviewer}, nil
+		},
+		ReplyFunc: func(_ context.Context, threadID, roundID uuid.UUID, roundNumber int32, author, body string) (reviewstore.Comment, error) {
+			return reviewstore.Comment{ID: uuid.New(), ThreadID: threadID, RoundID: roundID, RoundNumber: roundNumber, Author: author, Body: body}, nil
+		},
+	}
+	verdicts := &workbranch.VerdictStoreMock{
+		ListFunc: func(_ context.Context, _ uuid.UUID) ([]reviewstore.VerdictRecord, error) {
+			return []reviewstore.VerdictRecord{{
+				Verdict:     reviewstore.Verdict{ID: uuid.New(), RoundID: sampleRoundID, Reviewer: sampleReviewer, Outcome: reviewstore.OutcomeApprove},
+				RoundNumber: 1, Current: true,
+			}}, nil
+		},
+	}
+	publisher := &workbranch.VerdictPublisherMock{
+		PublishFunc: func(_ context.Context, req reviewpublish.Request) (reviewpublish.Result, error) {
+			return reviewpublish.Result{
+				Verdict:   reviewstore.Verdict{ID: uuid.New(), RoundID: sampleRoundID, Reviewer: req.Reviewer, Outcome: req.Outcome},
+				Round:     reviewstore.Round{ID: sampleRoundID, WorkBranchID: req.WorkBranchID, Number: 1},
+				Published: len(req.Comments),
+				State:     workbranchstore.StateReviewed,
+			}, nil
+		},
+	}
+	return workBranches, repos, rounds, diff, threads, verdicts, publisher
 }
 
-// newHandler wires a workbranch.Handler over the four given seams with a
+// sampleRoundID and sampleReviewer are the fixture round and reviewer the
+// review-half seams above answer with.
+var sampleRoundID = uuid.New()
+
+const sampleReviewer = "ada-lovelace-7-reviewer"
+
+// sampleThread is allMocks' default published thread: anchored, unresolved,
+// raised in round 1, carrying one comment posted in round 2 -- a comment's
+// round is its own, never inherited from its thread, so a default fixture
+// that made them equal would let a handler bug that copies the thread's
+// round into every comment pass unnoticed.
+func sampleThread() reviewstore.ThreadWithComments {
+	file, line := "auth.go", int32(42)
+	threadID := uuid.New()
+	return reviewstore.ThreadWithComments{
+		Thread: reviewstore.Thread{
+			ID: threadID, WorkBranchID: sampleWorkBranchID, RoundID: sampleRoundID, RoundNumber: 1,
+			Author: sampleReviewer, File: &file, Line: &line,
+		},
+		Comments: []reviewstore.Comment{{
+			ID: uuid.New(), ThreadID: threadID, RoundID: uuid.New(), RoundNumber: 2,
+			Author: sampleReviewer, Body: "this needs a guard",
+		}},
+	}
+}
+
+// newHandler wires a workbranch.Handler over the seven given seams with a
 // capability checker backed by roleCaps and an ErrorMapper that logs to buf
 // so tests can assert on the logged line for unmapped errors.
-func newHandler(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundStore, diff workbranch.DiffComputer, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
+func newHandler(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundStore, diff workbranch.DiffComputer, threads workbranch.ThreadStore, verdicts workbranch.VerdictStore, publisher workbranch.VerdictPublisher, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
 	checker := handler.NewCapabilityChecker(fixedRoleStore{capabilities: roleCaps})
 	mapper := handler.NewErrorMapper(slog.New(slog.NewJSONHandler(buf, nil)))
-	return workbranch.New(workBranches, repos, rounds, diff, checker, mapper, testLogger())
+	return workbranch.New(workBranches, repos, rounds, diff, threads, verdicts, publisher, checker, mapper, testLogger())
 }
 
 func connectCode(t *testing.T, err error) connect.Code {
@@ -154,8 +212,8 @@ func connectCode(t *testing.T, err error) connect.Code {
 func TestCreateWorkBranch_AgentLackingWorkStart_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.CreateWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -170,8 +228,8 @@ func TestCreateWorkBranch_AgentLackingWorkStart_Denied(t *testing.T) {
 func TestCreateWorkBranch_AdminCaller_RejectedForNoAgentIdentity(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, nil, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, nil, &buf)
 	_, err := h.CreateWorkBranch(adminCtx(t), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
@@ -190,8 +248,8 @@ func TestCreateWorkBranch_EmptyRepoOrFrom_ReturnsInvalidArgument(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			workBranches, repos, rounds, diff := allMocks()
-			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+			workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+			h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
 			_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: tc.repo, From: tc.from}))
 			require.Error(t, err)
 			assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
@@ -206,11 +264,11 @@ func TestCreateWorkBranch_EmptyRepoOrFrom_ReturnsInvalidArgument(t *testing.T) {
 func TestCreateWorkBranch_UnenrolledRepo_ReturnsNotFound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	repos.GetRepoByNameFunc = func(_ context.Context, name string) (reposstore.Repo, error) {
 		return reposstore.Repo{}, fmt.Errorf("getting repo %s: %w", name, reposstore.ErrNotFound)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
 	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/ghost", From: "main"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connectCode(t, err))
@@ -224,8 +282,8 @@ func TestCreateWorkBranch_UnenrolledRepo_ReturnsNotFound(t *testing.T) {
 func TestCreateWorkBranch_InvalidTargetBranch_ReturnsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
 	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "not-a-target"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
@@ -238,8 +296,8 @@ func TestCreateWorkBranch_InvalidTargetBranch_ReturnsInvalidArgument(t *testing.
 func TestCreateWorkBranch_Success_ReturnsDraftWorkBranch(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
 	resp, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
 	require.NoError(t, err)
 	assert.Equal(t, "bobcob7/doc-server", resp.Msg.GetWorkBranch().GetRepo())
@@ -257,8 +315,8 @@ func TestCreateWorkBranch_Success_ReturnsDraftWorkBranch(t *testing.T) {
 func TestUpdateWorkBranch_AgentLackingWorkSet_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.UpdateWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.UpdateWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -271,8 +329,8 @@ func TestUpdateWorkBranch_AgentLackingWorkSet_Denied(t *testing.T) {
 func TestUpdateWorkBranch_UnsetFieldsKeepCurrentValue(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkSet}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkSet}, &buf)
 	newDescription := "Adds a login flow with 2FA."
 	_, err := h.UpdateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.UpdateWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a", Description: &newDescription}))
 	require.NoError(t, err)
@@ -290,11 +348,11 @@ func TestUpdateWorkBranch_UnsetFieldsKeepCurrentValue(t *testing.T) {
 func TestUpdateWorkBranch_TerminalState_ReturnsFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.SetTitleDescriptionFunc = func(_ context.Context, id uuid.UUID, _, _ string) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("setting title/description on work branch %s: %w", id, workbranchstore.ErrIllegalTransition)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkSet}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkSet}, &buf)
 	title := "New title"
 	_, err := h.UpdateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.UpdateWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a", Title: &title}))
 	require.Error(t, err)
@@ -308,11 +366,11 @@ func TestUpdateWorkBranch_TerminalState_ReturnsFailedPrecondition(t *testing.T) 
 func TestUpdateWorkBranch_NotFound_ReturnsCodeNotFound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, name string) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("getting work branch %s: %w", name, workbranchstore.ErrNotFound)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkSet}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkSet}, &buf)
 	title := "New title"
 	_, err := h.UpdateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.UpdateWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-ghost", Title: &title}))
 	require.Error(t, err)
@@ -327,8 +385,8 @@ func TestUpdateWorkBranch_NotFound_ReturnsCodeNotFound(t *testing.T) {
 func TestRequestReview_AgentLackingWorkRequestReview_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -343,8 +401,8 @@ func TestRequestReview_AgentLackingWorkRequestReview_Denied(t *testing.T) {
 func TestRequestReview_AdminSendBack_BypassesCapability(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, nil, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, nil, &buf)
 	resp, err := h.RequestReview(adminCtx(t), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.NoError(t, err)
 	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE, resp.Msg.GetWorkBranch().GetState())
@@ -360,8 +418,8 @@ func TestRequestReview_AdminSendBack_BypassesCapability(t *testing.T) {
 func TestRequestReview_Success_TransitionsToReviewableAndOpensRound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	resp, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.NoError(t, err)
 	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE, resp.Msg.GetWorkBranch().GetState())
@@ -379,11 +437,11 @@ func TestRequestReview_Success_TransitionsToReviewableAndOpensRound(t *testing.T
 func TestRequestReview_MissingTitleOrDescription_ReturnsFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
@@ -402,7 +460,7 @@ func TestRequestReview_MissingTitleOrDescription_ReturnsFailedPrecondition(t *te
 func TestRequestReview_SelfHealsAfterInterruptedRoundOpen(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	openRoundCalls := 0
 	rounds.OpenRoundFunc = func(_ context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
 		openRoundCalls++
@@ -411,7 +469,7 @@ func TestRequestReview_SelfHealsAfterInterruptedRoundOpen(t *testing.T) {
 		}
 		return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1, RequestedBy: requestedBy}, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err, "the first call's OpenRound failed, so it must not silently report success")
 	// The retry: the work branch is now already reviewable (UpdateState's
@@ -443,7 +501,7 @@ func TestRequestReview_SelfHealsAfterInterruptedRoundOpen(t *testing.T) {
 func TestRequestReview_AlreadyReviewableWithRound_ReturnsFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 		return sampleTitledWorkBranch(workbranchstore.StateReviewable), nil
 	}
@@ -453,7 +511,7 @@ func TestRequestReview_AlreadyReviewableWithRound_ReturnsFailedPrecondition(t *t
 	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
 		return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1}, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err, "an already-reviewable branch that already has a round is a genuine illegal transition, not something to self-heal")
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
@@ -467,7 +525,7 @@ func TestRequestReview_AlreadyReviewableWithRound_ReturnsFailedPrecondition(t *t
 func TestRequestReview_CurrentRoundLookupFails_MapsToInternal(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 		return sampleTitledWorkBranch(workbranchstore.StateReviewable), nil
 	}
@@ -478,7 +536,7 @@ func TestRequestReview_CurrentRoundLookupFails_MapsToInternal(t *testing.T) {
 	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
 		return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, dbErr)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connectCode(t, err))
@@ -495,14 +553,14 @@ func TestRequestReview_CurrentRoundLookupFails_MapsToInternal(t *testing.T) {
 func TestRequestReview_TerminalState_MessageNamesTerminalState(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 		return sampleTitledWorkBranch(workbranchstore.StateClosed), nil
 	}
 	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	var connectErr *connect.Error
@@ -514,7 +572,7 @@ func TestRequestReview_TerminalState_MessageNamesTerminalState(t *testing.T) {
 func TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	untitled := workbranchstore.WorkBranch{ID: sampleWorkBranchID, RepoID: sampleRepoID, Name: "wb-9c2f1a", Target: "main", State: workbranchstore.StateDraft, Author: "grace-hopper-3-author"}
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 		return untitled, nil
@@ -522,7 +580,7 @@ func TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields(t *te
 	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
 	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	var connectErr *connect.Error
@@ -538,8 +596,8 @@ func TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields(t *te
 func TestListWorkBranches_AgentLackingWorkRead_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, nil, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, nil, &buf)
 	_, err := h.ListWorkBranches(agentCtx(t, "author"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -551,8 +609,8 @@ func TestListWorkBranches_AgentLackingWorkRead_Denied(t *testing.T) {
 func TestListWorkBranches_DefaultState_FiltersReviewable(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
 	require.NoError(t, err)
 	require.Len(t, workBranches.ListCalls(), 1)
@@ -565,8 +623,8 @@ func TestListWorkBranches_DefaultState_FiltersReviewable(t *testing.T) {
 func TestListWorkBranches_AwaitingReview_FiltersByCallerIdentity(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{AwaitingReview: true}))
 	require.NoError(t, err)
 	require.Len(t, workBranches.ListCalls(), 1)
@@ -579,13 +637,13 @@ func TestListWorkBranches_AwaitingReview_FiltersByCallerIdentity(t *testing.T) {
 func TestListWorkBranches_RepoFilter_ResolvesOnceNotPerRow(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	other := sampleTitledWorkBranch(workbranchstore.StateReviewable)
 	other.Name = "wb-abc123"
 	workBranches.ListFunc = func(_ context.Context, _ workbranchstore.ListFilter, _, _ int32) ([]workbranchstore.WorkBranch, int64, error) {
 		return []workbranchstore.WorkBranch{sampleTitledWorkBranch(workbranchstore.StateReviewable), other}, 2, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{Repo: strPtr("bobcob7/doc-server")}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetWorkBranches(), 2)
@@ -599,11 +657,11 @@ func TestListWorkBranches_RepoFilter_ResolvesOnceNotPerRow(t *testing.T) {
 func TestListWorkBranches_UnenrolledRepoFilter_ReturnsNotFound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	repos.GetRepoByNameFunc = func(_ context.Context, name string) (reposstore.Repo, error) {
 		return reposstore.Repo{}, fmt.Errorf("getting repo %s: %w", name, reposstore.ErrNotFound)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{Repo: strPtr("bobcob7/ghost")}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connectCode(t, err))
@@ -615,11 +673,11 @@ func TestListWorkBranches_UnenrolledRepoFilter_ReturnsNotFound(t *testing.T) {
 func TestListWorkBranches_Truncated_SetWhenMoreRowsExist(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.ListFunc = func(_ context.Context, _ workbranchstore.ListFilter, _, _ int32) ([]workbranchstore.WorkBranch, int64, error) {
 		return []workbranchstore.WorkBranch{sampleTitledWorkBranch(workbranchstore.StateReviewable)}, 5, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
 	require.NoError(t, err)
 	assert.True(t, resp.Msg.GetTruncated())
@@ -636,8 +694,8 @@ func TestListWorkBranches_Truncated_SetWhenMoreRowsExist(t *testing.T) {
 func TestListWorkBranches_BuildsExactFilterAndPage(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	target, author := "feature-x", "grace-hopper-3-author"
 	state := loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED
 	req := &loamv1.ListWorkBranchesRequest{Target: &target, Author: &author, State: &state, Page: &loamv1.Page{Limit: 7, Offset: 20}}
@@ -657,8 +715,8 @@ func TestListWorkBranches_BuildsExactFilterAndPage(t *testing.T) {
 func TestListWorkBranches_UnsetPage_DefaultsLimitTo100(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
 	require.NoError(t, err)
 	require.Len(t, workBranches.ListCalls(), 1)
@@ -674,8 +732,8 @@ func TestListWorkBranches_UnsetPage_DefaultsLimitTo100(t *testing.T) {
 func TestListWorkBranches_ExplicitUnspecifiedState_ReturnsInvalidArgument(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	state := loamv1.WorkBranchState_WORK_BRANCH_STATE_UNSPECIFIED
 	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{State: &state}))
 	require.Error(t, err)
@@ -700,8 +758,8 @@ func TestListWorkBranches_StateFilter_RoundTripsEveryEnumValue(t *testing.T) {
 		t.Run(string(want), func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			workBranches, repos, rounds, diff := allMocks()
-			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+			h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 			state := proto
 			_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{State: &state}))
 			require.NoError(t, err)
@@ -720,7 +778,7 @@ func TestListWorkBranches_StateFilter_RoundTripsEveryEnumValue(t *testing.T) {
 func TestListWorkBranches_NoRepoFilter_ResolvesEachDistinctRepoCorrectly(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	otherRepoID := uuid.New()
 	wbA := sampleTitledWorkBranch(workbranchstore.StateReviewable)
 	wbB := sampleTitledWorkBranch(workbranchstore.StateReviewable)
@@ -734,7 +792,7 @@ func TestListWorkBranches_NoRepoFilter_ResolvesEachDistinctRepoCorrectly(t *test
 		}
 		return reposstore.Repo{ID: id, Name: "bobcob7/doc-server"}, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetWorkBranches(), 2)
@@ -749,8 +807,8 @@ func TestListWorkBranches_NoRepoFilter_ResolvesEachDistinctRepoCorrectly(t *test
 func TestGetWorkBranch_AgentLackingWorkRead_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, nil, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, nil, &buf)
 	_, err := h.GetWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -761,8 +819,8 @@ func TestGetWorkBranch_AgentLackingWorkRead_Denied(t *testing.T) {
 func TestGetWorkBranch_Success_ReturnsWorkBranch(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.NoError(t, err)
 	assert.Equal(t, "wb-9c2f1a", resp.Msg.GetWorkBranch().GetName())
@@ -774,11 +832,11 @@ func TestGetWorkBranch_Success_ReturnsWorkBranch(t *testing.T) {
 func TestGetWorkBranch_NotFound_ReturnsCodeNotFound(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, name string) (workbranchstore.WorkBranch, error) {
 		return workbranchstore.WorkBranch{}, fmt.Errorf("getting work branch %s: %w", name, workbranchstore.ErrNotFound)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-ghost"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connectCode(t, err))
@@ -801,11 +859,11 @@ func TestGetWorkBranch_State_RoundTripsEveryEnumValue(t *testing.T) {
 		t.Run(string(store), func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			workBranches, repos, rounds, diff := allMocks()
+			workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 			workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 				return sampleTitledWorkBranch(store), nil
 			}
-			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 			resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 			require.NoError(t, err)
 			assert.Equal(t, want, resp.Msg.GetWorkBranch().GetState())
@@ -818,14 +876,14 @@ func TestGetWorkBranch_State_RoundTripsEveryEnumValue(t *testing.T) {
 func TestGetWorkBranch_PreservesUpstreamPRURL(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	url := "https://github.com/bobcob7/doc-server/pull/42"
 	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
 		wb := sampleTitledWorkBranch(workbranchstore.StateReviewed)
 		wb.UpstreamPRURL = &url
 		return wb, nil
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.NoError(t, err)
 	require.NotNil(t, resp.Msg.GetWorkBranch().UpstreamPrUrl)
@@ -839,8 +897,8 @@ func TestGetWorkBranch_PreservesUpstreamPRURL(t *testing.T) {
 func TestGetWorkBranchDiff_AgentLackingWorkRead_Denied(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, nil, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, nil, &buf)
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "author"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
@@ -852,8 +910,8 @@ func TestGetWorkBranchDiff_AgentLackingWorkRead_Denied(t *testing.T) {
 func TestGetWorkBranchDiff_Success_ReturnsDiff(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	resp, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.NoError(t, err)
 	assert.Equal(t, "--- a/f\n+++ b/f\n", resp.Msg.GetDiff())
@@ -869,12 +927,12 @@ func TestGetWorkBranchDiff_Success_ReturnsDiff(t *testing.T) {
 func TestGetWorkBranchDiff_UnmappedComputerError_FailsLoudlyAsInternal(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	sentinel := errors.New("bare mirror missing or invalid on disk")
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
 		return "", sentinel
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connectCode(t, err))
@@ -889,11 +947,11 @@ func TestGetWorkBranchDiff_UnmappedComputerError_FailsLoudlyAsInternal(t *testin
 func TestGetWorkBranchDiff_RefMissing_MapsToFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
 		return "", fmt.Errorf("wb-9c2f1a: %w", gitdiff.ErrRefMissing)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
@@ -905,11 +963,11 @@ func TestGetWorkBranchDiff_RefMissing_MapsToFailedPrecondition(t *testing.T) {
 func TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	workBranches, repos, rounds, diff := allMocks()
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
 		return "", fmt.Errorf("main...wb-9c2f1a: %w", gitdiff.ErrNoMergeBase)
 	}
-	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))

@@ -73,6 +73,10 @@ message Comment {
   // Agent identifier of the comment's author.
   string author = 1;
   string body = 2;
+  // The review round this comment was posted in. A reply can land in a LATER
+  // round than the thread it belongs to, so this is the comment's own round,
+  // never inherited from Thread.round (docs/persistence-spec.md → "comments").
+  uint32 round = 3;
 }
 
 // A location within a file: a file path and an optional line. Shared by comment
@@ -90,6 +94,9 @@ message Thread {
   // File/line anchor. Unset for a top-level thread.
   optional FileLine anchor = 3;
   repeated Comment comments = 4;
+  // The review round the thread was RAISED in. It never changes as the branch
+  // moves through later rounds (docs/cli-spec.md → "comments" output shape).
+  uint32 round = 5;
 }
 
 // A reviewer's recorded verdict on a work branch. Verdicts persist across rounds;

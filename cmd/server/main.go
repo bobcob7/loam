@@ -104,6 +104,7 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/parser"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/rolestore"
 	"github.com/bobcob7/loam/internal/server"
@@ -423,14 +424,20 @@ func registerMetadataServices(router *server.Router, cfg config.Config, pool *pg
 	router.RegisterCLI(loamv1connect.NewMetaServiceHandler(meta.New(roles, errorMapper, cfg.Logger)))
 }
 
-// registerWorkBranchService wires loam.v1.WorkBranchService's lifecycle
-// half (loam-ofg.8: CreateWorkBranch, UpdateWorkBranch, RequestReview,
-// ListWorkBranches, GetWorkBranch, GetWorkBranchDiff) over pool, the same
-// single Postgres connection registerMetadataServices' services share.
-// GetWorkBranchDiff is backed by internal/gitdiff.Computer (loam-fwk),
-// rooted at cfg.DataDir over the same repos store every other RPC here
-// shares; every RPC this handler implements is wired against real stores
-// and genuinely reachable.
+// registerWorkBranchService wires loam.v1.WorkBranchService in full over
+// pool, the same single Postgres connection registerMetadataServices'
+// services share: the lifecycle half (loam-ofg.8: CreateWorkBranch,
+// UpdateWorkBranch, RequestReview, ListWorkBranches, GetWorkBranch,
+// GetWorkBranchDiff) and the review half (loam-ofg.9: ListComments,
+// ListVerdicts, SubmitVerdict, ReplyToThread). GetWorkBranchDiff is backed
+// by internal/gitdiff.Computer (loam-fwk), rooted at cfg.DataDir over the
+// same repos store every other RPC here shares; every RPC this handler
+// implements is wired against real stores and genuinely reachable.
+//
+// SubmitVerdict's publisher is given the POOL, not a pre-bound querier,
+// because it opens and owns a pgx.Tx per call -- that transaction is what
+// makes the publish atomic (internal/reviewpublish). Handing it the same
+// gen.New(pool) the other stores use would quietly remove that property.
 //
 // pool == nil is the only guard here, for the same reason and exercised
 // the same way as registerMetadataServices' own guard: run() always
@@ -446,9 +453,12 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	rounds := reviewstore.NewRoundStore(pool, cfg.Logger)
+	threads := reviewstore.NewThreadStore(pool, cfg.Logger)
+	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
+	publisher := reviewpublish.New(pool, cfg.Logger)
 	diff := gitdiff.New(cfg.DataDir, repos)
 	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
-		workbranch.New(workBranches, repos, rounds, diff, capabilities, errorMapper, cfg.Logger),
+		workbranch.New(workBranches, repos, rounds, diff, threads, verdicts, publisher, capabilities, errorMapper, cfg.Logger),
 	))
 }
 

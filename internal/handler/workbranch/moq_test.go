@@ -6,6 +6,7 @@ package workbranch
 import (
 	"context"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 	"github.com/google/uuid"
@@ -707,5 +708,363 @@ func (mock *DiffComputerMock) DiffCalls() []struct {
 	mock.lockDiff.RLock()
 	calls = mock.calls.Diff
 	mock.lockDiff.RUnlock()
+	return calls
+}
+
+// Ensure, that ThreadStoreMock does implement ThreadStore.
+// If this is not the case, regenerate this file with moq.
+var _ ThreadStore = &ThreadStoreMock{}
+
+// ThreadStoreMock is a mock implementation of ThreadStore.
+//
+//	func TestSomethingThatUsesThreadStore(t *testing.T) {
+//
+//		// make and configure a mocked ThreadStore
+//		mockedThreadStore := &ThreadStoreMock{
+//			GetFunc: func(ctx context.Context, workBranchID uuid.UUID, id uuid.UUID) (reviewstore.Thread, error) {
+//				panic("mock out the Get method")
+//			},
+//			ListFunc: func(ctx context.Context, workBranchID uuid.UUID, limit int32, offset int32) ([]reviewstore.ThreadWithComments, int64, error) {
+//				panic("mock out the List method")
+//			},
+//			ReplyFunc: func(ctx context.Context, threadID uuid.UUID, roundID uuid.UUID, roundNumber int32, author string, body string) (reviewstore.Comment, error) {
+//				panic("mock out the Reply method")
+//			},
+//		}
+//
+//		// use mockedThreadStore in code that requires ThreadStore
+//		// and then make assertions.
+//
+//	}
+type ThreadStoreMock struct {
+	// GetFunc mocks the Get method.
+	GetFunc func(ctx context.Context, workBranchID uuid.UUID, id uuid.UUID) (reviewstore.Thread, error)
+
+	// ListFunc mocks the List method.
+	ListFunc func(ctx context.Context, workBranchID uuid.UUID, limit int32, offset int32) ([]reviewstore.ThreadWithComments, int64, error)
+
+	// ReplyFunc mocks the Reply method.
+	ReplyFunc func(ctx context.Context, threadID uuid.UUID, roundID uuid.UUID, roundNumber int32, author string, body string) (reviewstore.Comment, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Get holds details about calls to the Get method.
+		Get []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// WorkBranchID is the workBranchID argument value.
+			WorkBranchID uuid.UUID
+			// ID is the id argument value.
+			ID uuid.UUID
+		}
+		// List holds details about calls to the List method.
+		List []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// WorkBranchID is the workBranchID argument value.
+			WorkBranchID uuid.UUID
+			// Limit is the limit argument value.
+			Limit int32
+			// Offset is the offset argument value.
+			Offset int32
+		}
+		// Reply holds details about calls to the Reply method.
+		Reply []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ThreadID is the threadID argument value.
+			ThreadID uuid.UUID
+			// RoundID is the roundID argument value.
+			RoundID uuid.UUID
+			// RoundNumber is the roundNumber argument value.
+			RoundNumber int32
+			// Author is the author argument value.
+			Author string
+			// Body is the body argument value.
+			Body string
+		}
+	}
+	lockGet   sync.RWMutex
+	lockList  sync.RWMutex
+	lockReply sync.RWMutex
+}
+
+// Get calls GetFunc.
+func (mock *ThreadStoreMock) Get(ctx context.Context, workBranchID uuid.UUID, id uuid.UUID) (reviewstore.Thread, error) {
+	if mock.GetFunc == nil {
+		panic("ThreadStoreMock.GetFunc: method is nil but ThreadStore.Get was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		ID           uuid.UUID
+	}{
+		Ctx:          ctx,
+		WorkBranchID: workBranchID,
+		ID:           id,
+	}
+	mock.lockGet.Lock()
+	mock.calls.Get = append(mock.calls.Get, callInfo)
+	mock.lockGet.Unlock()
+	return mock.GetFunc(ctx, workBranchID, id)
+}
+
+// GetCalls gets all the calls that were made to Get.
+// Check the length with:
+//
+//	len(mockedThreadStore.GetCalls())
+func (mock *ThreadStoreMock) GetCalls() []struct {
+	Ctx          context.Context
+	WorkBranchID uuid.UUID
+	ID           uuid.UUID
+} {
+	var calls []struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		ID           uuid.UUID
+	}
+	mock.lockGet.RLock()
+	calls = mock.calls.Get
+	mock.lockGet.RUnlock()
+	return calls
+}
+
+// List calls ListFunc.
+func (mock *ThreadStoreMock) List(ctx context.Context, workBranchID uuid.UUID, limit int32, offset int32) ([]reviewstore.ThreadWithComments, int64, error) {
+	if mock.ListFunc == nil {
+		panic("ThreadStoreMock.ListFunc: method is nil but ThreadStore.List was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		Limit        int32
+		Offset       int32
+	}{
+		Ctx:          ctx,
+		WorkBranchID: workBranchID,
+		Limit:        limit,
+		Offset:       offset,
+	}
+	mock.lockList.Lock()
+	mock.calls.List = append(mock.calls.List, callInfo)
+	mock.lockList.Unlock()
+	return mock.ListFunc(ctx, workBranchID, limit, offset)
+}
+
+// ListCalls gets all the calls that were made to List.
+// Check the length with:
+//
+//	len(mockedThreadStore.ListCalls())
+func (mock *ThreadStoreMock) ListCalls() []struct {
+	Ctx          context.Context
+	WorkBranchID uuid.UUID
+	Limit        int32
+	Offset       int32
+} {
+	var calls []struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		Limit        int32
+		Offset       int32
+	}
+	mock.lockList.RLock()
+	calls = mock.calls.List
+	mock.lockList.RUnlock()
+	return calls
+}
+
+// Reply calls ReplyFunc.
+func (mock *ThreadStoreMock) Reply(ctx context.Context, threadID uuid.UUID, roundID uuid.UUID, roundNumber int32, author string, body string) (reviewstore.Comment, error) {
+	if mock.ReplyFunc == nil {
+		panic("ThreadStoreMock.ReplyFunc: method is nil but ThreadStore.Reply was just called")
+	}
+	callInfo := struct {
+		Ctx         context.Context
+		ThreadID    uuid.UUID
+		RoundID     uuid.UUID
+		RoundNumber int32
+		Author      string
+		Body        string
+	}{
+		Ctx:         ctx,
+		ThreadID:    threadID,
+		RoundID:     roundID,
+		RoundNumber: roundNumber,
+		Author:      author,
+		Body:        body,
+	}
+	mock.lockReply.Lock()
+	mock.calls.Reply = append(mock.calls.Reply, callInfo)
+	mock.lockReply.Unlock()
+	return mock.ReplyFunc(ctx, threadID, roundID, roundNumber, author, body)
+}
+
+// ReplyCalls gets all the calls that were made to Reply.
+// Check the length with:
+//
+//	len(mockedThreadStore.ReplyCalls())
+func (mock *ThreadStoreMock) ReplyCalls() []struct {
+	Ctx         context.Context
+	ThreadID    uuid.UUID
+	RoundID     uuid.UUID
+	RoundNumber int32
+	Author      string
+	Body        string
+} {
+	var calls []struct {
+		Ctx         context.Context
+		ThreadID    uuid.UUID
+		RoundID     uuid.UUID
+		RoundNumber int32
+		Author      string
+		Body        string
+	}
+	mock.lockReply.RLock()
+	calls = mock.calls.Reply
+	mock.lockReply.RUnlock()
+	return calls
+}
+
+// Ensure, that VerdictStoreMock does implement VerdictStore.
+// If this is not the case, regenerate this file with moq.
+var _ VerdictStore = &VerdictStoreMock{}
+
+// VerdictStoreMock is a mock implementation of VerdictStore.
+//
+//	func TestSomethingThatUsesVerdictStore(t *testing.T) {
+//
+//		// make and configure a mocked VerdictStore
+//		mockedVerdictStore := &VerdictStoreMock{
+//			ListFunc: func(ctx context.Context, workBranchID uuid.UUID) ([]reviewstore.VerdictRecord, error) {
+//				panic("mock out the List method")
+//			},
+//		}
+//
+//		// use mockedVerdictStore in code that requires VerdictStore
+//		// and then make assertions.
+//
+//	}
+type VerdictStoreMock struct {
+	// ListFunc mocks the List method.
+	ListFunc func(ctx context.Context, workBranchID uuid.UUID) ([]reviewstore.VerdictRecord, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// List holds details about calls to the List method.
+		List []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// WorkBranchID is the workBranchID argument value.
+			WorkBranchID uuid.UUID
+		}
+	}
+	lockList sync.RWMutex
+}
+
+// List calls ListFunc.
+func (mock *VerdictStoreMock) List(ctx context.Context, workBranchID uuid.UUID) ([]reviewstore.VerdictRecord, error) {
+	if mock.ListFunc == nil {
+		panic("VerdictStoreMock.ListFunc: method is nil but VerdictStore.List was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+	}{
+		Ctx:          ctx,
+		WorkBranchID: workBranchID,
+	}
+	mock.lockList.Lock()
+	mock.calls.List = append(mock.calls.List, callInfo)
+	mock.lockList.Unlock()
+	return mock.ListFunc(ctx, workBranchID)
+}
+
+// ListCalls gets all the calls that were made to List.
+// Check the length with:
+//
+//	len(mockedVerdictStore.ListCalls())
+func (mock *VerdictStoreMock) ListCalls() []struct {
+	Ctx          context.Context
+	WorkBranchID uuid.UUID
+} {
+	var calls []struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+	}
+	mock.lockList.RLock()
+	calls = mock.calls.List
+	mock.lockList.RUnlock()
+	return calls
+}
+
+// Ensure, that VerdictPublisherMock does implement VerdictPublisher.
+// If this is not the case, regenerate this file with moq.
+var _ VerdictPublisher = &VerdictPublisherMock{}
+
+// VerdictPublisherMock is a mock implementation of VerdictPublisher.
+//
+//	func TestSomethingThatUsesVerdictPublisher(t *testing.T) {
+//
+//		// make and configure a mocked VerdictPublisher
+//		mockedVerdictPublisher := &VerdictPublisherMock{
+//			PublishFunc: func(ctx context.Context, req reviewpublish.Request) (reviewpublish.Result, error) {
+//				panic("mock out the Publish method")
+//			},
+//		}
+//
+//		// use mockedVerdictPublisher in code that requires VerdictPublisher
+//		// and then make assertions.
+//
+//	}
+type VerdictPublisherMock struct {
+	// PublishFunc mocks the Publish method.
+	PublishFunc func(ctx context.Context, req reviewpublish.Request) (reviewpublish.Result, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Publish holds details about calls to the Publish method.
+		Publish []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Req is the req argument value.
+			Req reviewpublish.Request
+		}
+	}
+	lockPublish sync.RWMutex
+}
+
+// Publish calls PublishFunc.
+func (mock *VerdictPublisherMock) Publish(ctx context.Context, req reviewpublish.Request) (reviewpublish.Result, error) {
+	if mock.PublishFunc == nil {
+		panic("VerdictPublisherMock.PublishFunc: method is nil but VerdictPublisher.Publish was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Req reviewpublish.Request
+	}{
+		Ctx: ctx,
+		Req: req,
+	}
+	mock.lockPublish.Lock()
+	mock.calls.Publish = append(mock.calls.Publish, callInfo)
+	mock.lockPublish.Unlock()
+	return mock.PublishFunc(ctx, req)
+}
+
+// PublishCalls gets all the calls that were made to Publish.
+// Check the length with:
+//
+//	len(mockedVerdictPublisher.PublishCalls())
+func (mock *VerdictPublisherMock) PublishCalls() []struct {
+	Ctx context.Context
+	Req reviewpublish.Request
+} {
+	var calls []struct {
+		Ctx context.Context
+		Req reviewpublish.Request
+	}
+	mock.lockPublish.RLock()
+	calls = mock.calls.Publish
+	mock.lockPublish.RUnlock()
 	return calls
 }

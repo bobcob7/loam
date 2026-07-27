@@ -1,9 +1,9 @@
-// Package workbranch implements the lifecycle half of loam.v1.WorkBranchService
-// (loam-ofg.8): CreateWorkBranch, UpdateWorkBranch, RequestReview,
-// ListWorkBranches, GetWorkBranch, and GetWorkBranchDiff. The other half --
-// ListComments, ListVerdicts, SubmitVerdict, ReplyToThread -- belongs to
-// loam-ofg.9, which shares this package's Handler struct and store seams
-// rather than duplicating them.
+// Package workbranch implements loam.v1.WorkBranchService: the lifecycle
+// half (loam-ofg.8) -- CreateWorkBranch, UpdateWorkBranch, RequestReview,
+// ListWorkBranches, GetWorkBranch, GetWorkBranchDiff -- and the review half
+// (loam-ofg.9) -- ListComments, ListVerdicts, SubmitVerdict, ReplyToThread
+// -- on one Handler struct sharing one set of store seams, rather than two
+// packages duplicating them.
 package workbranch
 
 import (
@@ -12,11 +12,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundStore DiffComputer
+//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundStore DiffComputer ThreadStore VerdictStore VerdictPublisher
 
 // WorkBranchStore is the internal/workbranchstore.Store surface this
 // package's lifecycle RPCs need, defined here at the consumer per repo
@@ -121,4 +122,60 @@ type RoundStore interface {
 // DESCRIPTION; it never covered diff computation).
 type DiffComputer interface {
 	Diff(ctx context.Context, workBranch workbranchstore.WorkBranch) (string, error)
+}
+
+// ThreadStore is the internal/reviewstore.ThreadStore surface the review
+// RPCs need, defined here at the consumer per repo convention.
+// *reviewstore.ThreadStore satisfies it directly in production; tests drive
+// a moq mock instead.
+//
+// Only the two READ-and-immediate-write operations live here. The batch
+// publish SubmitVerdict performs does NOT: it must be one transaction
+// spanning threads, verdicts, and work_branches, so it is a single seam of
+// its own (VerdictPublisher) rather than several calls this handler would
+// have to sequence outside any transaction.
+type ThreadStore interface {
+	// List returns the work branch's PUBLISHED threads with their
+	// comments, offset-paginated by thread, plus the total thread count
+	// for PageInfo.total. Staged comments are never here -- they live in
+	// the CLI's .loam until a verdict publishes them.
+	List(ctx context.Context, workBranchID uuid.UUID, limit, offset int32) ([]reviewstore.ThreadWithComments, int64, error)
+	// Get resolves a thread id scoped to workBranchID, so ReplyToThread
+	// can reject a thread belonging to another work branch as
+	// reviewstore.ErrThreadNotFound before writing anything.
+	Get(ctx context.Context, workBranchID, id uuid.UUID) (reviewstore.Thread, error)
+	// Reply appends a comment to an existing thread immediately -- never
+	// staged (docs/cli-spec.md -> "reply"). roundID/roundNumber is the
+	// branch's CURRENT round at the moment of the reply, which may be a
+	// later round than the thread's own.
+	Reply(ctx context.Context, threadID, roundID uuid.UUID, roundNumber int32, author, body string) (reviewstore.Comment, error)
+}
+
+// VerdictStore is the internal/reviewstore.VerdictStore surface
+// ListVerdicts needs, defined here at the consumer.
+// *reviewstore.VerdictStore satisfies it directly in production.
+type VerdictStore interface {
+	// List returns every verdict across every round for the work branch,
+	// newest round first, each decorated with whether its round is the
+	// branch's CURRENT one. Staleness is that flag's negation and is
+	// derived from round numbers by the query itself -- there is no stored
+	// stale column anywhere in this system, and this handler must not
+	// invent a second mechanism for it.
+	List(ctx context.Context, workBranchID uuid.UUID) ([]reviewstore.VerdictRecord, error)
+}
+
+// VerdictPublisher is the atomic verdict publish SubmitVerdict performs,
+// defined here at the consumer. *reviewpublish.Publisher satisfies it in
+// production, opening one pgx.Tx per call so the published comments, the
+// thread resolutions, the verdict, and the reviewable -> reviewed flip
+// commit together or not at all.
+//
+// It is deliberately ONE method rather than a set of finer-grained store
+// calls this handler would orchestrate: the atomicity is the contract
+// (docs/cli-spec.md -> "verdict": "in one atomic action"), and a handler
+// sequencing three store calls could not provide it no matter how careful
+// the ordering. The work-branch state gate lives inside the transaction
+// too, so it cannot be raced by a concurrent transition.
+type VerdictPublisher interface {
+	Publish(ctx context.Context, req reviewpublish.Request) (reviewpublish.Result, error)
 }
