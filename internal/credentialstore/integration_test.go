@@ -280,6 +280,40 @@ func TestSetValidated_UpdatesFlag_RealDB(t *testing.T) {
 	assert.True(t, status.Validated)
 }
 
+// TestReupsert_ResetsValidated_RealDB pins that replacing a host's token
+// clears validated. The flag describes ONE token, not the host, so a
+// freshly-written token must never inherit the previous token's verdict:
+// otherwise a caller whose re-validation errors out before it can call
+// SetValidated(false) leaves GetStatus reporting validated:true for a
+// token nothing ever checked. Without the ON CONFLICT clause's
+// `validated = false`, this test is the only thing that fails.
+func TestReupsert_ResetsValidated_RealDB(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newTestPool(t)
+	enc := newTestEncryptor(t, 0x09)
+	s := New(pool, enc, testLogger())
+	const host = "github.com-reupsert-resets-validated"
+	_, err := s.UpsertToken(ctx, host, "first-token")
+	require.NoError(t, err)
+
+	status, err := s.SetValidated(ctx, host, true)
+	require.NoError(t, err)
+	require.True(t, status.Validated, "precondition: the first token is marked validated")
+
+	_, err = s.UpsertToken(ctx, host, "second-token")
+	require.NoError(t, err)
+
+	status, err = s.GetStatus(ctx, host)
+	require.NoError(t, err)
+	assert.False(t, status.Validated, "replacing the token must reset validated -- the flag describes the token, not the host")
+	assert.True(t, status.HasToken, "the replacement token is still present")
+
+	got, err := s.GetByHost(ctx, host)
+	require.NoError(t, err)
+	assert.Equal(t, "second-token", got.Token, "the replacement token must round-trip")
+}
+
 // TestGetByHost_UnknownHost_ReturnsErrNotFound proves the distinguishable
 // errNotFound surfaces against the real schema, not a bare pgx.ErrNoRows.
 func TestGetByHost_UnknownHost_ReturnsErrNotFound(t *testing.T) {

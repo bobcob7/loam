@@ -6,9 +6,17 @@
 -- already-encrypted token_ciphertext: the plaintext token never reaches
 -- this query (internal/credentialstore's Store encrypts it via the
 -- injected AES-GCM encryptor before calling this).
+--
+-- Replacing a host's token resets validated to false. A validated flag
+-- describes ONE token, not the host: leaving it true would report a
+-- freshly-written, never-checked token as validated -- exactly the drift
+-- GetCredentialStatus avoids for has_token by computing it rather than
+-- storing it. The caller re-validates and calls SetCredentialValidated
+-- again; it must not be able to inherit the previous token's verdict by
+-- failing before it gets there.
 INSERT INTO credentials (id, host, token_ciphertext)
 VALUES ($1, $2, $3)
-ON CONFLICT (host) DO UPDATE SET token_ciphertext = EXCLUDED.token_ciphertext, updated_at = now()
+ON CONFLICT (host) DO UPDATE SET token_ciphertext = EXCLUDED.token_ciphertext, validated = false, updated_at = now()
 RETURNING *;
 
 -- name: GetCredentialByHost :one
