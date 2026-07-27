@@ -449,11 +449,29 @@ repo/work-branch key checks are lexical and cannot see symlinks, so they are not
 provides this; they exist to reject a malformed key with a precise usage error (exit `2`).
 The CLI never exposes a staging path string to write to directly.
 
+**Staging format:** one `staged.json` document per `(repo, work-branch, agent)` staging
+directory — written by `comment`, read by `comments --staged`, published and cleared by
+`verdict`:
+
+```json
+{ "version": 1, "next_id": 4,
+  "items": [ { "id": "s3", "file": "auth.go", "line": 42, "body": "…", "resolve": "t1" } ] }
+```
+
+Every field of an item except `id` is optional: a top-level comment has no `file`/`line`, a
+resolve-only item has no `body`, and a plain comment has no `resolve`. An item carries **no
+round** — staged items are inert local data that survive round changes, and the round is
+assigned only when `verdict` publishes them. `next_id` is persisted rather than derived from
+the items, so an id freed by `--discard` is never handed out again and a `--edit s3` in a
+later invocation always addresses the same comment the agent read earlier.
+
 **Output** (JSON) — the staged item with a local staging id:
 
 ```json
 { "staged": true, "id": "s3", "file": "auth.go", "line": 42, "body": "…" }
 ```
+
+`staged` is `false` for a `--discard`, which reports the item it removed.
 
 **Errors:** exit `2` on conflicting modes, a missing body when one is required, or attempting
 to resolve a thread the caller did not author; exit `3` if the work branch, referenced

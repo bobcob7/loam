@@ -86,6 +86,9 @@ var stillStubbedExemptions = map[string]bool{
 	"work start":          true,
 	"work set":            true,
 	"work request-review": true,
+	// work comment is covered by TestRouterDispatch_WorkComment_
+	// ReachesRealHandler in commands_work_comment_test.go (loam-0pj.12).
+	"work comment": true,
 	// graph def/refs/deps/dependents/history are covered by
 	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
 	// commands_graph_test.go (loam-0pj.14).
@@ -158,7 +161,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"work comments", []string{"work", "comments", "acme/repo", "wb-1"}},
 		{"work comments staged", []string{"work", "comments", "acme/repo", "wb-1", "--staged"}},
 		{"work verdicts", []string{"work", "verdicts", "acme/repo", "wb-1"}},
-		{"work comment", []string{"work", "comment", "acme/repo", "wb-1", "--file", "a.go", "--line", "3"}},
 		{"work reply", []string{"work", "reply", "acme/repo", "wb-1", "--thread", "t1"}},
 		{"work verdict", []string{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"}},
 	}
@@ -227,8 +229,15 @@ func keysOf(m map[string]*command) []string {
 func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	t.Parallel()
 	router := NewRouter(newTestDeps())
+	// `work comment` is implemented (loam-0pj.12), so it is dispatched with
+	// an extra positional: its flags are still registered and parsed, but it
+	// stops on the argument count before reading stdin or opening a staging
+	// area, neither of which newTestDeps provides.
+	commentErr := router.Dispatch(t.Context(), []string{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"})
+	var commentUsage *usageError
+	assert.ErrorAs(t, commentErr, &commentUsage)
 	for _, args := range [][]string{
-		{"work", "comment", "a", "b", "--file", "x.go", "--line", "3"},
+		{"work", "comments", "a", "b", "--staged"},
 		{"work", "list", "--limit", "5"},
 		{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"},
 	} {

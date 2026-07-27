@@ -83,7 +83,9 @@ func workBranchStateString(s loamv1.WorkBranchState) string {
 // matters because docs/cli-spec.md -> set treats "empty stdin" as "leave
 // the description unchanged" -- a bare trailing newline from `echo` (rather
 // than `printf`) must not itself count as a provided, non-empty
-// description.
+// description. `work comment` depends on the same distinction: a lone
+// newline must not satisfy its required body, nor turn a bare `--discard`
+// into a conflicting new-thread invocation.
 func readStdin(r io.Reader) (string, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -277,34 +279,6 @@ func runWorkVerdicts(ctx context.Context, deps *Deps, args []string) error {
 		return newUsageError(err.Error())
 	}
 	if err := requireWorkBranchArgs("work verdicts", positional); err != nil {
-		return err
-	}
-	return errNotImplemented
-}
-
-// newWorkCommentFlags builds the flag.FlagSet for `loam work comment
-// [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>]
-// [--edit <staged-id>] [--discard <staged-id>]`.
-func newWorkCommentFlags() *flag.FlagSet {
-	fs := newFlagSet("work comment")
-	fs.String("file", "", "anchor the new thread to this file")
-	fs.Int("line", 0, "anchor the new thread to this line")
-	fs.String("resolve", "", "mark this thread id resolved")
-	fs.String("edit", "", "replace the body of this staged comment id")
-	fs.String("discard", "", "remove this staged comment id")
-	return fs
-}
-
-// runWorkComment implements `loam work comment [repo] [work-branch]
-// [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>]
-// [--discard <staged-id>]`.
-func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
-	fs := newWorkCommentFlags()
-	positional, err := parseCommandArgs(fs, args)
-	if err != nil {
-		return newUsageError(err.Error())
-	}
-	if err := requireWorkBranchArgs("work comment", positional); err != nil {
 		return err
 	}
 	return errNotImplemented
