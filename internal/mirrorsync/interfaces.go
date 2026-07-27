@@ -11,11 +11,13 @@ package mirrorsync
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -243,6 +245,21 @@ type repoByNameLookup interface {
 // StoreRepoResolver uses to enumerate a repo's currently registered
 // work-branch names, defined here at the consumer. *workbranchstore.Store
 // satisfies it structurally.
+//
+// StoreAdvanceDetector uses this same surface for a different projection:
+// not every registered branch's Name (StoreRepoResolver's use), but the
+// Target of every non-terminal one (docs/sync-spec.md -> Mirror Sync step
+// 2's set (b), "any branch that is the recorded target of an open work
+// branch"). One List method serves both, since workbranchstore.WorkBranch
+// carries every field either caller needs.
 type workBranchNameLister interface {
 	List(ctx context.Context, filter workbranchstore.ListFilter, limit, offset int32) ([]workbranchstore.WorkBranch, int64, error)
+}
+
+// targetBranchLister is the reposstore.Store surface StoreAdvanceDetector
+// uses to enumerate repo_target_branches -- set (a), the listed target
+// branches (docs/sync-spec.md -> Mirror Sync step 2) -- defined here at
+// the consumer. *reposstore.Store satisfies it structurally.
+type targetBranchLister interface {
+	ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
 }

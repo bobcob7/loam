@@ -7,6 +7,7 @@ import (
 	"context"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
+	"github.com/google/uuid"
 	"sync"
 )
 
@@ -1025,5 +1026,77 @@ func (mock *workBranchNameListerMock) ListCalls() []struct {
 	mock.lockList.RLock()
 	calls = mock.calls.List
 	mock.lockList.RUnlock()
+	return calls
+}
+
+// Ensure, that targetBranchListerMock does implement targetBranchLister.
+// If this is not the case, regenerate this file with moq.
+var _ targetBranchLister = &targetBranchListerMock{}
+
+// targetBranchListerMock is a mock implementation of targetBranchLister.
+//
+//	func TestSomethingThatUsestargetBranchLister(t *testing.T) {
+//
+//		// make and configure a mocked targetBranchLister
+//		mockedtargetBranchLister := &targetBranchListerMock{
+//			ListTargetBranchesFunc: func(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error) {
+//				panic("mock out the ListTargetBranches method")
+//			},
+//		}
+//
+//		// use mockedtargetBranchLister in code that requires targetBranchLister
+//		// and then make assertions.
+//
+//	}
+type targetBranchListerMock struct {
+	// ListTargetBranchesFunc mocks the ListTargetBranches method.
+	ListTargetBranchesFunc func(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ListTargetBranches holds details about calls to the ListTargetBranches method.
+		ListTargetBranches []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+		}
+	}
+	lockListTargetBranches sync.RWMutex
+}
+
+// ListTargetBranches calls ListTargetBranchesFunc.
+func (mock *targetBranchListerMock) ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error) {
+	if mock.ListTargetBranchesFunc == nil {
+		panic("targetBranchListerMock.ListTargetBranchesFunc: method is nil but targetBranchLister.ListTargetBranches was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+	}{
+		Ctx:    ctx,
+		RepoID: repoID,
+	}
+	mock.lockListTargetBranches.Lock()
+	mock.calls.ListTargetBranches = append(mock.calls.ListTargetBranches, callInfo)
+	mock.lockListTargetBranches.Unlock()
+	return mock.ListTargetBranchesFunc(ctx, repoID)
+}
+
+// ListTargetBranchesCalls gets all the calls that were made to ListTargetBranches.
+// Check the length with:
+//
+//	len(mockedtargetBranchLister.ListTargetBranchesCalls())
+func (mock *targetBranchListerMock) ListTargetBranchesCalls() []struct {
+	Ctx    context.Context
+	RepoID uuid.UUID
+} {
+	var calls []struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+	}
+	mock.lockListTargetBranches.RLock()
+	calls = mock.calls.ListTargetBranches
+	mock.lockListTargetBranches.RUnlock()
 	return calls
 }
