@@ -156,6 +156,417 @@ tasks:
         echo ""
         echo "=== demo:m1 complete ==="
 
+  demo:m2:
+    desc: >-
+      Demo M2 (loam-yox): boot the real compiled server + loam + loamhook
+      binaries (task build:bin -- cmd/server resolves loamhook as a sibling
+      of its own executable and refuses to start without it, loam-mce), run
+      a real `loam clone` against a real /git/* smart-HTTP endpoint, commit
+      and push a work branch with plain git (accepted), then show THREE
+      live rejections with their documented, byte-exact reasons -- push to
+      a read-only target ref, push with identity headers stripped, and push
+      with the policy socket down (fail-closed) -- then clean up. Needs the
+      Go toolchain plus a docker-CLI-compatible client on PATH talking to a
+      Docker (or Docker-API-compatible) daemon, same as demo:m1; set
+      LOAM_DEMO_DOCKER if your client binary is not literally named
+      `docker`. Runs from a clean checkout with no manual setup.
+      Every fixture choice below is deliberate, not a shortcut taken for
+      convenience:
+        - The repo + work branch are seeded with two direct INSERTs
+          (repos, repo_target_branches, work_branches) plus a hand-built
+          bare mirror on disk, exactly the technique
+          cmd/server/clonepush_integration_test.go's own
+          seedEnrolledRepoWithMirror established as this bead's proven
+          happy path -- NOT RepoAdminService.EnrollRepo (loam-ofg.12),
+          which requires a resolvable credential row and a REAL reachable
+          upstream to clone from; that is a real enrollment flow's own
+          concern, orthogonal to this bead's "clone and push" scope.
+        - The server boots TWICE: once to apply migrations against a
+          virgin database (nothing enrolled yet, so there is no mirror to
+          reconcile), then it is stopped, the repo/branch rows and the bare
+          mirror are seeded, then it boots again -- this second boot's own
+          Startup step 3 (docs/server-spec.md; cmd/server/main.go's run())
+          reconciles the now-already-on-disk mirror for real: installs the
+          real compiled loamhook binary as its pre-receive hook and sets
+          receive.denyNonFastForwards/denyDeletes, exactly as it would for
+          a real enrolled repo surviving a server restart. No test-only
+          code path is exercised anywhere in this demo -- only the
+          binaries this repo ships, driven by SQL and shell.
+        - LOAM_DATA_DIR is a short /tmp/loam-m2-data.XXXXXX, not a
+          test-name-embedding t.TempDir()-style path: the policy socket
+          binds <LOAM_DATA_DIR>/hook.sock, and unix domain sockets cap
+          sun_path at ~104 bytes (internal/hooksocket/server.go's
+          bindUnixSocket), so a long data dir makes the server exit before
+          this task's own readiness poll could ever succeed.
+        - Readiness is a poll loop against GET /healthz until 200, never a
+          fixed sleep: Startup fails fast on migrate/pool-connect/policy-
+          socket-bind before the HTTP listener ever binds (cmd/server/
+          main.go's run()), so reaching this endpoint is a real signal, the
+          same convention demo:m1 and every integration test in this repo
+          already use.
+        - Rejection 1 (read-only ref) and rejection 2 (missing identity)
+          are exactly docs/git-spec.md's own pinned reasons: the read-only
+          table entry at docs/git-spec.md:148, and the 403 body
+          internal/httpauth/middleware.go's GitIdentity writes verbatim
+          ("loam: forbidden: missing agent identity", the loam-j33 fix) --
+          git's smart-HTTP client only relays an HTTP error body to the
+          user at all when it is text/plain (which net/http's http.Error
+          sets), prefixed "remote: ", which is also why rejection 1's
+          pre-receive-hook-originated reason arrives with the identical
+          "remote: " prefix despite coming from a completely different
+          layer (a compiled hook process's stdout, not an HTTP body) --
+          internal/gitpushsuite's own matrix_test.go proves both land on
+          the client identically.
+        - Rejection 3 (policy socket down) is simulated by REMOVING
+          hook.sock out from under the already-running server, not by
+          never starting it in the first place (which is how this bead's
+          own DESIGN note originally suggested reproducing it, and how
+          internal/gitpushsuite/failclosed_test.go reproduces it in-
+          process, before ofg.18 made the policy socket a real startup-
+          ordered server component rather than an inert stub). Verified
+          directly while building this task (a throwaway Go program: a
+          real net.Listener kept running, its own socket file removed out
+          from under it, then a fresh net.DialTimeout against the same
+          path) that this still fails exactly the way a genuinely down
+          socket would: the removed path can no longer be resolved by a
+          NEW connect(2) (cmd/loamhook always dials fresh, once per push --
+          internal/hooksocket/client.go's Call), surfacing as "dial unix
+          <path>: connect: no such file or directory", which the hook
+          wraps as "loam: policy socket unavailable; rejecting push:
+          connecting to policy socket ...: ...: connect: ...". This is
+          arguably a MORE honest simulation than never starting the
+          socket at all: it reproduces a live production incident (the
+          socket file vanishing, e.g. an operator error or a `/var` mount
+          issue) against a server that had genuinely finished booting with
+          the socket up, rather than a server that was never asked to
+          serve it.
+        - Fixed local port (127.0.0.1:18089) and fixed container name
+          (loam-demo-m2-pg), both self-healed pre-flight exactly like
+          demo:m1's own container (mvdan/sh's EXIT trap does not fire on
+          go-task's own SIGINT interception, so a Ctrl-C'd run would
+          otherwise leak them): the server process is found and stopped by
+          matching its own absolute exec path via pgrep -f, not tracked by
+          $! + kill, since go-task's shell does not implement kill as a
+          builtin at all (confirmed directly: "kill: unsupported builtin")
+          and its $! is an internal job id ("g1", ...), not a real,
+          signalable OS pid -- /bin/kill, path-qualified, is what actually
+          reaches the real binary. Matching by absolute path means a
+          server leaked by a Ctrl-C'd previous run self-heals on the next
+          invocation with no separate pidfile to go stale. A second,
+          independent pre-flight safety net (clear_stale_port, best-effort
+          via lsof) additionally kills anything at all bound to the fixed
+          port regardless of which binary it is: observed directly while
+          building this task, a single leaked process (from an earlier
+          bug in this same target, before the pgrep-based fix above)
+          answered /healthz instantly on every subsequent run, handing
+          wait_for_http_ok a false-positive "ready" for a boot that had
+          not actually happened and letting stop_server race-kill the
+          REAL, still-migrating server moments later -- silent, and only
+          caught by directly diffing Postgres's own table list against
+          what should have been there.
+    cmds:
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        docker_cli="${LOAM_DEMO_DOCKER:-docker}"
+        pg_container="loam-demo-m2-pg"
+        server_bin="$repo_root/bin/server"
+        repo_name="bobcob7/doc-server"
+        target_branch="main"
+        work_branch="wb-9c2f1a"
+        agent_name="grace-hopper-3-author"
+        agent_id="1"
+        agent_role="author"
+        http_port="18089"
+        http_addr="127.0.0.1:$http_port"
+        data_dir=""
+        workspace=""
+        # find_server_pids/stop_server locate and stop the real OS-level
+        # server process(es) by matching the absolute exec path via
+        # pgrep -f, rather than tracking $! + kill: go-task's shell
+        # (mvdan/sh) does not implement `kill` as a builtin at all ("kill:
+        # unsupported builtin" -- /bin/kill, path-qualified, is required
+        # to reach the real binary) and its `$!` is an internal job-id
+        # ("g1", ...), not a real, kill(2)-able OS pid -- confirmed
+        # directly while building this task. Matching by absolute path
+        # also means a server process leaked by a Ctrl-C'd previous run of
+        # this exact task self-heals on the next invocation with no
+        # separate pidfile to go stale. stop_server signals EVERY match,
+        # not just the first: a stray extra process holding this task's
+        # fixed HTTP port would otherwise answer /healthz itself, giving
+        # wait_for_http_ok a false-positive "ready" for a server that
+        # never actually booted (observed directly while building this
+        # task, from a process this same target's own earlier bug had
+        # leaked) -- signaling only one of several matches left that kind
+        # of impostor alive.
+        find_server_pids() {
+          # `|| true`: pgrep exits 1 when nothing matches (the common case
+          # pre-flight, before any server has ever booted), and this
+          # script runs under errexit -- a bare failing pgrep here would
+          # abort the whole task, not just report "no server found".
+          pgrep -f "$server_bin" 2>/dev/null || true
+        }
+        stop_server() {
+          stop_label="$1"
+          stop_pids="$(find_server_pids)"
+          if [ -z "$stop_pids" ]; then
+            echo "$stop_label: no running server process found"
+            return 0
+          fi
+          echo "$stop_label: stopping server pid(s): $(echo "$stop_pids" | tr '\n' ' ')"
+          for stop_pid in $stop_pids; do
+            /bin/kill -TERM "$stop_pid" 2>/dev/null || true
+          done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_server_pids)" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_server_pids); do
+            /bin/kill -9 "$stop_pid" 2>/dev/null || true
+          done
+        }
+        # clear_stale_port kills whatever (if anything) is bound to
+        # $http_addr's port, independent of whether it matches
+        # $server_bin: a leftover process of ANY kind squatting on this
+        # task's fixed port would otherwise answer /healthz itself and
+        # produce the exact false-positive readiness signal stop_server's
+        # own doc comment above describes. Best-effort: lsof is present on
+        # every platform this repo's CI targets (macos-latest, ubuntu-
+        # latest) but is not guaranteed everywhere, so its absence is
+        # silently tolerated rather than failing the whole task over a
+        # belt-and-suspenders safety net.
+        clear_stale_port() {
+          command -v lsof >/dev/null 2>&1 || return 0
+          stale_pids="$(lsof -ti "tcp:$http_port" 2>/dev/null || true)"
+          killed_any=0
+          for stale_pid in $stale_pids; do
+            [ -z "$stale_pid" ] && continue
+            [ "$killed_any" -eq 0 ] && echo "killing stale process(es) still bound to $http_addr:"
+            killed_any=1
+            echo "  pid $stale_pid"
+            /bin/kill -9 "$stale_pid" 2>/dev/null || true
+          done
+        }
+        cleanup() {
+          echo "=== demo:m2 cleanup: stopping server, removing container $pg_container, removing temp dirs ==="
+          stop_server "cleanup"
+          clear_stale_port
+          if ! "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1; then
+            echo "demo:m2: NOTE -- $pg_container was not present to remove (already gone, or never created)" >&2
+          fi
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$workspace" ] && rm -rf "$workspace"
+        }
+        trap cleanup EXIT
+        echo "=== demo:m2 pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1 || true
+        stop_server "pre-flight"
+        clear_stale_port
+        wait_for_http_ok() {
+          poll_url="$1"; poll_log="$2"; poll_label="$3"; poll_timeout="${4:-30}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            if [ "$poll_code" = "200" ]; then
+              echo "$poll_label ready (HTTP 200 from $poll_url)"
+              return 0
+            fi
+            poll_now=$(date +%s)
+            poll_elapsed=$((poll_now - poll_start))
+            if [ "$poll_elapsed" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s -- server log:" >&2
+              cat "$poll_log" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        echo "=== step 1/10: build server, loam, loamhook into bin/ (task build:bin) ==="
+        mkdir -p bin
+        go build -o bin/server ./cmd/server
+        go build -o bin/loam ./cmd/loam
+        go build -o bin/loamhook ./cmd/loamhook
+        echo "=== step 2/10: start a fresh Postgres/pgvector container ==="
+        "$docker_cli" run -d --name "$pg_container" \
+          -e POSTGRES_USER=loam -e POSTGRES_PASSWORD=loam -e POSTGRES_DB=loam \
+          -p 127.0.0.1::5432 pgvector/pgvector:pg16 >/dev/null
+        pg_wait_deadline=$(( $(date +%s) + 30 ))
+        until "$docker_cli" exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$pg_wait_deadline" ]; then
+            echo "postgres never became ready within 30s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        pg_hostport="$("$docker_cli" port "$pg_container" 5432 | head -1)"
+        echo "postgres ready at $pg_hostport"
+        database_url="postgres://loam:loam@${pg_hostport}/loam?sslmode=disable"
+        data_dir="$(mktemp -d /tmp/loam-m2-data.XXXXXX)"
+        workspace="$(mktemp -d /tmp/loam-m2-ws.XXXXXX)"
+        echo "LOAM_DATA_DIR=$data_dir (short, so <dir>/hook.sock fits unix's sun_path limit)"
+        admin_password="throwaway-admin-pass"
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        echo "=== step 3/10: first server boot -- applies migrations, nothing enrolled yet -- then stop it ==="
+        server_log_1="$workspace/server-first-boot.log"
+        env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
+          LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+          LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+          "$server_bin" >"$server_log_1" 2>&1 &
+        wait_for_http_ok "http://$http_addr/healthz" "$server_log_1" "first boot" 30
+        stop_server "first boot"
+        echo "migrations applied; first boot stopped cleanly"
+        echo "=== step 4/10: seed the enrolled repo + work branch directly in Postgres (loam-0pj.8's own fixture technique) ==="
+        repo_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        wb_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        "$docker_cli" exec "$pg_container" psql -U loam -d loam -v ON_ERROR_STOP=1 -c "
+        INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
+        VALUES ('$repo_id', '$repo_name', 'https://example.invalid/$repo_name', 'example.invalid', '$target_branch');
+        INSERT INTO repo_target_branches (repo_id, branch) VALUES ('$repo_id', '$target_branch');
+        INSERT INTO work_branches (id, repo_id, name, target, state, author)
+        VALUES ('$wb_id', '$repo_id', '$work_branch', '$target_branch', 'draft', '$agent_name');
+        "
+        echo "=== step 5/10: seed the bare mirror on disk, with both the target branch and the work branch ==="
+        mirror_dir="$data_dir/mirrors/$repo_name.git"
+        mkdir -p "$(dirname "$mirror_dir")"
+        seed_src="$(mktemp -d /tmp/loam-m2-src.XXXXXX)"
+        git init --quiet --initial-branch="$target_branch" "$seed_src"
+        git -C "$seed_src" config user.email "seed@example.com"
+        git -C "$seed_src" config user.name "seed"
+        echo "hello" > "$seed_src/README.md"
+        git -C "$seed_src" add README.md
+        git -C "$seed_src" commit --quiet -m "init"
+        git -C "$seed_src" branch "$work_branch"
+        git clone --quiet --bare "$seed_src" "$mirror_dir"
+        rm -rf "$seed_src"
+        echo "=== step 6/10: second server boot -- reconciles the pre-existing mirror (installs the real loamhook + receive.deny* config) ==="
+        server_log_2="$workspace/server-second-boot.log"
+        env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
+          LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+          LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+          "$server_bin" >"$server_log_2" 2>&1 &
+        wait_for_http_ok "http://$http_addr/healthz" "$server_log_2" "second boot" 30
+        echo "=== step 7/10: loam clone (compiled CLI, real HTTP smart-transport clone) ==="
+        ( cd "$workspace" && env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+            LOAM_AGENT_NAME="$agent_name" LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$agent_role" \
+            "$repo_root/bin/loam" clone "$repo_name" "$work_branch" )
+        clone_dir="$workspace/doc-server"
+        if [ ! -d "$clone_dir" ]; then
+          echo "clone directory $clone_dir was not created" >&2
+          exit 1
+        fi
+        echo "clone landed at $clone_dir; remote(s):"
+        git -C "$clone_dir" remote -v
+        remote_count=$(git -C "$clone_dir" remote | wc -l | tr -d ' ')
+        if [ "$remote_count" != "1" ]; then
+          echo "FAIL: expected exactly one remote, found $remote_count" >&2
+          exit 1
+        fi
+        local_branches=$(git -C "$clone_dir" for-each-ref --format='%(refname:short)' refs/heads)
+        if [ "$local_branches" != "$work_branch" ]; then
+          echo "FAIL: expected exactly one local branch ($work_branch), found: $local_branches" >&2
+          exit 1
+        fi
+        clone_headers=$(git -C "$clone_dir" config --get-all http.extraheader)
+        clone_username=$(git -C "$clone_dir" config --get user.name)
+        case "$clone_headers" in
+          *"Loam-Agent-Name: $agent_name"*) : ;;
+          *) echo "FAIL: clone is missing the Loam-Agent-Name identity header" >&2; exit 1 ;;
+        esac
+        if [ "$clone_username" != "$agent_name" ]; then
+          echo "FAIL: expected git author user.name=$agent_name, got $clone_username" >&2
+          exit 1
+        fi
+        echo "PASS: single remote, single branch ($work_branch), identity headers + git author configured -- Scenario: Cloning a work branch bootstraps plain git"
+        echo "=== step 8/10: commit + plain git push -- expect SUCCESS (Scenario: Pushing commits with plain git) ==="
+        echo "demo change" > "$clone_dir/agent-change.txt"
+        git -C "$clone_dir" add agent-change.txt
+        git -C "$clone_dir" commit --quiet -m "demo: agent change"
+        if push_happy_out=$(git -C "$clone_dir" push origin HEAD 2>&1); then push_happy_status=0; else push_happy_status=$?; fi
+        echo "$push_happy_out"
+        if [ "$push_happy_status" -ne 0 ]; then
+          echo "FAIL: the happy-path push was rejected (expected success)" >&2
+          exit 1
+        fi
+        mirror_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")
+        clone_sha=$(git -C "$clone_dir" rev-parse HEAD)
+        if [ "$mirror_sha" != "$clone_sha" ]; then
+          echo "FAIL: mirror's $work_branch ($mirror_sha) does not match the pushed commit ($clone_sha)" >&2
+          exit 1
+        fi
+        echo "PASS: plain git push landed on the mirror's refs/heads/$work_branch ($mirror_sha)"
+        echo "=== step 9/10: three live rejections ==="
+        echo "--- rejection 1/3: push to the read-only target branch \"$target_branch\" ---"
+        if reject1_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$target_branch" 2>&1); then reject1_status=0; else reject1_status=$?; fi
+        echo "$reject1_out"
+        if [ "$reject1_status" -eq 0 ]; then
+          echo "FAIL: push to refs/heads/$target_branch should have been rejected as read-only" >&2
+          exit 1
+        fi
+        expected1="remote: loam: refs/heads/$target_branch is read-only (target branch)"
+        case "$reject1_out" in
+          *"$expected1"*) echo "PASS: got the exact documented reason (Scenario: Target branches are read-only): $expected1" ;;
+          *) echo "FAIL: expected to see: $expected1" >&2; exit 1 ;;
+        esac
+        echo "--- rejection 2/3: push with identity headers stripped ---"
+        git -C "$clone_dir" config --unset-all http.extraheader
+        echo "more demo change" >> "$clone_dir/agent-change.txt"
+        git -C "$clone_dir" add agent-change.txt
+        git -C "$clone_dir" commit --quiet -m "demo: change after stripping identity"
+        if reject2_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$work_branch" 2>&1); then reject2_status=0; else reject2_status=$?; fi
+        echo "$reject2_out"
+        if [ "$reject2_status" -eq 0 ]; then
+          echo "FAIL: push with no Loam-Agent-* headers should have been rejected" >&2
+          exit 1
+        fi
+        expected2="remote: loam: forbidden: missing agent identity"
+        case "$reject2_out" in
+          *"$expected2"*) echo "PASS: got the exact documented reason (Scenario: A push without a Loam identity is rejected): $expected2" ;;
+          *) echo "FAIL: expected to see: $expected2" >&2; exit 1 ;;
+        esac
+        echo "--- rejection 3/3: policy socket down -- fail-closed, never silently accepted ---"
+        git -C "$clone_dir" config --add http.extraheader "Loam-Agent-Name: $agent_name"
+        git -C "$clone_dir" config --add http.extraheader "Loam-Agent-Id: $agent_id"
+        git -C "$clone_dir" config --add http.extraheader "Loam-Agent-Role: $agent_role"
+        hook_sock="$data_dir/hook.sock"
+        if [ ! -e "$hook_sock" ]; then
+          echo "FAIL: expected a live policy socket at $hook_sock before simulating its failure" >&2
+          exit 1
+        fi
+        rm -f "$hook_sock"
+        echo "removed $hook_sock while the server keeps running: any NEW dial to it now fails at the filesystem-path resolution step, exactly like the socket being down"
+        if reject3_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$work_branch" 2>&1); then reject3_status=0; else reject3_status=$?; fi
+        echo "$reject3_out"
+        if [ "$reject3_status" -eq 0 ]; then
+          echo "FAIL: push with the policy socket down should have been rejected (fail-closed)" >&2
+          exit 1
+        fi
+        case "$reject3_out" in
+          *"remote: loam:"*) : ;;
+          *) echo "FAIL: expected a loam:-prefixed rejection reason" >&2; exit 1 ;;
+        esac
+        case "$reject3_out" in
+          *"connect"*) echo "PASS: fail-closed, loam:-prefixed, and names the connection failure" ;;
+          *) echo "FAIL: expected the reason to name the connection failure (\"connect\")" >&2; exit 1 ;;
+        esac
+        if [ -n "$(git --git-dir="$mirror_dir" for-each-ref "refs/heads/$work_branch" --format='%(objectname)')" ]; then
+          post_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")
+          if [ "$post_sha" != "$mirror_sha" ]; then
+            echo "FAIL: the mirror's $work_branch moved even though the fail-closed push was rejected" >&2
+            exit 1
+          fi
+        fi
+        echo "confirmed: refs/heads/$work_branch on the mirror never moved past the happy-path commit"
+        echo "=== step 10/10: done -- summary ==="
+        echo "clone-and-push.feature scenarios observed passing against the real binaries:"
+        echo "  - Cloning a work branch bootstraps plain git"
+        echo "  - Pushing commits with plain git"
+        echo "  - Target branches are read-only       -> $expected1"
+        echo "  - A push without a Loam identity is rejected -> $expected2"
+        echo "Additional acceptance criterion (not a named Gherkin scenario): fail-closed with the policy socket down:"
+        echo "  $(echo "$reject3_out" | grep -o 'remote: loam:.*' || true)"
+        echo "=== demo:m2 complete ==="
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:
