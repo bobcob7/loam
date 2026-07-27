@@ -69,6 +69,50 @@ func TestNew_ModelTagSuffix_ResolvesBaseDimension(t *testing.T) {
 	assert.Equal(t, "ollama/nomic-embed-text:latest", e.ModelID())
 }
 
+// TestNew_ContextWindow_FollowsConfiguredModel pins that ContextWindow is
+// not a single constant: two different configured models report two
+// different budgets, both drawn from knownModelContextWindows, so a
+// caller (the chunker, loam-zoa) that switches models automatically gets
+// that model's own budget rather than one baked in for nomic-embed-text.
+func TestNew_ContextWindow_FollowsConfiguredModel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"nomic-embed-text", 2048},
+		{"nomic-embed-text:latest", 2048},
+		{"mxbai-embed-large", 512},
+		{"bge-m3", 8192},
+		{"all-minilm", 256},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			e, err := New("http://localhost:11434", tc.model, http.DefaultClient, testLogger())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, e.ContextWindow())
+		})
+	}
+}
+
+// TestKnownModelTables_HaveIdenticalKeySets guards against the two
+// hand-maintained model-fact tables (knownModelDimensions,
+// knownModelContextWindows) drifting apart: a model present in one but not
+// the other would make New fail unpredictably depending on which lookup
+// ran first, rather than consistently for every known model.
+func TestKnownModelTables_HaveIdenticalKeySets(t *testing.T) {
+	t.Parallel()
+	for model := range knownModelDimensions {
+		_, ok := knownModelContextWindows[model]
+		assert.Truef(t, ok, "%q has a known dimension but no known context window", model)
+	}
+	for model := range knownModelContextWindows {
+		_, ok := knownModelDimensions[model]
+		assert.Truef(t, ok, "%q has a known context window but no known dimension", model)
+	}
+}
+
 func TestEmbed_HappyPath_ReturnsWellFormedVector(t *testing.T) {
 	t.Parallel()
 	server, calls := serveEmbed(t, func(req embedRequest) (int, string) {
@@ -377,6 +421,35 @@ func TestEmbed_SendsTruncateFalse(t *testing.T) {
 	_, err = e.Embed(t.Context(), []string{"hello"})
 	require.NoError(t, err)
 	assert.Contains(t, rawBody, `"truncate":false`)
+}
+
+// TestEmbed_SendsNumCtxMatchingContextWindow locks in that Embed declares
+// the context window it expects Ollama to serve (embedRequest.Options.
+// NumCtx) rather than leaving it to Ollama's own default — the whole
+// point of also exposing ContextWindow() being that the two never diverge.
+// A different model must send that model's own number, not
+// nomic-embed-text's, so this also pins that the value follows the
+// configured model rather than being a hardcoded constant.
+func TestEmbed_SendsNumCtxMatchingContextWindow(t *testing.T) {
+	t.Parallel()
+	var rawBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = string(b)
+		vec := make([]float32, 1024)
+		out, err := json.Marshal(embedResponse{Embeddings: [][]float32{vec}})
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(server.Close)
+	e, err := New(server.URL, "bge-m3", server.Client(), testLogger())
+	require.NoError(t, err)
+	require.Equal(t, 8192, e.ContextWindow())
+	_, err = e.Embed(t.Context(), []string{"hello"})
+	require.NoError(t, err)
+	assert.Contains(t, rawBody, `"num_ctx":8192`)
 }
 
 func TestEmbed_AlreadyCanceledContext_ReturnsPromptlyWithoutRequest(t *testing.T) {

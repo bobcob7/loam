@@ -30,12 +30,14 @@ var (
 	errMissingURL = errors.New("ollama: embedder url is required")
 	// errMissingHTTPClient is returned by New when no *http.Client is supplied.
 	errMissingHTTPClient = errors.New("ollama: http client is required")
-	// errUnknownModel is returned by New when the model's vector width is not
-	// known. Dimension must be knowable before any text is embedded — it
-	// pins chunks.embedding's vector(N) (docs/persistence-spec.md) — so an
-	// unrecognized model is a configuration error, not something to guess at
-	// or defer to a first response.
-	errUnknownModel = errors.New("ollama: unknown embedding model dimension")
+	// errUnknownModel is returned by New when the model's vector width or
+	// context window is not known. Both must be knowable before any text is
+	// embedded — dimension pins chunks.embedding's vector(N)
+	// (docs/persistence-spec.md), and the context window is the budget the
+	// chunker (internal/ingest/chunk, loam-zoa) must keep every chunk under
+	// — so an unrecognized model is a configuration error, not something to
+	// guess at or defer to a first response.
+	errUnknownModel = errors.New("ollama: unknown embedding model")
 	// errRequestFailed means the embedder could not be reached at all
 	// (connection refused, DNS failure, timeout establishing/using the
 	// connection). This is a transient/infrastructure problem, distinct from
@@ -98,14 +100,56 @@ var knownModelDimensions = map[string]int{
 	"all-minilm":        384,
 }
 
+// knownModelContextWindows maps the same published Ollama embedding models
+// (docs/ingestion-spec.md) to the token budget this package holds Embed to
+// (loam-zoa, the chunker context-budget bead). It sits alongside
+// knownModelDimensions per that bead's DESIGN note: the model facts this
+// package already owns are the cheapest place to add one more.
+//
+// These are the model's *served* context window, not necessarily its
+// largest theoretically-supported one, because that is the number Embed's
+// truncate:false rejection (errContextLengthExceeded) actually enforces.
+// The two can differ: nomic-embed-text is documented as supporting 8192
+// tokens natively, but Ollama's own library page and Modelfile default it
+// to num_ctx=2048 unless a caller overrides it (github.com/ollama/ollama
+// issue #7741 further reports that on some Ollama builds, num_ctx above
+// 2048 has not reliably taken effect for embedding requests either) — so
+// 2048, not 8192, is the value this package uses and now also sends
+// explicitly (see embedRequest.Options below), rather than trusting
+// whatever Ollama's per-version default happens to be.
+//
+//   - nomic-embed-text:  2048 (Ollama library default; native max 8192)
+//   - mxbai-embed-large: 512  (BERT-large architecture; Ollama library model
+//     card lists a 512-token context length)
+//   - bge-m3:             8192 (published as supporting up to 8192-token
+//     documents; unlike nomic-embed-text, no Ollama-served-default
+//     divergence for this model is independently confirmed here)
+//   - all-minilm:         256  (MiniLM architecture; short-snippet model)
+//
+// None of these were exercised against a live Ollama server in this
+// session (docs/ingestion-spec.md's testing constraints keep this package's
+// tests hermetic) — they are this table's documented source, not a
+// certainty; loam-yie tracks confirming each entry against a live server.
+// Embed's truncate:false rejection is the deliberate backstop if any of
+// these turns out wrong for a given Ollama version: an
+// under-estimate here fails one embed call loudly (IsContextLengthExceeded)
+// rather than silently producing a corrupt vector.
+var knownModelContextWindows = map[string]int{
+	"nomic-embed-text":  2048,
+	"mxbai-embed-large": 512,
+	"bge-m3":            8192,
+	"all-minilm":        256,
+}
+
 // Embedder implements embed.Embedder (internal/ingest/embed) against a
 // local Ollama server's /api/embed endpoint.
 type Embedder struct {
-	endpoint   string
-	model      string
-	dimension  int
-	httpClient *http.Client
-	logger     *slog.Logger
+	endpoint      string
+	model         string
+	dimension     int
+	contextWindow int
+	httpClient    *http.Client
+	logger        *slog.Logger
 }
 
 // New constructs an Embedder for baseURL and model, using httpClient for
@@ -113,7 +157,8 @@ type Embedder struct {
 // embedding models (docs/ingestion-spec.md: nomic-embed-text,
 // mxbai-embed-large, bge-m3, all-minilm), optionally with an Ollama tag
 // suffix (e.g. "nomic-embed-text:latest") — the tag is ignored for
-// dimension lookup but kept verbatim in ModelID. New performs no I/O.
+// dimension/context-window lookup but kept verbatim in ModelID. New
+// performs no I/O.
 func New(baseURL, model string, httpClient *http.Client, logger *slog.Logger) (*Embedder, error) {
 	if baseURL == "" {
 		return nil, errMissingURL
@@ -125,15 +170,20 @@ func New(baseURL, model string, httpClient *http.Client, logger *slog.Logger) (*
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", errUnknownModel, model)
 	}
+	contextWindow, ok := knownModelContextWindows[modelFamily(model)]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", errUnknownModel, model)
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Embedder{
-		endpoint:   strings.TrimRight(baseURL, "/") + "/api/embed",
-		model:      model,
-		dimension:  dimension,
-		httpClient: httpClient,
-		logger:     logger,
+		endpoint:      strings.TrimRight(baseURL, "/") + "/api/embed",
+		model:         model,
+		dimension:     dimension,
+		contextWindow: contextWindow,
+		httpClient:    httpClient,
+		logger:        logger,
 	}, nil
 }
 
@@ -157,10 +207,29 @@ func modelFamily(model string) string {
 // path as any other embedder failure — consistent with that section's
 // stale-but-consistent rule: the ingest transaction aborts and the previous
 // index stays live, rather than the index silently degrading.
+//
+// Options.NumCtx is always sent, set to the same contextWindow ContextWindow
+// reports (knownModelContextWindows), so the window truncate:false is
+// actually enforced against is the one this package declares to its
+// caller — not whatever Ollama's per-version, per-model default happens to
+// be (see knownModelContextWindows's doc comment for why that default is
+// not safe to assume). Without this, the chunker's budget (loam-zoa) could
+// stay under knownModelContextWindows's value while Ollama silently served
+// a smaller or larger window, defeating the point of the two being the
+// same table.
 type embedRequest struct {
-	Model    string   `json:"model"`
-	Input    []string `json:"input"`
-	Truncate bool     `json:"truncate"`
+	Model    string       `json:"model"`
+	Input    []string     `json:"input"`
+	Truncate bool         `json:"truncate"`
+	Options  embedOptions `json:"options"`
+}
+
+// embedOptions is the subset of Ollama's runtime options this client sets.
+type embedOptions struct {
+	// NumCtx is the context window (in tokens) Ollama serves this request
+	// against. See embedRequest's doc comment for why this is sent
+	// explicitly rather than left to Ollama's default.
+	NumCtx int `json:"num_ctx"`
 }
 
 // embedResponse is the /api/embed response body.
@@ -181,7 +250,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	if len(texts) == 0 {
 		return [][]float32{}, nil
 	}
-	reqBody, err := json.Marshal(embedRequest{Model: e.model, Input: texts, Truncate: false})
+	reqBody, err := json.Marshal(embedRequest{Model: e.model, Input: texts, Truncate: false, Options: embedOptions{NumCtx: e.contextWindow}})
 	if err != nil {
 		return nil, fmt.Errorf("ollama: encoding embed request: %w", err)
 	}
@@ -323,6 +392,15 @@ func IsContextLengthExceeded(err error) bool {
 // Dimension reports the fixed vector width for the configured model.
 func (e *Embedder) Dimension() int {
 	return e.dimension
+}
+
+// ContextWindow reports the token budget Embed serves the configured model
+// against (knownModelContextWindows) — the same value sent as
+// embedRequest.Options.NumCtx, so a caller computing a chunk-time budget
+// (internal/ingest/chunk, loam-zoa) and Embed's own truncate:false
+// rejection are working from identical numbers.
+func (e *Embedder) ContextWindow() int {
+	return e.contextWindow
 }
 
 // ModelID identifies the configured Ollama model, including any tag, so the

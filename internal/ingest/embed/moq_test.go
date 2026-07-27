@@ -18,6 +18,9 @@ var _ Embedder = &EmbedderMock{}
 //
 //		// make and configure a mocked Embedder
 //		mockedEmbedder := &EmbedderMock{
+//			ContextWindowFunc: func() int {
+//				panic("mock out the ContextWindow method")
+//			},
 //			DimensionFunc: func() int {
 //				panic("mock out the Dimension method")
 //			},
@@ -34,6 +37,9 @@ var _ Embedder = &EmbedderMock{}
 //
 //	}
 type EmbedderMock struct {
+	// ContextWindowFunc mocks the ContextWindow method.
+	ContextWindowFunc func() int
+
 	// DimensionFunc mocks the Dimension method.
 	DimensionFunc func() int
 
@@ -45,6 +51,9 @@ type EmbedderMock struct {
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// ContextWindow holds details about calls to the ContextWindow method.
+		ContextWindow []struct {
+		}
 		// Dimension holds details about calls to the Dimension method.
 		Dimension []struct {
 		}
@@ -59,9 +68,37 @@ type EmbedderMock struct {
 		ModelID []struct {
 		}
 	}
-	lockDimension sync.RWMutex
-	lockEmbed     sync.RWMutex
-	lockModelID   sync.RWMutex
+	lockContextWindow sync.RWMutex
+	lockDimension     sync.RWMutex
+	lockEmbed         sync.RWMutex
+	lockModelID       sync.RWMutex
+}
+
+// ContextWindow calls ContextWindowFunc.
+func (mock *EmbedderMock) ContextWindow() int {
+	if mock.ContextWindowFunc == nil {
+		panic("EmbedderMock.ContextWindowFunc: method is nil but Embedder.ContextWindow was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockContextWindow.Lock()
+	mock.calls.ContextWindow = append(mock.calls.ContextWindow, callInfo)
+	mock.lockContextWindow.Unlock()
+	return mock.ContextWindowFunc()
+}
+
+// ContextWindowCalls gets all the calls that were made to ContextWindow.
+// Check the length with:
+//
+//	len(mockedEmbedder.ContextWindowCalls())
+func (mock *EmbedderMock) ContextWindowCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockContextWindow.RLock()
+	calls = mock.calls.ContextWindow
+	mock.lockContextWindow.RUnlock()
+	return calls
 }
 
 // Dimension calls DimensionFunc.
