@@ -1,0 +1,251 @@
+{
+  "seed_commit": "fa15d655dc8b77823b709a81bc1a2997b2440a12",
+  "symbols": [
+    {
+      "file": "pkg/report/report.go",
+      "line": 9,
+      "name": "Summarize",
+      "kind": "function"
+    },
+    {
+      "file": "pkg/report/report.go",
+      "line": null,
+      "name": "report",
+      "kind": "module"
+    },
+    {
+      "file": "pkg/validate/validate.go",
+      "line": 12,
+      "name": "Validate",
+      "kind": "function"
+    },
+    {
+      "file": "pkg/validate/validate.go",
+      "line": null,
+      "name": "validate",
+      "kind": "module"
+    },
+    {
+      "file": "scripts/parity.py",
+      "line": 8,
+      "name": "is_even",
+      "kind": "function"
+    },
+    {
+      "file": "scripts/parity.py",
+      "line": 15,
+      "name": "is_odd",
+      "kind": "function"
+    },
+    {
+      "file": "scripts/parity.py",
+      "line": null,
+      "name": "parity",
+      "kind": "module"
+    },
+    {
+      "file": "src/index.ts",
+      "line": null,
+      "name": "index",
+      "kind": "module"
+    },
+    {
+      "file": "src/index.ts",
+      "line": 7,
+      "name": "summarize",
+      "kind": "function"
+    },
+    {
+      "file": "src/validate.ts",
+      "line": 9,
+      "name": "Validate",
+      "kind": "function"
+    },
+    {
+      "file": "src/validate.ts",
+      "line": null,
+      "name": "validate",
+      "kind": "module"
+    }
+  ],
+  "symbol_references": [
+    {
+      "file": "pkg/report/report.go",
+      "line": 10,
+      "name": "Validate",
+      "kind": "call"
+    },
+    {
+      "file": "pkg/validate/validate.go",
+      "line": 13,
+      "name": "TrimSpace",
+      "kind": "call"
+    },
+    {
+      "file": "scripts/parity.py",
+      "line": 12,
+      "name": "is_odd",
+      "kind": "call"
+    },
+    {
+      "file": "scripts/parity.py",
+      "line": 19,
+      "name": "is_even",
+      "kind": "call"
+    },
+    {
+      "file": "src/index.ts",
+      "line": 8,
+      "name": "Validate",
+      "kind": "call"
+    },
+    {
+      "file": "src/validate.ts",
+      "line": 10,
+      "name": "trim",
+      "kind": "call"
+    }
+  ],
+  "graph_edges": [
+    {
+      "from_file": "pkg/report/report.go",
+      "from_line": 9,
+      "from_name": "Summarize",
+      "from_kind": "function",
+      "to_file": "pkg/validate/validate.go",
+      "to_line": 12,
+      "to_name": "Validate",
+      "to_kind": "function",
+      "kind": "dependency"
+    },
+    {
+      "from_file": "pkg/report/report.go",
+      "from_line": 9,
+      "from_name": "Summarize",
+      "from_kind": "function",
+      "to_file": "src/validate.ts",
+      "to_line": 9,
+      "to_name": "Validate",
+      "to_kind": "function",
+      "kind": "dependency"
+    },
+    {
+      "from_file": "scripts/parity.py",
+      "from_line": 8,
+      "from_name": "is_even",
+      "from_kind": "function",
+      "to_file": "scripts/parity.py",
+      "to_line": 15,
+      "to_name": "is_odd",
+      "to_kind": "function",
+      "kind": "dependency"
+    },
+    {
+      "from_file": "scripts/parity.py",
+      "from_line": 15,
+      "from_name": "is_odd",
+      "from_kind": "function",
+      "to_file": "scripts/parity.py",
+      "to_line": 8,
+      "to_name": "is_even",
+      "to_kind": "function",
+      "kind": "dependency"
+    },
+    {
+      "from_file": "src/index.ts",
+      "from_line": 7,
+      "from_name": "summarize",
+      "from_kind": "function",
+      "to_file": "pkg/validate/validate.go",
+      "to_line": 12,
+      "to_name": "Validate",
+      "to_kind": "function",
+      "kind": "dependency"
+    },
+    {
+      "from_file": "src/index.ts",
+      "from_line": 7,
+      "from_name": "summarize",
+      "from_kind": "function",
+      "to_file": "src/validate.ts",
+      "to_line": 9,
+      "to_name": "Validate",
+      "to_kind": "function",
+      "kind": "dependency"
+    }
+  ],
+  "chunks": [
+    {
+      "file": "CHANGELOG.md",
+      "start_line": 1,
+      "end_line": 3,
+      "content": "# Changelog\n\n- initial: fixture seeded"
+    },
+    {
+      "file": "README.md",
+      "start_line": 1,
+      "end_line": 4,
+      "content": "# fixture-polyglot\n\nSeed repository for loam's integration and acceptance test fixtures. See\n`docs/OVERVIEW.md` for the symbol graph this repo is designed to produce."
+    },
+    {
+      "file": "docs/OVERVIEW.md",
+      "start_line": 1,
+      "end_line": 5,
+      "content": "# Fixture Polyglot Overview\n\nThis fixture backs golden ingest tests: a known symbol graph across Go,\nTypeScript, Python, and this document.\n"
+    },
+    {
+      "file": "docs/OVERVIEW.md",
+      "start_line": 6,
+      "end_line": 12,
+      "content": "## Validation\n\nTwo languages each export a symbol named `Validate` -- `pkg/validate` in Go\nand `src/validate.ts` in TypeScript -- deliberately colliding in name so\nedge-resolution tests can prove approximate, name-based matching stays\nintra-language and does not merge the two.\n"
+    },
+    {
+      "file": "docs/OVERVIEW.md",
+      "start_line": 13,
+      "end_line": 18,
+      "content": "## Reporting\n\n`pkg/report` (Go) and `src/index.ts` (TypeScript) each import their\nlanguage's `Validate` from a separate file, giving cross-file reference\nresolution something concrete to find within a single language.\n"
+    },
+    {
+      "file": "docs/OVERVIEW.md",
+      "start_line": 19,
+      "end_line": 23,
+      "content": "## Recursion Cycle\n\n`scripts/parity.py` defines `is_even` and `is_odd`, two functions that call\neach other. Resolving dependents from either one must terminate instead of\nlooping -- the cycle-safety case for the `dependents` recursive CTE."
+    },
+    {
+      "file": "pkg/report/report.go",
+      "start_line": 6,
+      "end_line": 14,
+      "content": "// Summarize returns a human-readable line describing whether s passed\n// validation. It calls validate.Validate, giving cross-file, cross-package\n// reference resolution something concrete to find within the Go fixture.\nfunc Summarize(s string) string {\n\tif validate.Validate(s) {\n\t\treturn \"ok: \" + s\n\t}\n\treturn \"invalid: \" + s\n}"
+    },
+    {
+      "file": "pkg/validate/validate.go",
+      "start_line": 6,
+      "end_line": 14,
+      "content": "// Validate reports whether s is a non-empty, trimmed string.\n//\n// It exists in this fixture specifically to collide in name with\n// src/validate.ts's exported Validate: the ambiguous symbol that\n// edge-resolution tests use to prove name-based matching stays intra-language\n// and does not merge the Go and TypeScript hits together.\nfunc Validate(s string) bool {\n\treturn strings.TrimSpace(s) != \"\"\n}"
+    },
+    {
+      "file": "scripts/parity.py",
+      "start_line": 8,
+      "end_line": 12,
+      "content": "def is_even(n: int) -> bool:\n    \"\"\"Return True if n is even, deferring to is_odd for the recursive case.\"\"\"\n    if n == 0:\n        return True\n    return is_odd(n - 1)"
+    },
+    {
+      "file": "scripts/parity.py",
+      "start_line": 15,
+      "end_line": 19,
+      "content": "def is_odd(n: int) -> bool:\n    \"\"\"Return True if n is odd, deferring to is_even for the recursive case.\"\"\"\n    if n == 0:\n        return False\n    return is_even(n - 1)"
+    },
+    {
+      "file": "src/index.ts",
+      "start_line": 3,
+      "end_line": 9,
+      "content": "/**\n * summarize renders a validation result for value, calling Validate.\n * Exercises cross-file reference resolution within the TypeScript fixture.\n */\nexport function summarize(value: string): string {\n  return Validate(value) ? `ok: ${value}` : `invalid: ${value}`;\n}"
+    },
+    {
+      "file": "src/validate.ts",
+      "start_line": 1,
+      "end_line": 11,
+      "content": "/**\n * Validate reports whether the given value is a non-empty, trimmed string.\n *\n * This is the fixture's ambiguous symbol: a TypeScript export named Validate\n * that collides in name with pkg/validate/validate.go's Go export Validate,\n * proving that name-based edge resolution must not merge cross-language\n * hits.\n */\nexport function Validate(value: string): boolean {\n  return value.trim().length > 0;\n}"
+    }
+  ]
+}

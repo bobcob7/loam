@@ -91,6 +91,23 @@ tasks:
       # this thinking it's redundant.
       - go test -tags=integration -count=1 ./...
 
+  test:goldens:update:
+    desc: >-
+      Re-baseline the ingest goldens (loam-li0.8, docs/testing-spec.md
+      Layer 2 "Ingest pipeline"): the pinned symbol/reference/edge/chunk
+      output for internal/testfixture's fixture-polyglot, held under
+      internal/ingest/orchestrator/testdata/golden/. Run this ONLY when an
+      extraction query, a chunking strategy, or edge resolution changed on
+      purpose, then READ the resulting diff before committing it — that
+      diff is the whole point of the golden. LOAM_UPDATE_GOLDENS is the only
+      way to rewrite one: without it a stale golden fails, and a MISSING
+      golden fails too rather than being silently created from whatever the
+      current code happens to emit. Same Docker/podman caveats as
+      test:integration above.
+    cmds:
+      - LOAM_UPDATE_GOLDENS=1 go test -tags=integration -count=1 -run Golden ./internal/ingest/orchestrator/...
+      - git --no-pager diff --stat -- internal/ingest/orchestrator/testdata/golden
+
   test:acceptance:
     desc: >-
       Run the godog acceptance suite (loam-li0.5, docs/testing-spec.md

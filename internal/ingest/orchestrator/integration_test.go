@@ -148,7 +148,12 @@ func (f *fixture) gitAt(t *testing.T, dir string, args ...string) string {
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=loam", "GIT_AUTHOR_EMAIL=loam@example.invalid",
 		"GIT_COMMITTER_NAME=loam", "GIT_COMMITTER_EMAIL=loam@example.invalid",
-		"GIT_CONFIG_NOSYSTEM=1", "HOME="+f.work,
+		// GIT_CONFIG_NOSYSTEM plus a redirected HOME *and*
+		// XDG_CONFIG_HOME is the full set: without XDG_CONFIG_HOME git
+		// still reads ~/.config/git/config from the real home, and
+		// without an explicit identity git guesses user@hostname, which
+		// works on a laptop and fails on CI.
+		"GIT_CONFIG_NOSYSTEM=1", "HOME="+f.work, "XDG_CONFIG_HOME="+f.work,
 	)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, out)
