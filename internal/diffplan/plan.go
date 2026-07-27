@@ -322,9 +322,13 @@ func (p *Planner) diffNameStatus(ctx context.Context, mirrorDir, oldRef, newRef 
 // of NUL-separated fields, NOT NUL-terminated lines with tab-separated
 // fields the way the non -z form is -- verified empirically against real
 // git 2.50.1. That distinction is exactly why -z is used at all: without
-// it, a filename containing a literal newline (a real, if rare, possibility)
-// would be indistinguishable from a record boundary and silently shift
-// every subsequent record's fields. Most statuses (A/M/D/T -- added,
+// it, git C-quotes any path containing a control character -- a filename
+// with a literal newline comes back as `A\t"weird\nname.txt"`, the newline
+// escaped inside double quotes, regardless of core.quotepath. Records do
+// not shift (git is careful about that), but nothing here unescapes C
+// quoting, so the non-z form would hand us a mangled path that silently
+// fails to match the file on disk. Verified empirically, not assumed --
+// see TestPlan_FilenameWithNewline_ParsedCorrectly_RequiresDashZ. Most statuses (A/M/D/T -- added,
 // modified, deleted, type-changed) are a two-field record: the status
 // letter (with no similarity suffix) then one path. A rename or copy
 // (verified empirically: git enables rename detection for `git diff` by
