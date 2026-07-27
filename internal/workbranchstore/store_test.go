@@ -86,7 +86,7 @@ func TestCreate_Success_GeneratesIDAndReturnsRow(t *testing.T) {
 }
 
 // TestGet_NoRows_ReturnsErrNotFound proves Get maps pgx.ErrNoRows to the
-// distinguishable errNotFound rather than a bare pgx sentinel a caller
+// distinguishable ErrNotFound rather than a bare pgx sentinel a caller
 // would otherwise have to import pgx just to check for.
 func TestGet_NoRows_ReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
@@ -98,7 +98,7 @@ func TestGet_NoRows_ReturnsErrNotFound(t *testing.T) {
 	store := New(mock, testLogger())
 	_, err := store.Get(t.Context(), uuid.Must(uuid.NewV7()))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 // TestGetByName_NoRows_ReturnsErrNotFound is GetByName's mirror of the
@@ -113,7 +113,7 @@ func TestGetByName_NoRows_ReturnsErrNotFound(t *testing.T) {
 	store := New(mock, testLogger())
 	_, err := store.GetByName(t.Context(), uuid.Must(uuid.NewV7()), "wb-missing")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 // TestList_NilRepoIDFilter_PassesInvalidUUID proves a nil ListFilter.RepoID
@@ -251,7 +251,7 @@ var transitionCases = []transitionCase{
 }
 
 // TestTransitionMethods_NotFound_ReturnErrNotFound proves every transition
-// method maps a zero-row guarded UPDATE to errNotFound when the id truly
+// method maps a zero-row guarded UPDATE to ErrNotFound when the id truly
 // does not exist (the transitionErr follow-up Get also finds nothing).
 func TestTransitionMethods_NotFound_ReturnErrNotFound(t *testing.T) {
 	t.Parallel()
@@ -265,15 +265,15 @@ func TestTransitionMethods_NotFound_ReturnErrNotFound(t *testing.T) {
 			store := New(mock, testLogger())
 			_, err := tc.call(t.Context(), store)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, errNotFound)
-			assert.NotErrorIs(t, err, errIllegalTransition)
+			assert.ErrorIs(t, err, ErrNotFound)
+			assert.NotErrorIs(t, err, ErrIllegalTransition)
 		})
 	}
 }
 
 // TestTransitionMethods_IllegalTransition_ReturnErrIllegalTransition proves
 // every transition method maps a zero-row guarded UPDATE to
-// errIllegalTransition when the id DOES exist (the transitionErr
+// ErrIllegalTransition when the id DOES exist (the transitionErr
 // follow-up Get finds a row) -- the illegal-transition state machine this
 // bead exists to add.
 func TestTransitionMethods_IllegalTransition_ReturnErrIllegalTransition(t *testing.T) {
@@ -288,15 +288,15 @@ func TestTransitionMethods_IllegalTransition_ReturnErrIllegalTransition(t *testi
 			store := New(mock, testLogger())
 			_, err := tc.call(t.Context(), store)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, errIllegalTransition)
-			assert.NotErrorIs(t, err, errNotFound)
+			assert.ErrorIs(t, err, ErrIllegalTransition)
+			assert.NotErrorIs(t, err, ErrNotFound)
 		})
 	}
 }
 
 // TestTransitionMethods_OtherError_NotMapped proves a genuine transport
-// failure (not a zero-row guard miss) is neither errNotFound nor
-// errIllegalTransition -- only a real pgx.ErrNoRows triggers the
+// failure (not a zero-row guard miss) is neither ErrNotFound nor
+// ErrIllegalTransition -- only a real pgx.ErrNoRows triggers the
 // existence-check follow-up.
 func TestTransitionMethods_OtherError_NotMapped(t *testing.T) {
 	t.Parallel()
@@ -308,18 +308,18 @@ func TestTransitionMethods_OtherError_NotMapped(t *testing.T) {
 			_, err := tc.call(t.Context(), store)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errBoom)
-			assert.NotErrorIs(t, err, errNotFound)
-			assert.NotErrorIs(t, err, errIllegalTransition)
+			assert.NotErrorIs(t, err, ErrNotFound)
+			assert.NotErrorIs(t, err, ErrIllegalTransition)
 		})
 	}
 }
 
 // TestTransitionMethods_ClassificationGetFails_WrapsTransportError proves
 // transitionErr's follow-up Get is itself fallible in a THIRD way beyond
-// "row exists" (errIllegalTransition) and "no row" (errNotFound): a
+// "row exists" (ErrIllegalTransition) and "no row" (ErrNotFound): a
 // genuine transport failure (dropped connection, cancelled context) during
 // that classification Get must be reported as its own wrapped error, not
-// misreported as errIllegalTransition -- errors.Is(getErr, pgx.ErrNoRows)
+// misreported as ErrIllegalTransition -- errors.Is(getErr, pgx.ErrNoRows)
 // is false for both a real row AND a transport failure, so the two must be
 // told apart explicitly rather than by falling through.
 func TestTransitionMethods_ClassificationGetFails_WrapsTransportError(t *testing.T) {
@@ -335,8 +335,8 @@ func TestTransitionMethods_ClassificationGetFails_WrapsTransportError(t *testing
 			_, err := tc.call(t.Context(), store)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errBoom, "a transport failure classifying the transition must not be swallowed")
-			assert.NotErrorIs(t, err, errIllegalTransition, "a failed classification must not default to illegal-transition")
-			assert.NotErrorIs(t, err, errNotFound)
+			assert.NotErrorIs(t, err, ErrIllegalTransition, "a failed classification must not default to illegal-transition")
+			assert.NotErrorIs(t, err, ErrNotFound)
 		})
 	}
 }

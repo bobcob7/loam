@@ -13,11 +13,11 @@ import (
 	"github.com/bobcob7/loam/internal/db/gen"
 )
 
-// errNoCurrentRound is returned by CurrentRound when a work branch has no
+// ErrNoCurrentRound is returned by CurrentRound when a work branch has no
 // review_rounds row yet (review has never been requested for it) --
 // distinguishable from a transport failure so a caller can tell "no round
 // yet" apart from "the database is unreachable".
-var errNoCurrentRound = errors.New("work branch has no current review round")
+var ErrNoCurrentRound = errors.New("work branch has no current review round")
 
 // errRoundNumberConflict is returned when two concurrent OpenRound calls
 // for the same work branch race: review_rounds_work_branch_id_number_key
@@ -92,7 +92,7 @@ func (s *RoundStore) CurrentRound(ctx context.Context, workBranchID uuid.UUID) (
 	row, err := s.q.CurrentReviewRound(ctx, pgUUID(workBranchID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, errNoCurrentRound)
+			return Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, ErrNoCurrentRound)
 		}
 		return Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, err)
 	}

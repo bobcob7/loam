@@ -134,7 +134,7 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (WorkBranch, error) {
 	row, err := s.q.GetWorkBranchByID(ctx, pgUUID(id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return WorkBranch{}, fmt.Errorf("getting work branch %s: %w", id, errNotFound)
+			return WorkBranch{}, fmt.Errorf("getting work branch %s: %w", id, ErrNotFound)
 		}
 		return WorkBranch{}, fmt.Errorf("getting work branch %s: %w", id, err)
 	}
@@ -147,7 +147,7 @@ func (s *Store) GetByName(ctx context.Context, repoID uuid.UUID, name string) (W
 	row, err := s.q.GetWorkBranchByName(ctx, gen.GetWorkBranchByNameParams{RepoID: pgUUID(repoID), Name: name})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return WorkBranch{}, fmt.Errorf("getting work branch %s/%s: %w", repoID, name, errNotFound)
+			return WorkBranch{}, fmt.Errorf("getting work branch %s/%s: %w", repoID, name, ErrNotFound)
 		}
 		return WorkBranch{}, fmt.Errorf("getting work branch %s/%s: %w", repoID, name, err)
 	}
@@ -196,7 +196,7 @@ func (s *Store) List(ctx context.Context, filter ListFilter, limit, offset int32
 // "leave one field unchanged" (docs/cli-spec.md "set": omitting --title or
 // stdin leaves that field as-is) to the caller, which can read the
 // current value via Get and pass it straight through. Rejected (zero rows,
-// mapped to errIllegalTransition) once the branch is complete or closed
+// mapped to ErrIllegalTransition) once the branch is complete or closed
 // (docs/cli-spec.md "State gates": `set` allowed in draft/reviewable/
 // reviewed only).
 func (s *Store) SetTitleDescription(ctx context.Context, id uuid.UUID, title, description string) (WorkBranch, error) {
@@ -219,7 +219,7 @@ func (s *Store) SetTitleDescription(ctx context.Context, id uuid.UUID, title, de
 // title and description to already be set (docs/cli-spec.md
 // "request-review"). Any other (from, to) pair -- including
 // reviewable/reviewed -> draft, -> complete, or -> closed -- is rejected
-// (errIllegalTransition): those are reached only through
+// (ErrIllegalTransition): those are reached only through
 // MarkConflicted, Complete, and Close respectively, each of which
 // carries bookkeeping (conflict, or close_reason) this generic method
 // does not.
@@ -269,7 +269,7 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID) (WorkBranch, error) 
 // branch can be found still-conflicting on several advances in a row
 // before anyone catches it up. Calling MarkConflicted again on an
 // already-conflicted branch is a benign no-op (it never returns
-// errIllegalTransition for that reason alone), and it never downgrades an
+// ErrIllegalTransition for that reason alone), and it never downgrades an
 // existing 'reset' back to 'flagged' -- doing so would silently strand a
 // demoted branch merely-flagged, with no restore-to-reviewable path left
 // for ClearConflict. Only legal from a non-terminal state (draft,
@@ -301,7 +301,7 @@ func (s *Store) ClearConflict(ctx context.Context, id uuid.UUID) (WorkBranch, er
 }
 
 // transitionErr maps a transition query's error to a distinguishable
-// sentinel: errNotFound if id names no row at all, errIllegalTransition if
+// sentinel: ErrNotFound if id names no row at all, ErrIllegalTransition if
 // the row exists but its current state/conflict disqualified the guarded
 // UPDATE (zero rows matched, not a transport failure), or the raw error
 // wrapped with context for anything else. verb names the attempted action
@@ -311,7 +311,7 @@ func (s *Store) ClearConflict(ctx context.Context, id uuid.UUID) (WorkBranch, er
 // neither "found" nor "not found" -- a dropped connection, a cancelled
 // context -- and errors.Is(getErr, pgx.ErrNoRows) is false in that case
 // too, same as it would be for a genuine row. That failure must NOT fall
-// through to errIllegalTransition (which would misreport a transport
+// through to ErrIllegalTransition (which would misreport a transport
 // problem as a precondition failure a caller could just accept and move
 // on from); it is reported as its own wrapped error instead.
 func (s *Store) transitionErr(ctx context.Context, id uuid.UUID, err error, verb string) error {
@@ -320,10 +320,10 @@ func (s *Store) transitionErr(ctx context.Context, id uuid.UUID, err error, verb
 	}
 	_, getErr := s.q.GetWorkBranchByID(ctx, pgUUID(id))
 	if getErr == nil {
-		return fmt.Errorf("%s work branch %s: %w", verb, id, errIllegalTransition)
+		return fmt.Errorf("%s work branch %s: %w", verb, id, ErrIllegalTransition)
 	}
 	if errors.Is(getErr, pgx.ErrNoRows) {
-		return fmt.Errorf("%s work branch %s: %w", verb, id, errNotFound)
+		return fmt.Errorf("%s work branch %s: %w", verb, id, ErrNotFound)
 	}
 	return fmt.Errorf("%s work branch %s: classifying failed transition: %w", verb, id, getErr)
 }

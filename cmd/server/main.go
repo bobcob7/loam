@@ -73,12 +73,15 @@ import (
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/handler/repo"
+	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/rolestore"
 	"github.com/bobcob7/loam/internal/server"
+	"github.com/bobcob7/loam/internal/workbranchstore"
 	loamweb "github.com/bobcob7/loam/web"
 )
 
@@ -104,6 +107,32 @@ type notImplementedOrchestrator struct{}
 // Run implements ingest.Orchestrator.
 func (notImplementedOrchestrator) Run(_ context.Context, _ ingest.Job) (ingest.Stats, error) {
 	return ingest.Stats{}, errIngestOrchestratorNotImplemented
+}
+
+// errDiffComputerNotImplemented is returned by notImplementedDiffComputer
+// in place of the git diff plumbing loam-ofg.8's own research turned up as
+// missing: no package anywhere in this tree shells out to `git diff`
+// against a repo's bare mirror (see
+// internal/handler/workbranch.DiffComputer's doc comment for the full
+// account, including why docs/git-spec.md's passing claim that "the server
+// already shells out to git for sync, diffs, and ingest" does not describe
+// this tree's actual state) -- that is filed as loam-fwk, NOT loam-ofg.16
+// (the git smart-HTTP transport handler, upload-pack/receive-pack framing
+// only; it does not cover diff computation).
+var errDiffComputerNotImplemented = errors.New("git diff plumbing not implemented (loam-fwk)")
+
+// notImplementedDiffComputer stands in for workbranch.DiffComputer, wired
+// here instead of leaving GetWorkBranchDiff unregistered so every other
+// WorkBranchService RPC in loam-ofg.8's scope is still genuinely reachable.
+// This one RPC fails loudly (CodeInternal, logged by handler.ErrorMapper)
+// rather than silently -- the same "loud failure over silent wrong
+// behavior" choice notImplementedOrchestrator above already makes for the
+// ingest pipeline -- until the real plumbing exists.
+type notImplementedDiffComputer struct{}
+
+// Diff implements workbranch.DiffComputer.
+func (notImplementedDiffComputer) Diff(_ context.Context, _ workbranchstore.WorkBranch) (string, error) {
+	return "", errDiffComputerNotImplemented
 }
 
 func main() {
@@ -193,6 +222,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool) *server.Router {
 	router.RegisterUnauthenticated("/healthz", placeholderHealthHandler("live"))
 	router.RegisterUnauthenticated("/readyz", placeholderHealthHandler("ready"))
 	registerMetadataServices(router, cfg, pool)
+	registerWorkBranchService(router, cfg, pool)
 	return router
 }
 
@@ -221,6 +251,34 @@ func registerMetadataServices(router *server.Router, cfg config.Config, pool *pg
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterCLI(loamv1connect.NewRepoServiceHandler(repo.New(repos, capabilities, errorMapper, cfg.Logger)))
 	router.RegisterCLI(loamv1connect.NewMetaServiceHandler(meta.New(roles, errorMapper, cfg.Logger)))
+}
+
+// registerWorkBranchService wires loam.v1.WorkBranchService's lifecycle
+// half (loam-ofg.8: CreateWorkBranch, UpdateWorkBranch, RequestReview,
+// ListWorkBranches, GetWorkBranch, GetWorkBranchDiff) over pool, the same
+// single Postgres connection registerMetadataServices' services share.
+// notImplementedDiffComputer stands in for the git diff plumbing that does
+// not exist in this tree yet (see its own doc comment); every other RPC
+// this handler implements is wired against real stores and genuinely
+// reachable.
+//
+// pool == nil is the only guard here, for the same reason and exercised
+// the same way as registerMetadataServices' own guard: run() always
+// supplies a real, already-connected pool, so this is never hit in
+// production, only by buildRouter's own tests.
+func registerWorkBranchService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
+	capabilities := handler.NewCapabilityChecker(roles)
+	errorMapper := handler.NewErrorMapper(cfg.Logger)
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	rounds := reviewstore.NewRoundStore(pool, cfg.Logger)
+	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
+		workbranch.New(workBranches, repos, rounds, notImplementedDiffComputer{}, capabilities, errorMapper, cfg.Logger),
+	))
 }
 
 // roleStoreAdapter adapts internal/rolestore.Store's plain-string

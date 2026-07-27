@@ -150,3 +150,36 @@ func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 	assert.NotContains(t, connectErr.Message(), "service registered",
 		"the request must reach the real MetaServiceHandler, never the group fallback's canned message, once a pool is wired in")
 }
+
+// TestBuildRouter_WithPool_WorkBranchServiceIsGenuinelyRegistered is
+// loam-ofg.8's registration proof, mirroring the RepoService/MetaService
+// pair above: a request to /loam.v1.WorkBranchService/GetWorkBranch must
+// reach the real handler registerWorkBranchService wires -- whose
+// capability check attempts a real role-store query against the
+// unreachable pool and fails with a connection error, mapped to
+// CodeInternal by handler.ErrorMapper -- rather than internal/server's
+// group-level "no service registered" fallback, which also happens to
+// answer with a Connect error but a fixed, request-independent message.
+// TestServer_WorkBranchServiceIsRegistered_NotGroupFallback
+// (registration_integration_test.go) is the real-Postgres version of this
+// same proof, asserting on the CODE too (which this fast variant cannot,
+// since the specific failure here is "database unreachable", not a
+// meaningful domain answer).
+func TestBuildRouter_WithPool_WorkBranchServiceIsGenuinelyRegistered(t *testing.T) {
+	t.Parallel()
+	pool := unreachablePool(t)
+	router := buildRouter(testConfigForRouter(), pool)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := loamv1connect.NewWorkBranchServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetWorkBranch(ctx, connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err, "the underlying pool is unreachable, so this must still fail -- but for a REAL reason")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.NotEqual(t, connect.CodeNotFound, connectErr.Code(),
+		"a real (if unreachable-database) failure inside the handler must not coincidentally look like the fallback's CodeNotFound")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real WorkBranchServiceHandler, never the group fallback's canned message, once a pool is wired in")
+}

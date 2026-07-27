@@ -281,7 +281,7 @@ func TestOpenRound_SequentialNumbering(t *testing.T) {
 
 // TestCurrentRound_NoRoundsYet_ReturnsErrNoCurrentRound proves a work
 // branch that has never had review requested reports the distinguishable
-// errNoCurrentRound against the real schema, not a bare pgx.ErrNoRows.
+// ErrNoCurrentRound against the real schema, not a bare pgx.ErrNoRows.
 func TestCurrentRound_NoRoundsYet_ReturnsErrNoCurrentRound(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -291,7 +291,7 @@ func TestCurrentRound_NoRoundsYet_ReturnsErrNoCurrentRound(t *testing.T) {
 
 	_, err := rounds.CurrentRound(ctx, workBranchID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNoCurrentRound)
+	assert.ErrorIs(t, err, ErrNoCurrentRound)
 }
 
 // TestCurrentRoundApproveCount_NoRoundsYet_IsZero proves the approve

@@ -14,7 +14,7 @@
 // the legal-from-state check and the write commit as a single atomic
 // statement, so a concurrent racer never observes a transition applied
 // from a state it was no longer valid in. An illegal call always surfaces
-// as errIllegalTransition (or errNotFound, if the id itself does not
+// as ErrIllegalTransition (or ErrNotFound, if the id itself does not
 // exist) -- it is never a silent no-op success.
 package workbranchstore
 
