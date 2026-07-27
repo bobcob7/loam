@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/httpauth"
@@ -860,15 +861,16 @@ func TestGetWorkBranchDiff_Success_ReturnsDiff(t *testing.T) {
 	assert.Equal(t, sampleWorkBranchID, diff.DiffCalls()[0].WorkBranch.ID)
 }
 
-// TestGetWorkBranchDiff_ComputerNotImplemented_FailsLoudlyAsInternal proves
-// the documented gap (no git diff plumbing exists anywhere in this tree
-// yet) fails loudly -- logged and CodeInternal -- rather than silently
-// returning an empty or fabricated diff.
-func TestGetWorkBranchDiff_ComputerNotImplemented_FailsLoudlyAsInternal(t *testing.T) {
+// TestGetWorkBranchDiff_UnmappedComputerError_FailsLoudlyAsInternal proves
+// a DiffComputer error with no handler.Err* sentinel match (mapDiffComputerErr's
+// default branch, e.g. gitdiff.ErrMirrorMissing -- an operational fault,
+// not a caller mistake) falls through to ErrorMapper's own default: logged
+// and CodeInternal, never silently dropped or turned into an empty diff.
+func TestGetWorkBranchDiff_UnmappedComputerError_FailsLoudlyAsInternal(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	workBranches, repos, rounds, diff := allMocks()
-	sentinel := errors.New("git diff plumbing not implemented (loam-fwk)")
+	sentinel := errors.New("bare mirror missing or invalid on disk")
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
 		return "", sentinel
 	}
@@ -876,7 +878,41 @@ func TestGetWorkBranchDiff_ComputerNotImplemented_FailsLoudlyAsInternal(t *testi
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connectCode(t, err))
-	assert.Contains(t, buf.String(), "not implemented", "an unmapped diff-computer failure must be logged, not silently dropped")
+	assert.Contains(t, buf.String(), "missing or invalid on disk", "an unmapped diff-computer failure must be logged, not silently dropped")
+}
+
+// TestGetWorkBranchDiff_RefMissing_MapsToFailedPrecondition proves
+// gitdiff.ErrRefMissing (a ref the diff range needs -- target or the work
+// branch's own name -- absent from the mirror) surfaces as
+// CodeFailedPrecondition, not CodeInternal: the request itself is valid,
+// but the mirror's current state does not support it.
+func TestGetWorkBranchDiff_RefMissing_MapsToFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
+		return "", fmt.Errorf("wb-9c2f1a: %w", gitdiff.ErrRefMissing)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
+}
+
+// TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition is the same
+// proof for gitdiff.ErrNoMergeBase (target and the work branch share no
+// common ancestor -- unrelated histories).
+func TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
+		return "", fmt.Errorf("main...wb-9c2f1a: %w", gitdiff.ErrNoMergeBase)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
 }
 
 func strPtr(s string) *string { return &s }

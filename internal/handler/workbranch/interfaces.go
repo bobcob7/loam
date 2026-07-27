@@ -103,22 +103,22 @@ type RoundStore interface {
 
 // DiffComputer computes a work branch's unified diff against its target
 // branch (docs/cli-spec.md -> "diff": "the unified diff of the work branch
-// against its target branch"). Defined here at the consumer -- but nothing
-// in this tree implements it yet. Locating a repo's bare-mirror path on
-// disk and shelling out to `git diff <target>...<name>` against it is
-// filed as loam-fwk, NOT loam-ofg.16 (the git smart-HTTP transport handler
-// -- upload-pack/receive-pack framing only, per its own DESCRIPTION; it
-// does not cover diff computation). No package in this repo computes a
-// diff either (confirmed by grep: no exec.Command("git", "diff", ...) or
-// equivalent exists anywhere in internal/ as of this bead, despite
-// docs/git-spec.md -> "Enforcement Mechanics" asserting in passing that
-// "the server already shells out to git for sync, diffs, and ingest" --
-// that line does not match this tree's actual state and should not be
-// read as evidence the plumbing exists). cmd/server/main.go wires a
-// not-implemented stand-in (notImplementedDiffComputer) so
-// GetWorkBranchDiff is genuinely reachable and fails loudly, not silently,
-// until loam-fwk lands -- the same choice notImplementedOrchestrator
-// already makes there for the ingest pipeline.
+// against its target branch"): the three-dot `git diff <target>...<name>`
+// range, i.e. the diff from target and name's merge base -- what the work
+// branch itself changed, not everything target has done since. Defined
+// here at the consumer, per repo convention. Implemented by
+// internal/gitdiff.Computer (loam-fwk), which shells out to real git
+// against the repo's bare mirror on disk; wired in
+// cmd/server/main.go's registerWorkBranchService. Before loam-fwk, no
+// package in this repo computed a diff at all (confirmed by grep: no
+// exec.Command("git", "diff", ...) or equivalent existed anywhere in
+// internal/, despite docs/git-spec.md -> "Enforcement Mechanics" asserting
+// in passing that "the server already shells out to git for sync, diffs,
+// and ingest" -- that line did not match this tree's actual history and
+// should not be read as evidence the plumbing predates loam-fwk). This is
+// a distinct piece of git plumbing from loam-ofg.16 (the git smart-HTTP
+// transport handler -- upload-pack/receive-pack framing only, per its own
+// DESCRIPTION; it never covered diff computation).
 type DiffComputer interface {
 	Diff(ctx context.Context, workBranch workbranchstore.WorkBranch) (string, error)
 }

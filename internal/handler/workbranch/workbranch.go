@@ -13,6 +13,7 @@ import (
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
@@ -278,10 +279,9 @@ func (h *Handler) GetWorkBranch(ctx context.Context, req *connect.Request[loamv1
 // GetWorkBranchDiff fetches a work branch's unified diff against its
 // target, separately from GetWorkBranch to keep both responses small
 // (docs/cli-spec.md -> "diff"). Gated by CapabilityWorkRead. See
-// DiffComputer's doc comment: no git plumbing to compute this exists
-// anywhere in this tree yet, so in production this currently always fails
-// (loudly, mapped to CodeInternal and logged by ErrorMapper) via
-// cmd/server/main.go's notImplementedDiffComputer, not silently.
+// DiffComputer's doc comment: implemented by internal/gitdiff.Computer
+// (loam-fwk), wired in cmd/server/main.go. mapDiffComputerErr classifies
+// the errors that surface here.
 func (h *Handler) GetWorkBranchDiff(ctx context.Context, req *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
 	if err := h.capabilities.RequireCapability(ctx, handler.CapabilityWorkRead); err != nil {
 		return nil, h.errors.ToConnectErr(err)
@@ -293,7 +293,7 @@ func (h *Handler) GetWorkBranchDiff(ctx context.Context, req *connect.Request[lo
 	}
 	diff, err := h.diff.Diff(ctx, wb)
 	if err != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("computing diff for work branch %s/%s: %w", repo, name, err))
+		return nil, h.errors.ToConnectErr(mapDiffComputerErr(err, fmt.Sprintf("computing diff for work branch %s/%s", repo, name)))
 	}
 	return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: diff}), nil
 }
@@ -389,6 +389,29 @@ func mapWorkBranchStoreErr(err error, context string) error {
 	case errors.Is(err, workbranchstore.ErrNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	case errors.Is(err, workbranchstore.ErrIllegalTransition):
+		return fmt.Errorf("%s: %w", context, handler.ErrFailedPrecondition)
+	default:
+		return fmt.Errorf("%s: %w", context, err)
+	}
+}
+
+// mapDiffComputerErr maps a DiffComputer error to the handler.Err*
+// sentinel ErrorMapper recognizes, prefixing context. gitdiff.ErrRefMissing
+// and gitdiff.ErrNoMergeBase both map to ErrFailedPrecondition: the request
+// (repo, work branch) is valid -- resolveWorkBranch already confirmed the
+// work branch itself exists before Diff is ever called -- but the mirror's
+// current state (a missing ref, or target and name sharing no merge base)
+// does not support computing the range. gitdiff.ErrMirrorMissing has
+// deliberately no case here: a bare mirror missing on disk for an enrolled
+// repo is an operational fault, not a caller-fixable precondition, so it
+// falls through to the default branch below and ErrorMapper's own
+// CodeInternal-and-log path -- the same "loud failure over silent wrong
+// behavior" choice notImplementedDiffComputer made for every error before
+// this bead, now narrowed to just the cases that are genuinely someone's
+// operational problem rather than the caller's.
+func mapDiffComputerErr(err error, context string) error {
+	switch {
+	case errors.Is(err, gitdiff.ErrRefMissing), errors.Is(err, gitdiff.ErrNoMergeBase):
 		return fmt.Errorf("%s: %w", context, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
