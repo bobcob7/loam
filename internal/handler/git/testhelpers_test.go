@@ -1,6 +1,7 @@
 package git
 
 import (
+	"crypto/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -41,6 +42,31 @@ func seedBareMirror(t *testing.T, mirrorDir string) string {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "f.txt"), []byte("hello\n"), 0o644))
 	runGit(t, src, "add", "f.txt")
 	runGit(t, src, "commit", "--quiet", "-m", "init")
+	require.NoError(t, os.MkdirAll(filepath.Dir(mirrorDir), 0o755))
+	runGit(t, "", "clone", "--quiet", "--bare", src, mirrorDir)
+	return runGit(t, "", "--git-dir="+mirrorDir, "rev-parse", "refs/heads/main")
+}
+
+// seedBareMirrorWithLargeBlob is seedBareMirror's variant for tests that
+// need a subprocess response large enough to guarantee it cannot be
+// written into an unread connection without blocking (a write-blocked
+// subprocess is a genuinely different state than one blocked reading
+// stdin -- see TestServeRPC_ContextCancellationKillsAWriteBlockedSubprocess).
+// The blob is crypto/rand bytes, not a repeated pattern, specifically so
+// git's own delta/zlib compression cannot shrink the resulting pack back
+// down below whatever this test needs it to exceed.
+func seedBareMirrorWithLargeBlob(t *testing.T, mirrorDir string, blobSize int) string {
+	t.Helper()
+	src := t.TempDir()
+	runGit(t, src, "init", "--quiet", "--initial-branch=main")
+	runGit(t, src, "config", "user.email", "seed@example.com")
+	runGit(t, src, "config", "user.name", "seed")
+	blob := make([]byte, blobSize)
+	_, err := rand.Read(blob)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(src, "big.bin"), blob, 0o644))
+	runGit(t, src, "add", "big.bin")
+	runGit(t, src, "commit", "--quiet", "-m", "large blob")
 	require.NoError(t, os.MkdirAll(filepath.Dir(mirrorDir), 0o755))
 	runGit(t, "", "clone", "--quiet", "--bare", src, mirrorDir)
 	return runGit(t, "", "--git-dir="+mirrorDir, "rev-parse", "refs/heads/main")

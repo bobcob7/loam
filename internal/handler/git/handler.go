@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
@@ -26,6 +27,38 @@ const (
 // gitPathPrefix is the mount point this handler is registered under
 // (docs/git-spec.md "Endpoint & Protocol": "/git/<group>/<repo_name>.git").
 const gitPathPrefix = "/git/"
+
+// repoSegmentPattern is the same allowlist loam-hs5 settled for a
+// filesystem-joined identifier segment: it must start with an
+// alphanumeric and contain only alphanumerics, '.', '_', or '-'. That
+// makes '.', '..', and empty segments impossible BY CONSTRUCTION, rather
+// than relying on a blacklist of known-bad substrings -- the same
+// validate-then-reject shape loam-hs5's StagingPath guard uses, applied
+// here because r.URL.Path is already percent-decoded by net/http (a
+// request path containing "..%2f" arrives as a literal ".." path
+// segment), so repoName is untrusted, attacker-controlled input joined
+// straight into a filesystem path by mirrorpath.Dir.
+var repoSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validRepoName reports whether repoName is exactly two '/'-delimited
+// segments (docs/persistence-spec.md's "<group>/<repo_name>" convention),
+// each matching repoSegmentPattern. It REJECTS anything else -- including
+// a traversal segment like ".." or an empty segment from a doubled slash
+// -- rather than sanitizing it, matching loam-hs5's settled reasoning:
+// silently rewriting an invalid identifier into some other path the
+// caller cannot predict is worse than a clean 404.
+func validRepoName(repoName string) bool {
+	segments := strings.Split(repoName, "/")
+	if len(segments) != 2 {
+		return false
+	}
+	for _, segment := range segments {
+		if !repoSegmentPattern.MatchString(segment) {
+			return false
+		}
+	}
+	return true
+}
 
 // Handler serves the smart-HTTP transport for every enrolled repo's bare
 // mirror under dataDir (docs/git-spec.md "Endpoint & Protocol"). Construct
@@ -88,17 +121,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveInfoRefs(w, r, mirrorDir, req.service)
 		return
 	}
-	h.serveRPC(w, r, req.repoName, mirrorDir, req.service)
+	// repo.Name (the store's trusted value), not req.repoName (the raw,
+	// URL-derived string validRepoName merely rejected-if-malformed) is
+	// what serveRPC must use for LOAM_REPO: loam-ofg.18's pre-receive hook
+	// keys its policy decision on that value, so it must agree with
+	// mirrorDir above about which string is trusted, never the
+	// attacker-influenced request path.
+	h.serveRPC(w, r, repo.Name, mirrorDir, req.service)
 }
 
 // parseGitRequest matches r against the three request shapes docs/git-
 // spec.md "Endpoint & Protocol" defines under gitPathPrefix
 // ("/git/<group>/<repo_name>.git/info/refs?service=...",
 // ".../git-upload-pack", ".../git-receive-pack"), extracting the repo name
-// as everything between the prefix and the first ".git/" segment boundary.
-// ok is false for anything else, including an unrecognized ?service= value
-// on info/refs -- dumb HTTP is not served (docs/git-spec.md), and there is
-// no repo name to look up without a ".git/" boundary at all.
+// as everything between the prefix and the first ".git/" segment boundary
+// and validating it against validRepoName BEFORE returning it to the
+// caller. ok is false for anything else, including an unrecognized
+// ?service= value on info/refs -- dumb HTTP is not served (docs/git-
+// spec.md) -- and including a repoName that fails validRepoName, so a
+// path-traversal segment (e.g. r.URL.Path decoding "..%2f" into a literal
+// ".." segment) is rejected here, before this handler ever calls the repo
+// store or joins repoName into a filesystem path.
 func parseGitRequest(r *http.Request) (gitRequest, bool) {
 	if !strings.HasPrefix(r.URL.Path, gitPathPrefix) {
 		return gitRequest{}, false
@@ -109,6 +152,9 @@ func parseGitRequest(r *http.Request) (gitRequest, bool) {
 		return gitRequest{}, false
 	}
 	repoName := rest[:idx]
+	if !validRepoName(repoName) {
+		return gitRequest{}, false
+	}
 	suffix := rest[idx+len(".git/"):]
 	switch {
 	case r.Method == http.MethodGet && suffix == "info/refs":
@@ -128,9 +174,14 @@ func parseGitRequest(r *http.Request) (gitRequest, bool) {
 
 // writeGitNotFound answers an unrecognized shape or an unenrolled repo
 // with a plain-text 404 -- text/plain (not the JSON/html this process
-// serves elsewhere), matching internal/server's own gitNotFoundHandler
-// fallback so every /git/* 404 looks the same on the wire regardless of
-// which layer produced it.
+// serves elsewhere), the same content type internal/server's own
+// gitNotFoundHandler fallback uses, though the two bodies are
+// deliberately DIFFERENT fixed strings ("loam: repository not found\n"
+// here vs. "404 repository not found\n" in fallback.go): this handler's
+// own tests (TestBuildRouter_NilPool_GitStillHitsGroupFallback,
+// cmd/server/registration_test.go) rely on that difference to prove a
+// request reached this handler rather than the group-level fallback that
+// runs when RegisterGit was never called at all.
 func writeGitNotFound(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)

@@ -23,22 +23,32 @@ import (
 // so this handler must do it itself.
 const gitProtocolHeader = "Git-Protocol"
 
-// subprocessWaitDelay bounds how long a canceled request's git subprocess
-// gets to finish its own I/O teardown after being killed, before
-// (*exec.Cmd).Wait forces its stdio pipes closed and returns anyway (added
-// in Go 1.20 exec specifically for this class of hang). Context
-// cancellation (a client disconnecting mid-clone or mid-push) must never
-// leave this handler's goroutine blocked forever even in a pathological
-// case where the killed process's own I/O goroutines do not unblock on
-// their own -- see gitCommand's doc comment.
+// subprocessWaitDelay bounds two things per (*exec.Cmd).WaitDelay's own
+// doc comment: how long a canceled request's process gets to exit on its
+// own before Wait sends it a Kill, and how long Wait then waits for the
+// PIPES BETWEEN Cmd AND THE CHILD to close before forcibly closing them
+// itself to unblock a goroutine reading the child's stdout or writing the
+// child's stdin. It does NOT bound every possible way this handler's
+// goroutine could stay blocked: measured directly (a client that stalls
+// mid-body while the subprocess is producing output), the stdout-copying
+// goroutine can be blocked inside w.Write itself -- net/http's server
+// draining the unread request body there -- which closing the pipe
+// between Cmd and the child process cannot unblock, since that block is
+// on the RESPONSE side, not the child's own I/O. subprocessWaitDelay is
+// still worth keeping (it is what unblocks the case it actually covers:
+// a child that has exited or been killed but left its own pipes open),
+// it just is not a universal "this handler's goroutine returns within N
+// seconds no matter what" guarantee -- do not read it as one.
 const subprocessWaitDelay = 5 * time.Second
 
 // pktLine encodes s as a single pkt-line: a 4-hex-digit length prefix
 // (the length of the prefix itself PLUS s, per the pkt-line format smart
 // HTTP piggybacks on) followed by s verbatim. Used only for the one
 // hand-written line this handler ever emits itself -- the "# service=...\n"
-// header docs/git-spec.md's "Endpoint & Protocol" requires ahead of the
-// real advertisement -- everything else on the wire is real git's own
+// header git's own smart-HTTP protocol requires ahead of the real
+// advertisement (git-scm.com/docs/http-protocol; docs/git-spec.md names
+// the endpoint but does not itself describe pkt-line framing) --
+// everything else on the wire is real git's own
 // pkt-line-framed stdout, piped straight through.
 func pktLine(s string) []byte {
 	return []byte(fmt.Sprintf("%04x%s", len(s)+4, s))
@@ -57,10 +67,11 @@ var flushPkt = []byte("0000")
 // a request's Context when its underlying connection closes -- kills the
 // subprocess via exec.CommandContext's default Cancel (Process.Kill)
 // rather than leaving it running forever against a mirror nobody is still
-// reading from. subprocessWaitDelay is the second half of that guarantee:
-// even if the killed process's stdin/stdout pump goroutines somehow never
-// observe the kill, Wait gives up on them and returns instead of hanging
-// this handler's goroutine indefinitely.
+// reading from. subprocessWaitDelay bounds the OTHER half of that: how
+// long Wait keeps the killed process's own pipes open once it has exited
+// (see subprocessWaitDelay's own doc comment for the narrower guarantee
+// this actually is -- it does not bound every way this handler's
+// goroutine could stay blocked).
 //
 // env is deliberately NOT os.Environ() plus additions: this subprocess
 // serves an agent's clone/push over HTTP, it does not authenticate
@@ -92,9 +103,11 @@ func gitCommand(ctx context.Context, subcommand, mirrorDir string, extraArgs []s
 }
 
 // advertisementContentType and rpcResultContentType render the two
-// Content-Type shapes docs/git-spec.md pins ("application/x-git-upload-
-// pack-advertisement" / "...-result", and the receive-pack equivalents) --
-// a single concatenation expression covers both since service is always
+// Content-Type shapes git's own smart-HTTP protocol requires
+// ("application/x-git-upload-pack-advertisement" / "...-result", and the
+// receive-pack equivalents -- git-scm.com/docs/http-protocol, not
+// docs/git-spec.md, which does not itself name these MIME types) -- a
+// single concatenation expression covers both since service is always
 // exactly "git-upload-pack" or "git-receive-pack" (parseGitRequest's
 // contract).
 func advertisementContentType(service string) string {
@@ -116,11 +129,12 @@ func subcommandFor(service string) string {
 }
 
 // serveInfoRefs answers GET .../info/refs?service=... : the pkt-line
-// service header plus a flush (docs/git-spec.md "Endpoint & Protocol"),
-// then `git <subcommand> --stateless-rpc --advertise-refs <mirrorDir>`'s
-// own stdout, piped straight to the response with no buffering in
-// between -- streaming a large ref advertisement is no different from
-// streaming a large pack, so it gets the same treatment as serveRPC.
+// service header plus a flush (git's own smart-HTTP protocol; see
+// pktLine's doc comment), then `git <subcommand> --stateless-rpc
+// --advertise-refs <mirrorDir>`'s own stdout, piped straight to the
+// response with no buffering in between -- streaming a large ref
+// advertisement is no different from streaming a large pack, so it gets
+// the same treatment as serveRPC.
 func (h *Handler) serveInfoRefs(w http.ResponseWriter, r *http.Request, mirrorDir, service string) {
 	w.Header().Set("Content-Type", advertisementContentType(service))
 	w.Header().Set("Cache-Control", "no-cache")
@@ -194,10 +208,14 @@ func (h *Handler) serveRPC(w http.ResponseWriter, r *http.Request, repoName, mir
 }
 
 // requestBody returns r.Body, transparently gzip-decompressing it first
-// if Content-Encoding: gzip is set (docs/git-spec.md's own instructions:
-// "request bodies may be gzip-encoded ... git sends this" -- confirmed
-// against git's own remote-curl.c source, which gzip-compresses a
-// git-upload-pack POST body once it exceeds 1024 bytes). The returned
+// if Content-Encoding: gzip is set. docs/git-spec.md itself says nothing
+// about gzip; this is purely an empirical property of real git clients,
+// confirmed against git's own remote-curl.c source (post_rpc/fetch_git):
+// a git-upload-pack POST body is gzip-compressed once it exceeds 1024
+// bytes (protocol v2's stateless-connect path sets gzip_request too, so
+// this covers a modern client's default fetch), while git-receive-pack
+// (push) is never gzip-compressed regardless of size -- confirmed by this
+// package's own measurements (see the tests). The returned
 // reader streams the decompression rather than buffering it: gzip.Reader
 // wraps r.Body directly, so the subprocess's stdin is fed exactly as fast
 // as the client sends compressed bytes, not all at once. The returned

@@ -164,3 +164,85 @@ func TestServeHTTP_RepoStoreErrorIs500NotSilent(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// TestParseGitRequest_RejectsPathTraversalSegments proves the MUST-FIX
+// this bead's review found: a repo name containing a ".." segment --
+// whether written literally or arriving via a percent-encoded slash
+// net/http already decodes before this handler ever sees r.URL.Path
+// (e.g. "..%2f..%2f..%2ftmp%2fevil" decodes to the literal path segment
+// "../../../tmp/evil", confirmed against Go's own url.Parse) -- is
+// rejected by parseGitRequest itself, by construction (validRepoName's
+// allowlist), before anything downstream ever calls the repo store or
+// joins the name into a filesystem path via mirrorpath.Dir.
+func TestParseGitRequest_RejectsPathTraversalSegments(t *testing.T) {
+	t.Parallel()
+	targets := []string{
+		"http://example.invalid/git/acme/../../../tmp/evil.git/info/refs?service=git-upload-pack",
+		"http://example.invalid/git/acme/..%2f..%2f..%2ftmp%2fevil.git/info/refs?service=git-upload-pack",
+	}
+	for _, target := range targets {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			req, err := http.NewRequest(http.MethodGet, target, nil)
+			require.NoError(t, err)
+			require.Contains(t, req.URL.Path, "..", "the request's DECODED path must actually contain a traversal segment for this test to mean anything -- otherwise it would pass vacuously")
+			_, ok := parseGitRequest(req)
+			assert.False(t, ok, "a repo name containing a traversal segment must be rejected: %q", req.URL.Path)
+		})
+	}
+}
+
+// TestServeHTTP_PathTraversalRepoNameIs404BeforeAnyStoreLookup proves the
+// same rejection end-to-end through ServeHTTP, with the repo store itself
+// wired to fail the test (via t.Fatal) if it is ever consulted: the
+// traversal segment must never reach GetRepoByName, or mirrorpath.Dir,
+// at all -- so a permissive or missing CHECK constraint on repos.name (as
+// this bead's review found: 0001_init.up.sql has none) can never turn
+// this into a real filesystem access outside LOAM_DATA_DIR. The
+// rejection happens at parseGitRequest, strictly before any store call.
+func TestServeHTTP_PathTraversalRepoNameIs404BeforeAnyStoreLookup(t *testing.T) {
+	t.Parallel()
+	repos := &RepoStoreMock{
+		GetRepoByNameFunc: func(context.Context, string) (reposstore.Repo, error) {
+			t.Fatal("the repo store must never be consulted for a path-traversal repo name")
+			return reposstore.Repo{}, nil
+		},
+	}
+	h := New(t.TempDir(), repos, discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/git/acme/..%2f..%2f..%2ftmp%2fevil.git/info/refs?service=git-upload-pack", nil)
+	require.Contains(t, req.URL.Path, "..", "the request's DECODED path must actually contain a traversal segment for this test to mean anything")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestValidRepoName_Table pins validRepoName's allowlist behavior
+// directly against the specific shapes this bead's review named: exactly
+// two non-empty segments, each starting with an alphanumeric and
+// containing only alphanumerics/'.'/'_'/'-'.
+func TestValidRepoName_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ok   bool
+	}{
+		{"acme/widgets", true},
+		{"acme/doc-server.wiki", true},
+		{"acme.corp/wid_gets.v2", true},
+		{"../../../tmp/evil", false},
+		{"acme/..", false},
+		{"acme/.", false},
+		{"acme//evil", false},
+		{"/acme", false},
+		{"acme/", false},
+		{"acme", false},
+		{"acme/sub/widgets", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.ok, validRepoName(tc.name))
+		})
+	}
+}
