@@ -1,0 +1,55 @@
+//go:build acceptance
+
+// The Admin actor driver (testing-spec Layer 1's table): a connect-go
+// client authenticating with plain HTTP basic auth, never the SPA (Layer
+// 3's own concern).
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+
+	"connectrpc.com/connect"
+
+	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
+)
+
+// basicAuthRoundTripper injects a fixed HTTP Basic Authorization header
+// into every outgoing request, the Admin actor's one and only auth
+// mechanism per testing-spec Layer 1's table (no SPA session, no bearer
+// token).
+type basicAuthRoundTripper struct {
+	user, password string
+	base           http.RoundTripper
+}
+
+// RoundTrip implements http.RoundTripper.
+func (rt basicAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.SetBasicAuth(rt.user, rt.password)
+	return rt.base.RoundTrip(req)
+}
+
+// adminHTTPClient builds the connect.HTTPClient every Admin-actor connect-go
+// client in this suite authenticates through.
+func (h *acceptanceHarness) adminHTTPClient() *http.Client {
+	return &http.Client{Transport: basicAuthRoundTripper{user: h.adminUser, password: h.adminPassword, base: http.DefaultTransport}}
+}
+
+// newProposalServiceClient builds the Admin actor's connect-go client for
+// loam.admin.v1.ProposalService, backing the core vocabulary row "I accept
+// it" (docs/testing-spec.md Layer 1's step-vocabulary table).
+func (h *acceptanceHarness) newProposalServiceClient() adminv1connect.ProposalServiceClient {
+	return adminv1connect.NewProposalServiceClient(h.adminHTTPClient(), h.server.baseURL)
+}
+
+// acceptProposal calls ProposalService.AcceptProposal for (repo,
+// workBranch) and returns the accepted PR's URL.
+func acceptProposal(ctx context.Context, client adminv1connect.ProposalServiceClient, repo, workBranch string) (string, error) {
+	resp, err := client.AcceptProposal(ctx, connect.NewRequest(&adminv1.AcceptProposalRequest{Repo: repo, WorkBranch: workBranch}))
+	if err != nil {
+		return "", fmt.Errorf("accepting proposal for %s/%s: %w", repo, workBranch, err)
+	}
+	return resp.Msg.PrUrl, nil
+}

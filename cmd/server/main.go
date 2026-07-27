@@ -172,32 +172,71 @@ func main() {
 		bootLogger.Error("loading configuration", "error", err)
 		os.Exit(1)
 	}
-	if err := run(cfg); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, stop, cfg, nil); err != nil {
 		cfg.Logger.Error("server exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-// run executes docs/server-spec.md's Startup sequence and blocks until
-// SIGINT/SIGTERM triggers Shutdown. The sync scheduler is deliberately not
-// constructed: 5 of its 7 collaborators (Fetcher/loam-giq.2,
-// AdvanceDetector/loam-giq.4, MergeabilityChecker/loam-giq.5, the
-// IngestEnqueuer adapter/loam-c94.2, PRPoller/loam-giq.8) have no
-// production implementation anywhere in the tree -- only RepoLister
-// (loam-13z's StoreRepoLister) and SyncStateReporter are real. Wiring a
-// Scheduler with placeholder stand-ins for those five would make every
-// enrolled repo's Mirror Sync cycle fail step 1 immediately and report
-// sync_state='error' for the entire enrollment on every tick -- materially
-// worse and more misleading than simply not starting it yet, the same
-// conclusion loam-13z's own closing NOTES reached constructing this
-// package's RepoLister producer. mirrorsync.Scheduler.Shutdown (added
-// alongside this bead) and the runner/closer seams in interfaces.go are
-// both ready for that Scheduler to be constructed and passed to serve as
-// its background runner the moment giq.2/4/5/8 and c94.2 land -- a single
-// mechanical addition, not a redesign of this function.
-func run(cfg config.Config) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+// run executes docs/server-spec.md's Startup sequence and blocks until ctx
+// is done, triggering Shutdown. main() constructs ctx/stop via
+// signal.NotifyContext(os.Interrupt, syscall.SIGTERM) so production shuts
+// down on SIGINT/SIGTERM exactly as before; ctx and stop are parameters --
+// rather than derived here internally -- solely so loam-li0.5's acceptance
+// harness can call this exact function, unmodified in every other respect,
+// with its own cancelable context instead of a real OS signal it cannot
+// send itself (a test process sending SIGINT/SIGTERM to itself would tear
+// down the whole `go test` binary, not just the in-process server under
+// test). This is the literal "same constructor graph as cmd/server/main.go"
+// docs/testing-spec.md's Layer 1 topology requires: the harness calls run,
+// not a hand-rolled subset of its steps.
+//
+// The sync scheduler is deliberately not constructed here: 5 of its 7
+// collaborators (Fetcher/loam-giq.2, AdvanceDetector/loam-giq.4,
+// MergeabilityChecker/loam-giq.5, the IngestEnqueuer adapter/loam-c94.2,
+// PRPoller/loam-giq.8) have no production implementation anywhere in the
+// tree -- only RepoLister (loam-13z's StoreRepoLister) and
+// SyncStateReporter are real. Wiring a Scheduler with placeholder stand-ins
+// for those five would make every enrolled repo's Mirror Sync cycle fail
+// step 1 immediately and report sync_state='error' for the entire
+// enrollment on every tick -- materially worse and more misleading than
+// simply not starting it yet, the same conclusion loam-13z's own closing
+// NOTES reached constructing this package's RepoLister producer.
+// mirrorsync.Scheduler.Shutdown (added alongside this bead) and the
+// runner/closer seams in interfaces.go are both ready for that Scheduler to
+// be constructed and passed to serve as its background runner the moment
+// giq.2/4/5/8 and c94.2 land -- a single mechanical addition, not a
+// redesign of this function.
+//
+// loam-f75: this function -- production's only caller of Scheduler.Run --
+// still does not construct one, so the constraint it names ("never call
+// Scheduler.Run and Scheduler.Tick on the same Scheduler") cannot be
+// violated from here today. The acceptance harness (loam-li0.5) builds its
+// OWN Scheduler, over this same real ingest.Pool/reposstore wiring plus
+// fakeforge, purely to drive testsched.SyncHarness.Tick from step
+// definitions -- see cmd/server/acceptance_harness_test.go's
+// newSyncHarness doc comment for how that Scheduler is built so its Run is
+// never reachable at all, satisfying loam-f75 by construction rather than
+// by convention.
+//
+// onReady, if non-nil, is called exactly once, after every collaborator
+// below is constructed and reachable but before this function hands off to
+// serve's blocking Serve/Shutdown loop, with the live pool, ingestPool, and
+// resolved hookBinaryPath. Production (main()) always passes nil: nothing
+// outside this function needs those handles once serve takes over, since
+// every request-handling path already closes over them via buildRouter.
+// The one caller that does need them is loam-li0.5's acceptance harness,
+// which must call this exact function -- the "same constructor graph as
+// cmd/server/main.go" docs/testing-spec.md's Layer 1 topology requires --
+// while still building its own testsched.SyncHarness/IngestHarness over
+// the SAME pool and ingest.Pool this call constructs, not a second,
+// divergent instance. A callback is the minimal seam for that: it adds no
+// branching to the startup sequence itself (every line above and below it
+// is unchanged from before this parameter existed) and cannot be invoked
+// more than once, since run() itself never loops.
+func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onReady func(pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string)) error {
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
 		return err
@@ -248,6 +287,9 @@ func run(cfg config.Config) error {
 	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
 	background := multiRunner{ingestPool, policyServer}
+	if onReady != nil {
+		onReady(pool, ingestPool, hookBinaryPath)
+	}
 	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, pool, defaultShutdownGrace)
 }
 
