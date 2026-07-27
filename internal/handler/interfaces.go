@@ -1,6 +1,12 @@
 package handler
 
-import "context"
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	"github.com/bobcob7/loam/internal/reposstore"
+)
 
 // RoleStore resolves the capabilities granted to a named role, backed by
 // the same role store loam-ofg.11's MetaService and loam-ofg.13's
@@ -15,4 +21,24 @@ type RoleStore interface {
 	RoleCapabilities(ctx context.Context, role string) ([]Capability, error)
 }
 
-//go:generate go tool moq -out moq_test.go . RoleStore
+// ScopeStore is the repo-lookup surface ScopeResolver needs (see scope.go),
+// defined here at the consumer per this package's own convention.
+// *reposstore.Store satisfies it structurally in production; tests drive a
+// moq mock.
+type ScopeStore interface {
+	// GetRepoByName resolves an enrolled repo's name to its full row,
+	// including the id and indexed_branch ScopeResolver needs. Returns a
+	// wrapped reposstore.ErrNotFound for a name that is not enrolled.
+	GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error)
+	// ListAllRepoNames returns every enrolled repo's name, unpaginated --
+	// how ScopeResolver expands an empty QueryScope.repos into "all
+	// enrolled repos".
+	ListAllRepoNames(ctx context.Context) ([]string, error)
+	// ListTargetBranches returns every branch enrolled as a target for
+	// repoID, including each one's ingest provenance -- how
+	// ScopeResolver.Ingested finds the row matching a repo's indexed
+	// branch.
+	ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
+}
+
+//go:generate go tool moq -out moq_test.go . RoleStore ScopeStore

@@ -5,6 +5,8 @@ package handler
 
 import (
 	"context"
+	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/google/uuid"
 	"sync"
 )
 
@@ -77,5 +79,171 @@ func (mock *RoleStoreMock) RoleCapabilitiesCalls() []struct {
 	mock.lockRoleCapabilities.RLock()
 	calls = mock.calls.RoleCapabilities
 	mock.lockRoleCapabilities.RUnlock()
+	return calls
+}
+
+// Ensure, that ScopeStoreMock does implement ScopeStore.
+// If this is not the case, regenerate this file with moq.
+var _ ScopeStore = &ScopeStoreMock{}
+
+// ScopeStoreMock is a mock implementation of ScopeStore.
+//
+//	func TestSomethingThatUsesScopeStore(t *testing.T) {
+//
+//		// make and configure a mocked ScopeStore
+//		mockedScopeStore := &ScopeStoreMock{
+//			GetRepoByNameFunc: func(ctx context.Context, name string) (reposstore.Repo, error) {
+//				panic("mock out the GetRepoByName method")
+//			},
+//			ListAllRepoNamesFunc: func(ctx context.Context) ([]string, error) {
+//				panic("mock out the ListAllRepoNames method")
+//			},
+//			ListTargetBranchesFunc: func(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error) {
+//				panic("mock out the ListTargetBranches method")
+//			},
+//		}
+//
+//		// use mockedScopeStore in code that requires ScopeStore
+//		// and then make assertions.
+//
+//	}
+type ScopeStoreMock struct {
+	// GetRepoByNameFunc mocks the GetRepoByName method.
+	GetRepoByNameFunc func(ctx context.Context, name string) (reposstore.Repo, error)
+
+	// ListAllRepoNamesFunc mocks the ListAllRepoNames method.
+	ListAllRepoNamesFunc func(ctx context.Context) ([]string, error)
+
+	// ListTargetBranchesFunc mocks the ListTargetBranches method.
+	ListTargetBranchesFunc func(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetRepoByName holds details about calls to the GetRepoByName method.
+		GetRepoByName []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Name is the name argument value.
+			Name string
+		}
+		// ListAllRepoNames holds details about calls to the ListAllRepoNames method.
+		ListAllRepoNames []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+		}
+		// ListTargetBranches holds details about calls to the ListTargetBranches method.
+		ListTargetBranches []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+		}
+	}
+	lockGetRepoByName      sync.RWMutex
+	lockListAllRepoNames   sync.RWMutex
+	lockListTargetBranches sync.RWMutex
+}
+
+// GetRepoByName calls GetRepoByNameFunc.
+func (mock *ScopeStoreMock) GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error) {
+	if mock.GetRepoByNameFunc == nil {
+		panic("ScopeStoreMock.GetRepoByNameFunc: method is nil but ScopeStore.GetRepoByName was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Name string
+	}{
+		Ctx:  ctx,
+		Name: name,
+	}
+	mock.lockGetRepoByName.Lock()
+	mock.calls.GetRepoByName = append(mock.calls.GetRepoByName, callInfo)
+	mock.lockGetRepoByName.Unlock()
+	return mock.GetRepoByNameFunc(ctx, name)
+}
+
+// GetRepoByNameCalls gets all the calls that were made to GetRepoByName.
+// Check the length with:
+//
+//	len(mockedScopeStore.GetRepoByNameCalls())
+func (mock *ScopeStoreMock) GetRepoByNameCalls() []struct {
+	Ctx  context.Context
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Name string
+	}
+	mock.lockGetRepoByName.RLock()
+	calls = mock.calls.GetRepoByName
+	mock.lockGetRepoByName.RUnlock()
+	return calls
+}
+
+// ListAllRepoNames calls ListAllRepoNamesFunc.
+func (mock *ScopeStoreMock) ListAllRepoNames(ctx context.Context) ([]string, error) {
+	if mock.ListAllRepoNamesFunc == nil {
+		panic("ScopeStoreMock.ListAllRepoNamesFunc: method is nil but ScopeStore.ListAllRepoNames was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+	}{
+		Ctx: ctx,
+	}
+	mock.lockListAllRepoNames.Lock()
+	mock.calls.ListAllRepoNames = append(mock.calls.ListAllRepoNames, callInfo)
+	mock.lockListAllRepoNames.Unlock()
+	return mock.ListAllRepoNamesFunc(ctx)
+}
+
+// ListAllRepoNamesCalls gets all the calls that were made to ListAllRepoNames.
+// Check the length with:
+//
+//	len(mockedScopeStore.ListAllRepoNamesCalls())
+func (mock *ScopeStoreMock) ListAllRepoNamesCalls() []struct {
+	Ctx context.Context
+} {
+	var calls []struct {
+		Ctx context.Context
+	}
+	mock.lockListAllRepoNames.RLock()
+	calls = mock.calls.ListAllRepoNames
+	mock.lockListAllRepoNames.RUnlock()
+	return calls
+}
+
+// ListTargetBranches calls ListTargetBranchesFunc.
+func (mock *ScopeStoreMock) ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error) {
+	if mock.ListTargetBranchesFunc == nil {
+		panic("ScopeStoreMock.ListTargetBranchesFunc: method is nil but ScopeStore.ListTargetBranches was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+	}{
+		Ctx:    ctx,
+		RepoID: repoID,
+	}
+	mock.lockListTargetBranches.Lock()
+	mock.calls.ListTargetBranches = append(mock.calls.ListTargetBranches, callInfo)
+	mock.lockListTargetBranches.Unlock()
+	return mock.ListTargetBranchesFunc(ctx, repoID)
+}
+
+// ListTargetBranchesCalls gets all the calls that were made to ListTargetBranches.
+// Check the length with:
+//
+//	len(mockedScopeStore.ListTargetBranchesCalls())
+func (mock *ScopeStoreMock) ListTargetBranchesCalls() []struct {
+	Ctx    context.Context
+	RepoID uuid.UUID
+} {
+	var calls []struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+	}
+	mock.lockListTargetBranches.RLock()
+	calls = mock.calls.ListTargetBranches
+	mock.lockListTargetBranches.RUnlock()
 	return calls
 }
