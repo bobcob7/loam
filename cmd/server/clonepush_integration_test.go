@@ -261,7 +261,11 @@ func mirrorLogSubject(t *testing.T, mirrorDir, ref string) string {
 // criteria.
 func TestClonePush_CompiledCLI_RealServer_ClonesAndPushesPlainGit(t *testing.T) {
 	dsn := newPostgres(t)
-	dataDir := t.TempDir()
+	// shortDataDir, not t.TempDir(): the policy socket binds
+	// <LOAM_DATA_DIR>/hook.sock, and a t.TempDir() path (which embeds the
+	// test name) overruns unix sockets' ~104-byte sun_path limit, so the
+	// server exits before this file's readiness poll can ever succeed.
+	dataDir := shortDataDir(t)
 	rs := startServerWithDataDir(t, dsn, dataDir)
 	const repoName = "acme/widgets"
 	const branch = "feature-x"
@@ -336,7 +340,11 @@ func plainGitCommitAndPush(t *testing.T, clonePath, filename, content, message s
 // still true one layer up, through `loam clone`'s own exit-3 message.
 func TestClonePush_UnenrolledRepo_ExitsThreeDistinctFromServiceNotRegistered(t *testing.T) {
 	dsn := newPostgres(t)
-	dataDir := t.TempDir()
+	// shortDataDir, not t.TempDir(): the policy socket binds
+	// <LOAM_DATA_DIR>/hook.sock, and a t.TempDir() path (which embeds the
+	// test name) overruns unix sockets' ~104-byte sun_path limit, so the
+	// server exits before this file's readiness poll can ever succeed.
+	dataDir := shortDataDir(t)
 	rs := startServerWithDataDir(t, dsn, dataDir)
 	workspace := t.TempDir()
 	env := loamAgentEnv("http://"+rs.addr, "ada-lovelace", "7", "author")
