@@ -26,6 +26,7 @@ import (
 
 	"github.com/cucumber/godog"
 
+	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorsync"
 )
 
@@ -378,13 +379,21 @@ func (h *acceptanceHarness) stepTheUpstreamPRMerges(ctx context.Context) error {
 // only ever set by the Given that caused the failure, so it can never
 // silence a cycle that errored for a reason the scenario did not arrange.
 //
-// Reading sync_state once, straight after Tick, is safe from loam-8vg's
-// single-sample trap: Tick blocks until every cycle it started has
-// finished reporting (mirrorsync.Scheduler.Tick -> waitIdle, which
-// releases only after the terminal report), and no other writer of this
-// column exists in the tree today -- the ingest worker's own
-// sync_state write (loam-c94.13) is not implemented, so nothing can move
-// the value between the report and this read.
+// Reading sync_state once, straight after Tick, survives loam-4q2's
+// single-sample trap, but no longer for the reason it originally did.
+// Tick still blocks until every cycle it started has finished reporting
+// (mirrorsync.Scheduler.Tick -> waitIdle, which releases only after the
+// terminal report) -- but this column now has a SECOND, asynchronous
+// writer: the live in-process ingest.Pool this suite wires
+// (loam-c94.13), which flips it to syncing on claim and to idle/error
+// when the job resolves, on its own goroutine and its own schedule. A
+// single sample of the raw value would now genuinely cycle underneath
+// this read.
+//
+// What makes the read sound is that assertSyncNotErrored classifies by
+// AUTHOR, not by timing: it ignores an 'error' carrying
+// ingest.SyncErrorPrefix. See its own doc comment for why that leaves no
+// false failure reachable regardless of when the ingest writer lands.
 func (h *acceptanceHarness) stepTheNextSyncRuns(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if _, err := h.syncHarness.Tick(ctx); err != nil {
@@ -397,7 +406,31 @@ func (h *acceptanceHarness) stepTheNextSyncRuns(ctx context.Context) error {
 }
 
 // assertSyncNotErrored reads repos.sync_state and repos.sync_error back for
-// repo and fails loudly if the tick just run left it in the 'error' state.
+// repo and fails loudly if the tick just run left it in the 'error' state
+// for a reason the SYNC cycle is responsible for.
+//
+// The author check is what keeps this honest now that two components
+// write the column (internal/ingest/pool.go's SyncErrorPrefix block).
+// Ownership of sync_state passes to the ingest worker for any tick whose
+// step 4 enqueued a job -- internal/mirrorsync/state.Reporter's
+// ReportIdle/ReportError deliberately do not write in that case -- so
+// after such a tick the value here means "how is the INGEST going", a
+// question this step is not asking. An ingest failure (the default
+// outcome in this suite: the acceptance server points at an embedder
+// that is not running) would otherwise fail every subsequent "the next
+// sync runs" step in the scenario, for a reason the step's own error
+// message would misattribute to the sync cycle.
+//
+// No false failure is reachable from the second writer, whenever it
+// happens to land: every value the ingest worker can write is either not
+// 'error' ('syncing' on claim, 'idle' on success) or is an 'error'
+// carrying the prefix. The remaining, deliberate gap is the opposite
+// direction -- an ingest 'idle' overwriting a genuine sync 'error' would
+// read as a pass -- which is inherent to one column with two authors and
+// cannot arise in the two scenarios that assert on a sync error
+// (features/sync.feature's deleted-target-branch and unreachable-forge),
+// since a cycle that fails at step 1 or 2 never reaches step 4 and so
+// never starts an ingest writer for that repo at all.
 func (h *acceptanceHarness) assertSyncNotErrored(ctx context.Context, repo string) error {
 	var syncState string
 	var syncError *string
@@ -411,6 +444,9 @@ func (h *acceptanceHarness) assertSyncNotErrored(ctx context.Context, repo strin
 	message := ""
 	if syncError != nil {
 		message = *syncError
+	}
+	if strings.HasPrefix(message, ingest.SyncErrorPrefix) {
+		return nil
 	}
 	return fmt.Errorf("sync cycle for repo %s ended in sync_state=error: %s", repo, message)
 }

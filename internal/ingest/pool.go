@@ -202,9 +202,65 @@ LIMIT 1
 FOR UPDATE SKIP LOCKED
 `
 
+// This package is the SECOND writer of repos.sync_state; the first is
+// internal/mirrorsync/state.Reporter, writing it from the Mirror Sync
+// cycle. The two do not race, because the column has a single owner at
+// any instant and ownership is handed over explicitly:
+//
+//   - The sync cycle owns it from ReportSyncing until its terminal
+//     report. If step 4 of the cycle enqueued an ingest job,
+//     ReportIdle/ReportError deliberately do NOT write (they take
+//     enqueuedIngest and return nil) -- ownership of that tick's terminal
+//     value passes here instead, and the row is left at 'syncing' for
+//     this package to resolve.
+//   - This package owns it from the moment a worker claims a job for the
+//     repo (syncStateSyncingQuery, committed in the same transaction as
+//     ingest_jobs.status='running') until that job resolves
+//     (syncStateIdleQuery on success, syncStateErrorQuery on failure,
+//     each committed in the same transaction as the job's terminal
+//     status).
+//
+// That is why every one of the three statements below is issued inside
+// the same transaction as the ingest_jobs status write it accompanies:
+// docs/ingestion-spec.md ("Consistency & Failure": repos.sync_state
+// "reflects the latest outcome") is only true if the two rows can never
+// be observed disagreeing about which outcome that is. See
+// internal/mirrorsync/state/reporter.go's type doc for the sync half of
+// the same contract.
+//
+// Reports here key on repos.id, not repos.name: unlike the Reporter --
+// whose callers only ever hold a mirrorsync.RepoID -- every job this
+// package runs already carries the FK (ingest_jobs.repo_id), so there is
+// no name to resolve and no lookup to spend.
+const (
+	syncStateSyncingQuery = `UPDATE repos SET sync_state = 'syncing', updated_at = now() WHERE id = $1`
+	syncStateIdleQuery    = `UPDATE repos SET sync_state = 'idle', last_synced_at = now(), sync_error = NULL, updated_at = now() WHERE id = $1`
+	syncStateErrorQuery   = `UPDATE repos SET sync_state = 'error', sync_error = $2, updated_at = now() WHERE id = $1`
+)
+
+// SyncErrorPrefix marks a repos.sync_error this package wrote, as opposed
+// to one internal/mirrorsync/state.Reporter wrote from a failed fetch,
+// mergeability check, or PR poll. sync_state has three values and no
+// author column, so without this an admin (docs/web-spec.md's repo view,
+// which surfaces sync_error verbatim) cannot tell "we could not reach
+// your forge" apart from "we reached it fine and the index build blew
+// up" -- two errors with completely different remedies. It is a message
+// prefix rather than a new column because docs/persistence-spec.md's
+// repos shape is fixed at three sync columns and the distinction is
+// diagnostic, not something any query filters on.
+//
+// Exported solely so a reader of the column can classify by author
+// without restating the literal: cmd/server's acceptance suite asserts
+// "the sync cycle we just ran did not error" off sync_state, and now that
+// this package writes the same column it needs to tell the two authors
+// apart (see acceptance_steps_test.go's assertSyncNotErrored).
+const SyncErrorPrefix = "ingest: "
+
 // claim attempts to claim one queued job. It holds mu for the whole
 // operation -- snapshotting the busy-repo set, querying, marking the row
-// running, and recording the repo as busy -- so two goroutines in this
+// running (and its repo syncing, in the same transaction: see the
+// syncStateSyncingQuery block), and recording the repo as busy -- so two
+// goroutines in this
 // process can never observe the same repo as free and both claim a job
 // for it (the property docs/server-spec.md's per-repo serialization
 // depends on, since the DB row lock alone only prevents the same *row*
@@ -234,6 +290,9 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	if _, err := tx.Exec(ctx, `UPDATE ingest_jobs SET status = 'running', started_at = now() WHERE id = $1`, job.ID); err != nil {
 		return Job{}, false, fmt.Errorf("marking ingest job %s running: %w", job.ID, err)
 	}
+	if _, err := tx.Exec(ctx, syncStateSyncingQuery, job.RepoID); err != nil {
+		return Job{}, false, fmt.Errorf("marking repo %s syncing for ingest job %s: %w", job.RepoID, job.ID, err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Job{}, false, fmt.Errorf("committing ingest job claim: %w", err)
 	}
@@ -257,7 +316,17 @@ func (p *Pool) run(ctx context.Context, job Job) {
 
 // succeed records a successful ingest: status=succeeded, stats persisted
 // as jsonb, finished_at set (docs/ingestion-spec.md "Chunk -> Embed ->
-// Vectors").
+// Vectors"), and the repo returned to sync_state='idle' with
+// last_synced_at advanced and any stale sync_error cleared -- both writes
+// in one transaction, per the syncStateSyncingQuery block's ownership
+// note.
+//
+// last_synced_at is advanced here, not only by the sync cycle's own
+// ReportIdle: when a cycle enqueues an ingest job, ReportIdle no-ops and
+// never touches the column, so a repo that ingests on every tick would
+// otherwise report a last successful sync that only ever goes stale
+// (docs/persistence-spec.md "repos"; features/enrollment.feature's
+// "Enrolled repos report sync status" reads exactly this pair).
 func (p *Pool) succeed(ctx context.Context, job Job, stats Stats) {
 	defer p.release(job.RepoID)
 	defer p.notifyDrainWaiters(job.RepoID)
@@ -266,29 +335,79 @@ func (p *Pool) succeed(ctx context.Context, job Job, stats Stats) {
 		p.logger.ErrorContext(ctx, "marshaling ingest job stats", "job_id", job.ID, "error", err)
 		statsJSON = []byte(`{}`)
 	}
-	if _, err := p.db.Exec(ctx,
-		`UPDATE ingest_jobs SET status = 'succeeded', stats = $2, finished_at = now() WHERE id = $1`,
-		job.ID, statsJSON,
-	); err != nil {
+	if err := p.inTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE ingest_jobs SET status = 'succeeded', stats = $2, finished_at = now() WHERE id = $1`,
+			job.ID, statsJSON,
+		); err != nil {
+			return fmt.Errorf("marking ingest job %s succeeded: %w", job.ID, err)
+		}
+		if _, err := tx.Exec(ctx, syncStateIdleQuery, job.RepoID); err != nil {
+			return fmt.Errorf("marking repo %s idle: %w", job.RepoID, err)
+		}
+		return nil
+	}); err != nil {
 		p.logger.ErrorContext(ctx, "recording ingest job success", "job_id", job.ID, "error", err)
 	}
+}
+
+// inTx runs fn inside a single transaction, committing if it returns nil
+// and rolling back otherwise. succeed and fail each write two rows
+// (ingest_jobs and repos) that must never be observed disagreeing, and
+// neither has any other reason to open a transaction by hand.
+func (p *Pool) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+	return nil
 }
 
 // fail records a failed ingest -- status=failed, the error, attempts
 // incremented, finished_at set -- then schedules a retry after bounded
 // exponential backoff (bead DESCRIPTION: "On failure mark status=failed
 // with the error recorded ... retry with exponential backoff (increment
-// attempts)"). The repo's serialization slot is released immediately (not
+// attempts)"). The repo moves to sync_state='error' carrying the same
+// message under syncErrorPrefix, in the same transaction as the job's own
+// terminal status (see the syncStateSyncingQuery block).
+// The repo's serialization slot is released immediately (not
 // held for the backoff wait), so a coalesced follow-up for the same repo
 // can run right away rather than waiting behind this job's retry timer.
+//
+// last_synced_at is deliberately left where it was: the swap orchestrator
+// rolled back, so the previous index is still live and still reflects the
+// last commit this repo genuinely synced to (docs/ingestion-spec.md
+// "Consistency & Failure"). Advancing it here would claim a success that
+// did not happen.
+//
+// sync_state stays 'error' for the whole backoff wait and only returns to
+// 'syncing' when a worker actually re-claims the retried job -- the
+// bead's "a merely queued job leaves sync_state unchanged" rule, which
+// falls out of claim being the only writer of 'syncing' rather than
+// needing a rule of its own here.
 func (p *Pool) fail(ctx context.Context, job Job, runErr error) {
 	defer p.release(job.RepoID)
 	defer p.notifyDrainWaiters(job.RepoID)
 	var attempts int
-	err := p.db.QueryRow(ctx,
-		`UPDATE ingest_jobs SET status = 'failed', error = $2, attempts = attempts + 1, finished_at = now() WHERE id = $1 RETURNING attempts`,
-		job.ID, runErr.Error(),
-	).Scan(&attempts)
+	err := p.inTx(ctx, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`UPDATE ingest_jobs SET status = 'failed', error = $2, attempts = attempts + 1, finished_at = now() WHERE id = $1 RETURNING attempts`,
+			job.ID, runErr.Error(),
+		).Scan(&attempts); err != nil {
+			return fmt.Errorf("marking ingest job %s failed: %w", job.ID, err)
+		}
+		if _, err := tx.Exec(ctx, syncStateErrorQuery, job.RepoID, SyncErrorPrefix+runErr.Error()); err != nil {
+			return fmt.Errorf("marking repo %s errored: %w", job.RepoID, err)
+		}
+		return nil
+	})
 	if err != nil {
 		p.logger.ErrorContext(ctx, "recording ingest job failure", "job_id", job.ID, "run_error", runErr, "error", err)
 		return
