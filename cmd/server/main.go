@@ -64,6 +64,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bobcob7/loam/internal/chunkstore"
+	"github.com/bobcob7/loam/internal/codegraph"
 	"github.com/bobcob7/loam/internal/config"
 	"github.com/bobcob7/loam/internal/credentialstore"
 	"github.com/bobcob7/loam/internal/crypto"
@@ -77,13 +79,16 @@ import (
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/git"
+	"github.com/bobcob7/loam/internal/handler/graph"
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/handler/repoadmin"
+	"github.com/bobcob7/loam/internal/handler/search"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/hooksocket"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
+	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/reviewstore"
@@ -347,6 +352,8 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool,
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
 	registerRepoAdminService(router, cfg, pool, ingestPool, hookBinaryPath)
+	registerGraphService(router, cfg, pool)
+	registerSearchService(router, cfg, pool)
 	return router
 }
 
@@ -487,6 +494,59 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
 		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
 	))
+}
+
+// registerGraphService wires loam.v1.GraphService (loam-ofg.10) over pool,
+// the same live Postgres connection every other /loam.v1.* handler this
+// composition root builds shares. Repo-scope expansion (an empty
+// QueryScope.repos, or `--all`, resolving to every enrolled repo) is
+// handler.ScopeResolver, shared with registerSearchService below so both
+// services build the "ingested" envelope field identically.
+//
+// pool == nil is the only guard here, for the same reason and exercised the
+// same way as registerMetadataServices' own guard: run() always supplies a
+// real, already-connected pool, so this is never hit in production, only by
+// buildRouter's own tests.
+func registerGraphService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
+	capabilities := handler.NewCapabilityChecker(roles)
+	errorMapper := handler.NewErrorMapper(cfg.Logger)
+	scope := handler.NewScopeResolver(repos)
+	symbols := codegraph.New(gen.New(pool), cfg.Logger)
+	router.RegisterCLI(loamv1connect.NewGraphServiceHandler(graph.New(symbols, scope, capabilities, errorMapper, cfg.Logger)))
+}
+
+// registerSearchService wires loam.v1.SearchService (loam-ofg.10) over pool
+// and an Ollama embedder resolved from cfg.EmbedderURL/cfg.EmbedderModel
+// (docs/server-spec.md), mirroring internal/ingest's own embedder wiring
+// (internal/ingest/embed/ollama). Registered independently of
+// registerGraphService -- a misconfigured/unrecognized embedder model must
+// not also take down GraphService, which needs no embedder at all -- the
+// same "log and skip only this service" choice registerRepoAdminService
+// makes for its own encryptor failure.
+//
+// pool == nil is the only unconditional guard here, for the same reason as
+// every other register* function's own guard.
+func registerSearchService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, &http.Client{}, cfg.Logger)
+	if err != nil {
+		cfg.Logger.Error("search service: building embedder, not registering", "error", err)
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
+	capabilities := handler.NewCapabilityChecker(roles)
+	errorMapper := handler.NewErrorMapper(cfg.Logger)
+	scope := handler.NewScopeResolver(repos)
+	chunks := chunkstore.New(pool, cfg.Logger)
+	router.RegisterCLI(loamv1connect.NewSearchServiceHandler(search.New(chunks, embedder, scope, capabilities, errorMapper, cfg.Logger)))
 }
 
 // roleStoreAdapter adapts internal/rolestore.Store's plain-string

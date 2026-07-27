@@ -134,3 +134,57 @@ func TestServer_RepoAdminServiceIsRegistered_NotGroupFallback(t *testing.T) {
 	assert.Contains(t, connectErr.Message(), "bobcob7/never-enrolled",
 		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
 }
+
+// TestServer_GraphServiceIsRegistered_NotGroupFallback is loam-ofg.10's
+// central acceptance proof for GraphService, against the REAL, booted
+// binary with a REAL migrated Postgres -- the exact trap this bead's own
+// brief calls out by name: loam-ofg.11 initially registered its services
+// only when a pool was supplied while run() supplied nil, so the handler
+// was unreachable in production while every test passed. A freshly
+// migrated, empty database has no enrolled repos, so an unscoped Query
+// resolves QueryScope's empty `repos` to "every enrolled repo" (zero of
+// them) and the requested symbol is, correctly, not found anywhere in that
+// empty scope -- CodeNotFound, the SAME code internal/server's group-level
+// 404 fallback would also produce for an unregistered service, so the code
+// alone cannot discriminate the real handler from the fallback it replaces.
+// The MESSAGE is what proves it: the fallback's is a fixed string ("no
+// /loam.v1. service registered for ..."), unrelated to the request; the
+// real handler's names the specific symbol that was not found.
+func TestServer_GraphServiceIsRegistered_NotGroupFallback(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := loamv1connect.NewGraphServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.Query(ctx, connect.NewRequest(&loamv1.QueryRequest{Query: &loamv1.QueryRequest_Definition{Definition: &loamv1.DefinitionQuery{Symbol: "NeverDefinedAnywhere"}}}))
+	require.Error(t, err, "a freshly migrated, empty database has no enrolled repos, so no symbol can be found anywhere in scope")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code(),
+		"a symbol not found in an empty scope must be CodeNotFound -- the same code the fallback would also have produced, which is exactly why the message below, not this code, is the discriminating assertion")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real GraphServiceHandler this bead registers in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.v1.* service")
+	assert.Contains(t, connectErr.Message(), "NeverDefinedAnywhere",
+		"the real handler's not-found message names the requested symbol; the fallback's fixed message never does")
+}
+
+// TestServer_SearchServiceIsRegistered_NotGroupFallback mirrors
+// TestServer_GraphServiceIsRegistered_NotGroupFallback for SearchService,
+// the second handler this bead registers. Unlike GraphService, Search
+// always calls its Embedder before consulting scope, so this proof does
+// not depend on the freshly migrated database having zero enrolled repos:
+// whatever the real embedder does (succeed against a live Ollama, or fail
+// reaching an absent one in this test environment), the response comes from
+// the real SearchServiceHandler either way -- the discriminating assertion
+// is the same "never the group fallback's fixed message" check.
+func TestServer_SearchServiceIsRegistered_NotGroupFallback(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := loamv1connect.NewSearchServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.Search(ctx, connect.NewRequest(&loamv1.SearchRequest{Query: "how is authentication handled"}))
+	require.Error(t, err, "no embedder is reachable in this test environment (LOAM_EMBEDDER_URL defaults to an unreachable localhost Ollama), so the real handler's embed step fails")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real SearchServiceHandler this bead registers in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.v1.* service")
+}
