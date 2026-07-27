@@ -76,13 +76,16 @@ type acceptanceWorld struct {
 	// to error.
 	expectSyncError bool
 	// upstreamPRNumber is the PR number the forge allocated for this
-	// scenario's proposal. Nothing in PRODUCTION writes the matching
-	// work_branches.upstream_pr_number column yet (loam-giq.7 owns
-	// Proposal Acceptance's push+CreatePR+record leg), so the only step
-	// that sets this is stepAnAcceptedWorkBranchWhosePRHasMerged, which
-	// seeds the column directly; stepTheUpstreamPRMerges still fails
-	// loudly against a zero value (fakeforge has no PR #0) rather than
-	// passing vacuously.
+	// scenario's proposal, read back out of
+	// work_branches.upstream_pr_number AFTER the production accept engine
+	// (mirrorsync.StoreProposalAccepter, loam-giq.7) wrote it -- not off
+	// the forge response, and no longer seeded by a direct UPDATE. Reading
+	// the column rather than the return value is deliberate: that column
+	// is the entire poll set of mirrorsync.StorePRPoller, so an accept
+	// that opened a PR without recording it must fail the fixture here
+	// rather than surface three steps later as a poller that polled
+	// nothing. stepTheUpstreamPRMerges still fails loudly against a zero
+	// value (fakeforge has no PR #0) rather than passing vacuously.
 	upstreamPRNumber int
 }
 

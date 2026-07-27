@@ -263,6 +263,67 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID) (WorkBranch, error) 
 	return fromGenWorkBranch(row), nil
 }
 
+// RecordUpstreamPR writes the upstream pull request proposal acceptance
+// just opened for id -- both columns, in the one guarded statement
+// RecordWorkBranchUpstreamPR (internal/db/queries/work_branches.sql), and
+// only while upstream_pr_number is still NULL.
+//
+// That NULL guard is the durable half of proposal acceptance's
+// idempotency (docs/sync-spec.md "Proposal Acceptance": step 2 "is
+// skipped" on a re-accept with a PR already recorded). The engine's own
+// in-memory check of the row it read cannot survive two concurrent
+// accepts -- both can read NULL, both can call CreatePR -- so the column
+// itself is what arbitrates. The loser gets ErrPRAlreadyRecorded, NOT an
+// overwrite: overwriting would leave internal/mirrorsync's PR poller
+// (whose poll set is exactly "rows with a recorded upstream_pr_number")
+// tracking a PR that no accept is watching and silently abandoning the
+// one that is.
+//
+// prNumber must be positive and prURL non-empty; anything else is
+// rejected here, before it can burn the row's one-shot guard on an
+// unusable identity (errInvalidUpstreamPR). There is deliberately no
+// method in this package that clears these columns again.
+func (s *Store) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (WorkBranch, error) {
+	if prNumber <= 0 || prURL == "" {
+		return WorkBranch{}, fmt.Errorf("recording upstream PR %q/#%d on work branch %s: %w", prURL, prNumber, id, errInvalidUpstreamPR)
+	}
+	row, err := s.q.RecordWorkBranchUpstreamPR(ctx, gen.RecordWorkBranchUpstreamPRParams{
+		ID:               pgUUID(id),
+		UpstreamPrUrl:    pgText(prURL),
+		UpstreamPrNumber: pgtype.Int4{Int32: prNumber, Valid: true},
+	})
+	if err != nil {
+		return WorkBranch{}, s.recordUpstreamPRErr(ctx, id, err)
+	}
+	s.logger.InfoContext(ctx, "recorded upstream PR on work branch", "work_branch_id", id, "pr_url", prURL, "pr_number", prNumber)
+	return fromGenWorkBranch(row), nil
+}
+
+// recordUpstreamPRErr classifies RecordUpstreamPR's failure. Zero rows is
+// the only interesting case and it has two causes that must not be
+// conflated: the row does not exist (ErrNotFound) or it already carries a
+// PR number (ErrPRAlreadyRecorded, which its caller treats as a
+// concurrent accept that won, not as a failure). Anything else -- a
+// dropped connection, a cancelled context, including one observed while
+// classifying -- is reported as itself, never downgraded into either
+// sentinel; the same rule transitionErr follows and for the same reason.
+func (s *Store) recordUpstreamPRErr(ctx context.Context, id uuid.UUID, err error) error {
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("recording upstream PR on work branch %s: %w", id, err)
+	}
+	existing, getErr := s.q.GetWorkBranchByID(ctx, pgUUID(id))
+	if errors.Is(getErr, pgx.ErrNoRows) {
+		return fmt.Errorf("recording upstream PR on work branch %s: %w", id, ErrNotFound)
+	}
+	if getErr != nil {
+		return fmt.Errorf("recording upstream PR on work branch %s: classifying failed write: %w", id, getErr)
+	}
+	if existing.UpstreamPrNumber.Valid {
+		return fmt.Errorf("recording upstream PR on work branch %s (already #%d): %w", id, existing.UpstreamPrNumber.Int32, ErrPRAlreadyRecorded)
+	}
+	return fmt.Errorf("recording upstream PR on work branch %s: guarded update matched no row despite a NULL upstream_pr_number", id)
+}
+
 // MarkConflicted records that a target-branch advance no longer merges
 // cleanly into id (docs/git-spec.md "Target Advances & Catch-Up"): a
 // draft branch just gains the flag (conflict -> flagged, state

@@ -1771,3 +1771,413 @@ func (mock *upstreamRefDeleterMock) DeleteRemoteRefCalls() []struct {
 	mock.lockDeleteRemoteRef.RUnlock()
 	return calls
 }
+
+// Ensure, that upstreamRefPusherMock does implement upstreamRefPusher.
+// If this is not the case, regenerate this file with moq.
+var _ upstreamRefPusher = &upstreamRefPusherMock{}
+
+// upstreamRefPusherMock is a mock implementation of upstreamRefPusher.
+//
+//	func TestSomethingThatUsesupstreamRefPusher(t *testing.T) {
+//
+//		// make and configure a mocked upstreamRefPusher
+//		mockedupstreamRefPusher := &upstreamRefPusherMock{
+//			PushFunc: func(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspec string) ([]byte, error) {
+//				panic("mock out the Push method")
+//			},
+//		}
+//
+//		// use mockedupstreamRefPusher in code that requires upstreamRefPusher
+//		// and then make assertions.
+//
+//	}
+type upstreamRefPusherMock struct {
+	// PushFunc mocks the Push method.
+	PushFunc func(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspec string) ([]byte, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Push holds details about calls to the Push method.
+		Push []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Host is the host argument value.
+			Host string
+			// MirrorDir is the mirrorDir argument value.
+			MirrorDir string
+			// UpstreamURL is the upstreamURL argument value.
+			UpstreamURL string
+			// Refspec is the refspec argument value.
+			Refspec string
+		}
+	}
+	lockPush sync.RWMutex
+}
+
+// Push calls PushFunc.
+func (mock *upstreamRefPusherMock) Push(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspec string) ([]byte, error) {
+	if mock.PushFunc == nil {
+		panic("upstreamRefPusherMock.PushFunc: method is nil but upstreamRefPusher.Push was just called")
+	}
+	callInfo := struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Refspec     string
+	}{
+		Ctx:         ctx,
+		Host:        host,
+		MirrorDir:   mirrorDir,
+		UpstreamURL: upstreamURL,
+		Refspec:     refspec,
+	}
+	mock.lockPush.Lock()
+	mock.calls.Push = append(mock.calls.Push, callInfo)
+	mock.lockPush.Unlock()
+	return mock.PushFunc(ctx, host, mirrorDir, upstreamURL, refspec)
+}
+
+// PushCalls gets all the calls that were made to Push.
+// Check the length with:
+//
+//	len(mockedupstreamRefPusher.PushCalls())
+func (mock *upstreamRefPusherMock) PushCalls() []struct {
+	Ctx         context.Context
+	Host        string
+	MirrorDir   string
+	UpstreamURL string
+	Refspec     string
+} {
+	var calls []struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Refspec     string
+	}
+	mock.lockPush.RLock()
+	calls = mock.calls.Push
+	mock.lockPush.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchByNameLookupMock does implement workBranchByNameLookup.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchByNameLookup = &workBranchByNameLookupMock{}
+
+// workBranchByNameLookupMock is a mock implementation of workBranchByNameLookup.
+//
+//	func TestSomethingThatUsesworkBranchByNameLookup(t *testing.T) {
+//
+//		// make and configure a mocked workBranchByNameLookup
+//		mockedworkBranchByNameLookup := &workBranchByNameLookupMock{
+//			GetByNameFunc: func(ctx context.Context, repoID uuid.UUID, name string) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the GetByName method")
+//			},
+//		}
+//
+//		// use mockedworkBranchByNameLookup in code that requires workBranchByNameLookup
+//		// and then make assertions.
+//
+//	}
+type workBranchByNameLookupMock struct {
+	// GetByNameFunc mocks the GetByName method.
+	GetByNameFunc func(ctx context.Context, repoID uuid.UUID, name string) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetByName holds details about calls to the GetByName method.
+		GetByName []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockGetByName sync.RWMutex
+}
+
+// GetByName calls GetByNameFunc.
+func (mock *workBranchByNameLookupMock) GetByName(ctx context.Context, repoID uuid.UUID, name string) (workbranchstore.WorkBranch, error) {
+	if mock.GetByNameFunc == nil {
+		panic("workBranchByNameLookupMock.GetByNameFunc: method is nil but workBranchByNameLookup.GetByName was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+		Name   string
+	}{
+		Ctx:    ctx,
+		RepoID: repoID,
+		Name:   name,
+	}
+	mock.lockGetByName.Lock()
+	mock.calls.GetByName = append(mock.calls.GetByName, callInfo)
+	mock.lockGetByName.Unlock()
+	return mock.GetByNameFunc(ctx, repoID, name)
+}
+
+// GetByNameCalls gets all the calls that were made to GetByName.
+// Check the length with:
+//
+//	len(mockedworkBranchByNameLookup.GetByNameCalls())
+func (mock *workBranchByNameLookupMock) GetByNameCalls() []struct {
+	Ctx    context.Context
+	RepoID uuid.UUID
+	Name   string
+} {
+	var calls []struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+		Name   string
+	}
+	mock.lockGetByName.RLock()
+	calls = mock.calls.GetByName
+	mock.lockGetByName.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchPRRecorderMock does implement workBranchPRRecorder.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchPRRecorder = &workBranchPRRecorderMock{}
+
+// workBranchPRRecorderMock is a mock implementation of workBranchPRRecorder.
+//
+//	func TestSomethingThatUsesworkBranchPRRecorder(t *testing.T) {
+//
+//		// make and configure a mocked workBranchPRRecorder
+//		mockedworkBranchPRRecorder := &workBranchPRRecorderMock{
+//			RecordUpstreamPRFunc: func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the RecordUpstreamPR method")
+//			},
+//		}
+//
+//		// use mockedworkBranchPRRecorder in code that requires workBranchPRRecorder
+//		// and then make assertions.
+//
+//	}
+type workBranchPRRecorderMock struct {
+	// RecordUpstreamPRFunc mocks the RecordUpstreamPR method.
+	RecordUpstreamPRFunc func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// RecordUpstreamPR holds details about calls to the RecordUpstreamPR method.
+		RecordUpstreamPR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// PrURL is the prURL argument value.
+			PrURL string
+			// PrNumber is the prNumber argument value.
+			PrNumber int32
+		}
+	}
+	lockRecordUpstreamPR sync.RWMutex
+}
+
+// RecordUpstreamPR calls RecordUpstreamPRFunc.
+func (mock *workBranchPRRecorderMock) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error) {
+	if mock.RecordUpstreamPRFunc == nil {
+		panic("workBranchPRRecorderMock.RecordUpstreamPRFunc: method is nil but workBranchPRRecorder.RecordUpstreamPR was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		ID       uuid.UUID
+		PrURL    string
+		PrNumber int32
+	}{
+		Ctx:      ctx,
+		ID:       id,
+		PrURL:    prURL,
+		PrNumber: prNumber,
+	}
+	mock.lockRecordUpstreamPR.Lock()
+	mock.calls.RecordUpstreamPR = append(mock.calls.RecordUpstreamPR, callInfo)
+	mock.lockRecordUpstreamPR.Unlock()
+	return mock.RecordUpstreamPRFunc(ctx, id, prURL, prNumber)
+}
+
+// RecordUpstreamPRCalls gets all the calls that were made to RecordUpstreamPR.
+// Check the length with:
+//
+//	len(mockedworkBranchPRRecorder.RecordUpstreamPRCalls())
+func (mock *workBranchPRRecorderMock) RecordUpstreamPRCalls() []struct {
+	Ctx      context.Context
+	ID       uuid.UUID
+	PrURL    string
+	PrNumber int32
+} {
+	var calls []struct {
+		Ctx      context.Context
+		ID       uuid.UUID
+		PrURL    string
+		PrNumber int32
+	}
+	mock.lockRecordUpstreamPR.RLock()
+	calls = mock.calls.RecordUpstreamPR
+	mock.lockRecordUpstreamPR.RUnlock()
+	return calls
+}
+
+// Ensure, that pullRequestOpenerMock does implement pullRequestOpener.
+// If this is not the case, regenerate this file with moq.
+var _ pullRequestOpener = &pullRequestOpenerMock{}
+
+// pullRequestOpenerMock is a mock implementation of pullRequestOpener.
+//
+//	func TestSomethingThatUsespullRequestOpener(t *testing.T) {
+//
+//		// make and configure a mocked pullRequestOpener
+//		mockedpullRequestOpener := &pullRequestOpenerMock{
+//			CreatePRFunc: func(ctx context.Context, repo string, headBranch string, targetBranch string, title string, description string) (string, int, error) {
+//				panic("mock out the CreatePR method")
+//			},
+//			FindOpenPRFunc: func(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error) {
+//				panic("mock out the FindOpenPR method")
+//			},
+//		}
+//
+//		// use mockedpullRequestOpener in code that requires pullRequestOpener
+//		// and then make assertions.
+//
+//	}
+type pullRequestOpenerMock struct {
+	// CreatePRFunc mocks the CreatePR method.
+	CreatePRFunc func(ctx context.Context, repo string, headBranch string, targetBranch string, title string, description string) (string, int, error)
+
+	// FindOpenPRFunc mocks the FindOpenPR method.
+	FindOpenPRFunc func(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// CreatePR holds details about calls to the CreatePR method.
+		CreatePR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// HeadBranch is the headBranch argument value.
+			HeadBranch string
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+			// Title is the title argument value.
+			Title string
+			// Description is the description argument value.
+			Description string
+		}
+		// FindOpenPR holds details about calls to the FindOpenPR method.
+		FindOpenPR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// HeadBranch is the headBranch argument value.
+			HeadBranch string
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+		}
+	}
+	lockCreatePR   sync.RWMutex
+	lockFindOpenPR sync.RWMutex
+}
+
+// CreatePR calls CreatePRFunc.
+func (mock *pullRequestOpenerMock) CreatePR(ctx context.Context, repo string, headBranch string, targetBranch string, title string, description string) (string, int, error) {
+	if mock.CreatePRFunc == nil {
+		panic("pullRequestOpenerMock.CreatePRFunc: method is nil but pullRequestOpener.CreatePR was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+		Title        string
+		Description  string
+	}{
+		Ctx:          ctx,
+		Repo:         repo,
+		HeadBranch:   headBranch,
+		TargetBranch: targetBranch,
+		Title:        title,
+		Description:  description,
+	}
+	mock.lockCreatePR.Lock()
+	mock.calls.CreatePR = append(mock.calls.CreatePR, callInfo)
+	mock.lockCreatePR.Unlock()
+	return mock.CreatePRFunc(ctx, repo, headBranch, targetBranch, title, description)
+}
+
+// CreatePRCalls gets all the calls that were made to CreatePR.
+// Check the length with:
+//
+//	len(mockedpullRequestOpener.CreatePRCalls())
+func (mock *pullRequestOpenerMock) CreatePRCalls() []struct {
+	Ctx          context.Context
+	Repo         string
+	HeadBranch   string
+	TargetBranch string
+	Title        string
+	Description  string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+		Title        string
+		Description  string
+	}
+	mock.lockCreatePR.RLock()
+	calls = mock.calls.CreatePR
+	mock.lockCreatePR.RUnlock()
+	return calls
+}
+
+// FindOpenPR calls FindOpenPRFunc.
+func (mock *pullRequestOpenerMock) FindOpenPR(ctx context.Context, repo string, headBranch string, targetBranch string) (string, int, bool, error) {
+	if mock.FindOpenPRFunc == nil {
+		panic("pullRequestOpenerMock.FindOpenPRFunc: method is nil but pullRequestOpener.FindOpenPR was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+	}{
+		Ctx:          ctx,
+		Repo:         repo,
+		HeadBranch:   headBranch,
+		TargetBranch: targetBranch,
+	}
+	mock.lockFindOpenPR.Lock()
+	mock.calls.FindOpenPR = append(mock.calls.FindOpenPR, callInfo)
+	mock.lockFindOpenPR.Unlock()
+	return mock.FindOpenPRFunc(ctx, repo, headBranch, targetBranch)
+}
+
+// FindOpenPRCalls gets all the calls that were made to FindOpenPR.
+// Check the length with:
+//
+//	len(mockedpullRequestOpener.FindOpenPRCalls())
+func (mock *pullRequestOpenerMock) FindOpenPRCalls() []struct {
+	Ctx          context.Context
+	Repo         string
+	HeadBranch   string
+	TargetBranch string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Repo         string
+		HeadBranch   string
+		TargetBranch string
+	}
+	mock.lockFindOpenPR.RLock()
+	calls = mock.calls.FindOpenPR
+	mock.lockFindOpenPR.RUnlock()
+	return calls
+}

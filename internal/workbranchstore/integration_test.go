@@ -758,3 +758,59 @@ func TestList_Pagination_ReturnsTotal(t *testing.T) {
 	assert.Equal(t, created[4].ID, page1[0].ID, "ORDER BY created_at DESC: the most recently created row is first")
 	assert.Equal(t, created[0].ID, page3[0].ID, "the earliest created row must land on the last page")
 }
+
+// TestRecordUpstreamPR_WritesTheColumnsAgainstTheRealSchema proves the
+// column pair proposal acceptance depends on -- the only input to
+// internal/mirrorsync's PR poller -- is really written by the applied
+// migration's schema, read back through a fresh Get rather than off the
+// RETURNING row the write itself produced.
+func TestRecordUpstreamPR_WritesTheColumnsAgainstTheRealSchema(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-accept-1", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	require.Nil(t, wb.UpstreamPRNumber, "precondition: a fresh work branch has no recorded PR")
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7)
+	require.NoError(t, err)
+	reread, err := store.Get(ctx, wb.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reread.UpstreamPRNumber)
+	assert.Equal(t, int32(7), *reread.UpstreamPRNumber)
+	require.NotNil(t, reread.UpstreamPRURL)
+	assert.Equal(t, "https://example.com/g/r/pulls/7", *reread.UpstreamPRURL)
+}
+
+// TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard is proposal
+// acceptance's idempotency proven at the layer that actually arbitrates
+// it: the NULL predicate in the guarded UPDATE, running against the real
+// schema. A second record -- a concurrent accept, or a re-accept whose
+// in-memory null-check somehow did not fire -- is refused, and the number
+// the FIRST write recorded is still the one on the row.
+func TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-accept-2", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7)
+	require.NoError(t, err)
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/99", 99)
+	require.ErrorIs(t, err, ErrPRAlreadyRecorded)
+	reread, err := store.Get(ctx, wb.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reread.UpstreamPRNumber)
+	assert.Equal(t, int32(7), *reread.UpstreamPRNumber, "the second write must not overwrite the recorded PR")
+	require.NotNil(t, reread.UpstreamPRURL)
+	assert.Equal(t, "https://example.com/g/r/pulls/7", *reread.UpstreamPRURL)
+}
+
+// TestRecordUpstreamPR_UnknownIDIsNotFound proves the other zero-row cause
+// stays distinguishable against the real schema too.
+func TestRecordUpstreamPR_UnknownIDIsNotFound(t *testing.T) {
+	t.Parallel()
+	store, _ := newTestStore(t)
+	_, err := store.RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://example.com/g/r/pulls/7", 7)
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
+}

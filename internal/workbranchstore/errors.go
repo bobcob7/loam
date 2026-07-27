@@ -23,6 +23,33 @@ var ErrNotFound = errors.New("work branch not found")
 // Postgres in the same statement that would have written it.
 var ErrIllegalTransition = errors.New("illegal work branch state transition")
 
+// ErrPRAlreadyRecorded is returned by RecordUpstreamPR when the row
+// already carries an upstream_pr_number, so the guarded UPDATE
+// (RecordWorkBranchUpstreamPR, internal/db/queries/work_branches.sql)
+// matched zero rows without the row itself being missing. It is
+// deliberately NOT folded into ErrIllegalTransition: the two call for
+// opposite reactions. An illegal transition is a precondition failure the
+// caller got wrong; this one means another actor recorded the PR first,
+// which is the exact outcome proposal acceptance is trying to reach, so
+// its caller re-reads the row and returns the PR that won rather than
+// failing the accept.
+//
+// Exported because that caller lives in another package
+// (internal/mirrorsync's StoreProposalAccepter) and must match it with
+// errors.Is.
+var ErrPRAlreadyRecorded = errors.New("work branch already has a recorded upstream pull request")
+
+// errInvalidUpstreamPR is returned by RecordUpstreamPR for a PR number or
+// URL that cannot identify a real pull request (a non-positive number, an
+// empty URL). It is a rejection at the store, one layer below the accept
+// engine's own validation of what the forge answered, because this column
+// pair is the sole input to internal/mirrorsync's PR poller: a recorded
+// PR #0 would put a work branch permanently into a poll set whose every
+// GetPRState call must fail, and -- worse -- would consume the row's
+// one-shot idempotency guard, so the accept that should have recorded the
+// real PR could never write it afterwards.
+var errInvalidUpstreamPR = errors.New("upstream pull request identity is not usable")
+
 // errDuplicateName is returned when Create hits
 // work_branches_repo_id_name_key (UNIQUE(repo_id, name),
 // docs/persistence-spec.md "work_branches") -- identity is (repo, name),

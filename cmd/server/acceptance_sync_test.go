@@ -6,8 +6,15 @@
 // collaborators (loam-a16) -- no scenario in this file stubs, decorates,
 // or short-circuits a step of the Mirror Sync cycle; the only thing these
 // steps do that production would not is SEED state (a repo on the fake
-// forge, a bare mirror, a work_branches row, an upstream_pr_number),
-// exactly as acceptance_seed_test.go already seeds enrollment.
+// forge, a bare mirror, a work_branches row), exactly as
+// acceptance_seed_test.go already seeds enrollment.
+//
+// work_branches.upstream_pr_number is no longer among that seeded state:
+// the "an accepted work branch whose upstream PR has merged" fixture now
+// runs the production accept engine (mirrorsync.StoreProposalAccepter,
+// loam-giq.7) and lets it write the column, which is what makes the PR
+// poller reachable through a real code path rather than a hand-written
+// UPDATE.
 package main
 
 import (
@@ -24,6 +31,7 @@ import (
 	"github.com/bobcob7/loam/internal/fakeforge"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/mirrorsync"
 )
 
 // registerSyncSteps wires every step features/sync.feature's Background
@@ -371,21 +379,28 @@ func (h *acceptanceHarness) stepSyncStatusIsHealthy(ctx context.Context) error {
 	return nil
 }
 
-// stepAnAcceptedWorkBranchWhosePRHasMerged reproduces, by seeding, the
-// exact state Proposal Acceptance leaves behind (docs/sync-spec.md ->
-// Proposal Acceptance): a work branch in the mirror, its tip pushed
-// upstream as loam/<name>, an open PR from that branch into the target,
-// and the PR's number recorded on the work_branches row -- then merges
-// that PR on the forge.
+// stepAnAcceptedWorkBranchWhosePRHasMerged reaches the state
+// docs/sync-spec.md -> Proposal Acceptance leaves behind by RUNNING
+// proposal acceptance: it seeds a reviewed work branch with a real commit
+// in the mirror, then calls the production *mirrorsync.StoreProposalAccepter
+// (loam-giq.7, wired in newAcceptanceAccepter exactly as
+// cmd/server/sync.go's buildProposalAccepter wires it), which pushes
+// loam/<name> upstream over the real transport, opens the PR on the fake
+// forge, and writes upstream_pr_url/upstream_pr_number itself. Only then
+// is that PR merged on the forge.
 //
-// The upstream_pr_number write is a direct UPDATE because NOTHING in the
-// tree writes that column yet: loam-giq.7 (Proposal Acceptance's own
-// push+CreatePR+record leg) is still open, which is what leaves
-// StorePRPoller's poll set permanently empty in production. Seeding the
-// column is therefore not a shortcut past a code path that exists -- it
-// is the only way to reach StorePRPoller at all until giq.7 lands, and it
-// is the single fixture in this file that a production code path will
-// later replace.
+// It used to be three hand-written steps plus a direct UPDATE of
+// upstream_pr_number, because nothing in the tree wrote that column and
+// seeding it was the only way to reach StorePRPoller at all. That is no
+// longer true, and the substitution matters beyond tidiness: this step is
+// now the end-to-end proof that the accept engine's recorded column is the
+// same column the PR poller's poll set is built from. A regression in
+// either half breaks "The pushed branch is cleaned up after the PR ends".
+//
+// The precondition assertions are kept and tightened rather than dropped:
+// a fixture whose upstream branch or PR number never materialised would
+// make the scenario's later "the loam/ branch is removed" assertion pass
+// vacuously.
 func (h *acceptanceHarness) stepAnAcceptedWorkBranchWhosePRHasMerged(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
@@ -394,28 +409,38 @@ func (h *acceptanceHarness) stepAnAcceptedWorkBranchWhosePRHasMerged(ctx context
 	if err := h.insertWorkBranchRow(ctx, world.repoID, world.workBranch, world.targetBranch, "reviewed", world.agentName); err != nil {
 		return err
 	}
+	if err := h.setWorkBranchTitleDescription(ctx, world.repoID, world.workBranch, "acceptance proposal", "acceptance proposal body"); err != nil {
+		return err
+	}
 	sha, err := commitIntoMirror(ctx, world.mirrorDir, world.workBranch, "", "PROPOSAL.txt", "proposed change\n", "acceptance: proposal commit")
 	if err != nil {
 		return err
 	}
 	world.workBranchSHA = sha
-	upstreamBranch := "loam/" + world.workBranch
-	if _, err := h.transport.Push(ctx, h.forgeHost, world.mirrorDir, world.upstreamURL, "refs/heads/"+world.workBranch+":refs/heads/"+upstreamBranch); err != nil {
-		return fmt.Errorf("pushing %s upstream: %w", upstreamBranch, err)
-	}
-	if _, err := h.upstreamRefSHA(ctx, world, "refs/heads/"+upstreamBranch); err != nil {
-		return fmt.Errorf("upstream branch %s was never created, so its later absence would prove nothing: %w", upstreamBranch, err)
-	}
-	_, number, err := h.forgeClient.CreatePR(ctx, world.repo(), upstreamBranch, world.targetBranch, "acceptance proposal", "acceptance proposal body")
+	result, err := h.accepter.AcceptProposal(ctx, mirrorsync.RepoID(world.repo()), world.workBranch)
 	if err != nil {
-		return fmt.Errorf("opening upstream PR for %s: %w", upstreamBranch, err)
+		return fmt.Errorf("accepting proposal %s in repo %s: %w", world.workBranch, world.repo(), err)
 	}
-	world.upstreamPRNumber = number
-	if err := h.recordUpstreamPRNumber(ctx, world.repoID, world.workBranch, number); err != nil {
+	if result.UpstreamBranch != "loam/"+world.workBranch {
+		return fmt.Errorf("accept pushed %q, want %q", result.UpstreamBranch, "loam/"+world.workBranch)
+	}
+	upstreamSHA, err := h.upstreamRefSHA(ctx, world, "refs/heads/"+result.UpstreamBranch)
+	if err != nil {
+		return fmt.Errorf("upstream branch %s was never created, so its later absence would prove nothing: %w", result.UpstreamBranch, err)
+	}
+	if upstreamSHA != sha {
+		return fmt.Errorf("upstream %s is at %s, want the work branch tip %s", result.UpstreamBranch, upstreamSHA, sha)
+	}
+	recorded, err := h.recordedUpstreamPRNumber(ctx, world.repoID, world.workBranch)
+	if err != nil {
 		return err
 	}
-	if err := h.forge.MergePR(ctx, world.repo(), number); err != nil {
-		return fmt.Errorf("merging upstream PR %s#%d: %w", world.repo(), number, err)
+	if recorded != result.PRNumber {
+		return fmt.Errorf("accept reported PR #%d but work_branches.upstream_pr_number holds #%d", result.PRNumber, recorded)
+	}
+	world.upstreamPRNumber = recorded
+	if err := h.forge.MergePR(ctx, world.repo(), recorded); err != nil {
+		return fmt.Errorf("merging upstream PR %s#%d: %w", world.repo(), recorded, err)
 	}
 	return nil
 }
@@ -537,19 +562,38 @@ func (h *acceptanceHarness) setUpstreamURL(ctx context.Context, repoID uuid.UUID
 	return nil
 }
 
-// recordUpstreamPRNumber writes work_branches.upstream_pr_number -- the
-// column loam-giq.7 will own; see
-// stepAnAcceptedWorkBranchWhosePRHasMerged's doc comment.
-func (h *acceptanceHarness) recordUpstreamPRNumber(ctx context.Context, repoID uuid.UUID, name string, number int) error {
+// setWorkBranchTitleDescription seeds the two columns proposal acceptance
+// turns into the upstream PR's title and body. insertWorkBranchRow leaves
+// both NULL (every other scenario in this suite is indifferent to them),
+// but a proposal with no description would produce an empty PR body, so
+// the accept fixture sets them explicitly.
+func (h *acceptanceHarness) setWorkBranchTitleDescription(ctx context.Context, repoID uuid.UUID, name, title, description string) error {
 	tag, err := h.server.pool.Exec(ctx,
-		`UPDATE work_branches SET upstream_pr_number = $1 WHERE repo_id = $2 AND name = $3`, number, repoID, name)
+		`UPDATE work_branches SET title = $1, description = $2 WHERE repo_id = $3 AND name = $4`, title, description, repoID, name)
 	if err != nil {
-		return fmt.Errorf("recording upstream PR number for work branch %s: %w", name, err)
+		return fmt.Errorf("seeding title/description for work branch %s: %w", name, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("recording upstream PR number for work branch %s: %d rows updated, want 1", name, tag.RowsAffected())
+		return fmt.Errorf("seeding title/description for work branch %s: %d rows updated, want 1", name, tag.RowsAffected())
 	}
 	return nil
+}
+
+// recordedUpstreamPRNumber reads work_branches.upstream_pr_number back
+// off the row -- the column proposal acceptance writes and the PR poller's
+// poll set is built from. It errors on SQL NULL rather than returning a
+// zero, so an accept that pushed but never recorded cannot slip past as a
+// PR "#0" the scenario would then fail on much further downstream.
+func (h *acceptanceHarness) recordedUpstreamPRNumber(ctx context.Context, repoID uuid.UUID, name string) (int, error) {
+	var number *int
+	if err := h.server.pool.QueryRow(ctx,
+		`SELECT upstream_pr_number FROM work_branches WHERE repo_id = $1 AND name = $2`, repoID, name).Scan(&number); err != nil {
+		return 0, fmt.Errorf("reading upstream_pr_number for work branch %s: %w", name, err)
+	}
+	if number == nil {
+		return 0, fmt.Errorf("work branch %s has no recorded upstream_pr_number after an accept", name)
+	}
+	return *number, nil
 }
 
 // workBranchStates reads every work branch of repoID back as name ->
