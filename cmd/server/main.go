@@ -245,7 +245,7 @@ func run(cfg config.Config) error {
 		pool.Close()
 		return fmt.Errorf("starting http listener: %w", err)
 	}
-	router := buildRouter(cfg, pool, ingestPool)
+	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
 	background := multiRunner{ingestPool, policyServer}
 	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, pool, defaultShutdownGrace)
@@ -310,7 +310,7 @@ func loamhookBinaryPath(executable func() (string, error), stat func(string) (os
 // ingestPool is loam-ofg.21's worker pool (constructed in run() before this
 // is called), threaded through for registerRepoAdminService's EnrollRepo/
 // ReindexRepo/ListIngestJobs; it may be nil for the same reason pool may.
-func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool) *server.Router {
+func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string) *server.Router {
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
 	router := server.New(auth)
 	router.RegisterSPA(loamweb.Dist())
@@ -319,7 +319,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool)
 	registerMetadataServices(router, cfg, pool)
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
-	registerRepoAdminService(router, cfg, pool, ingestPool)
+	registerRepoAdminService(router, cfg, pool, ingestPool, hookBinaryPath)
 	return router
 }
 
@@ -402,6 +402,18 @@ func registerGitService(router *server.Router, cfg config.Config, pool *pgxpool.
 	router.RegisterGit("/git/", gate.Middleware(gitHandler))
 }
 
+// bindHookBinary adapts mirrorreconcile.ReconcileMirror to the two-argument
+// seam internal/handler/repoadmin defines at its consumer. The hook binary's
+// location is a property of THIS process's deployment (loam-ofg.18 resolves
+// it as a sibling of os.Executable and run() fails startup if it is absent),
+// not something an enrollment handler should know or care about -- so it is
+// bound here at the composition root rather than widening repoadmin's seam.
+func bindHookBinary(hookBinaryPath string) func(context.Context, string) error {
+	return func(ctx context.Context, repoPath string) error {
+		return mirrorreconcile.ReconcileMirror(ctx, repoPath, hookBinaryPath)
+	}
+}
+
 // registerRepoAdminService wires loam.admin.v1.RepoAdminService
 // (loam-ofg.12) over pool and ingestPool -- the same live Postgres
 // connection and ingest worker pool run() already constructed -- plus a
@@ -420,7 +432,7 @@ func registerGitService(router *server.Router, cfg config.Config, pool *pgxpool.
 // reason and exercised the same way as registerMetadataServices' own
 // guard: run() always supplies both live values, so this is never hit in
 // production, only by buildRouter's own tests.
-func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool) {
+func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string) {
 	if pool == nil || ingestPool == nil {
 		return
 	}
@@ -445,7 +457,7 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	checker := repoadmin.ForgeChecker{HTTPClient: httpClient, Logger: cfg.Logger}
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
-		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, mirrorreconcile.ReconcileMirror, ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
+		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
 	))
 }
 

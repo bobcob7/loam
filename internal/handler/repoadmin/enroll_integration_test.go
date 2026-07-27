@@ -13,6 +13,7 @@ package repoadmin
 import (
 	"context"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -121,7 +122,17 @@ func TestEnrollRepo_RealMirror_ClonesPopulatedBareMirrorAndReconciles(t *testing
 	checker := ForgeChecker{HTTPClient: ts.Client(), Logger: logger}
 	dataDir := t.TempDir()
 	errorMapper := handler.NewErrorMapper(logger)
-	h := New(dataDir, repos, workBranches, credentials, checker, transport, mirrorreconcile.ReconcileMirror,
+	// ReconcileMirror copies the loamhook binary's bytes into the mirror's
+	// hooks/pre-receive, so it needs a real file to copy; what that binary
+	// DOES is loam-ofg.18's e2e test, not this one, which only proves enroll
+	// clones and then hardens. Bind the path here the same way cmd/server's
+	// composition root does, keeping this package's seam hook-agnostic.
+	hookBinary := filepath.Join(t.TempDir(), "loamhook")
+	require.NoError(t, os.WriteFile(hookBinary, []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	reconcile := func(ctx context.Context, repoPath string) error {
+		return mirrorreconcile.ReconcileMirror(ctx, repoPath, hookBinary)
+	}
+	h := New(dataDir, repos, workBranches, credentials, checker, transport, reconcile,
 		&ingestEnqueuerMock{EnqueueFunc: func(context.Context, uuid.UUID, string, ingest.Kind) error { return nil }},
 		&jobListerMock{},
 		&repoDeleterMock{},
