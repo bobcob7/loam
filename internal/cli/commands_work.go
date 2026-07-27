@@ -284,55 +284,6 @@ func runWorkVerdicts(ctx context.Context, deps *Deps, args []string) error {
 	return errNotImplemented
 }
 
-// newWorkReplyFlags builds the flag.FlagSet for `loam work reply [repo]
-// [work-branch] --thread <thread-id>`, plus the parsed --thread value.
-func newWorkReplyFlags() (*flag.FlagSet, *string) {
-	fs := newFlagSet("work reply")
-	thread := fs.String("thread", "", "the thread to reply to")
-	return fs, thread
-}
-
-// runWorkReply implements `loam work reply [repo] [work-branch] --thread
-// <thread-id>`. --thread is required.
-func runWorkReply(ctx context.Context, deps *Deps, args []string) error {
-	fs, thread := newWorkReplyFlags()
-	positional, err := parseCommandArgs(fs, args)
-	if err != nil {
-		return newUsageError(err.Error())
-	}
-	if err := requireWorkBranchArgs("work reply", positional); err != nil {
-		return err
-	}
-	if *thread == "" {
-		return newUsageError("work reply requires --thread")
-	}
-	return errNotImplemented
-}
-
-// newWorkVerdictFlags builds the flag.FlagSet for `loam work verdict
-// [repo] [work-branch] --outcome <approve|disapprove|neutral>`, plus the
-// parsed --outcome value.
-func newWorkVerdictFlags() (*flag.FlagSet, *string) {
-	fs := newFlagSet("work verdict")
-	outcome := fs.String("outcome", "", "approve, disapprove, or neutral")
-	return fs, outcome
-}
-
-// runWorkVerdict implements `loam work verdict [repo] [work-branch]
-// --outcome <approve|disapprove|neutral>`. --outcome is required.
-func runWorkVerdict(ctx context.Context, deps *Deps, args []string) error {
-	fs, outcome := newWorkVerdictFlags()
-	positional, err := parseCommandArgs(fs, args)
-	if err != nil {
-		return newUsageError(err.Error())
-	}
-	if err := requireWorkBranchArgs("work verdict", positional); err != nil {
-		return err
-	}
-	switch *outcome {
-	case "approve", "disapprove", "neutral":
-	default:
-		return newUsageError("work verdict requires --outcome=approve|disapprove|neutral")
-	}
-	return errNotImplemented
-}
+// `work reply` lives in commands_work_reply.go and `work verdict` in
+// commands_work_verdict.go — the two publishing commands, kept together
+// with the staging batch one of them consumes.

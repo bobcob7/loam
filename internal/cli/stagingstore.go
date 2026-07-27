@@ -144,6 +144,25 @@ func (s *stagingStore) list() ([]stagedItem, error) {
 	return set.Items, nil
 }
 
+// clear empties the staged set, leaving NextID exactly where it was. `work
+// verdict` calls it after the server has accepted the batch — the only
+// thing that ever empties the staging area (docs/cli-spec.md -> verdict:
+// "publishes … and clears the local staging area").
+//
+// The id counter is deliberately NOT rewound. It is the same argument
+// discard makes: an id that named a comment the agent has already read must
+// never later name a different one. After a publish the reused id would
+// point at a freshly staged local item while the agent's notes still say s1
+// is the comment now published on the work branch.
+func (s *stagingStore) clear() error {
+	set, err := s.load()
+	if err != nil {
+		return err
+	}
+	set.Items = []stagedItem{}
+	return s.save(set)
+}
+
 // add appends item under a freshly allocated local id ("s1", "s2", …) and
 // returns it as stored.
 func (s *stagingStore) add(item stagedItem) (stagedItem, error) {

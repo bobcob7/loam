@@ -89,6 +89,11 @@ var stillStubbedExemptions = map[string]bool{
 	// work comment is covered by TestRouterDispatch_WorkComment_
 	// ReachesRealHandler in commands_work_comment_test.go (loam-0pj.12).
 	"work comment": true,
+	// work reply/verdict are covered by TestRouterDispatch_WorkReply_
+	// ReachesRealHandler and TestRouterDispatch_WorkVerdict_
+	// ReachesRealHandler (loam-0pj.13).
+	"work reply":   true,
+	"work verdict": true,
 	// graph def/refs/deps/dependents/history are covered by
 	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
 	// commands_graph_test.go (loam-0pj.14).
@@ -161,8 +166,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"work comments", []string{"work", "comments", "acme/repo", "wb-1"}},
 		{"work comments staged", []string{"work", "comments", "acme/repo", "wb-1", "--staged"}},
 		{"work verdicts", []string{"work", "verdicts", "acme/repo", "wb-1"}},
-		{"work reply", []string{"work", "reply", "acme/repo", "wb-1", "--thread", "t1"}},
-		{"work verdict", []string{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"}},
 	}
 
 	covered := make(map[string]bool, len(tests))
@@ -233,13 +236,19 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	// an extra positional: its flags are still registered and parsed, but it
 	// stops on the argument count before reading stdin or opening a staging
 	// area, neither of which newTestDeps provides.
-	commentErr := router.Dispatch(t.Context(), []string{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"})
-	var commentUsage *usageError
-	assert.ErrorAs(t, commentErr, &commentUsage)
+	// `work reply` and `work verdict` (loam-0pj.13) are implemented too, and
+	// get the same treatment for the same reason.
+	for _, args := range [][]string{
+		{"work", "comment", "a", "b", "c", "--file", "x.go", "--line", "3"},
+		{"work", "reply", "a", "b", "c", "--thread", "t1"},
+		{"work", "verdict", "a", "b", "c", "--outcome", "approve"},
+	} {
+		var usage *usageError
+		assert.ErrorAs(t, router.Dispatch(t.Context(), args), &usage)
+	}
 	for _, args := range [][]string{
 		{"work", "comments", "a", "b", "--staged"},
 		{"work", "list", "--limit", "5"},
-		{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"},
 	} {
 		err := router.Dispatch(t.Context(), args)
 		assert.ErrorIs(t, err, errNotImplemented)
