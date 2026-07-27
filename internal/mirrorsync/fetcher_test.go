@@ -74,10 +74,61 @@ func TestParsePorcelainFetchEmptyOutputReturnsNoRefs(t *testing.T) {
 	assert.Empty(t, refs)
 }
 
-func TestParsePorcelainFetchRejectsUnparseableLine(t *testing.T) {
+func TestParsePorcelainFetchSkipsLineWithTooFewFields(t *testing.T) {
 	t.Parallel()
-	_, err := parsePorcelainFetch([]byte("only-two-fields\n"))
-	require.Error(t, err)
+	refs, err := parsePorcelainFetch([]byte("only-two-fields\n"))
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+}
+
+// TestParsePorcelainFetchSkipsInterleavedStderrWarning is the must-fix
+// regression: Transport.run returns cmd.CombinedOutput()
+// (internal/gittransport/transport.go), so a benign git warning on stderr
+// -- e.g. a redirected upstream URL -- lands in the same byte stream this
+// function parses. A redirect warning has exactly 3 whitespace-separated
+// fields ("warning:", "redirecting", "to" -- or similar), so the old
+// field-count-only check would have silently fabricated a bogus RefUpdate
+// from it; this asserts the warning line contributes nothing and the real
+// porcelain lines around it are still parsed correctly.
+func TestParsePorcelainFetchSkipsInterleavedStderrWarning(t *testing.T) {
+	t.Parallel()
+	out := []byte("warning: redirecting to https://github.com/octocat/Hello-World.git/\n" +
+		"  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 refs/heads/main\n")
+	refs, err := parsePorcelainFetch(out)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "refs/heads/main", refs[0].Ref)
+}
+
+// TestParsePorcelainFetchSkipsFromSummaryLine covers the other shape
+// git's own "From <url>" fetch summary line takes on stderr: exactly 2
+// fields, which the old implementation hard-errored on -- failing an
+// entire sync cycle into sync_state=error over a benign line, not a real
+// fetch failure.
+func TestParsePorcelainFetchSkipsFromSummaryLine(t *testing.T) {
+	t.Parallel()
+	out := []byte("From https://forge.example.com/acme/widgets\n" +
+		"  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 refs/heads/main\n")
+	refs, err := parsePorcelainFetch(out)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "refs/heads/main", refs[0].Ref)
+}
+
+func TestParsePorcelainFetchSkipsLineWithNonRefDestination(t *testing.T) {
+	t.Parallel()
+	out := []byte("  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 not-a-ref\n")
+	refs, err := parsePorcelainFetch(out)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+}
+
+func TestParsePorcelainFetchSkipsLineWithNonHexObjectID(t *testing.T) {
+	t.Parallel()
+	out := []byte("  not-hex-old not-hex-new refs/heads/main\n")
+	refs, err := parsePorcelainFetch(out)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
 }
 
 func TestMirrorFetcherFetchBuildsRefspecsAndParsesResult(t *testing.T) {
@@ -94,14 +145,14 @@ func TestMirrorFetcherFetchBuildsRefspecsAndParsesResult(t *testing.T) {
 			assert.Equal(t, "/data/mirrors/acme/widgets.git", mirrorDir)
 			assert.Equal(t, "https://forge.example.com/acme/widgets.git", upstreamURL)
 			assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/wb-1"}, refspecs)
-			return []byte("  aaa bbb refs/heads/main\n"), nil
+			return []byte("  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 refs/heads/main\n"), nil
 		},
 	}
 	fetcher := NewMirrorFetcher("/data", upstream, repos)
 	result, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
 	require.NoError(t, err)
 	require.Len(t, result.Refs, 1)
-	assert.Equal(t, RefUpdate{Ref: "refs/heads/main", OldSHA: "aaa", NewSHA: "bbb"}, result.Refs[0])
+	assert.Equal(t, RefUpdate{Ref: "refs/heads/main", OldSHA: "8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12", NewSHA: "8c9a25ef69308c445dc914c7485e411a7312a167"}, result.Refs[0])
 }
 
 func TestMirrorFetcherFetchPropagatesResolveRepoError(t *testing.T) {

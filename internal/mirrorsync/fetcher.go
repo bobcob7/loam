@@ -11,10 +11,21 @@ import (
 
 // allRefsRefspec is the wildcard positive refspec MirrorFetcher pairs with
 // a negative exclusion per registered work-branch ref (docs/sync-spec.md
-// -> Mirror Sync step 1). gittransport.Transport.Fetch already runs every
-// refspec it is given with --prune --force, so the leading '+' here is
-// what makes a diverged or force-pushed upstream ref win outright rather
-// than being rejected as a non-fast-forward.
+// -> Mirror Sync step 1). The leading '+' is NOT what makes a diverged or
+// force-pushed upstream ref win here: gittransport.Transport.Fetch already
+// passes the git-level --force flag unconditionally, which (per
+// git-fetch(1) -f/--force) overrides the non-fast-forward check for every
+// refspec regardless of a per-refspec '+' -- dropping the '+' leaves every
+// integration test in this package green; only the refspec-string unit
+// tests catch it. The '+' is kept anyway because it is what
+// docs/sync-spec.md's DESIGN mandates verbatim and it is exactly the
+// refspec `git clone --mirror` itself uses, so intent stays correct even
+// if Transport ever stops passing --force: belt-and-suspenders notation,
+// not the forcing mechanism. The sharper unconditional flag actually in
+// play is --prune, which is safe to run unconditionally here only because
+// git scopes pruning to the refspec's own destination namespace -- a ref
+// a negative exclusion removes from the refspec is never a prune
+// candidate either, exactly as it is never a fetch candidate.
 const allRefsRefspec = "+refs/*:refs/*"
 
 // MirrorFetcher is the production Fetcher (docs/sync-spec.md -> Mirror
@@ -97,6 +108,13 @@ func buildFetchRefspecs(workBranches []string) []string {
 	return refspecs
 }
 
+// porcelainFlags is the fixed set of single-character status flags
+// git-fetch(1) OUTPUT documents for --porcelain: ' ' (fast-forward), '+'
+// (forced), '-' (pruned), 't' (tag update), '*' (new ref), '!' (rejected),
+// and '=' (up to date, --verbose only). A line whose first byte is not one
+// of these is not a porcelain ref line at all.
+var porcelainFlags = map[byte]bool{' ': true, '+': true, '-': true, 't': true, '*': true, '!': true, '=': true}
+
 // zeroOID reports whether s is a git all-zero object id -- the
 // deleted/absent sentinel in `git fetch --porcelain` output -- regardless
 // of the hash algorithm's digest length (40 hex chars for SHA-1, 64 for
@@ -105,38 +123,76 @@ func zeroOID(s string) bool {
 	return s != "" && strings.Count(s, "0") == len(s)
 }
 
-// parsePorcelainFetch turns `git fetch --porcelain` output (git-fetch(1)
-// OUTPUT: one line per ref, "<flag> <old-object-id> <new-object-id>
-// <local-reference>") into RefUpdates. The flag character itself is not
-// retained -- ' ' (fast-forward), '+' (forced), '-' (pruned), '*' (new),
-// and 't' (tag update) are all successful updates once Fetch has already
-// returned a nil error, and pruned/created rows are already
+// isHexOID reports whether s is a plausible git object id: lowercase hex,
+// 40 chars (SHA-1) or 64 chars (SHA-256). This also accepts the all-zero
+// sentinel, since "0"*40/"0"*64 is valid hex.
+func isHexOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// parsePorcelainFetchLine parses one line of `git fetch --porcelain`
+// output (git-fetch(1) OUTPUT: "<flag> <old-object-id> <new-object-id>
+// <local-reference>") into a RefUpdate, reporting ok=false when line does
+// not conform to that exact shape: flag is one of porcelainFlags, both
+// object-id fields are plausible hex-or-zero, and the ref is rooted at
+// "refs/". The flag character itself is not retained in the result -- once
+// Fetch has already returned a nil error, every flag this function accepts
+// denotes a successful update, and pruned/created rows are already
 // distinguishable from the SHA fields alone (an all-zero old id means a
-// new ref, an all-zero new id means a prune) without needing the flag
-// too. A rejected ('!') line cannot appear here: Fetch surfaces any git
-// failure as an error before this ever runs.
+// new ref, an all-zero new id means a prune) without needing the flag too.
+func parsePorcelainFetchLine(line string) (RefUpdate, bool) {
+	if len(line) < 2 || line[1] != ' ' || !porcelainFlags[line[0]] {
+		return RefUpdate{}, false
+	}
+	fields := strings.Fields(line[1:])
+	if len(fields) != 3 {
+		return RefUpdate{}, false
+	}
+	oldSHA, newSHA, ref := fields[0], fields[1], fields[2]
+	if !isHexOID(oldSHA) || !isHexOID(newSHA) || !strings.HasPrefix(ref, "refs/") {
+		return RefUpdate{}, false
+	}
+	if zeroOID(oldSHA) {
+		oldSHA = ""
+	}
+	if zeroOID(newSHA) {
+		newSHA = ""
+	}
+	return RefUpdate{Ref: ref, OldSHA: oldSHA, NewSHA: newSHA}, true
+}
+
+// parsePorcelainFetch turns `git fetch --porcelain` output into
+// RefUpdates, one per conforming line (see parsePorcelainFetchLine). Lines
+// that do not conform are silently skipped rather than fabricated into a
+// RefUpdate or treated as a fatal parse error: Transport.run returns
+// cmd.CombinedOutput() (internal/gittransport/transport.go), so stdout and
+// stderr are interleaved in out, and a benign git warning on stderr (e.g.
+// "warning: redirecting to https://.../foo.git/" on a redirected upstream
+// URL, or fetch's own "From <url>" summary line) is a real, common shape
+// here -- neither a ref update to report nor a reason to fail the whole
+// sync cycle into sync_state=error.
 func parsePorcelainFetch(out []byte) ([]RefUpdate, error) {
 	var refs []RefUpdate
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			return nil, fmt.Errorf("unparseable fetch --porcelain line: %q", line)
+		ref, ok := parsePorcelainFetchLine(line)
+		if !ok {
+			continue
 		}
-		ref := fields[len(fields)-1]
-		newSHA := fields[len(fields)-2]
-		oldSHA := fields[len(fields)-3]
-		if zeroOID(oldSHA) {
-			oldSHA = ""
-		}
-		if zeroOID(newSHA) {
-			newSHA = ""
-		}
-		refs = append(refs, RefUpdate{Ref: ref, OldSHA: oldSHA, NewSHA: newSHA})
+		refs = append(refs, ref)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning fetch --porcelain output: %w", err)

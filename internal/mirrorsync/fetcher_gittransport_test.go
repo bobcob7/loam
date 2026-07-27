@@ -198,6 +198,16 @@ func TestMirrorFetcherExcludesWorkBranchRefFromForcePush(t *testing.T) {
 // TestMirrorFetcherExcludesWorkBranchRefFromPrune mirrors the force-push
 // test for the prune path: a colliding upstream branch is deleted, and the
 // mirror's own work-branch ref of the same name must survive.
+//
+// Note the SHA-equality assertion below is not the discriminating check it
+// looks like: CreateCollidingBranch's empty fromRef resolves upstream
+// HEAD, so seedSHA and the (now-deleted) upstream wb-mine's SHA are
+// identical by construction, and a broken exclusion here would prune the
+// ref away rather than leave it pointing at a different SHA. This test's
+// real assertion is the require.NoError on the rev-parse a few lines down
+// (the ref must still exist at all) -- assert.Equal is included only for
+// symmetry with the force-push test above, where the SHAs genuinely
+// differ.
 func TestMirrorFetcherExcludesWorkBranchRefFromPrune(t *testing.T) {
 	t.Parallel()
 	srv := newFakeForgeServer(t)
