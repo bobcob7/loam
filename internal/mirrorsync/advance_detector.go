@@ -7,8 +7,6 @@ import (
 	"sort"
 
 	"github.com/google/uuid"
-
-	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
 // errMissingTargetBranch is StoreAdvanceDetector's whole-repo failure
@@ -116,35 +114,21 @@ func (d *StoreAdvanceDetector) DetectAdvances(ctx context.Context, repo RepoID, 
 	return advanced, nil
 }
 
-// openWorkBranchTargets pages through every work_branches row for repoID
-// and returns the distinct Target of every non-terminal one -- set (b),
-// docs/sync-spec.md -> Mirror Sync step 2. Complete and closed rows are
-// excluded: their recorded target no longer needs conflict detection.
+// openWorkBranchTargets returns the distinct Target of every non-terminal
+// work branch of repoID -- set (b), docs/sync-spec.md -> Mirror Sync step
+// 2. The paging and the terminal-state exclusion are
+// listOpenWorkBranches' (mergeability_checker.go), shared with
+// StoreMergeabilityChecker so the two consumers of "the repo's open work
+// branches" can never drift apart on what open means; this method is only
+// the Target projection over it.
 func (d *StoreAdvanceDetector) openWorkBranchTargets(ctx context.Context, repoID uuid.UUID) (map[string]struct{}, error) {
-	targets := make(map[string]struct{})
-	var offset int32
-	for {
-		page, total, err := d.branches.List(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, offset)
-		if err != nil {
-			return nil, err
-		}
-		for _, wb := range page {
-			if isTerminalWorkBranchState(wb.State) {
-				continue
-			}
-			targets[wb.Target] = struct{}{}
-		}
-		offset += int32(len(page))
-		if len(page) == 0 || int64(offset) >= total {
-			break
-		}
+	open, err := listOpenWorkBranches(ctx, d.branches, repoID)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string]struct{}, len(open))
+	for _, wb := range open {
+		targets[wb.Target] = struct{}{}
 	}
 	return targets, nil
-}
-
-// isTerminalWorkBranchState reports whether s is one of work_branches'
-// two terminal states (docs/persistence-spec.md "work_branches": "complete
-// and closed are terminal"), the states set (b) excludes.
-func isTerminalWorkBranchState(s workbranchstore.State) bool {
-	return s == workbranchstore.StateComplete || s == workbranchstore.StateClosed
 }

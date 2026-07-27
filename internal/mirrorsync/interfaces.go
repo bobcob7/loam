@@ -18,7 +18,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -57,17 +57,20 @@ type RepoID string
 // package) adapts Store.ListAllRepoNames to this interface, converting
 // each returned name to a RepoID (RepoID is repos.name, never repos.id --
 // loam-54o.7 NOTES). No production Scheduler is constructed anywhere in
-// the tree yet: loam-ofg.21 now wires cmd/server/main.go's startup
-// sequence -- it connects to Postgres, in the correct migrate-then-pool
-// order, and constructs a real ingest worker pool -- but deliberately
-// stops short of building a Scheduler, since 5 of this package's other 7
-// collaborators (Fetcher, AdvanceDetector, MergeabilityChecker, the
-// IngestEnqueuer adapter, PRPoller) still have no production
-// implementation anywhere in the tree; only this package's own
-// StoreRepoLister and SyncStateReporter are real. So StoreRepoLister
-// still has no call site to wire into today; it remains ready for
-// whichever bead constructs the rest (giq.2/4/5/8, c94.2) to pass to
-// mirrorsync.New as the RepoLister argument, alongside
+// the tree yet: loam-ofg.21 wires cmd/server/main.go's startup sequence --
+// it connects to Postgres, in the correct migrate-then-pool order, and
+// constructs a real ingest worker pool -- but deliberately stopped short
+// of building a Scheduler while most of this package's collaborators had
+// no production implementation. As of loam-giq.5 exactly ONE of the
+// scheduler's 7 collaborators still lacks one: PRPoller (loam-giq.8).
+// Fetcher is MirrorFetcher (giq.2), AdvanceDetector is
+// StoreAdvanceDetector (giq.4), MergeabilityChecker is
+// StoreMergeabilityChecker (giq.5), IngestEnqueuer is StoreIngestEnqueuer
+// (c94.2), and RepoLister/SyncStateReporter are this package's own
+// StoreRepoLister and internal/mirrorsync/state -- all real. So
+// StoreRepoLister still has no call site to wire into today; it remains
+// ready for whichever bead constructs the last collaborator (giq.8) to
+// pass to mirrorsync.New as the RepoLister argument, alongside
 // Scheduler.Shutdown (added by loam-ofg.21) as the drain seam its own
 // shutdown sequence needs.
 type RepoLister interface {
@@ -298,4 +301,51 @@ type ingestedRefLookup interface {
 // lives.
 type ingestJobEnqueuer interface {
 	Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error
+}
+
+// mergeTreeRunner answers the one git question StoreMergeabilityChecker
+// asks -- would this work branch still merge into that target tip? --
+// defined here at the consumer. *gitmergetree.Checker satisfies it
+// structurally; StoreMergeabilityChecker never shells out to git itself,
+// the same split MirrorFetcher keeps with gittransport.
+//
+// conflicted is meaningful ONLY when err is nil. A check that could not be
+// performed at all -- the work-branch ref missing from the mirror,
+// histories with no common ancestor, a corrupt mirror, a canceled context
+// -- must come back as a non-nil error, never as conflicted=true, because
+// the two outcomes have opposite consequences: a true conflict demotes a
+// reviewable work branch to draft and voids its verdicts, while a failed
+// check must leave every work branch untouched and abort the repo's cycle
+// (git-merge-tree(1) makes this easy to get wrong -- it reports an
+// unresolvable ref with the SAME exit status as a conflict; see
+// internal/gitmergetree's package doc comment for the measured table).
+type mergeTreeRunner interface {
+	MergeTree(ctx context.Context, mirrorDir, ours, theirs string) (conflicted bool, err error)
+}
+
+// workBranchConflictMarker is the workbranchstore.Store surface
+// StoreMergeabilityChecker writes a conflict verdict through, defined here
+// at the consumer. *workbranchstore.Store satisfies it structurally.
+//
+// MarkConflicted alone is the whole write surface this bead needs, because
+// the draft-vs-demotion decision docs/sync-spec.md's Mergeability Check
+// describes ("the branch is marked conflicted; if it was reviewable or
+// reviewed it is reset to draft with conflict_reset recorded") lives
+// inside that one guarded UPDATE, not here -- see
+// MarkWorkBranchConflicted in internal/db/queries/work_branches.sql. It is
+// idempotent and level-triggered by design, matching how this checker
+// calls it: every open work branch is re-evaluated on every advance of its
+// target, so the same branch can be found still-conflicting many ticks in
+// a row.
+//
+// There is deliberately no clearing counterpart here. A flagged branch
+// recovers by PUSH, not by a later clean check: docs/sync-spec.md's clean
+// case is "nothing happens", and clearing is catch-up detection's job on
+// an accepted push (loam-giq.6), which is also what re-opens a review
+// round. Handing this checker a ClearConflict seam would let a target
+// advance that happens to merge cleanly silently restore a demoted branch
+// to reviewable with no push and no fresh round -- see
+// StoreMergeabilityChecker's doc comment.
+type workBranchConflictMarker interface {
+	MarkConflicted(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error)
 }
