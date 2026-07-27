@@ -141,6 +141,17 @@ func runVerificationGit(t *testing.T, args ...string) ([]byte, error) {
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+home+"/.config",
 		"GIT_TERMINAL_PROMPT=0",
+		// Identity must be supplied explicitly, precisely BECAUSE the
+		// three lines above isolate this git from every config file that
+		// would otherwise carry it. Without them `git commit` has no
+		// committer: git falls back to guessing username@hostname, which
+		// happens to succeed on a developer laptop (with a warning) and
+		// fails outright on a CI runner with "Please tell me who you
+		// are", so the gap is invisible locally. --author on a commit
+		// does NOT cover this -- it sets only the author, never the
+		// committer.
+		"GIT_AUTHOR_NAME=loam-test", "GIT_AUTHOR_EMAIL=loam-test@example.invalid",
+		"GIT_COMMITTER_NAME=loam-test", "GIT_COMMITTER_EMAIL=loam-test@example.invalid",
 	)
 	return cmd.CombinedOutput()
 }
