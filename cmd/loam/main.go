@@ -14,7 +14,7 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	deps, err := cli.NewProductionDeps(logger, http.DefaultClient, os.Stdout)
+	deps, err := cli.NewProductionDeps(logger, http.DefaultClient, os.Stdout, os.Stdin)
 	if err != nil {
 		os.Exit(cli.NewErrorMapper().ExitCode(err))
 	}

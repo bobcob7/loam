@@ -29,7 +29,7 @@ func (fakeConnect) Search() SearchClient         { return nil }
 func (fakeConnect) Meta() MetaClient             { return nil }
 
 func newTestDeps() *Deps {
-	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil)
+	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil, nil)
 }
 
 func TestRouterDispatch_NoArgs_ReturnsUsageError(t *testing.T) {
@@ -80,6 +80,12 @@ func TestRouterDispatch_GroupWithNoSubcommand_ReturnsUsageError(t *testing.T) {
 // below instead of by a reviewer noticing a table shrank.
 var stillStubbedExemptions = map[string]bool{
 	"clone": true,
+	// work start/set/request-review are covered by
+	// TestRouterDispatch_WorkStartSetRequestReview_ReachRealHandlers in
+	// commands_work_test.go (loam-0pj.11).
+	"work start":          true,
+	"work set":            true,
+	"work request-review": true,
 }
 
 // leafCommandKeys walks tree and returns the set of dispatchable leaf
@@ -134,9 +140,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"instructions", []string{"instructions"}},
 		{"instructions with target", []string{"instructions", "work list"}},
 		{"whoami", []string{"whoami"}},
-		{"work start", []string{"work", "start", "acme/repo", "main"}},
-		{"work set", []string{"work", "set", "acme/repo", "wb-1", "--title", "T"}},
-		{"work request-review", []string{"work", "request-review", "acme/repo", "wb-1"}},
 		{"work list", []string{"work", "list"}},
 		{"work list with filters", []string{"work", "list", "--repo", "acme/repo", "--awaiting-review", "--limit", "5"}},
 		{"work show", []string{"work", "show", "acme/repo", "wb-1"}},
@@ -222,7 +225,7 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	t.Parallel()
 	router := NewRouter(newTestDeps())
 	for _, args := range [][]string{
-		{"work", "set", "a", "b", "--title", "T"},
+		{"work", "comment", "a", "b", "--file", "x.go", "--line", "3"},
 		{"work", "list", "--limit", "5"},
 		{"graph", "def", "Symbol", "--repo", "acme/repo"},
 		{"search", "q", "--limit", "3"},
