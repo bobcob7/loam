@@ -114,31 +114,54 @@ var knownModelDimensions = map[string]int{
 // to num_ctx=2048 unless a caller overrides it (github.com/ollama/ollama
 // issue #7741 further reports that on some Ollama builds, num_ctx above
 // 2048 has not reliably taken effect for embedding requests either) — so
-// 2048, not 8192, is the value this package uses and now also sends
-// explicitly (see embedRequest.Options below), rather than trusting
-// whatever Ollama's per-version default happens to be.
+// 2048, not 8192, is the value this package uses.
 //
 //   - nomic-embed-text:  2048 (Ollama library default; native max 8192)
 //   - mxbai-embed-large: 512  (BERT-large architecture; Ollama library model
 //     card lists a 512-token context length)
 //   - bge-m3:             8192 (published as supporting up to 8192-token
 //     documents; unlike nomic-embed-text, no Ollama-served-default
-//     divergence for this model is independently confirmed here)
-//   - all-minilm:         256  (MiniLM architecture; short-snippet model)
+//     divergence for this model is independently confirmed here — loam-yie
+//     tests this entry first, as the highest-exposure one: it is both the
+//     largest window and the one with the least independent confirmation)
+//   - all-minilm:         512  (Ollama's library page lists 512 for every
+//     all-minilm variant; 256 is sentence-transformers' max_seq_length, a
+//     client-side truncation setting from the model's original release,
+//     not the window Ollama itself serves, and using it here would be
+//     picking the wrong number, not merely a conservative one)
 //
 // None of these were exercised against a live Ollama server in this
 // session (docs/ingestion-spec.md's testing constraints keep this package's
 // tests hermetic) — they are this table's documented source, not a
 // certainty; loam-yie tracks confirming each entry against a live server.
 // Embed's truncate:false rejection is the deliberate backstop if any of
-// these turns out wrong for a given Ollama version: an
-// under-estimate here fails one embed call loudly (IsContextLengthExceeded)
-// rather than silently producing a corrupt vector.
+// these turns out wrong for a given Ollama version: an under-estimate here
+// fails one embed call loudly (IsContextLengthExceeded) rather than
+// silently producing a corrupt vector.
+//
+// This table's values are also sent as embedRequest.Options.NumCtx on
+// every request (see that struct's doc comment), which changes the cost of
+// getting an entry wrong here in a way worth naming explicitly: before
+// that, an under-estimate was merely wasteful — the chunker's byte budget
+// (internal/ingest/chunk.TokenBudgetChars) would fragment chunks more than
+// strictly necessary, but Ollama itself still served whatever its own
+// default context actually was, so the real embed call had headroom the
+// chunker didn't know about. Now that this value is sent as num_ctx, an
+// under-estimate directly commands Ollama to serve a SMALLER real window,
+// not just a smaller budget this package privately assumes — so a wrong
+// entry no longer only costs internal headroom, it costs real served
+// context, doubling the actual fragmentation rate for that model rather
+// than just this package's estimate of it. Getting an entry wrong LOW is
+// still the safe direction, though (wasteful, never dangerous): going too
+// HIGH is the direction to avoid, since setting num_ctx above a model's
+// trained context has been reported to crash the Ollama runner outright
+// (github.com/ollama/ollama issue #9365, GGML_ASSERT) rather than merely
+// reject the request the way an oversized *input* does.
 var knownModelContextWindows = map[string]int{
 	"nomic-embed-text":  2048,
 	"mxbai-embed-large": 512,
 	"bge-m3":            8192,
-	"all-minilm":        256,
+	"all-minilm":        512,
 }
 
 // Embedder implements embed.Embedder (internal/ingest/embed) against a

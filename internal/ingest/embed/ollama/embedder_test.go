@@ -84,7 +84,7 @@ func TestNew_ContextWindow_FollowsConfiguredModel(t *testing.T) {
 		{"nomic-embed-text:latest", 2048},
 		{"mxbai-embed-large", 512},
 		{"bge-m3", 8192},
-		{"all-minilm", 256},
+		{"all-minilm", 512},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {
