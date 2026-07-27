@@ -357,6 +357,15 @@ func (p *Pool) wakeUp() {
 	}
 }
 
+// enqueueLockKey returns the pg_advisory_xact_lock key Enqueue serializes
+// on for a given (repoID, targetBranch, kind) triple. Exposed as its own
+// function (rather than inlined) so a test can take the identical lock
+// Enqueue contends on, instead of duplicating the format string and
+// risking silent drift between the two.
+func enqueueLockKey(repoID uuid.UUID, targetBranch string, kind Kind) string {
+	return fmt.Sprintf("ingest-enqueue:%s:%s:%s", repoID, targetBranch, kind)
+}
+
 // Enqueue implements Enqueuer. It coalesces on (repoID, targetBranch,
 // kind): a pg_advisory_xact_lock keyed on that triple serializes
 // concurrent callers so a burst of triggers for the same repo commits at
@@ -383,7 +392,7 @@ func (p *Pool) Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch strin
 		return fmt.Errorf("beginning enqueue transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	lockKey := fmt.Sprintf("ingest-enqueue:%s:%s:%s", repoID, targetBranch, kind)
+	lockKey := enqueueLockKey(repoID, targetBranch, kind)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
 		return fmt.Errorf("acquiring ingest enqueue lock: %w", err)
 	}

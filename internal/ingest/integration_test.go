@@ -278,20 +278,24 @@ func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 // path, and asserts exactly one queued row results.
 //
 // This and TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock below
-// are a complementary pair, not a redundant/superseded pair -- neither is
-// individually a deterministic mutation-catcher for "the advisory lock is
-// missing" from Enqueue, and each has caught that mutation on a run the
-// other missed (see this bead's final report for the review round that
-// established this by replication on different hardware: this test's own
-// author-side experiments saw 0/10 catches removing the lock, even with
-// this synchronized start barrier and pool_max_conns raised well past n;
-// an independent reviewer's replication caught it here on the run where
-// the timing test below happened to land inside its own threshold).
-// Keep both: this one is the literal ACCEPTANCE CRITERIA assertion
-// (exactly one queued row after N real concurrent callers) and remains
-// worth running even though it is not a reliable regression detector on
-// its own; the timing test is the more consistent -- but still
-// probabilistic, not deterministic -- detector of the two.
+// are a complementary pair testing two different properties of the same
+// lock, not a redundant/superseded pair. This test races N goroutines for
+// a check-then-insert window and asserts the coalescing OUTCOME (exactly
+// one queued row); that race window turned out, empirically, to be far
+// narrower than Go's goroutine dispatch + local network jitter, so
+// author-side experiments saw only 0/10 catches when the advisory lock
+// was removed, even with this synchronized start barrier and
+// pool_max_conns raised well past n -- this test alone is not a reliable
+// mutation-catcher for "the lock is missing". Keep it anyway: it is the
+// literal ACCEPTANCE CRITERIA assertion, and it is what proves the
+// coalescing dedup predicate itself is correct, which the sibling test
+// below does not exercise at all (it proves mutual exclusion, not
+// coalescing). The sibling test directly observes the lock blocking a
+// second caller (loam-2co replaced its former timing-based version, which
+// raced two wall-clock samples and could fail on a loaded CI runner with
+// the lock fully intact), so between the two: this one is the
+// probabilistic-but-authoritative acceptance check, and the sibling is
+// the deterministic mutual-exclusion check.
 func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -330,117 +334,64 @@ func TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp(t *testing.T) {
 
 // TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock is the second
 // half of the complementary pair described on
-// TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp above: instead of
-// racing for a check-then-insert window (which turned out, empirically,
-// to be far narrower than Go's goroutine dispatch + local network
-// jitter), it measures a timing signature. n concurrent Enqueue calls for
-// the SAME (repo, branch, kind) must each acquire the same
-// pg_advisory_xact_lock in turn -- lock held from acquisition until that
-// call's COMMIT/ROLLBACK -- so their total wall time scales with n. n
-// concurrent Enqueue calls for n DIFFERENT repos never contend on that
-// lock (different hash key each), so their total wall time stays roughly
-// constant regardless of n. If the advisory lock were removed, both
-// scenarios run at the same (fast, parallel) speed and this comparison
-// collapses.
+// TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp above. It used to
+// measure a timing signature -- n concurrent same-key Enqueue calls must
+// take measurably longer in total than n concurrent different-key calls
+// -- but that compared two independent wall-clock samples taken back to
+// back, which is a race on any shared/loaded runner: loam-2co saw CI fail
+// with "27.5956ms" not-greater-than "28.313566ms", numbers that disagree
+// with the assertion's own inputs because the two measurements were taken
+// under different momentary load. Timing is a proxy for mutual exclusion,
+// not the property itself, and a proxy can be fooled in both directions.
 //
-// This is a more consistent detector than the goroutine-count test above,
-// but it is still probabilistic, not deterministic, and the review round
-// that added it found a real, reproducible false negative. On the
-// reviewer's hardware, three runs of the lock-removed mutation measured
-// ratios of approximately 0.70x, 0.87x, and 1.56x -- straddling this
-// test's 1.5x threshold, so one of those three runs passed at 1.56x even
-// with the lock gone. Separately, six runs of the same mutation on the
-// original (author-side) hardware measured ratios of approximately
-// 0.64x-1.13x -- never near the threshold, so on that machine this test
-// failed 6/6, correctly. The mirror image is the strongest evidence
-// neither test can be deleted on one machine's say-so: on the reviewer's
-// hardware, this timing test passed the one mutated run at 1.56x, and the
-// goroutine-count test above caught exactly that run; on the author's
-// hardware, this timing test failed all six mutated runs, and the
-// goroutine-count test caught none of them. Each test's blind spot was
-// exactly where the other one's coverage landed, on different machines.
-// The same review measured the correct-code distribution as 1.8x-6x
-// across repeated runs on the original hardware and a separate 3.1x-3.4x
-// under GOMAXPROCS=2 with a full container load on the reviewer's
-// hardware, so the risk is asymmetric: false negatives (missing a real
-// regression) are the demonstrated weakness; false positives (flagging
-// correct code) were not observed on either machine. Do not read this
-// test's pass as deterministic proof the lock is present -- read a
-// *failure* as a strong signal something is wrong, and lean on the
-// goroutine-count test and code review for the cases this one's timing
-// margin is too close to call.
+// This version observes the actual invariant instead: it takes the exact
+// same pg_advisory_xact_lock Enqueue would (enqueueLockKey, same key
+// format, same hashtextextended call) in a transaction the test holds
+// open, then asserts a concurrent Enqueue for that key does not complete
+// while the lock is held -- checked against a generous bound -- and does
+// complete promptly once the test releases it -- checked against a bound
+// an order of magnitude tighter. The second check is what keeps the first
+// from passing vacuously: an Enqueue that is simply slow for an unrelated
+// reason would also fail to complete within the generous bound, but it
+// would not then complete within the tight post-release bound either, so
+// the pairing of both assertions is what proves the wait was contention
+// on this lock specifically, not incidental latency.
 func TestEnqueue_SameKeyCallsSerializeThroughTheAdvisoryLock(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pgPool := newTestPool(ctx, t)
-	const n = 30
-	const trials = 3
-	sameKeyRepo := seedRepo(ctx, t, pgPool, "group/lock-same-key")
-	sameKeyElapsed := fastestOf(trials, func() time.Duration {
-		return timeConcurrentEnqueues(ctx, t, pgPool, n, func(i int) uuid.UUID { return sameKeyRepo })
-	})
-	differentKeyRepos := make([]uuid.UUID, n)
-	for i := range n {
-		differentKeyRepos[i] = seedRepo(ctx, t, pgPool, fmt.Sprintf("group/lock-different-key-%d", i))
-	}
-	differentKeyElapsed := fastestOf(trials, func() time.Duration {
-		return timeConcurrentEnqueues(ctx, t, pgPool, n, func(i int) uuid.UUID { return differentKeyRepos[i] })
-	})
-	t.Logf("fastest of %d trials: same-key elapsed=%s different-key elapsed=%s (n=%d)", trials, sameKeyElapsed, differentKeyElapsed, n)
-	// Threshold calibrated empirically (see this bead's final report): with
-	// the lock in place this ratio measured 1.8x-6x across repeated local
-	// runs; with the lock deleted it measured 0.75x-1.2x and never
-	// exceeded 1.3x. 1.5x sits cleanly between both observed ranges.
-	assert.Greaterf(t, sameKeyElapsed, differentKeyElapsed*3/2,
-		"n Enqueue calls for the same (repo, branch, kind) must be measurably slower than n calls for n different repos -- "+
-			"same-key=%s, different-key=%s -- if this fails, the advisory lock is not actually serializing concurrent callers",
-		sameKeyElapsed, differentKeyElapsed)
-}
-
-// fastestOf runs measure trials times and returns the minimum -- a run
-// can only be slowed down by scheduling/GC/container noise, never sped
-// up, so the minimum across a few trials is a more robust estimate of the
-// true cost than any single sample.
-func fastestOf(trials int, measure func() time.Duration) time.Duration {
-	best := measure()
-	for range trials - 1 {
-		if d := measure(); d < best {
-			best = d
-		}
-	}
-	return best
-}
-
-// timeConcurrentEnqueues fires n concurrent Enqueue(main, incremental)
-// calls, one per repo returned by repoFor(i), released from a start
-// barrier as simultaneously as possible, and returns the total wall time
-// for all n to complete.
-func timeConcurrentEnqueues(ctx context.Context, t *testing.T, pgPool *pgxpool.Pool, n int, repoFor func(i int) uuid.UUID) time.Duration {
-	t.Helper()
+	repoID := seedRepo(ctx, t, pgPool, "group/lock-same-key")
+	holder, err := pgPool.Begin(ctx)
+	require.NoError(t, err)
+	// Guarantee the manually-acquired connection/transaction is released no
+	// matter how the test ends -- including on a t.Fatal(f) further down,
+	// which unwinds via runtime.Goexit rather than a normal return -- so an
+	// assertion failure here cannot wedge pgPool.Close's t.Cleanup waiting
+	// on a connection this test never gave back.
+	t.Cleanup(func() { _ = holder.Rollback(context.Background()) })
+	lockKey := enqueueLockKey(repoID, "main", KindIncremental)
+	_, err = holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey)
+	require.NoError(t, err)
 	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 2)
-	start := make(chan struct{})
-	var ready sync.WaitGroup
-	var wg sync.WaitGroup
-	errs := make([]error, n)
-	ready.Add(n)
-	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			ready.Done()
-			<-start
-			errs[i] = pool.Enqueue(ctx, repoFor(i), "main", KindIncremental)
-		}(i)
+	done := make(chan error, 1)
+	go func() { done <- pool.Enqueue(ctx, repoID, "main", KindIncremental) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Enqueue returned (err=%v) while the test was still holding the advisory lock it needs -- it must block", err)
+	case <-time.After(1 * time.Second):
 	}
-	ready.Wait()
-	begin := time.Now()
-	close(start)
-	wg.Wait()
-	elapsed := time.Since(begin)
-	for _, err := range errs {
+	require.NoError(t, holder.Rollback(ctx), "release the manually-held advisory lock")
+	released := time.Now()
+	select {
+	case err := <-done:
 		require.NoError(t, err)
+		assert.Lessf(t, time.Since(released), 300*time.Millisecond,
+			"Enqueue must complete promptly once the advisory lock is free -- a slow completion here would mean the earlier "+
+				"non-completion was unrelated latency, not lock contention, and this test would be vacuous")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Enqueue did not complete after the advisory lock was released")
 	}
-	return elapsed
+	assert.Equal(t, 1, queuedJobCount(ctx, t, pgPool, repoID, "main", KindIncremental))
 }
 
 // TestPool_PerRepoSerializationHoldsUnderConcurrentClaim is the other core
