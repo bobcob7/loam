@@ -246,8 +246,14 @@ func (s *Store) Close(ctx context.Context, id uuid.UUID, reason string) (WorkBra
 }
 
 // Complete is the server-only terminal transition set when the upstream
-// PR merges (docs/cli-spec.md: "There is no agent complete command");
-// only a reviewable/reviewed branch (an accepted proposal) can complete.
+// PR merges (docs/cli-spec.md: "There is no agent complete command"). Any
+// non-terminal state may complete, including 'draft': a conflicting target
+// advance resets an accepted proposal with an open PR back to draft
+// (docs/git-spec.md "Target Advances & Catch-Up") without touching that
+// PR, and if the forge then merges it the merge is authoritative. See
+// CompleteWorkBranch in internal/db/queries/work_branches.sql for why the
+// narrower reviewable/reviewed guard this method started with was wrong,
+// and where the "only an accepted proposal completes" property lives now.
 func (s *Store) Complete(ctx context.Context, id uuid.UUID) (WorkBranch, error) {
 	row, err := s.q.CompleteWorkBranch(ctx, pgUUID(id))
 	if err != nil {

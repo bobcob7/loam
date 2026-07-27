@@ -36,7 +36,10 @@ type Provider interface {
 	GetPRState(ctx context.Context, repo string, prNumber int) (state string, err error)
 	// ClosePR closes an open pull request without merging it. Callers
 	// treat failures as best-effort (docs/sync-spec.md → PR State
-	// Tracking).
+	// Tracking). Returns an error wrapping ErrPRAlreadyMerged when the
+	// PR has already merged and therefore cannot be closed — a
+	// success-equivalent outcome (the PR is already terminal), not a
+	// failure to retry; see that sentinel's godoc.
 	ClosePR(ctx context.Context, repo string, prNumber int) error
 	// GitCredentials returns the forge's username/password convention
 	// for authenticating git-over-HTTPS with token (e.g. Forgejo takes

@@ -18,7 +18,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer workBranchTerminator pullRequestTracker upstreamRefDeleter
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -298,4 +298,40 @@ type ingestedRefLookup interface {
 // lives.
 type ingestJobEnqueuer interface {
 	Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error
+}
+
+// workBranchTerminator is the workbranchstore.Store surface StorePRPoller
+// drives a work branch into one of its two terminal states with, defined
+// here at the consumer. *workbranchstore.Store satisfies it structurally.
+// Both methods are guarded, single-statement UPDATEs on the store side, so
+// a branch another actor already terminated surfaces as
+// workbranchstore.ErrIllegalTransition rather than as a silent second
+// transition -- which is what makes StorePRPoller's per-tick re-poll
+// idempotent without this package holding a lock or reading back state.
+type workBranchTerminator interface {
+	Complete(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error)
+	Close(ctx context.Context, id uuid.UUID, reason string) (workbranchstore.WorkBranch, error)
+}
+
+// pullRequestTracker is the forge.Provider surface StorePRPoller reads PR
+// state through, and closes a PR with on the admin-close path, defined here
+// at the consumer. forge.Provider itself (and *fakeforge.Client) satisfies
+// it structurally. GetPRState returns a bare state string, not a typed
+// enum: StorePRPoller validates it against the three states the Provider
+// contract documents ("open", "merged", "closed") and treats anything else
+// as unknown-and-non-destructive rather than trusting it.
+type pullRequestTracker interface {
+	GetPRState(ctx context.Context, repo string, prNumber int) (state string, err error)
+	ClosePR(ctx context.Context, repo string, prNumber int) error
+}
+
+// upstreamRefDeleter is the gittransport.Transport surface StorePRPoller
+// runs upstream branch cleanup through, defined here at the consumer.
+// *gittransport.Transport satisfies it structurally (Transport.DeleteRemoteRef
+// exists for exactly this call site). It is deliberately NOT folded into
+// upstreamRefFetcher above: MirrorFetcher must never gain the ability to
+// delete an upstream ref just because it shares a transport with this
+// poller.
+type upstreamRefDeleter interface {
+	DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstreamURL, ref string) ([]byte, error)
 }

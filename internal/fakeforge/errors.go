@@ -52,10 +52,12 @@ import (
 // accurate when this comment last said otherwise, before ErrDuplicatePR
 // existed).
 //
-// errPRMerged still has no forge-level equivalent: Forgejo's 412 from
-// closing an already-merged PR still falls through doPullRequest's generic
-// "unexpected status" branch. That gap is loam-giq.8's, not this one's —
-// left as-is here.
+// errPRMerged now wraps ErrPRAlreadyMerged, the forge-level equivalent
+// loam-giq.8 added: Forgejo's 412 from closing an already-merged PR is
+// classified in doPullRequest now, instead of falling through its generic
+// "unexpected status" branch. statusForErr (control.go) already mapped
+// this sentinel to 412, so the fake's wire behavior is unchanged by that
+// bead — only the class a Client reconstructs from it on the way back.
 var (
 	errUnauthorized         = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
 	errRepoNotFound         = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)
@@ -64,7 +66,7 @@ var (
 	errTargetBranchNotFound = fmt.Errorf("fakeforge: target branch not found: %w", forge.ErrRepoNotFound)
 	errPRNotFound           = fmt.Errorf("fakeforge: pull request not found: %w", forge.ErrRepoNotFound)
 	errPRExists             = fmt.Errorf("fakeforge: an open pull request already exists for this head/target pair: %w", forge.ErrDuplicatePR)
-	errPRMerged             = errors.New("fakeforge: pull request is already merged")
+	errPRMerged             = fmt.Errorf("fakeforge: pull request is already merged: %w", forge.ErrPRAlreadyMerged)
 	errInvalidBranch        = errors.New("fakeforge: invalid branch name")
 	errMergeConflict        = errors.New("fakeforge: merge conflict")
 	errGitUnavailable       = errors.New("fakeforge: git binary not available")

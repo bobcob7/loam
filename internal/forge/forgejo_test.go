@@ -216,6 +216,29 @@ func TestForgejo_ClosePR_AuthFailure(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidToken)
 }
 
+// TestForgejo_ClosePR_AlreadyMerged pins the 412 classification loam-giq.8
+// added. Real Forgejo 9.0.3 answers PATCH state=closed on a MERGED pull
+// request with 412 Precondition Failed ("cannot change state of this pull
+// request, it was already merged") and leaves the state untouched. Before
+// this mapping that fell through doPullRequest's generic "unexpected
+// status" branch, indistinguishable from a transport failure a caller
+// should retry -- which is exactly the wrong reading, since the PR is
+// already terminal.
+func TestForgejo_ClosePR_AlreadyMerged(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "cannot change state of this pull request, it was already merged"})
+	}))
+	defer server.Close()
+	f := NewForgejo(server.URL, "secret", server.Client(), testLogger())
+	err := f.ClosePR(t.Context(), "acme/widgets", 7)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPRAlreadyMerged)
+	assert.NotErrorIs(t, err, ErrRepoNotFound, "an already-merged PR must not read as a missing one")
+	assert.NotErrorIs(t, err, ErrInvalidToken)
+}
+
 func TestForgejo_GitCredentials(t *testing.T) {
 	t.Parallel()
 	f := NewForgejo("forgejo.example.com", "", http.DefaultClient, testLogger())
