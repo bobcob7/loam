@@ -27,9 +27,10 @@ type Deps struct {
 // implementations. cloner is the one exception in tests: it is only
 // exercised by `loam clone` (see clone.go), so tests that never dispatch
 // clone may safely pass nil for it, as several in this package's own test
-// files do. stdin is the same kind of exception for `loam work set` (see
-// commands_work.go's readStdin) -- tests that never dispatch it may also
-// pass nil.
+// files do. stdin is the same kind of exception for the two commands that
+// read a body from it, `loam work set` and `loam work comment` (see
+// commands_work.go's readStdin) -- tests that never dispatch either may
+// also pass nil.
 func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader) *Deps {
 	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin}
 }
