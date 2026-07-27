@@ -174,7 +174,31 @@ advance — notices before any agent does. The behavior, as it shapes transport:
 - A flagged branch recovers **by push**: when an agent pushes commits that bring the
   branch up to date (its history contains the current target tip), the server clears the
   flag, and a conflict-reset branch flips **directly back to `reviewable`** — no
-  `request-review` needed; the round was interrupted, not abandoned.
+  `request-review` needed. The *review* was interrupted rather than abandoned, but the
+  restore is still a transition into `reviewable`, so it **opens a new numbered round**
+  like every other such transition (`docs/cli-spec.md` → "Each transition into
+  `reviewable` opens a numbered review round"; `internal/db/queries/review_rounds.sql`
+  names catch-up auto-restore as one of `OpenReviewRound`'s three callers). "No
+  `request-review` needed" is a statement about the *agent verb* — the author does not
+  have to ask — not about round numbering.
+
+  The round opens **only when the branch actually transitions into `reviewable`**, which
+  is not every catch-up. `workbranchstore.ClearConflict` already distinguishes the two
+  cases and the distinction is the whole rule: a branch that was **demoted** (`conflict`
+  = `reset`, so it had been `reviewable`/`reviewed` before the conflict) flips back to
+  `reviewable` and gets a new round; a branch that was **merely flagged** and stayed
+  `draft` throughout just loses the flag, its state untouched — no transition, therefore
+  **no new round**. Opening one for the flagged-draft case would invent a review round
+  for a branch nobody has asked anyone to review.
+
+  This is load-bearing, not bookkeeping. Staleness in this codebase is **derived** from
+  `MAX(review_rounds.number)`; there is no stored stale flag. If the catch-up resumed the
+  same round, the pre-conflict verdicts would keep deriving as CURRENT — so the branch
+  would drop out of the awaiting-verdict filter and its approvals of content the target
+  has already invalidated would still count toward the approval bar. That is precisely
+  the staleness this spec and `docs/cli-spec.md` both say a conflict demotion must
+  produce, and the derived mechanism cannot express "interrupted round" without a new
+  number. Resolved as loam-lb6.
 - Catching up is **ordinary git**: `git fetch origin <target>`, merge it into the work
   branch, resolve the conflicts, commit, push. No Loam verb is involved; conflict
   resolution is the thing git is best at. An agent may do the same merge at any time on a
