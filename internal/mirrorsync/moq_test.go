@@ -5,6 +5,7 @@ package mirrorsync
 
 import (
 	"context"
+	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 	"github.com/google/uuid"
@@ -1098,5 +1099,167 @@ func (mock *targetBranchListerMock) ListTargetBranchesCalls() []struct {
 	mock.lockListTargetBranches.RLock()
 	calls = mock.calls.ListTargetBranches
 	mock.lockListTargetBranches.RUnlock()
+	return calls
+}
+
+// Ensure, that ingestedRefLookupMock does implement ingestedRefLookup.
+// If this is not the case, regenerate this file with moq.
+var _ ingestedRefLookup = &ingestedRefLookupMock{}
+
+// ingestedRefLookupMock is a mock implementation of ingestedRefLookup.
+//
+//	func TestSomethingThatUsesingestedRefLookup(t *testing.T) {
+//
+//		// make and configure a mocked ingestedRefLookup
+//		mockedingestedRefLookup := &ingestedRefLookupMock{
+//			IngestedRefFunc: func(ctx context.Context, repoID uuid.UUID, branch string) (reposstore.IngestedRef, error) {
+//				panic("mock out the IngestedRef method")
+//			},
+//		}
+//
+//		// use mockedingestedRefLookup in code that requires ingestedRefLookup
+//		// and then make assertions.
+//
+//	}
+type ingestedRefLookupMock struct {
+	// IngestedRefFunc mocks the IngestedRef method.
+	IngestedRefFunc func(ctx context.Context, repoID uuid.UUID, branch string) (reposstore.IngestedRef, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// IngestedRef holds details about calls to the IngestedRef method.
+		IngestedRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// Branch is the branch argument value.
+			Branch string
+		}
+	}
+	lockIngestedRef sync.RWMutex
+}
+
+// IngestedRef calls IngestedRefFunc.
+func (mock *ingestedRefLookupMock) IngestedRef(ctx context.Context, repoID uuid.UUID, branch string) (reposstore.IngestedRef, error) {
+	if mock.IngestedRefFunc == nil {
+		panic("ingestedRefLookupMock.IngestedRefFunc: method is nil but ingestedRefLookup.IngestedRef was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+		Branch string
+	}{
+		Ctx:    ctx,
+		RepoID: repoID,
+		Branch: branch,
+	}
+	mock.lockIngestedRef.Lock()
+	mock.calls.IngestedRef = append(mock.calls.IngestedRef, callInfo)
+	mock.lockIngestedRef.Unlock()
+	return mock.IngestedRefFunc(ctx, repoID, branch)
+}
+
+// IngestedRefCalls gets all the calls that were made to IngestedRef.
+// Check the length with:
+//
+//	len(mockedingestedRefLookup.IngestedRefCalls())
+func (mock *ingestedRefLookupMock) IngestedRefCalls() []struct {
+	Ctx    context.Context
+	RepoID uuid.UUID
+	Branch string
+} {
+	var calls []struct {
+		Ctx    context.Context
+		RepoID uuid.UUID
+		Branch string
+	}
+	mock.lockIngestedRef.RLock()
+	calls = mock.calls.IngestedRef
+	mock.lockIngestedRef.RUnlock()
+	return calls
+}
+
+// Ensure, that ingestJobEnqueuerMock does implement ingestJobEnqueuer.
+// If this is not the case, regenerate this file with moq.
+var _ ingestJobEnqueuer = &ingestJobEnqueuerMock{}
+
+// ingestJobEnqueuerMock is a mock implementation of ingestJobEnqueuer.
+//
+//	func TestSomethingThatUsesingestJobEnqueuer(t *testing.T) {
+//
+//		// make and configure a mocked ingestJobEnqueuer
+//		mockedingestJobEnqueuer := &ingestJobEnqueuerMock{
+//			EnqueueFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error {
+//				panic("mock out the Enqueue method")
+//			},
+//		}
+//
+//		// use mockedingestJobEnqueuer in code that requires ingestJobEnqueuer
+//		// and then make assertions.
+//
+//	}
+type ingestJobEnqueuerMock struct {
+	// EnqueueFunc mocks the Enqueue method.
+	EnqueueFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Enqueue holds details about calls to the Enqueue method.
+		Enqueue []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+			// Kind is the kind argument value.
+			Kind ingest.Kind
+		}
+	}
+	lockEnqueue sync.RWMutex
+}
+
+// Enqueue calls EnqueueFunc.
+func (mock *ingestJobEnqueuerMock) Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error {
+	if mock.EnqueueFunc == nil {
+		panic("ingestJobEnqueuerMock.EnqueueFunc: method is nil but ingestJobEnqueuer.Enqueue was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+		Kind         ingest.Kind
+	}{
+		Ctx:          ctx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+		Kind:         kind,
+	}
+	mock.lockEnqueue.Lock()
+	mock.calls.Enqueue = append(mock.calls.Enqueue, callInfo)
+	mock.lockEnqueue.Unlock()
+	return mock.EnqueueFunc(ctx, repoID, targetBranch, kind)
+}
+
+// EnqueueCalls gets all the calls that were made to Enqueue.
+// Check the length with:
+//
+//	len(mockedingestJobEnqueuer.EnqueueCalls())
+func (mock *ingestJobEnqueuerMock) EnqueueCalls() []struct {
+	Ctx          context.Context
+	RepoID       uuid.UUID
+	TargetBranch string
+	Kind         ingest.Kind
+} {
+	var calls []struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+		Kind         ingest.Kind
+	}
+	mock.lockEnqueue.RLock()
+	calls = mock.calls.Enqueue
+	mock.lockEnqueue.RUnlock()
 	return calls
 }
