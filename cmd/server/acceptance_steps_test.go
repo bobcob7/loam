@@ -217,7 +217,8 @@ func (h *acceptanceHarness) stepIPushToTheTargetBranch(ctx context.Context, bran
 }
 
 // stepThePushIsRejectedAsReadOnly asserts the last push failed with the
-// documented read-only reason (docs/git-spec.md's Ref Policy table).
+// documented read-only reason (docs/git-spec.md's "Ref Policy (push)"
+// rejection-reasons table).
 func (h *acceptanceHarness) stepThePushIsRejectedAsReadOnly(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if world.lastGitErr == nil {
