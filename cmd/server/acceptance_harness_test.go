@@ -57,16 +57,28 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 // errAdvanceDetectorNotImplemented, errMergeabilityCheckerNotImplemented,
 // errIngestEnqueuerNotImplemented, and errPRPollerNotImplemented mirror
 // cmd/server/main.go's own notImplementedOrchestrator/DiffComputer/
-// RepoDeleter idiom: a labeled, loud failure standing in for a
-// collaborator with no production implementation anywhere in the tree yet
-// (loam-giq.4, loam-giq.5, loam-c94.2, loam-giq.8, respectively -- all
-// still open), rather than a silent no-op that would misrepresent "the
-// next sync runs" as having actually detected, merge-checked, enqueued, or
-// polled anything. No scenario in this suite's default (@wip-filtered) run
-// exercises these today; they exist so the step vocabulary row itself is
-// wired and "resolvable" (loam-li0.5's own scope), ready for each
-// collaborator bead to swap in its real implementation here with no other
-// harness change.
+// RepoDeleter idiom: a labeled error standing in for a collaborator with
+// no production implementation anywhere in the tree yet (loam-giq.4,
+// loam-giq.5, loam-c94.2, loam-giq.8, respectively -- all still open),
+// rather than a silent no-op that would misrepresent "the next sync runs"
+// as having actually detected, merge-checked, enqueued, or polled
+// anything.
+//
+// This is loud FROM THE SCHEDULER's own point of view only:
+// mirrorsync.Scheduler's cycle logs each of these and writes
+// repos.sync_state='error' (scheduler.go), but never returns them through
+// Scheduler.Tick -- Tick's own error return is exclusively a ListRepos
+// failure (its doc comment). A caller that only checked Tick's return
+// value would see a nil error and nothing else, which is why
+// stepTheNextSyncRuns (acceptance_steps_test.go) additionally reads
+// repos.sync_state back after every tick and fails the step if it is
+// 'error' -- these vars alone are not "loud" to a godog step, only to the
+// database column the scheduler itself writes.
+//
+// No scenario in this suite's default (@wip-filtered) run exercises these
+// today; they exist so the step vocabulary row itself is wired and
+// "resolvable" (loam-li0.5's own scope), ready for each collaborator bead
+// to swap in its real implementation here with no other harness change.
 var (
 	errAdvanceDetectorNotImplemented     = errors.New("acceptance harness: AdvanceDetector not implemented (loam-giq.4)")
 	errMergeabilityCheckerNotImplemented = errors.New("acceptance harness: MergeabilityChecker not implemented (loam-giq.5)")

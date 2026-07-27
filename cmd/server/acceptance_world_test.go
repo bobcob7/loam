@@ -37,22 +37,29 @@ var acceptanceScenarioCounter atomic.Int64
 // driver call a When step most recently made, for a later Then step to
 // assert on.
 type acceptanceWorld struct {
-	workspace         string
-	repoGroup         string
-	repoName          string
-	repoID            uuid.UUID
-	targetBranch      string
-	workBranch        string
-	mirrorDir         string
-	agentName         string
-	agentID           string
-	agentRole         string
-	clonePath         string
-	lastCLI           loamCLIResult
-	lastGitOutput     string
-	lastGitErr        error
-	upstreamPRNumber  int
-	lastProposalPRURL string
+	workspace      string
+	repoGroup      string
+	repoName       string
+	repoID         uuid.UUID
+	targetBranch   string
+	workBranch     string
+	mirrorDir      string
+	agentName      string
+	agentID        string
+	agentRole      string
+	clonePath      string
+	lastCLI        loamCLIResult
+	lastGitOutput  string
+	lastGitErr     error
+	lastWorkBranch acceptanceWorkBranchOutput
+	// upstreamPRNumber is read by stepTheUpstreamPRMerges but nothing in
+	// this suite writes it yet: no step records the PR number
+	// ProposalService.AcceptProposal would return (loam-qkr, ProposalService
+	// itself is not registered in buildRouter yet), so it stays at its
+	// zero value today. Tracked as a known gap on loam-qkr/loam-a16, not
+	// silently -- stepTheUpstreamPRMerges still fails loudly (fakeforge
+	// has no PR #0 to merge) rather than passing vacuously.
+	upstreamPRNumber int
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.
@@ -66,18 +73,27 @@ func (w *acceptanceWorld) repo() string { return w.repoGroup + "/" + w.repoName 
 // already configured by `loam clone`'s bootstrapCloneIdentity) rather than
 // relying on any ambient gitconfig, per this repo's own constraint that
 // CI carries no global one.
+//
+// A write/add/commit failure is a BROKEN FIXTURE, not a policy rejection
+// under test, so it is returned directly (failing the calling step with a
+// clear "git add: ..." message) rather than folded into lastGitOutput/
+// lastGitErr -- those two fields carry only the PUSH's own outcome, which
+// is what every Then step in this file (stepThePushIsRejected,
+// stepThePushIsRejectedAsReadOnly, stepMyCommitsReachTheServerOn) actually
+// means to assert on. Conflating the two would let a scenario green
+// because its own setup broke, not because the server's policy genuinely
+// rejected anything -- exactly the trap the four gitpushsuite-backed
+// scenarios (loam-inq) would otherwise fall into, since all of them share
+// this helper.
 func (w *acceptanceWorld) writeCommitAndPush(filename, content, message, refspec string) error {
 	if err := os.WriteFile(filepath.Join(w.clonePath, filename), []byte(content+"\n"), 0o644); err != nil {
-		w.lastGitErr = fmt.Errorf("writing %s: %w", filename, err)
-		return nil
+		return fmt.Errorf("writing %s: %w", filename, err)
 	}
 	if out, err := runPlainGit(w.clonePath, "add", filename); err != nil {
-		w.lastGitOutput, w.lastGitErr = out, fmt.Errorf("git add: %w", err)
-		return nil
+		return fmt.Errorf("git add %s: %w\n%s", filename, err, out)
 	}
 	if out, err := runPlainGit(w.clonePath, "commit", "--quiet", "-m", message); err != nil {
-		w.lastGitOutput, w.lastGitErr = out, fmt.Errorf("git commit: %w", err)
-		return nil
+		return fmt.Errorf("git commit: %w\n%s", err, out)
 	}
 	out, err := runPlainGit(w.clonePath, "push", "origin", refspec)
 	w.lastGitOutput, w.lastGitErr = out, err

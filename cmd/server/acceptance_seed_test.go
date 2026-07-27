@@ -26,38 +26,17 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorpath"
 )
 
-// seedEnrolledRepoWithWorkBranch seeds world's repo (with its target
-// branch registered) and its one work branch directly into Postgres, then
-// builds a real bare mirror on disk at the exact path production derives
-// (mirrorpath.Dir) with both the target branch and the work branch
-// present, and finally reconciles that mirror (see
-// acceptanceHarness.reconcileSeededMirror's doc comment for why every
-// scenario must do this itself). This is the Background step "the repo ...
-// is enrolled with target branch ..." combined with "I have started the
-// work branch ..." -- both collapsed into one setup call since
-// clone-and-push.feature's Background always seeds them together and
-// neither step in isolation is a testing-spec core-vocabulary row (see
-// docs/testing-spec.md Layer 1's step-vocabulary table); this is
-// scenario-specific fixture setup, not a driver call in the actor sense.
-func (h *acceptanceHarness) seedEnrolledRepoWithWorkBranch(ctx context.Context, world *acceptanceWorld) error {
-	repoID, err := h.insertRepoRow(ctx, world)
-	if err != nil {
-		return err
-	}
-	if err := h.insertWorkBranchRow(ctx, repoID, world.workBranch, world.targetBranch, "draft", world.agentName); err != nil {
-		return err
-	}
-	mirrorDir, err := seedBareMirrorWithBranches(ctx, h.server.dataDir, world.repo(), world.targetBranch, world.workBranch)
-	if err != nil {
-		return err
-	}
-	world.mirrorDir = mirrorDir
-	return h.reconcileSeededMirror(ctx, mirrorDir)
-}
-
 // insertRepoRow inserts world's repo row plus its one registered target
 // branch, returning the generated repos.id for insertWorkBranchRow to
-// reference.
+// reference. Called from stepRepoIsEnrolled (acceptance_steps_test.go),
+// which implements the Background step "the repo ... is enrolled with
+// target branch ...": that step and "I have started the work branch ..."
+// (insertWorkBranchRow, seedBareMirrorWithBranches, below) are two
+// separate Gherkin steps, not one call, since neither is a
+// testing-spec core-vocabulary row (docs/testing-spec.md Layer 1's
+// step-vocabulary table) -- this is scenario-specific fixture setup, not
+// a driver call in the actor sense, and clone-and-push.feature's own
+// Background lists them as two Given lines.
 func (h *acceptanceHarness) insertRepoRow(ctx context.Context, world *acceptanceWorld) (uuid.UUID, error) {
 	repoID := uuid.Must(uuid.NewV7())
 	_, err := h.server.pool.Exec(ctx,

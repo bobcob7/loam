@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -249,13 +250,24 @@ func (h *acceptanceHarness) stepIPushFromIt(ctx context.Context) error {
 }
 
 // stepThePushIsRejected is the generic push-rejection assertion several
-// clone-and-push.feature scenarios share: any non-zero exit is
-// sufficient (the more specific rejection-reason scenarios use their own
-// dedicated Then step, e.g. stepThePushIsRejectedAsReadOnly).
+// clone-and-push.feature scenarios share (the more specific rejection-
+// reason scenarios use their own dedicated Then step, e.g.
+// stepThePushIsRejectedAsReadOnly). A non-zero exit is necessary but not
+// sufficient: it also requires the output carry a `remote: loam:`-prefixed
+// reason (docs/git-spec.md's "Ref Policy (push)" rejection-reasons table
+// -- every documented reason is `loam:`-prefixed and, per git's own
+// smart-HTTP client behavior, arrives on the pushing side as "remote:
+// loam: ..."), so a push that fails for some unrelated reason (a broken
+// fixture, a network error, git rejecting a non-fast-forward on its own
+// before ever reaching Loam's pre-receive hook) cannot be mistaken for a
+// genuine policy rejection.
 func (h *acceptanceHarness) stepThePushIsRejected(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if world.lastGitErr == nil {
 		return fmt.Errorf("push succeeded, want rejection\n%s", world.lastGitOutput)
+	}
+	if !strings.Contains(world.lastGitOutput, "remote: loam:") {
+		return fmt.Errorf("push failed, but not with a loam policy rejection:\n%s", world.lastGitOutput)
 	}
 	return nil
 }
@@ -284,16 +296,38 @@ func (h *acceptanceHarness) registerVocabularySteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I accept it$`, h.stepIAcceptIt)
 }
 
+// acceptanceWorkBranchOutput mirrors internal/cli/commands_work.go's own
+// workBranchOutput JSON shape (repo, name, target, title, state) -- `loam
+// work request-review`'s success output -- reproduced here rather than
+// imported, since internal/cli's type is unexported.
+type acceptanceWorkBranchOutput struct {
+	Repo   string `json:"repo"`
+	Name   string `json:"name"`
+	Target string `json:"target"`
+	Title  string `json:"title"`
+	State  string `json:"state"`
+}
+
 // stepIRequestReview is the core vocabulary row "I request review": one
-// `loam work request-review` invocation, parsed as JSON success or a
-// non-zero exit -- resolvable today (the CLI subprocess driver, `loam
-// work request-review <repo> <work-branch>`), even though the command
-// itself still returns errNotImplemented (internal/cli/commands_work.go)
-// pending its own implementation bead. No scenario in this suite's
-// default (@wip-filtered) run calls this step yet.
+// `loam work request-review <repo> <work-branch>` invocation, asserting
+// exit 0 and decoding its JSON success output, per
+// docs/testing-spec.md's own resolution for this row ("parse JSON,
+// assert exit code"). A non-zero exit is reported verbatim with stdout
+// and stderr rather than silently accepted -- a silent return here would
+// let any future scenario using this step pass regardless of what the
+// CLI actually did, exactly the failure mode this bead exists to
+// prevent.
 func (h *acceptanceHarness) stepIRequestReview(ctx context.Context) error {
 	world := worldFrom(ctx)
 	world.lastCLI = h.runLoamCLI(world, "work", "request-review", world.repo(), world.workBranch)
+	if world.lastCLI.exitCode != 0 {
+		return fmt.Errorf("loam work request-review exited %d, want 0\nstdout: %s\nstderr: %s", world.lastCLI.exitCode, world.lastCLI.stdout, world.lastCLI.stderr)
+	}
+	var out acceptanceWorkBranchOutput
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &out); err != nil {
+		return fmt.Errorf("decoding loam work request-review JSON output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	world.lastWorkBranch = out
 	return nil
 }
 
@@ -313,9 +347,43 @@ func (h *acceptanceHarness) stepTheUpstreamPRMerges(ctx context.Context) error {
 // mirrorsync.Scheduler.Tick, run to completion, via the harness's own
 // testsched.SyncHarness (see newSyncHarness's doc comment for why its
 // Run method is never reachable at all).
+//
+// Tick's own returned error is ONLY a ListRepos failure
+// (mirrorsync.Scheduler.Tick's doc comment): every per-repo cycle failure
+// -- including this harness's own not-implemented
+// AdvanceDetector/MergeabilityChecker/IngestEnqueuer/PRPoller stand-ins --
+// is logged and written to repos.sync_state by the scheduler itself
+// (scheduler.go's cycle/ReportError), never propagated back through Tick.
+// A step that only checked Tick's return value would pass even though the
+// cycle it just ran genuinely errored, so this reads repos.sync_state back
+// for world's own repo afterward and fails loudly if it is 'error' --
+// exactly the same "loud failure over silent wrong behavior" this
+// harness's own not-implemented stand-ins are meant to produce.
 func (h *acceptanceHarness) stepTheNextSyncRuns(ctx context.Context) error {
-	_, err := h.syncHarness.Tick(ctx)
-	return err
+	world := worldFrom(ctx)
+	if _, err := h.syncHarness.Tick(ctx); err != nil {
+		return err
+	}
+	return h.assertSyncNotErrored(ctx, world.repo())
+}
+
+// assertSyncNotErrored reads repos.sync_state and repos.sync_error back for
+// repo and fails loudly if the tick just run left it in the 'error' state.
+func (h *acceptanceHarness) assertSyncNotErrored(ctx context.Context, repo string) error {
+	var syncState string
+	var syncError *string
+	err := h.server.pool.QueryRow(ctx, `SELECT sync_state, sync_error FROM repos WHERE name = $1`, repo).Scan(&syncState, &syncError)
+	if err != nil {
+		return fmt.Errorf("reading sync_state for repo %s after tick: %w", repo, err)
+	}
+	if syncState != "error" {
+		return nil
+	}
+	message := ""
+	if syncError != nil {
+		message = *syncError
+	}
+	return fmt.Errorf("sync cycle for repo %s ended in sync_state=error: %s", repo, message)
 }
 
 // stepAfterIngestion is the core vocabulary row "after ingestion": one
@@ -338,12 +406,8 @@ func (h *acceptanceHarness) stepAfterIngestion(ctx context.Context) error {
 func (h *acceptanceHarness) stepIAcceptIt(ctx context.Context) error {
 	world := worldFrom(ctx)
 	client := h.newProposalServiceClient()
-	resp, err := acceptProposal(ctx, client, world.repo(), world.workBranch)
-	if err != nil {
-		return err
-	}
-	world.lastProposalPRURL = resp
-	return nil
+	_, err := acceptProposal(ctx, client, world.repo(), world.workBranch)
+	return err
 }
 
 // assertDirExists asserts path exists and is a directory.

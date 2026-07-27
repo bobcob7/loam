@@ -126,22 +126,11 @@ func gitRemotes(dir string) []string {
 	return strings.Split(trimmed, "\n")
 }
 
-// mirrorRefSubject returns the subject line of ref's current commit inside
-// the bare mirror at mirrorDir, addressed via --git-dir (never -C, so this
-// never accidentally walks upward past mirrorDir into some enclosing
-// repository -- the same reasoning internal/mirrorreconcile documents for
-// its own git invocations).
-func mirrorRefSubject(mirrorDir, ref string) (string, error) {
-	cmd := exec.Command("git", "--git-dir="+mirrorDir, "log", "-1", "--format=%s", ref)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 // mirrorRefSHA returns ref's current commit SHA inside the bare mirror at
-// mirrorDir.
+// mirrorDir, addressed via --git-dir (never -C, so this never accidentally
+// walks upward past mirrorDir into some enclosing repository -- the same
+// reasoning internal/mirrorreconcile documents for its own git
+// invocations).
 func mirrorRefSHA(mirrorDir, ref string) (string, error) {
 	cmd := exec.Command("git", "--git-dir="+mirrorDir, "rev-parse", ref)
 	out, err := cmd.Output()

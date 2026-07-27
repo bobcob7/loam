@@ -91,6 +91,28 @@ tasks:
       # this thinking it's redundant.
       - go test -tags=integration -count=1 ./...
 
+  test:acceptance:
+    desc: >-
+      Run the godog acceptance suite (loam-li0.5, docs/testing-spec.md
+      Layer 1) — real Postgres via testcontainers-go plus the in-process
+      server (cmd/server's own run()) and the compiled loam CLI as a real
+      subprocess per actor — needs a Docker (or Docker-API-compatible)
+      daemon. Same testcontainers/cache caveats as test:integration above:
+      on podman, also set TESTCONTAINERS_RYUK_DISABLED=true; CI's own job
+      running this must NOT set that var. @wip scenarios are excluded by
+      default (~@wip) — landing a feature is a tag removal in
+      features/*.feature, not a change to this target or the harness. To
+      prove a still-@wip scenario locally without touching the committed
+      tag, override the tag expression and temporarily strip @wip from
+      just that scenario in its .feature file, e.g.:
+        LOAM_ACCEPTANCE_TAGS="@wip" task test:acceptance
+      then revert the .feature file before committing.
+    cmds:
+      # -count=1 for the same reason test:integration's own comment gives:
+      # the container/server boot is the thing under test, and Go's test
+      # cache cannot tell a stale replayed "ok" apart from a genuine rerun.
+      - go test -tags=acceptance -count=1 ./cmd/server/... -run TestFeatures -v
+
   demo:m1:
     desc: >-
       Demo M1 (loam-ejr): run the store integration suite (loam-li0.6,

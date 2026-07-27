@@ -163,9 +163,10 @@ func main() {
 // with its own cancelable context instead of a real OS signal it cannot
 // send itself (a test process sending SIGINT/SIGTERM to itself would tear
 // down the whole `go test` binary, not just the in-process server under
-// test). This is the literal "same constructor graph as cmd/server/main.go"
-// docs/testing-spec.md's Layer 1 topology requires: the harness calls run,
-// not a hand-rolled subset of its steps.
+// test). This is what lets the acceptance harness be "wired through the
+// same constructor graph as `main()`" (docs/testing-spec.md, Layer 1's
+// "Topology" paragraph): the harness calls run, not a hand-rolled subset
+// of its steps.
 //
 // The sync scheduler is deliberately not constructed here: 5 of its 7
 // collaborators (Fetcher/loam-giq.2, AdvanceDetector/loam-giq.4,
@@ -203,13 +204,23 @@ func main() {
 // every request-handling path already closes over them via buildRouter.
 // The one caller that does need them is loam-li0.5's acceptance harness,
 // which must call this exact function -- the "same constructor graph as
-// cmd/server/main.go" docs/testing-spec.md's Layer 1 topology requires --
+// `main()`" docs/testing-spec.md's Layer 1 "Topology" paragraph requires --
 // while still building its own testsched.SyncHarness/IngestHarness over
 // the SAME pool and ingest.Pool this call constructs, not a second,
 // divergent instance. A callback is the minimal seam for that: it adds no
 // branching to the startup sequence itself (every line above and below it
 // is unchanged from before this parameter existed) and cannot be invoked
 // more than once, since run() itself never loops.
+//
+// onReady's contract: it is called synchronously, on this same goroutine,
+// AFTER the HTTP listener is already bound (newListener above has already
+// succeeded) but BEFORE serve starts accepting connections on it. It must
+// neither block nor panic -- a non-nil onReady that does either wedges or
+// crashes startup with the port already bound and nothing actually being
+// served, which is strictly worse than never calling onReady at all. This
+// is why production's onReady is always nil today: the only caller that
+// exists (loam-li0.5's acceptance harness) sends its handles over a
+// buffered channel and returns immediately, never blocking here.
 func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onReady func(pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string)) error {
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
