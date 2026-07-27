@@ -662,6 +662,275 @@ func insertSymbolOnBranch(ctx context.Context, t *testing.T, pool *pgxpool.Pool,
 	return id
 }
 
+// insertReference seeds one symbol_references row directly (bypassing
+// ReplaceFileReferences), mirroring insertSymbol, so
+// LookupReferencesByName's scoping tests can build exact fixtures without
+// depending on the delete-and-replace path exercised separately.
+func insertReference(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID, file, name string, line int32) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx,
+		`INSERT INTO symbol_references (id, repo_id, target_branch, file, name, kind, line) VALUES ($1, $2, 'main', $3, $4, 'call', $5)`,
+		id, repoID, file, name, line,
+	)
+	require.NoError(t, err)
+	return id
+}
+
+// insertReferenceOnBranch mirrors insertSymbolOnBranch for
+// symbol_references, letting the caller pick target_branch.
+func insertReferenceOnBranch(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID, targetBranch, file, name string, line int32) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx,
+		`INSERT INTO symbol_references (id, repo_id, target_branch, file, name, kind, line) VALUES ($1, $2, $3, $4, $5, 'call', $6)`,
+		id, repoID, targetBranch, file, name, line,
+	)
+	require.NoError(t, err)
+	return id
+}
+
+// referenceIDsFromReferences extracts reference ids from a Reference slice
+// for order-independent set comparisons.
+func referenceIDsFromReferences(refs []Reference) []uuid.UUID {
+	ids := make([]uuid.UUID, len(refs))
+	for i, r := range refs {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// --- LookupReferencesByName (loam-4na): name -> []Reference, backing
+// `graph refs` -- mirrors the LookupSymbolsByName integration suite below,
+// scoping-by-scoping, per this bead's DESIGN CONSTRAINT. ---
+
+// TestLookupReferencesByName_MultipleUseSites proves several references to
+// the same name all come back as one call's result -- refs is naturally
+// many-rows-per-name (every call site), unlike def's ambiguity case.
+func TestLookupReferencesByName_MultipleUseSites(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	a := insertReference(ctx, t, pool, repoID, "a.go", "Login", 5)
+	b := insertReference(ctx, t, pool, repoID, "b.go", "Login", 12)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 2, "every reference to the name must return")
+	assert.ElementsMatch(t, []uuid.UUID{a, b}, referenceIDsFromReferences(refs))
+}
+
+// TestLookupReferencesByName_NoMatchIsEmptyNotError proves a name with zero
+// referencing rows comes back empty, not an error -- but see this bead's
+// report: unlike LookupSymbolsByName, this is not by itself an
+// authoritative not-found signal for the *symbol* (see
+// TestLookupReferencesByName_DistinguishesFromUnreferencedSymbol below).
+func TestLookupReferencesByName_NoMatchIsEmptyNotError(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "a.go", "Login", 5) // unrelated reference exists in scope
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "NoSuchName", "", 0)
+	require.NoError(t, err, "a genuine not-found must not be an error")
+	assert.False(t, truncated)
+	assert.Empty(t, refs, "zero matching references must come back as an empty slice, never a phantom match from an unrelated name")
+}
+
+// TestLookupReferencesByName_EmptyNameMatchesNothing pins that the SQL's
+// empty-string-means-no-filter sentinel applies ONLY to $4 (--file), not
+// to $3 (name): symbol_references.name is NOT NULL text exactly like
+// symbol_references.file is, so widening $4's own OR-empty-string clause
+// to also cover $3 would compile and behave identically -- a
+// plausible-looking "make these consistent" edit that would silently turn
+// an empty name into "match every reference in scope" instead of matching
+// nothing. The review round for this bead flagged that no test pinned this
+// asymmetry.
+func TestLookupReferencesByName_EmptyNameMatchesNothing(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "a.go", "Login", 5)
+	insertReference(ctx, t, pool, repoID, "b.go", "Logout", 9)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, refs, "an empty name must match nothing, never every reference in scope -- name has no wildcard sentinel, unlike --file")
+}
+
+// TestLookupReferencesByName_DistinguishesFromUnreferencedSymbol is this
+// bead's central design point, exercised end-to-end: "no such symbol" and
+// "symbol exists but has never been referenced" both make
+// LookupReferencesByName return empty, so a caller needing the distinction
+// (docs/cli-spec.md exit 3 for `graph refs`) must compose this with
+// LookupSymbolsByName -- the same composition Dependents/Deps/History
+// already require. This proves that composition actually works: a name
+// with no symbol at all resolves to zero from LookupSymbolsByName (exit 3);
+// a name that IS a real, defined symbol but has zero call sites resolves to
+// one row from LookupSymbolsByName and zero, non-error rows from
+// LookupReferencesByName (exit 0, empty results) -- genuinely
+// distinguishable by a caller holding both results, even though
+// LookupReferencesByName alone cannot tell the two apart.
+func TestLookupReferencesByName_DistinguishesFromUnreferencedSymbol(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	unreferencedID := insertSymbol(ctx, t, pool, repoID, "unused.go", "Orphan")
+
+	notFoundSymbols, _, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "DoesNotExist", "", 0)
+	require.NoError(t, err)
+	assert.Empty(t, notFoundSymbols, "no symbol named DoesNotExist exists -- this is the not-found case")
+	notFoundRefs, _, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "DoesNotExist", "", 0)
+	require.NoError(t, err)
+	assert.Empty(t, notFoundRefs)
+
+	foundSymbols, _, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Orphan", "", 0)
+	require.NoError(t, err)
+	require.Len(t, foundSymbols, 1, "Orphan exists as a symbol -- this is NOT the not-found case")
+	assert.Equal(t, unreferencedID, foundSymbols[0].ID)
+
+	foundRefs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Orphan", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, foundRefs, "Orphan is never referenced -- an empty reference set, not a not-found condition")
+}
+
+// TestLookupReferencesByName_NarrowedByFile proves --file narrows to
+// references in exactly one file (docs/cli-spec.md: "--file <path> narrows
+// the target to the definition in one file" -- the same narrowing applies
+// to refs' use sites).
+func TestLookupReferencesByName_NarrowedByFile(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "web/login.go", "Login", 5)
+	cliRef := insertReference(ctx, t, pool, repoID, "cli/login.go", "Login", 9)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "cli/login.go", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 1, "--file must narrow to references in exactly one file")
+	assert.Equal(t, cliRef, refs[0].ID)
+}
+
+// TestLookupReferencesByName_NarrowedByFile_NoMatchIsNotFound proves --file
+// narrowing an existing name down to a file with no matching reference is
+// itself a not-found result (empty, not an error).
+func TestLookupReferencesByName_NarrowedByFile_NoMatchIsNotFound(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "web/login.go", "Login", 5)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "cli/login.go", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, refs, "Login is referenced in web/login.go, not cli/login.go -- narrowing to the wrong file is not-found")
+}
+
+// TestLookupReferencesByName_ExcludesOutOfScopeRepo mirrors
+// TestLookupSymbolsByName_ExcludesOutOfScopeRepo: it seeds a reference with
+// the SAME name in a repo NOT in the lookup's scope -- one that would sort
+// first (file "aaa.go") if the repo-id filter were dropped or broadened --
+// and proves it never appears.
+func TestLookupReferencesByName_ExcludesOutOfScopeRepo(t *testing.T) {
+	t.Parallel()
+	store, pool, inScopeRepo := newTestStore(t)
+	ctx := t.Context()
+	outOfScopeRepo := insertRepo(ctx, t, pool, "group/refs-out-of-scope")
+
+	inScopeID := insertReference(ctx, t, pool, inScopeRepo, "zzz.go", "Login", 1)
+	insertReference(ctx, t, pool, outOfScopeRepo, "aaa.go", "Login", 1)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{inScopeRepo}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 1, "the out-of-scope repo's same-named reference must never appear")
+	assert.Equal(t, inScopeID, refs[0].ID)
+}
+
+// TestLookupReferencesByName_ExcludesOtherTargetBranch proves target_branch
+// scoping specifically: a same-named reference on a different branch of the
+// SAME repo must not appear, seeded in a file that would sort first if
+// branch filtering were dropped.
+func TestLookupReferencesByName_ExcludesOtherTargetBranch(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	mainID := insertReferenceOnBranch(ctx, t, pool, repoID, "main", "zzz.go", "Login", 1)
+	insertReferenceOnBranch(ctx, t, pool, repoID, "feature", "aaa.go", "Login", 1)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 1, "a same-named reference on a different target_branch must never appear")
+	assert.Equal(t, mainID, refs[0].ID)
+}
+
+// TestLookupReferencesByName_IncludesMultipleInScopeRepos proves the plural
+// repoIDs scope is a genuine multi-repo OR: two different in-scope repos
+// each referencing "Login" must both be returned from one call.
+func TestLookupReferencesByName_IncludesMultipleInScopeRepos(t *testing.T) {
+	t.Parallel()
+	store, pool, repoA := newTestStore(t)
+	ctx := t.Context()
+	repoB := insertRepo(ctx, t, pool, "group/refs-second-in-scope")
+
+	idA := insertReference(ctx, t, pool, repoA, "a.go", "Login", 1)
+	idB := insertReference(ctx, t, pool, repoB, "b.go", "Login", 1)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoA, repoB}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 2, "both in-scope repos' matches must be returned from a single call")
+	assert.ElementsMatch(t, []uuid.UUID{idA, idB}, referenceIDsFromReferences(refs))
+}
+
+// TestLookupReferencesByName_TruncatesAndReportsTruncated proves the
+// limit/truncated contract against a real database: docs/cli-spec.md:535-537
+// requires truncated: true on a capped `graph` response for every
+// subquery, refs included -- this seeds 4 use sites of the same name and
+// asks for at most 2. It also pins WHICH 2 of the 4 survive (f0.go, f1.go,
+// the ORDER BY sr.file, sr.line, sr.id head), not merely that 2 survive:
+// the review round for this bead found that swapping the query's
+// `ORDER BY sr.file, sr.line, sr.id` for `ORDER BY sr.id DESC` still passed
+// the whole suite when only Len==2 was asserted here -- LIMIT's contract
+// depends entirely on which order it caps, exactly the failure mode
+// TestDependents_NearestDepthFirst_NotUUIDOrder (FIX 2, above) already
+// guards for Dependents.
+func TestLookupReferencesByName_TruncatesAndReportsTruncated(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	for i := range 4 {
+		insertReference(ctx, t, pool, repoID, fmt.Sprintf("f%d.go", i), "Login", int32(i+1))
+	}
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
+	require.Len(t, refs, 2)
+	assert.Equal(t, []string{"f0.go", "f1.go"}, []string{refs[0].File, refs[1].File}, "a capped result must keep the ORDER BY-first rows (f0.go, f1.go), not an arbitrary 2 of the 4 matches")
+}
+
+// TestLookupReferencesByName_ExactlyLimitMatches_NotTruncated is the
+// negative case against a real database: exactly limit matches must not
+// report truncated=true.
+func TestLookupReferencesByName_ExactlyLimitMatches_NotTruncated(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "a.go", "Login", 1)
+	insertReference(ctx, t, pool, repoID, "b.go", "Login", 2)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.False(t, truncated, "exactly 2 matches for a limit of 2 must not be reported as truncated")
+	assert.Len(t, refs, 2)
+}
+
 // TestLookupSymbolsByName_ExactlyOneMatch is the unambiguous case: one
 // symbol named "Login" resolves to exactly one row.
 func TestLookupSymbolsByName_ExactlyOneMatch(t *testing.T) {

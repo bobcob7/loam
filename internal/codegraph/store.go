@@ -49,6 +49,34 @@ type ReferenceInput struct {
 	Line int32
 }
 
+// Reference is a persisted symbol_references row: one use site of a name,
+// as opposed to Symbol, which is a definition site. The two types are
+// deliberately NOT unified even though symbols and symbol_references are
+// column-for-column compatible today (id, repo_id, target_branch, file,
+// name, kind, plus a line -- nullable on Symbol for file-level symbols,
+// always present here since every reference is a concrete use site): they
+// answer different questions ("where is this defined" vs "where is this
+// used"), symbol_references carries no symbol_id/FK back to symbols at all
+// (0002_code_intel.up.sql), and collapsing them into one type would make
+// it easy for a caller to accidentally treat a use site as a definition
+// site (or vice versa) since the compiler could no longer tell them apart.
+// See LookupReferencesByName's doc comment for the read path this backs.
+//
+// Kind is carried because it is real symbol_references column data, but
+// docs/cli-spec.md:544's `refs` row shape (`{ repo, file, line, symbol }`)
+// deliberately omits a kind field -- unlike `def`/`deps`/`dependents`'s row
+// shapes, which all include one. A `graph refs` handler built on this type
+// must drop Kind when it serializes a result row, not pass it through.
+type Reference struct {
+	ID           uuid.UUID
+	RepoID       uuid.UUID
+	TargetBranch string
+	File         string
+	Name         string
+	Kind         string
+	Line         int32
+}
+
 // Dependency is one entry in a Dependents/Deps transitive result: the
 // reached symbol, plus the depth (hop count) at which it was first
 // reached. Depth is informational only -- it plays no part in cycle
@@ -296,6 +324,70 @@ func (s *Store) LookupSymbolsByName(ctx context.Context, repoIDs []uuid.UUID, ta
 	return symbols, truncated, nil
 }
 
+// LookupReferencesByName resolves name to every matching symbol_references
+// row -- backing `graph refs` (docs/cli-spec.md "Graph DB queries") --
+// mirroring LookupSymbolsByName above in shape, scoping (repoIDs plural for
+// `--all` fan-out, targetBranch, optional file narrowing), and the
+// limit/truncated contract (clampLimit/fetchLimit, limit+1 fetch), per this
+// bead's DESIGN CONSTRAINT: `graph def` and `graph refs` must not diverge
+// in how their store seams are scoped just because symbols and
+// symbol_references happen to be column-for-column compatible. See
+// internal/db/queries/code_graph.sql's LookupReferencesByName comment for
+// the query-level rationale this mirrors.
+//
+// An empty repoIDs matches nothing, identical to LookupSymbolsByName and
+// internal/chunkstore.Search's "empty scope means search nothing" rule --
+// loam-ofg.10 owns expanding an empty scope into concrete repo ids before
+// calling this.
+//
+// Unlike LookupSymbolsByName, an empty result here is NOT by itself an
+// authoritative not-found signal: this query answers only "which
+// references named name exist in scope", and "no symbol named name exists
+// at all" is a genuinely different question that "the symbol exists but
+// has never been referenced" also answers with zero rows here -- both
+// collapse to the same empty result. Joining symbol_references to symbols
+// to resolve that distinction in one query would be the wrong fix even
+// though the join is mechanically possible (no FK is required to join on
+// the shared (repo_id, target_branch, name) triple): it would silently
+// drop real reference rows whose target is defined in another repo or a
+// third-party library never present in symbols (docs/cli-spec.md:553-557,
+// the MVP does not resolve cross-repo edges), and it would multiply rows
+// under an ambiguous target (:528-533's several-Logins-in-several-files
+// case) before LIMIT ever sees them, breaking the truncated contract --
+// see internal/db/queries/code_graph.sql's LookupReferencesByName comment
+// for the full reasoning. A caller that needs the not-found distinction
+// (docs/cli-spec.md exit 3 for `graph refs`) must call
+// LookupSymbolsByName(name) first to establish existence, the same
+// composition Dependents/Deps/History already require to turn a name into
+// a symbol id -- refs joins an established two-step pattern rather than
+// inventing a new one.
+func (s *Store) LookupReferencesByName(ctx context.Context, repoIDs []uuid.UUID, targetBranch, name, file string, limit int32) (refs []Reference, truncated bool, err error) {
+	if len(repoIDs) == 0 {
+		return nil, false, nil
+	}
+	effectiveLimit := clampLimit(limit)
+	ids := make([]pgtype.UUID, len(repoIDs))
+	for i, id := range repoIDs {
+		ids[i] = pgUUID(id)
+	}
+	rows, err := s.q.LookupReferencesByName(ctx, gen.LookupReferencesByNameParams{
+		Column1:      ids,
+		TargetBranch: targetBranch,
+		Name:         name,
+		Column4:      file,
+		Limit:        fetchLimit(effectiveLimit),
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("looking up references named %q: %w", name, err)
+	}
+	all := make([]Reference, len(rows))
+	for i, r := range rows {
+		all[i] = fromGenReference(r)
+	}
+	refs, truncated = trimReferences(all, effectiveLimit)
+	return refs, truncated, nil
+}
+
 // Dependents returns the reverse blast radius of symbolID: every symbol
 // that transitively depends on it, deduplicated (by minimum depth),
 // nearest-depth-first, up to limit rows (limit <= 0 uses defaultLimit).
@@ -463,6 +555,32 @@ func trimSymbols(symbols []Symbol, effectiveLimit int32) ([]Symbol, bool) {
 		return symbols[:effectiveLimit], true
 	}
 	return symbols, false
+}
+
+// fromGenReference converts a sqlc-generated symbol_references row (the
+// LookupReferencesByName query selects the symbol_references table's own
+// columns, so sqlc synthesizes the built-in gen.SymbolReference model
+// rather than a query-specific Row type) into this package's exported
+// Reference type -- fromGenSymbol's analogue for the references side.
+func fromGenReference(r gen.SymbolReference) Reference {
+	return Reference{
+		ID:           uuidFromPg(r.ID),
+		RepoID:       uuidFromPg(r.RepoID),
+		TargetBranch: r.TargetBranch,
+		File:         r.File,
+		Name:         r.Name,
+		Kind:         r.Kind,
+		Line:         r.Line,
+	}
+}
+
+// trimReferences trims refs to effectiveLimit rows, reporting whether it
+// held more than that -- trimSymbols' analogue over the Reference shape.
+func trimReferences(refs []Reference, effectiveLimit int32) ([]Reference, bool) {
+	if int32(len(refs)) > effectiveLimit {
+		return refs[:effectiveLimit], true
+	}
+	return refs, false
 }
 
 // trimDependencies trims deps to effectiveLimit rows, reporting whether it

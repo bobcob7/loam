@@ -46,6 +46,9 @@ var _ querier = &querierMock{}
 //			InsertSymbolsFunc: func(ctx context.Context, arg []gen.InsertSymbolsParams) (int64, error) {
 //				panic("mock out the InsertSymbols method")
 //			},
+//			LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+//				panic("mock out the LookupReferencesByName method")
+//			},
 //			LookupSymbolsByNameFunc: func(ctx context.Context, arg gen.LookupSymbolsByNameParams) ([]gen.Symbol, error) {
 //				panic("mock out the LookupSymbolsByName method")
 //			},
@@ -88,6 +91,9 @@ type querierMock struct {
 
 	// InsertSymbolsFunc mocks the InsertSymbols method.
 	InsertSymbolsFunc func(ctx context.Context, arg []gen.InsertSymbolsParams) (int64, error)
+
+	// LookupReferencesByNameFunc mocks the LookupReferencesByName method.
+	LookupReferencesByNameFunc func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error)
 
 	// LookupSymbolsByNameFunc mocks the LookupSymbolsByName method.
 	LookupSymbolsByNameFunc func(ctx context.Context, arg gen.LookupSymbolsByNameParams) ([]gen.Symbol, error)
@@ -163,6 +169,13 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg []gen.InsertSymbolsParams
 		}
+		// LookupReferencesByName holds details about calls to the LookupReferencesByName method.
+		LookupReferencesByName []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.LookupReferencesByNameParams
+		}
 		// LookupSymbolsByName holds details about calls to the LookupSymbolsByName method.
 		LookupSymbolsByName []struct {
 			// Ctx is the ctx argument value.
@@ -194,6 +207,7 @@ type querierMock struct {
 	lockInsertSymbolHistory           sync.RWMutex
 	lockInsertSymbolReferences        sync.RWMutex
 	lockInsertSymbols                 sync.RWMutex
+	lockLookupReferencesByName        sync.RWMutex
 	lockLookupSymbolsByName           sync.RWMutex
 	lockResolveGraphEdgeCandidates    sync.RWMutex
 	lockSymbolHistory                 sync.RWMutex
@@ -520,6 +534,42 @@ func (mock *querierMock) InsertSymbolsCalls() []struct {
 	mock.lockInsertSymbols.RLock()
 	calls = mock.calls.InsertSymbols
 	mock.lockInsertSymbols.RUnlock()
+	return calls
+}
+
+// LookupReferencesByName calls LookupReferencesByNameFunc.
+func (mock *querierMock) LookupReferencesByName(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+	if mock.LookupReferencesByNameFunc == nil {
+		panic("querierMock.LookupReferencesByNameFunc: method is nil but querier.LookupReferencesByName was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.LookupReferencesByNameParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockLookupReferencesByName.Lock()
+	mock.calls.LookupReferencesByName = append(mock.calls.LookupReferencesByName, callInfo)
+	mock.lockLookupReferencesByName.Unlock()
+	return mock.LookupReferencesByNameFunc(ctx, arg)
+}
+
+// LookupReferencesByNameCalls gets all the calls that were made to LookupReferencesByName.
+// Check the length with:
+//
+//	len(mockedquerier.LookupReferencesByNameCalls())
+func (mock *querierMock) LookupReferencesByNameCalls() []struct {
+	Ctx context.Context
+	Arg gen.LookupReferencesByNameParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.LookupReferencesByNameParams
+	}
+	mock.lockLookupReferencesByName.RLock()
+	calls = mock.calls.LookupReferencesByName
+	mock.lockLookupReferencesByName.RUnlock()
 	return calls
 }
 

@@ -81,6 +81,7 @@ type querier interface {
 	DeleteGraphEdgesForRepoBranch(ctx context.Context, arg gen.DeleteGraphEdgesForRepoBranchParams) error
 	ResolveGraphEdgeCandidates(ctx context.Context, arg gen.ResolveGraphEdgeCandidatesParams) ([]gen.ResolveGraphEdgeCandidatesRow, error)
 	LookupSymbolsByName(ctx context.Context, arg gen.LookupSymbolsByNameParams) ([]gen.Symbol, error)
+	LookupReferencesByName(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error)
 	InsertGraphEdges(ctx context.Context, arg []gen.InsertGraphEdgesParams) (int64, error)
 	Dependents(ctx context.Context, arg gen.DependentsParams) ([]gen.DependentsRow, error)
 	Deps(ctx context.Context, arg gen.DepsParams) ([]gen.DepsRow, error)

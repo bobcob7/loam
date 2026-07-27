@@ -467,6 +467,264 @@ func TestLookupSymbolsByName_QueryErrorWraps(t *testing.T) {
 	assert.ErrorIs(t, err, errBoom)
 }
 
+// genReference builds a gen.SymbolReference row for LookupReferencesByName
+// mock returns.
+func genReference(id, repoID uuid.UUID, file, name string, line int32) gen.SymbolReference {
+	return gen.SymbolReference{
+		ID:           pgUUID(id),
+		RepoID:       pgUUID(repoID),
+		TargetBranch: "main",
+		File:         file,
+		Name:         name,
+		Kind:         "call",
+		Line:         line,
+	}
+}
+
+// TestLookupReferencesByName_EmptyRepoIDsSkipsQuery mirrors
+// TestLookupSymbolsByName_EmptyRepoIDsSkipsQuery: an empty repoIDs must
+// return immediately without ever reaching the query layer, matching
+// LookupSymbolsByName and internal/chunkstore.Search's "empty scope means
+// search nothing" rule.
+func TestLookupReferencesByName_EmptyRepoIDsSkipsQuery(t *testing.T) {
+	t.Parallel()
+	queryCalled := false
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			queryCalled = true
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), nil, "main", "Login", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+	assert.False(t, truncated)
+	assert.False(t, queryCalled, "an empty repoIDs scope must never reach the query layer")
+}
+
+// TestLookupReferencesByName_ScopesByRepoIDsAndFile proves the Go-level
+// parameters land in the exact gen params LookupReferencesByName's SQL
+// expects, mirroring TestLookupSymbolsByName_ScopesByRepoIDsAndFile.
+func TestLookupReferencesByName_ScopesByRepoIDsAndFile(t *testing.T) {
+	t.Parallel()
+	repoA, repoB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	var got gen.LookupReferencesByNameParams
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			got = arg
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	_, _, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{repoA, repoB}, "main", "Login", "auth.go", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []pgtype.UUID{pgUUID(repoA), pgUUID(repoB)}, got.Column1)
+	assert.Equal(t, "main", got.TargetBranch)
+	assert.Equal(t, "Login", got.Name)
+	assert.Equal(t, "auth.go", got.Column4, "a non-empty --file must be passed through as the narrowing param")
+}
+
+// TestLookupReferencesByName_NoFileFilterPassesEmptyString mirrors
+// TestLookupSymbolsByName_NoFileFilterPassesEmptyString: omitting --file
+// must reach the query as an empty string, the SQL's "no narrowing"
+// sentinel.
+func TestLookupReferencesByName_NoFileFilterPassesEmptyString(t *testing.T) {
+	t.Parallel()
+	var got gen.LookupReferencesByNameParams
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			got = arg
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	_, _, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{uuid.Must(uuid.NewV7())}, "main", "Login", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Column4)
+}
+
+// TestLookupReferencesByName_FetchesLimitPlusOne mirrors
+// TestLookupSymbolsByName_FetchesLimitPlusOne: the Store must ask for one
+// more row than the caller's limit so it can detect truncation without a
+// second round trip.
+func TestLookupReferencesByName_FetchesLimitPlusOne(t *testing.T) {
+	t.Parallel()
+	var gotLimit int32
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			gotLimit = arg.Limit
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	_, _, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{uuid.Must(uuid.NewV7())}, "main", "Login", "", 7)
+	require.NoError(t, err)
+	assert.Equal(t, int32(8), gotLimit)
+}
+
+// TestLookupReferencesByName_ClampsNonPositiveLimitToDefaultThenFetchesOneMore
+// mirrors LookupSymbolsByName's identical clampLimit/fetchLimit composition
+// test.
+func TestLookupReferencesByName_ClampsNonPositiveLimitToDefaultThenFetchesOneMore(t *testing.T) {
+	t.Parallel()
+	var gotLimit int32
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			gotLimit = arg.Limit
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	_, _, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{uuid.Must(uuid.NewV7())}, "main", "Login", "", 0)
+	require.NoError(t, err)
+	assert.Equal(t, int32(defaultLimit+1), gotLimit)
+}
+
+// TestLookupReferencesByName_TrimsToLimitAndReportsTruncated proves the
+// truncation contract this bead adds: given more rows than the caller's
+// limit, LookupReferencesByName must trim to exactly limit and report
+// truncated=true. It also pins WHICH rows survive the trim (the head, not
+// the tail, of the limit+1 fetch): a query already orders results
+// deterministically before LIMIT applies, so a truncated answer's identity
+// depends on trimReferences keeping the front of that order, not an
+// arbitrary effectiveLimit-sized slice -- trimReferences returning
+// refs[len(refs)-effectiveLimit:] instead of refs[:effectiveLimit] would
+// still satisfy Len==2 and truncated==true while silently returning the
+// wrong rows, which the review round for this bead flagged as an
+// unasserted hole.
+func TestLookupReferencesByName_TrimsToLimitAndReportsTruncated(t *testing.T) {
+	t.Parallel()
+	repoID := uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			assert.Equal(t, int32(3), arg.Limit, "must request limit+1 = 3 for a caller limit of 2")
+			return []gen.SymbolReference{
+				genReference(uuid.Must(uuid.NewV7()), repoID, "a.go", "Login", 1),
+				genReference(uuid.Must(uuid.NewV7()), repoID, "b.go", "Login", 2),
+				genReference(uuid.Must(uuid.NewV7()), repoID, "c.go", "Login", 3),
+			}, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.True(t, truncated, "3 rows fetched for a limit of 2 must report truncated=true")
+	require.Len(t, refs, 2, "the result must be trimmed back down to the caller's limit")
+	assert.Equal(t, []string{"a.go", "b.go"}, []string{refs[0].File, refs[1].File}, "the trim must keep the HEAD of the fetched order (a.go, b.go), not an arbitrary 2 of the 3 fetched rows")
+}
+
+// TestLookupReferencesByName_ExactlyLimitRows_NotTruncated is the negative
+// case: exactly limit rows must not be reported as truncated.
+func TestLookupReferencesByName_ExactlyLimitRows_NotTruncated(t *testing.T) {
+	t.Parallel()
+	repoID := uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			return []gen.SymbolReference{
+				genReference(uuid.Must(uuid.NewV7()), repoID, "a.go", "Login", 1),
+				genReference(uuid.Must(uuid.NewV7()), repoID, "b.go", "Login", 2),
+			}, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{repoID}, "main", "Login", "", 2)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Len(t, refs, 2)
+}
+
+// TestLookupReferencesByName_ZeroRowsIsNotAnError proves a genuine "no
+// references matched" comes back as an empty, non-error result -- but see
+// TestLookupReferencesByName's doc comment (and this bead's report): unlike
+// LookupSymbolsByName, this empty result is NOT by itself an authoritative
+// not-found signal, since symbol_references has no FK to symbols and a
+// real, defined symbol can legitimately have zero references. A caller
+// needing that distinction composes this with LookupSymbolsByName, proved
+// at the integration level.
+func TestLookupReferencesByName_ZeroRowsIsNotAnError(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			return nil, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{uuid.Must(uuid.NewV7())}, "main", "NoSuchSymbol", "", 10)
+	require.NoError(t, err, "zero matches must not be an error")
+	assert.Empty(t, refs)
+	assert.False(t, truncated)
+}
+
+// TestLookupReferencesByName_MultipleMatchesReturnedAsData proves several
+// use sites of the same name all come back, not just one -- refs is
+// naturally many-rows-per-name (every call site), unlike def's ambiguity
+// case, but the "return every match" contract is identical.
+func TestLookupReferencesByName_MultipleMatchesReturnedAsData(t *testing.T) {
+	t.Parallel()
+	repoID := uuid.Must(uuid.NewV7())
+	idA, idB, idC := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			return []gen.SymbolReference{
+				genReference(idA, repoID, "a.go", "Login", 1),
+				genReference(idB, repoID, "b.go", "Login", 2),
+				genReference(idC, repoID, "c.go", "Login", 3),
+			}, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{repoID}, "main", "Login", "", 10)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 3, "every reference to the name must return, not fail or pick one")
+}
+
+// TestLookupReferencesByName_MapsRowsToReferences proves field-by-field
+// conversion from the sqlc gen.SymbolReference row into this package's
+// exported Reference type -- Line is a plain int32 here (never nil), unlike
+// Symbol.Line, since symbol_references.line is NOT NULL
+// (0002_code_intel.up.sql).
+func TestLookupReferencesByName_MapsRowsToReferences(t *testing.T) {
+	t.Parallel()
+	refID := uuid.Must(uuid.NewV7())
+	repoID := uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			return []gen.SymbolReference{
+				genReference(refID, repoID, "a.go", "Login", 42),
+			}, nil
+		},
+	}
+	store := New(mock, testLogger())
+	refs, truncated, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{repoID}, "main", "Login", "", 10)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, refs, 1)
+	assert.Equal(t, refID, refs[0].ID)
+	assert.Equal(t, repoID, refs[0].RepoID)
+	assert.Equal(t, "main", refs[0].TargetBranch)
+	assert.Equal(t, "a.go", refs[0].File)
+	assert.Equal(t, int32(42), refs[0].Line)
+	assert.Equal(t, "Login", refs[0].Name)
+	assert.Equal(t, "call", refs[0].Kind)
+}
+
+// TestLookupReferencesByName_QueryErrorWraps mirrors the identity-
+// preserving error-wrap test for LookupSymbolsByName.
+func TestLookupReferencesByName_QueryErrorWraps(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		LookupReferencesByNameFunc: func(ctx context.Context, arg gen.LookupReferencesByNameParams) ([]gen.SymbolReference, error) {
+			return nil, errBoom
+		},
+	}
+	store := New(mock, testLogger())
+	_, _, err := store.LookupReferencesByName(t.Context(), []uuid.UUID{uuid.Must(uuid.NewV7())}, "main", "Login", "", 10)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBoom)
+}
+
 func TestDependents_QueryErrorWraps(t *testing.T) {
 	t.Parallel()
 	mock := &querierMock{
