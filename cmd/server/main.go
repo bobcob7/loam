@@ -73,6 +73,7 @@ import (
 	"github.com/bobcob7/loam/internal/forge"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/git"
@@ -116,32 +117,6 @@ func (notImplementedOrchestrator) Run(_ context.Context, _ ingest.Job) (ingest.S
 	return ingest.Stats{}, errIngestOrchestratorNotImplemented
 }
 
-// errDiffComputerNotImplemented is returned by notImplementedDiffComputer
-// in place of the git diff plumbing loam-ofg.8's own research turned up as
-// missing: no package anywhere in this tree shells out to `git diff`
-// against a repo's bare mirror (see
-// internal/handler/workbranch.DiffComputer's doc comment for the full
-// account, including why docs/git-spec.md's passing claim that "the server
-// already shells out to git for sync, diffs, and ingest" does not describe
-// this tree's actual state) -- that is filed as loam-fwk, NOT loam-ofg.16
-// (the git smart-HTTP transport handler, upload-pack/receive-pack framing
-// only; it does not cover diff computation).
-var errDiffComputerNotImplemented = errors.New("git diff plumbing not implemented (loam-fwk)")
-
-// notImplementedDiffComputer stands in for workbranch.DiffComputer, wired
-// here instead of leaving GetWorkBranchDiff unregistered so every other
-// WorkBranchService RPC in loam-ofg.8's scope is still genuinely reachable.
-// This one RPC fails loudly (CodeInternal, logged by handler.ErrorMapper)
-// rather than silently -- the same "loud failure over silent wrong
-// behavior" choice notImplementedOrchestrator above already makes for the
-// ingest pipeline -- until the real plumbing exists.
-type notImplementedDiffComputer struct{}
-
-// Diff implements workbranch.DiffComputer.
-func (notImplementedDiffComputer) Diff(_ context.Context, _ workbranchstore.WorkBranch) (string, error) {
-	return "", errDiffComputerNotImplemented
-}
-
 // errRepoDeleteNotImplemented is returned by notImplementedRepoDeleter in
 // place of loam-cwb's real cross-table repos-row delete path (a separate,
 // still-open bead: "no store can delete a repos row today"). See
@@ -156,8 +131,7 @@ var errRepoDeleteNotImplemented = errors.New("repo delete path not implemented (
 // delete path, wired here instead of leaving RemoveRepo unregistered so
 // its guard (the half loam-ofg.12 owns) is genuinely reachable and
 // enforced. The same "loud failure over silent wrong behavior" choice
-// this file already makes for notImplementedOrchestrator and
-// notImplementedDiffComputer.
+// this file already makes for notImplementedOrchestrator.
 type notImplementedRepoDeleter struct{}
 
 // DeleteRepo implements internal/handler/repoadmin's repoDeleter.
@@ -354,10 +328,10 @@ func registerMetadataServices(router *server.Router, cfg config.Config, pool *pg
 // half (loam-ofg.8: CreateWorkBranch, UpdateWorkBranch, RequestReview,
 // ListWorkBranches, GetWorkBranch, GetWorkBranchDiff) over pool, the same
 // single Postgres connection registerMetadataServices' services share.
-// notImplementedDiffComputer stands in for the git diff plumbing that does
-// not exist in this tree yet (see its own doc comment); every other RPC
-// this handler implements is wired against real stores and genuinely
-// reachable.
+// GetWorkBranchDiff is backed by internal/gitdiff.Computer (loam-fwk),
+// rooted at cfg.DataDir over the same repos store every other RPC here
+// shares; every RPC this handler implements is wired against real stores
+// and genuinely reachable.
 //
 // pool == nil is the only guard here, for the same reason and exercised
 // the same way as registerMetadataServices' own guard: run() always
@@ -373,8 +347,9 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	rounds := reviewstore.NewRoundStore(pool, cfg.Logger)
+	diff := gitdiff.New(cfg.DataDir, repos)
 	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
-		workbranch.New(workBranches, repos, rounds, notImplementedDiffComputer{}, capabilities, errorMapper, cfg.Logger),
+		workbranch.New(workBranches, repos, rounds, diff, capabilities, errorMapper, cfg.Logger),
 	))
 }
 
