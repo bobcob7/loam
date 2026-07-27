@@ -465,7 +465,7 @@ func (h *acceptanceHarness) stepBranchIsRemovedFromUpstream(ctx context.Context,
 // naming the same repo starts from an empty forge rather than inheriting
 // this one's branches and PR numbers.
 func (h *acceptanceHarness) seedUpstreamRepo(ctx context.Context, world *acceptanceWorld) error {
-	files := map[string][]byte{"README.md": []byte("# " + world.repo() + "\n")}
+	files := acceptanceUpstreamFiles(world.repo())
 	if err := h.forge.SeedRepoFiles(ctx, world.repo(), files, fakeforge.SeedOptions{DefaultBranch: world.targetBranch}); err != nil {
 		return fmt.Errorf("seeding upstream repo %s: %w", world.repo(), err)
 	}

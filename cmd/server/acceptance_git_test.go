@@ -29,8 +29,19 @@ type loamCLIResult struct {
 // identity as its LOAM_AGENT_* environment, pointed at the shared
 // in-process server.
 func (h *acceptanceHarness) runLoamCLI(world *acceptanceWorld, args ...string) loamCLIResult {
+	return h.runLoamCLIIn(world, world.workspace, args...)
+}
+
+// runLoamCLIIn is runLoamCLI with an explicit working directory. It exists
+// for the query steps (acceptance_ingest_test.go), which must run from
+// INSIDE a clone rather than from the workspace root: `loam graph`/`loam
+// search` infer their scope from the current directory when neither
+// --repo nor --all is given (internal/cli's resolveGraphScope), and that
+// inference is exactly what code-intelligence.feature's "I am working
+// inside a clone of ..." Background is there to establish.
+func (h *acceptanceHarness) runLoamCLIIn(world *acceptanceWorld, dir string, args ...string) loamCLIResult {
 	cmd := exec.Command(h.loamBinary, args...)
-	cmd.Dir = world.workspace
+	cmd.Dir = dir
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"LOAM_SERVER_URL=" + h.server.baseURL,

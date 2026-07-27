@@ -8,12 +8,10 @@ Feature: Querying code intelligence
     And its indexed branch has been ingested
     And I am working inside a clone of "bobcob7/doc-server"
 
-  @wip
   Scenario: Finding where a symbol is defined
     When I ask the graph where "Login" is defined
     Then I get the file and line of its definition
 
-  @wip
   Scenario: Results name the commit they were built from
     Given "main" has advanced past the last ingested commit
     When I run a graph query
@@ -43,7 +41,6 @@ Feature: Querying code intelligence
     When I ask the graph for the dependents of "auth.go"
     Then I get the code that would be affected by changing it
 
-  @wip
   Scenario: Semantic search returns relevant chunks with provenance
     When I search for "how is authentication handled"
     Then I get the most relevant doc and code chunks

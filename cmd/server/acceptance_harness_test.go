@@ -175,4 +175,5 @@ func (h *acceptanceHarness) initializeScenario(sc *godog.ScenarioContext) {
 	h.registerCloneAndPushSteps(sc)
 	h.registerSyncSteps(sc)
 	h.registerVocabularySteps(sc)
+	h.registerIngestAndQuerySteps(sc)
 }

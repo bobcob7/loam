@@ -7,13 +7,11 @@ Feature: Code ingestion
     Given I am signed in to the web interface as the admin
     And the repo "bobcob7/doc-server" is enrolled with target branch "main"
 
-  @wip
   Scenario: Enrolling a repo ingests its indexed branch
     When enrollment completes
     Then the indexed branch "main" is ingested
     And graph and search queries return results for it
 
-  @wip
   Scenario: Advancing the target branch refreshes the index
     Given "main" has been ingested
     When "main" advances with a commit that adds "Logout" and removes "LegacyLogin"
