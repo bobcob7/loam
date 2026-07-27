@@ -188,15 +188,18 @@ func TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained(t *t
 }
 
 // assertPathContained proves path is genuinely under root by computing
-// their relative path and requiring it neither escapes upward (a leading
-// "..") nor is itself root (an empty relative path would mean path and
-// root are the same directory, not root's staging subtree) — a structural
-// check, not merely the absence of an error.
+// their relative path and requiring it not escape upward (a leading "..")
+// — a structural check, not merely the absence of an error. It also
+// requires the path be a proper descendant: filepath.Rel(root, root)
+// returns "." and filepath.IsLocal(".") is true, so IsLocal alone would
+// accept path == root, which is the staging root rather than a per-agent
+// subtree within it.
 func assertPathContained(t *testing.T, root, path string) {
 	t.Helper()
 	rel, err := filepath.Rel(root, path)
 	require.NoError(t, err)
 	assert.Truef(t, filepath.IsLocal(rel), "path %q must resolve to a local (contained) path relative to root %q, got %q", path, root, rel)
+	assert.NotEqualf(t, ".", rel, "path %q must be a proper descendant of root %q, not root itself", path, root)
 }
 
 // stagingPathAttack is one row of the traversal attack table below: a
