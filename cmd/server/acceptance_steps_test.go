@@ -9,6 +9,11 @@
 // its NOTES: infrastructure that makes every future @wip removal
 // resolvable, not a claim that every row is exercised by a scenario in
 // this suite's current, @wip-filtered green run.
+//
+// features/sync.feature's own steps live in acceptance_sync_test.go
+// (loam-a16), which is where "the next sync runs" first became a genuine
+// five-step Mirror Sync cycle rather than a tick into four
+// not-implemented stand-ins.
 package main
 
 import (
@@ -45,11 +50,18 @@ func (h *acceptanceHarness) registerCloneAndPushSteps(sc *godog.ScenarioContext)
 	sc.Step(`^the push is rejected$`, h.stepThePushIsRejected)
 }
 
-// stepRepoIsEnrolled seeds world's repo row plus its registered target
-// branch (see acceptance_seed_test.go's insertRepoRow). The mirror itself
-// is not built until stepIHaveStartedTheWorkBranch, once both the target
-// branch and the work branch it also seeds are known, so it is created
-// once with its full, final set of branches.
+// stepRepoIsEnrolled seeds world's upstream repo on the shared fake forge
+// and then its repo row plus registered target branch, pointed at that
+// upstream (see acceptance_sync_test.go's seedUpstreamRepo and
+// acceptance_seed_test.go's insertRepoRow).
+//
+// The MIRROR is deliberately not built here. clone-and-push.feature's
+// scenarios build theirs in stepIHaveStartedTheWorkBranch, once both the
+// target branch and the work branch it also seeds are known, so it is
+// created once with its full, final set of branches; sync.feature's
+// scenarios instead clone theirs from the real upstream, in whichever
+// Given first needs it (ensureMirrorFromUpstream). Building one here
+// would collide with both.
 func (h *acceptanceHarness) stepRepoIsEnrolled(ctx context.Context, repo, branch string) error {
 	world := worldFrom(ctx)
 	group, name, ok := strings.Cut(repo, "/")
@@ -57,6 +69,9 @@ func (h *acceptanceHarness) stepRepoIsEnrolled(ctx context.Context, repo, branch
 		return fmt.Errorf("repo %q must be shaped like <group>/<repo_name>", repo)
 	}
 	world.repoGroup, world.repoName, world.targetBranch = group, name, branch
+	if err := h.seedUpstreamRepo(ctx, world); err != nil {
+		return err
+	}
 	repoID, err := h.insertRepoRow(ctx, world)
 	if err != nil {
 		return err
@@ -350,19 +365,33 @@ func (h *acceptanceHarness) stepTheUpstreamPRMerges(ctx context.Context) error {
 //
 // Tick's own returned error is ONLY a ListRepos failure
 // (mirrorsync.Scheduler.Tick's doc comment): every per-repo cycle failure
-// -- including this harness's own not-implemented
-// AdvanceDetector/MergeabilityChecker/IngestEnqueuer/PRPoller stand-ins --
 // is logged and written to repos.sync_state by the scheduler itself
 // (scheduler.go's cycle/ReportError), never propagated back through Tick.
 // A step that only checked Tick's return value would pass even though the
 // cycle it just ran genuinely errored, so this reads repos.sync_state back
-// for world's own repo afterward and fails loudly if it is 'error' --
-// exactly the same "loud failure over silent wrong behavior" this
-// harness's own not-implemented stand-ins are meant to produce.
+// for world's own repo afterward and fails loudly if it is 'error'.
+//
+// The one exception is a scenario whose own Given deliberately broke the
+// upstream (features/sync.feature's deleted-target-branch and
+// unreachable-forge scenarios): those set world.expectSyncError, and
+// their own Then steps assert on the recorded error instead. The flag is
+// only ever set by the Given that caused the failure, so it can never
+// silence a cycle that errored for a reason the scenario did not arrange.
+//
+// Reading sync_state once, straight after Tick, is safe from loam-8vg's
+// single-sample trap: Tick blocks until every cycle it started has
+// finished reporting (mirrorsync.Scheduler.Tick -> waitIdle, which
+// releases only after the terminal report), and no other writer of this
+// column exists in the tree today -- the ingest worker's own
+// sync_state write (loam-c94.13) is not implemented, so nothing can move
+// the value between the report and this read.
 func (h *acceptanceHarness) stepTheNextSyncRuns(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if _, err := h.syncHarness.Tick(ctx); err != nil {
 		return err
+	}
+	if world.expectSyncError {
+		return nil
 	}
 	return h.assertSyncNotErrored(ctx, world.repo())
 }

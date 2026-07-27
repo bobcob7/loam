@@ -52,13 +52,37 @@ type acceptanceWorld struct {
 	lastGitOutput  string
 	lastGitErr     error
 	lastWorkBranch acceptanceWorkBranchOutput
-	// upstreamPRNumber is read by stepTheUpstreamPRMerges but nothing in
-	// this suite writes it yet: no step records the PR number
-	// ProposalService.AcceptProposal would return (loam-qkr, ProposalService
-	// itself is not registered in buildRouter yet), so it stays at its
-	// zero value today. Tracked as a known gap on loam-qkr/loam-a16, not
-	// silently -- stepTheUpstreamPRMerges still fails loudly (fakeforge
-	// has no PR #0 to merge) rather than passing vacuously.
+	// upstreamSeeded/upstreamURL record this scenario's repo on the shared
+	// fake forge: the clone URL every fetch, push, and ls-remote in the
+	// scenario targets, and the flag afterScenario removes it on. Both are
+	// set by seedUpstreamRepo (acceptance_sync_test.go), called from the
+	// "the repo ... is enrolled ..." Background step.
+	upstreamSeeded bool
+	upstreamURL    string
+	// divergedSHA and workBranchSHA are pre-tick mirror SHAs a later Then
+	// step compares against, so an assertion cannot pass on an equality
+	// that already held before the sync ran (loam-8vg).
+	divergedSHA   string
+	workBranchSHA string
+	// workBranchesBefore snapshots name -> "<state>/<conflict>" for every
+	// work branch of the repo before a sync that is expected to fail, for
+	// "existing work branches are left untouched" to diff against.
+	workBranchesBefore map[string]string
+	// expectSyncError marks a scenario whose Given deliberately broke the
+	// upstream, so "the next sync runs" tolerates the resulting
+	// sync_state = 'error' instead of failing the step on it. It is set
+	// only by a Given that caused the failure, never by a Then, so the
+	// suppression can never be reached by a scenario that merely happened
+	// to error.
+	expectSyncError bool
+	// upstreamPRNumber is the PR number the forge allocated for this
+	// scenario's proposal. Nothing in PRODUCTION writes the matching
+	// work_branches.upstream_pr_number column yet (loam-giq.7 owns
+	// Proposal Acceptance's push+CreatePR+record leg), so the only step
+	// that sets this is stepAnAcceptedWorkBranchWhosePRHasMerged, which
+	// seeds the column directly; stepTheUpstreamPRMerges still fails
+	// loudly against a zero value (fakeforge has no PR #0) rather than
+	// passing vacuously.
 	upstreamPRNumber int
 }
 
@@ -149,6 +173,12 @@ func (h *acceptanceHarness) beforeScenario(ctx context.Context, _ *godog.Scenari
 //   - the bare mirror on disk (lives under the shared server's own
 //     LOAM_DATA_DIR, not under the scenario's own workspace tmpdir h.t's
 //     TempDir cleanup already reaches).
+//   - this scenario's repo on the shared fake forge. The fake is one
+//     instance for the whole suite, and SeedRepoFiles refuses to seed
+//     over an existing repo, so without this every scenario after the
+//     first to name a given repo would either fail to seed or silently
+//     inherit the previous scenario's branches and PR numbers -- the
+//     forge-side twin of the repos-row collision described below.
 //   - the repos row itself (cascading to repo_target_branches and
 //     work_branches via their ON DELETE CASCADE foreign keys). This is
 //     the fixture-isolation seam clone-and-push.feature's own Background
@@ -167,6 +197,9 @@ func (h *acceptanceHarness) afterScenario(ctx context.Context, _ *godog.Scenario
 	}
 	if world.repoID != (uuid.UUID{}) {
 		_, _ = h.server.pool.Exec(context.Background(), `DELETE FROM repos WHERE id = $1`, world.repoID)
+	}
+	if world.upstreamSeeded {
+		_ = h.forge.RemoveRepo(context.Background(), world.repo())
 	}
 	return ctx, nil
 }

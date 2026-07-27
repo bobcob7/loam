@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/cucumber/godog"
@@ -13,6 +12,7 @@ import (
 	"github.com/bobcob7/loam/internal/credentialstore"
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/fakeforge"
+	"github.com/bobcob7/loam/internal/gitmergetree"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/mirrorsync"
@@ -24,14 +24,20 @@ import (
 
 // acceptanceHarness is the fixed, whole-suite context every step definition
 // closes over: the live in-process server, the CLI binary path, the shared
-// fakeforge instance, and the two testsched wrappers backing the "the next
-// sync runs"/"the upstream PR merges" and "after ingestion" step-vocabulary
-// rows. Constructed once by newAcceptanceHarness; per-scenario mutable
-// state lives in acceptanceWorld (acceptance_world_test.go), never here.
+// fakeforge instance plus the two client handles pointed at it (a
+// *fakeforge.Client for the provider REST surface and a
+// *gittransport.Transport for authenticated upstream git), and the two
+// testsched wrappers backing the "the next sync runs"/"the upstream PR
+// merges" and "after ingestion" step-vocabulary rows. Constructed once by
+// newAcceptanceHarness; per-scenario mutable state lives in
+// acceptanceWorld (acceptance_world_test.go), never here.
 type acceptanceHarness struct {
 	t             *testing.T
 	server        acceptanceServer
 	forge         *fakeforge.Server
+	forgeClient   *fakeforge.Client
+	forgeHost     string
+	transport     *gittransport.Transport
 	loamBinary    string
 	adminUser     string
 	adminPassword string
@@ -40,84 +46,28 @@ type acceptanceHarness struct {
 }
 
 // newAcceptanceHarness assembles the fixed, whole-suite acceptanceHarness.
-func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.Server, cfg config.Config) *acceptanceHarness {
+// forgeBaseURL is the shared fakeforge instance's own httptest URL, and
+// forgeHost its host:port -- the repos.forge_host value every repo this
+// suite seeds against the fake carries, and therefore the key
+// gittransport resolves a credential under.
+func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.Server, forgeBaseURL, forgeHost string, cfg config.Config) *acceptanceHarness {
 	t.Helper()
+	forge.AddToken(acceptanceForgeToken)
+	forgeClient := fakeforge.NewClient(forgeBaseURL, acceptanceForgeToken)
+	transport := gittransport.New(staticTokenCredentialSource{token: acceptanceForgeToken}, forgeClient, acceptanceLogger())
 	return &acceptanceHarness{
 		t:             t,
 		server:        srv,
 		forge:         forge,
+		forgeClient:   forgeClient,
+		forgeHost:     forgeHost,
+		transport:     transport,
 		loamBinary:    acceptanceLoamBinary,
 		adminUser:     cfg.AdminUser,
 		adminPassword: cfg.AdminPassword,
-		syncHarness:   newSyncHarness(srv, forge),
+		syncHarness:   newSyncHarness(srv, transport, forgeClient),
 		ingestHarness: testsched.NewIngestHarness(srv.ingestPool),
 	}
-}
-
-// errAdvanceDetectorNotImplemented, errMergeabilityCheckerNotImplemented,
-// errIngestEnqueuerNotImplemented, and errPRPollerNotImplemented mirror
-// cmd/server/main.go's own notImplementedOrchestrator/DiffComputer/
-// RepoDeleter idiom: a labeled error standing in for a collaborator with
-// no production implementation anywhere in the tree yet (loam-giq.4,
-// loam-giq.5, loam-c94.2, loam-giq.8, respectively -- all still open),
-// rather than a silent no-op that would misrepresent "the next sync runs"
-// as having actually detected, merge-checked, enqueued, or polled
-// anything.
-//
-// This is loud FROM THE SCHEDULER's own point of view only:
-// mirrorsync.Scheduler's cycle logs each of these and writes
-// repos.sync_state='error' (scheduler.go), but never returns them through
-// Scheduler.Tick -- Tick's own error return is exclusively a ListRepos
-// failure (its doc comment). A caller that only checked Tick's return
-// value would see a nil error and nothing else, which is why
-// stepTheNextSyncRuns (acceptance_steps_test.go) additionally reads
-// repos.sync_state back after every tick and fails the step if it is
-// 'error' -- these vars alone are not "loud" to a godog step, only to the
-// database column the scheduler itself writes.
-//
-// No scenario in this suite's default (@wip-filtered) run exercises these
-// today; they exist so the step vocabulary row itself is wired and
-// "resolvable" (loam-li0.5's own scope), ready for each collaborator bead
-// to swap in its real implementation here with no other harness change.
-var (
-	errAdvanceDetectorNotImplemented     = errors.New("acceptance harness: AdvanceDetector not implemented (loam-giq.4)")
-	errMergeabilityCheckerNotImplemented = errors.New("acceptance harness: MergeabilityChecker not implemented (loam-giq.5)")
-	errIngestEnqueuerNotImplemented      = errors.New("acceptance harness: IngestEnqueuer not implemented (loam-c94.2)")
-	errPRPollerNotImplemented            = errors.New("acceptance harness: PRPoller not implemented (loam-giq.8)")
-)
-
-// acceptanceAdvanceDetector, acceptanceMergeabilityChecker,
-// acceptanceIngestEnqueuer, and acceptancePRPoller are the harness's own
-// not-implemented stand-ins for the four mirrorsync collaborators that
-// have no production implementation anywhere in the tree yet (see the
-// error vars' doc comment above). Each is a zero-field type so
-// newSyncHarness can construct one inline with no further wiring.
-type acceptanceAdvanceDetector struct{}
-
-// DetectAdvances implements mirrorsync.AdvanceDetector.
-func (acceptanceAdvanceDetector) DetectAdvances(_ context.Context, _ mirrorsync.RepoID, _ mirrorsync.FetchResult) ([]mirrorsync.Advance, error) {
-	return nil, errAdvanceDetectorNotImplemented
-}
-
-type acceptanceMergeabilityChecker struct{}
-
-// CheckMergeability implements mirrorsync.MergeabilityChecker.
-func (acceptanceMergeabilityChecker) CheckMergeability(_ context.Context, _ mirrorsync.RepoID, _ []mirrorsync.Advance) error {
-	return errMergeabilityCheckerNotImplemented
-}
-
-type acceptanceIngestEnqueuer struct{}
-
-// EnqueueIngest implements mirrorsync.IngestEnqueuer.
-func (acceptanceIngestEnqueuer) EnqueueIngest(_ context.Context, _ mirrorsync.RepoID, _ []mirrorsync.Advance) (bool, error) {
-	return false, errIngestEnqueuerNotImplemented
-}
-
-type acceptancePRPoller struct{}
-
-// PollPRs implements mirrorsync.PRPoller.
-func (acceptancePRPoller) PollPRs(_ context.Context, _ mirrorsync.RepoID) error {
-	return errPRPollerNotImplemented
 }
 
 // staticTokenCredentialSource is a minimal credentialSource (gittransport's
@@ -137,7 +87,7 @@ func (s staticTokenCredentialSource) GetByHost(context.Context, string) (credent
 
 // acceptanceForgeToken is the fixed fake-forge token every repo this suite
 // seeds is reachable with -- registered once against the shared fakeforge
-// instance in newSyncHarness, below.
+// instance in newAcceptanceHarness, above.
 const acceptanceForgeToken = "loam-acceptance-static-token"
 
 // newSyncHarness builds the harness's OWN *mirrorsync.Scheduler --
@@ -146,6 +96,18 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // this scenario's own SQL fixtures just seeded) and a real MirrorFetcher
 // pointed at the shared fakeforge instance -- and immediately wraps it in
 // a *testsched.SyncHarness, which is ALL this function returns.
+//
+// Every one of the scheduler's seven collaborators is now the production
+// type, constructed exactly as cmd/server/main.go's run() would construct
+// it (loam-a16): StoreRepoLister (loam-13z), MirrorFetcher (giq.2),
+// StoreAdvanceDetector (giq.4), StoreMergeabilityChecker (giq.5) over a
+// real gitmergetree.Checker, StoreIngestEnqueuer (c94.2) over THE live
+// ingest.Pool run() itself built, StorePRPoller (giq.8) over the shared
+// fakeforge's provider surface and this suite's one authenticated
+// gittransport.Transport, and internal/mirrorsync/state's Reporter (giq.9)
+// over the live pool. There are no harness-local stand-ins left in this
+// graph at all, so "the next sync runs" drives a genuine five-step Mirror
+// Sync cycle end to end rather than erroring out at step 2.
 //
 // This is loam-f75's constraint ("never call Scheduler.Run and
 // Scheduler.Tick on the same Scheduler") satisfied by construction, not by
@@ -163,15 +125,18 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // all today (see its own doc comment), so there is no risk of this
 // harness's Tick calls ever racing a production goroutine's Run -- the two
 // Schedulers are not just logically separate, one of them does not exist.
-func newSyncHarness(srv acceptanceServer, forge *fakeforge.Server) *testsched.SyncHarness {
-	forge.AddToken(acceptanceForgeToken)
-	repoStore := reposstore.NewStore(gen.New(srv.pool), acceptanceLogger())
-	workBranchStore := workbranchstore.New(gen.New(srv.pool), acceptanceLogger())
+func newSyncHarness(srv acceptanceServer, transport *gittransport.Transport, forgeClient *fakeforge.Client) *testsched.SyncHarness {
+	logger := acceptanceLogger()
+	repoStore := reposstore.NewStore(gen.New(srv.pool), logger)
+	workBranchStore := workbranchstore.New(gen.New(srv.pool), logger)
 	resolver := mirrorsync.NewStoreRepoResolver(repoStore, workBranchStore)
-	transport := gittransport.New(staticTokenCredentialSource{token: acceptanceForgeToken}, fakeforge.NewClient("", ""), acceptanceLogger())
 	fetcher := mirrorsync.NewMirrorFetcher(srv.dataDir, transport, resolver)
+	advances := mirrorsync.NewStoreAdvanceDetector(repoStore, repoStore, workBranchStore)
+	mergeability := mirrorsync.NewStoreMergeabilityChecker(srv.dataDir, repoStore, workBranchStore, gitmergetree.New(logger), workBranchStore)
+	ingestEnqueuer := mirrorsync.NewStoreIngestEnqueuer(repoStore, repoStore, srv.ingestPool)
+	prPoller := mirrorsync.NewStorePRPoller(srv.dataDir, logger, repoStore, workBranchStore, workBranchStore, forgeClient, transport)
 	reporter := state.New(srv.pool)
-	scheduler := mirrorsync.New(acceptanceLogger(), nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, acceptanceAdvanceDetector{}, acceptanceMergeabilityChecker{}, acceptanceIngestEnqueuer{}, acceptancePRPoller{}, reporter)
+	scheduler := mirrorsync.New(logger, nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, advances, mergeability, ingestEnqueuer, prPoller, reporter)
 	return testsched.NewSyncHarness(scheduler)
 }
 
@@ -199,5 +164,6 @@ func (h *acceptanceHarness) initializeScenario(sc *godog.ScenarioContext) {
 	sc.Before(h.beforeScenario)
 	sc.After(h.afterScenario)
 	h.registerCloneAndPushSteps(sc)
+	h.registerSyncSteps(sc)
 	h.registerVocabularySteps(sc)
 }

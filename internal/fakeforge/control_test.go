@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bobcob7/loam/internal/forge"
 )
 
 // postControl posts body as JSON to path on ts and returns the response,
@@ -199,4 +201,48 @@ func TestMergePRConflict(t *testing.T) {
 	pr := srv.prs.create("acme/widgets", "wb-feature", "main", "t", "d")
 	err := srv.MergePR(ctx, "acme/widgets", pr.number)
 	assert.ErrorIs(t, err, errMergeConflict)
+}
+
+func TestRemoveRepoAllowsReseedingTheSameName(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, _ := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"README.md": []byte("first\n")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-1a2b", ""))
+	first := branchSHA(t, srv, "acme/widgets", "main")
+	require.NoError(t, srv.RemoveRepo(ctx, "acme/widgets"))
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"README.md": []byte("second\n")}, SeedOptions{}))
+	assert.NotEqual(t, first, branchSHA(t, srv, "acme/widgets", "main"), "re-seeding must build a fresh repo, not reuse the removed one's history")
+	_, err := srv.runGit(ctx, "", "--git-dir="+srv.repoDir("acme/widgets"), "rev-parse", "--verify", "refs/heads/wb-1a2b")
+	assert.Error(t, err, "the removed repo's branches must not survive into the re-seeded one")
+}
+
+func TestRemoveRepoForgetsItsPullRequests(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	srv.AddToken("t0k")
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"README.md": []byte("hi\n")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-1a2b", ""))
+	client := NewClient(ts.URL, "t0k")
+	_, number, err := client.CreatePR(ctx, "acme/widgets", "wb-1a2b", "main", "t", "d")
+	require.NoError(t, err)
+	require.NoError(t, srv.MergePR(ctx, "acme/widgets", number))
+	require.NoError(t, srv.RemoveRepo(ctx, "acme/widgets"))
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"README.md": []byte("hi\n")}, SeedOptions{}))
+	_, err = client.GetPRState(ctx, "acme/widgets", number)
+	assert.ErrorIs(t, err, forge.ErrRepoNotFound, "a PR recorded against the removed repo must not answer with its stale merged state")
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-1a2b", ""))
+	_, reused, err := client.CreatePR(ctx, "acme/widgets", "wb-1a2b", "main", "t", "d")
+	require.NoError(t, err)
+	assert.Equal(t, number, reused, "PR numbering must restart for a re-seeded repo")
+}
+
+func TestRemoveRepoUnknownRepoIsNotFound(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, _ := newTestServer(t)
+	assert.ErrorIs(t, srv.RemoveRepo(t.Context(), "acme/nope"), forge.ErrRepoNotFound)
 }

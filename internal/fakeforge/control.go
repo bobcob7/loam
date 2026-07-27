@@ -245,6 +245,39 @@ func (s *Server) ClosePR(_ context.Context, repo string, number int) (err error)
 	return nil
 }
 
+// RemoveRepo deletes repoName's bare storage and forgets every pull
+// request recorded against it, returning errRepoNotFound if it was never
+// seeded. It is the teardown counterpart to SeedRepo/SeedRepoFiles, which
+// both refuse to seed over an existing repo (errRepoExists) -- without a
+// way to remove one, a long-lived Server shared by many test cases
+// (cmd/server's acceptance suite runs one fake forge for the whole godog
+// run) could only ever seed a given name once, and every later case
+// naming the same repo would inherit the previous case's branches, tags,
+// and PR numbers.
+//
+// It is deliberately NOT exposed on the control REST surface: it models
+// no forge-side event Loam ever observes or reacts to (unlike
+// advance/force-push/delete-branch/merge-pr, which all do), only a test's
+// own fixture teardown, so an in-process Go call is the whole of its
+// intended use.
+func (s *Server) RemoveRepo(_ context.Context, repoName string) (err error) {
+	s.logger.Info("fakeforge: control remove-repo", "repo", repoName)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: control remove-repo failed", "repo", repoName, "error", err)
+		}
+	}()
+	repoDir := s.repoDir(repoName)
+	if err := s.requireRepo(repoDir); err != nil {
+		return fmt.Errorf("removing repo %s: %w", repoName, err)
+	}
+	if err := os.RemoveAll(repoDir); err != nil {
+		return fmt.Errorf("removing repo %s: %w", repoName, err)
+	}
+	s.prs.forget(repoName)
+	return nil
+}
+
 func (s *Server) lookupPR(repo string, number int) (*prRecord, error) {
 	pr, ok := s.prs.get(repo, number)
 	if !ok {

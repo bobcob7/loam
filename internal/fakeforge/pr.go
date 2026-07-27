@@ -63,6 +63,18 @@ func (r *prRegistry) findOpen(repo, headBranch, targetBranch string) (*prRecord,
 	return nil, false
 }
 
+// forget drops every PR recorded for repo, including its number
+// allocator, so a later repo of the same name starts from #1 with an
+// empty registry. It exists for Server.RemoveRepo: leaving the records
+// behind would let a GetPRState for a long-gone repo answer with a
+// stale terminal state instead of errPRNotFound.
+func (r *prRegistry) forget(repo string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.next, repo)
+	delete(r.byNo, repo)
+}
+
 // setState transitions the PR's state; a no-op if the PR is unknown.
 func (r *prRegistry) setState(repo string, number int, state string) {
 	r.mu.Lock()

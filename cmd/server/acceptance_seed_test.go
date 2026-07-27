@@ -30,7 +30,14 @@ import (
 // branch, returning the generated repos.id for insertWorkBranchRow to
 // reference. Called from stepRepoIsEnrolled (acceptance_steps_test.go),
 // which implements the Background step "the repo ... is enrolled with
-// target branch ...": that step and "I have started the work branch ..."
+// target branch ...". upstream_url/forge_host name this scenario's REAL
+// repo on the shared fake forge (seedUpstreamRepo, called by that same
+// step just before this one), not a placeholder: every sync scenario
+// fetches, pushes, and ls-remotes against exactly this row, so a
+// fabricated URL here would make the whole Mirror Sync cycle
+// unexercisable.
+//
+// That step and "I have started the work branch ..."
 // (insertWorkBranchRow, seedBareMirrorWithBranches, below) are two
 // separate Gherkin steps, not one call, since neither is a
 // testing-spec core-vocabulary row (docs/testing-spec.md Layer 1's
@@ -41,7 +48,7 @@ func (h *acceptanceHarness) insertRepoRow(ctx context.Context, world *acceptance
 	repoID := uuid.Must(uuid.NewV7())
 	_, err := h.server.pool.Exec(ctx,
 		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch) VALUES ($1, $2, $3, $4, $5)`,
-		repoID, world.repo(), "https://example.invalid/"+world.repo(), "example.invalid", world.targetBranch)
+		repoID, world.repo(), world.upstreamURL, h.forgeHost, world.targetBranch)
 	if err != nil {
 		return uuid.UUID{}, fmt.Errorf("seeding repos row for %s: %w", world.repo(), err)
 	}

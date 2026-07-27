@@ -53,3 +53,34 @@ func acceptProposal(ctx context.Context, client adminv1connect.ProposalServiceCl
 	}
 	return resp.Msg.PrUrl, nil
 }
+
+// newRepoAdminServiceClient builds the Admin actor's connect-go client for
+// loam.admin.v1.RepoAdminService -- the service backing "I am signed in to
+// the web interface as the admin" and every "the repo's sync status ..."
+// assertion in features/sync.feature.
+func (h *acceptanceHarness) newRepoAdminServiceClient() adminv1connect.RepoAdminServiceClient {
+	return adminv1connect.NewRepoAdminServiceClient(h.adminHTTPClient(), h.server.baseURL)
+}
+
+// listReposAsAdmin calls RepoAdminService.ListRepos as the Admin actor,
+// the smallest authenticated round trip that proves the admin credentials
+// are accepted.
+func (h *acceptanceHarness) listReposAsAdmin(ctx context.Context) ([]*adminv1.EnrolledRepo, error) {
+	resp, err := h.newRepoAdminServiceClient().ListRepos(ctx, connect.NewRequest(&adminv1.ListReposRequest{}))
+	if err != nil {
+		return nil, fmt.Errorf("listing enrolled repos: %w", err)
+	}
+	return resp.Msg.GetRepos(), nil
+}
+
+// getRepoAsAdmin reads one enrolled repo back through the admin API --
+// including its SyncStatus, which is how every sync-status assertion in
+// this suite observes repos.sync_state: through the surface an admin
+// actually sees, not a direct SQL read of the column.
+func (h *acceptanceHarness) getRepoAsAdmin(ctx context.Context, repo string) (*adminv1.EnrolledRepo, error) {
+	resp, err := h.newRepoAdminServiceClient().GetRepo(ctx, connect.NewRequest(&adminv1.GetRepoRequest{Repo: repo}))
+	if err != nil {
+		return nil, fmt.Errorf("getting enrolled repo %s: %w", repo, err)
+	}
+	return resp.Msg.GetRepo(), nil
+}

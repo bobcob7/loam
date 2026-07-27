@@ -36,6 +36,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,8 +163,8 @@ func TestFeatures(t *testing.T) {
 	dataDir := acceptanceShortDataDir(t)
 	cfg := acceptanceConfig(t, dsn, dataDir)
 	srv := startAcceptanceServer(t, ctx, cancel, cfg)
-	forge := startAcceptanceForge(t)
-	harness := newAcceptanceHarness(t, srv, forge, cfg)
+	forge, forgeBaseURL, forgeHost := startAcceptanceForge(t)
+	harness := newAcceptanceHarness(t, srv, forge, forgeBaseURL, forgeHost, cfg)
 	suite := godog.TestSuite{
 		Name:                "loam-acceptance",
 		ScenarioInitializer: harness.initializeScenario,
@@ -369,7 +370,14 @@ func acceptanceWaitHealthy(t *testing.T, baseURL string) {
 // provider REST surfaces are reachable over real HTTP, exactly as
 // internal/mirrorsync's own fetcher_gittransport_test.go already
 // establishes this combination.
-func startAcceptanceForge(t *testing.T) *fakeforge.Server {
+//
+// It returns the httptest base URL and its bare host:port alongside the
+// Server: the base URL is what a *fakeforge.Client's provider REST calls
+// target, and the host:port is the repos.forge_host value every repo
+// seeded against this fake carries -- the key gittransport resolves a
+// credential under, and the reason both must come from the SAME
+// httptest.Server the git smart-HTTP surface is reachable on.
+func startAcceptanceForge(t *testing.T) (server *fakeforge.Server, baseURL, host string) {
 	t.Helper()
 	srv, err := fakeforge.New(acceptanceLogger())
 	require.NoError(t, err)
@@ -377,5 +385,7 @@ func startAcceptanceForge(t *testing.T) *fakeforge.Server {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	srv.SetBaseURL(ts.URL)
-	return srv
+	parsed, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	return srv, ts.URL, parsed.Host
 }
