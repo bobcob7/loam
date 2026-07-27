@@ -8,9 +8,14 @@
 // Manual scheduler).
 package mirrorsync
 
-import "context"
+import (
+	"context"
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister
+	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/workbranchstore"
+)
+
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -202,4 +207,42 @@ type SyncStateReporter interface {
 	ReportSyncing(ctx context.Context, repo RepoID) error
 	ReportIdle(ctx context.Context, repo RepoID, enqueuedIngest bool) error
 	ReportError(ctx context.Context, repo RepoID, err error, enqueuedIngest bool) error
+}
+
+// upstreamRefFetcher is the gittransport.Transport surface MirrorFetcher
+// runs the actual fetch subprocess through, defined here at the consumer.
+// *gittransport.Transport satisfies it structurally; loam-giq.3 owns
+// credential injection, config isolation, and secret scrubbing behind this
+// one call -- MirrorFetcher never shells out to git itself.
+type upstreamRefFetcher interface {
+	Fetch(ctx context.Context, host, mirrorDir, upstreamURL string, refspecs []string) ([]byte, error)
+}
+
+// repoResolver resolves everything MirrorFetcher needs to run one repo's
+// upstream fetch: the forge host backing credential resolution, the
+// upstream clone URL, and the bare names of every currently registered
+// work-branch ref to exclude from the refspec (docs/sync-spec.md -> Mirror
+// Sync step 1; docs/git-spec.md -> Ref Policy "Work-branch refs"). Defined
+// here at the consumer so MirrorFetcher never imports reposstore or
+// workbranchstore directly; StoreRepoResolver (this package) is the
+// production adapter joining both stores. workBranchNames are bare (e.g.
+// "wb-9c2f1a"), not full refs/heads/... paths -- MirrorFetcher owns
+// building the ref path from each name.
+type repoResolver interface {
+	ResolveRepo(ctx context.Context, repo RepoID) (host, upstreamURL string, workBranchNames []string, err error)
+}
+
+// repoByNameLookup is the reposstore.Store surface StoreRepoResolver uses
+// to resolve a repo's upstream fetch coordinates, defined here at the
+// consumer. *reposstore.Store satisfies it structurally.
+type repoByNameLookup interface {
+	GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error)
+}
+
+// workBranchNameLister is the workbranchstore.Store surface
+// StoreRepoResolver uses to enumerate a repo's currently registered
+// work-branch names, defined here at the consumer. *workbranchstore.Store
+// satisfies it structurally.
+type workBranchNameLister interface {
+	List(ctx context.Context, filter workbranchstore.ListFilter, limit, offset int32) ([]workbranchstore.WorkBranch, int64, error)
 }

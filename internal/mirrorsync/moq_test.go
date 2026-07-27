@@ -5,6 +5,8 @@ package mirrorsync
 
 import (
 	"context"
+	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/workbranchstore"
 	"sync"
 )
 
@@ -705,5 +707,323 @@ func (mock *repoNameListerMock) ListAllRepoNamesCalls() []struct {
 	mock.lockListAllRepoNames.RLock()
 	calls = mock.calls.ListAllRepoNames
 	mock.lockListAllRepoNames.RUnlock()
+	return calls
+}
+
+// Ensure, that upstreamRefFetcherMock does implement upstreamRefFetcher.
+// If this is not the case, regenerate this file with moq.
+var _ upstreamRefFetcher = &upstreamRefFetcherMock{}
+
+// upstreamRefFetcherMock is a mock implementation of upstreamRefFetcher.
+//
+//	func TestSomethingThatUsesupstreamRefFetcher(t *testing.T) {
+//
+//		// make and configure a mocked upstreamRefFetcher
+//		mockedupstreamRefFetcher := &upstreamRefFetcherMock{
+//			FetchFunc: func(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspecs []string) ([]byte, error) {
+//				panic("mock out the Fetch method")
+//			},
+//		}
+//
+//		// use mockedupstreamRefFetcher in code that requires upstreamRefFetcher
+//		// and then make assertions.
+//
+//	}
+type upstreamRefFetcherMock struct {
+	// FetchFunc mocks the Fetch method.
+	FetchFunc func(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspecs []string) ([]byte, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Fetch holds details about calls to the Fetch method.
+		Fetch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Host is the host argument value.
+			Host string
+			// MirrorDir is the mirrorDir argument value.
+			MirrorDir string
+			// UpstreamURL is the upstreamURL argument value.
+			UpstreamURL string
+			// Refspecs is the refspecs argument value.
+			Refspecs []string
+		}
+	}
+	lockFetch sync.RWMutex
+}
+
+// Fetch calls FetchFunc.
+func (mock *upstreamRefFetcherMock) Fetch(ctx context.Context, host string, mirrorDir string, upstreamURL string, refspecs []string) ([]byte, error) {
+	if mock.FetchFunc == nil {
+		panic("upstreamRefFetcherMock.FetchFunc: method is nil but upstreamRefFetcher.Fetch was just called")
+	}
+	callInfo := struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Refspecs    []string
+	}{
+		Ctx:         ctx,
+		Host:        host,
+		MirrorDir:   mirrorDir,
+		UpstreamURL: upstreamURL,
+		Refspecs:    refspecs,
+	}
+	mock.lockFetch.Lock()
+	mock.calls.Fetch = append(mock.calls.Fetch, callInfo)
+	mock.lockFetch.Unlock()
+	return mock.FetchFunc(ctx, host, mirrorDir, upstreamURL, refspecs)
+}
+
+// FetchCalls gets all the calls that were made to Fetch.
+// Check the length with:
+//
+//	len(mockedupstreamRefFetcher.FetchCalls())
+func (mock *upstreamRefFetcherMock) FetchCalls() []struct {
+	Ctx         context.Context
+	Host        string
+	MirrorDir   string
+	UpstreamURL string
+	Refspecs    []string
+} {
+	var calls []struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Refspecs    []string
+	}
+	mock.lockFetch.RLock()
+	calls = mock.calls.Fetch
+	mock.lockFetch.RUnlock()
+	return calls
+}
+
+// Ensure, that repoResolverMock does implement repoResolver.
+// If this is not the case, regenerate this file with moq.
+var _ repoResolver = &repoResolverMock{}
+
+// repoResolverMock is a mock implementation of repoResolver.
+//
+//	func TestSomethingThatUsesrepoResolver(t *testing.T) {
+//
+//		// make and configure a mocked repoResolver
+//		mockedrepoResolver := &repoResolverMock{
+//			ResolveRepoFunc: func(ctx context.Context, repo RepoID) (string, string, []string, error) {
+//				panic("mock out the ResolveRepo method")
+//			},
+//		}
+//
+//		// use mockedrepoResolver in code that requires repoResolver
+//		// and then make assertions.
+//
+//	}
+type repoResolverMock struct {
+	// ResolveRepoFunc mocks the ResolveRepo method.
+	ResolveRepoFunc func(ctx context.Context, repo RepoID) (string, string, []string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ResolveRepo holds details about calls to the ResolveRepo method.
+		ResolveRepo []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo RepoID
+		}
+	}
+	lockResolveRepo sync.RWMutex
+}
+
+// ResolveRepo calls ResolveRepoFunc.
+func (mock *repoResolverMock) ResolveRepo(ctx context.Context, repo RepoID) (string, string, []string, error) {
+	if mock.ResolveRepoFunc == nil {
+		panic("repoResolverMock.ResolveRepoFunc: method is nil but repoResolver.ResolveRepo was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo RepoID
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+	}
+	mock.lockResolveRepo.Lock()
+	mock.calls.ResolveRepo = append(mock.calls.ResolveRepo, callInfo)
+	mock.lockResolveRepo.Unlock()
+	return mock.ResolveRepoFunc(ctx, repo)
+}
+
+// ResolveRepoCalls gets all the calls that were made to ResolveRepo.
+// Check the length with:
+//
+//	len(mockedrepoResolver.ResolveRepoCalls())
+func (mock *repoResolverMock) ResolveRepoCalls() []struct {
+	Ctx  context.Context
+	Repo RepoID
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo RepoID
+	}
+	mock.lockResolveRepo.RLock()
+	calls = mock.calls.ResolveRepo
+	mock.lockResolveRepo.RUnlock()
+	return calls
+}
+
+// Ensure, that repoByNameLookupMock does implement repoByNameLookup.
+// If this is not the case, regenerate this file with moq.
+var _ repoByNameLookup = &repoByNameLookupMock{}
+
+// repoByNameLookupMock is a mock implementation of repoByNameLookup.
+//
+//	func TestSomethingThatUsesrepoByNameLookup(t *testing.T) {
+//
+//		// make and configure a mocked repoByNameLookup
+//		mockedrepoByNameLookup := &repoByNameLookupMock{
+//			GetRepoByNameFunc: func(ctx context.Context, name string) (reposstore.Repo, error) {
+//				panic("mock out the GetRepoByName method")
+//			},
+//		}
+//
+//		// use mockedrepoByNameLookup in code that requires repoByNameLookup
+//		// and then make assertions.
+//
+//	}
+type repoByNameLookupMock struct {
+	// GetRepoByNameFunc mocks the GetRepoByName method.
+	GetRepoByNameFunc func(ctx context.Context, name string) (reposstore.Repo, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetRepoByName holds details about calls to the GetRepoByName method.
+		GetRepoByName []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockGetRepoByName sync.RWMutex
+}
+
+// GetRepoByName calls GetRepoByNameFunc.
+func (mock *repoByNameLookupMock) GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error) {
+	if mock.GetRepoByNameFunc == nil {
+		panic("repoByNameLookupMock.GetRepoByNameFunc: method is nil but repoByNameLookup.GetRepoByName was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Name string
+	}{
+		Ctx:  ctx,
+		Name: name,
+	}
+	mock.lockGetRepoByName.Lock()
+	mock.calls.GetRepoByName = append(mock.calls.GetRepoByName, callInfo)
+	mock.lockGetRepoByName.Unlock()
+	return mock.GetRepoByNameFunc(ctx, name)
+}
+
+// GetRepoByNameCalls gets all the calls that were made to GetRepoByName.
+// Check the length with:
+//
+//	len(mockedrepoByNameLookup.GetRepoByNameCalls())
+func (mock *repoByNameLookupMock) GetRepoByNameCalls() []struct {
+	Ctx  context.Context
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Name string
+	}
+	mock.lockGetRepoByName.RLock()
+	calls = mock.calls.GetRepoByName
+	mock.lockGetRepoByName.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchNameListerMock does implement workBranchNameLister.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchNameLister = &workBranchNameListerMock{}
+
+// workBranchNameListerMock is a mock implementation of workBranchNameLister.
+//
+//	func TestSomethingThatUsesworkBranchNameLister(t *testing.T) {
+//
+//		// make and configure a mocked workBranchNameLister
+//		mockedworkBranchNameLister := &workBranchNameListerMock{
+//			ListFunc: func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
+//				panic("mock out the List method")
+//			},
+//		}
+//
+//		// use mockedworkBranchNameLister in code that requires workBranchNameLister
+//		// and then make assertions.
+//
+//	}
+type workBranchNameListerMock struct {
+	// ListFunc mocks the List method.
+	ListFunc func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// List holds details about calls to the List method.
+		List []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Filter is the filter argument value.
+			Filter workbranchstore.ListFilter
+			// Limit is the limit argument value.
+			Limit int32
+			// Offset is the offset argument value.
+			Offset int32
+		}
+	}
+	lockList sync.RWMutex
+}
+
+// List calls ListFunc.
+func (mock *workBranchNameListerMock) List(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
+	if mock.ListFunc == nil {
+		panic("workBranchNameListerMock.ListFunc: method is nil but workBranchNameLister.List was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		Filter workbranchstore.ListFilter
+		Limit  int32
+		Offset int32
+	}{
+		Ctx:    ctx,
+		Filter: filter,
+		Limit:  limit,
+		Offset: offset,
+	}
+	mock.lockList.Lock()
+	mock.calls.List = append(mock.calls.List, callInfo)
+	mock.lockList.Unlock()
+	return mock.ListFunc(ctx, filter, limit, offset)
+}
+
+// ListCalls gets all the calls that were made to List.
+// Check the length with:
+//
+//	len(mockedworkBranchNameLister.ListCalls())
+func (mock *workBranchNameListerMock) ListCalls() []struct {
+	Ctx    context.Context
+	Filter workbranchstore.ListFilter
+	Limit  int32
+	Offset int32
+} {
+	var calls []struct {
+		Ctx    context.Context
+		Filter workbranchstore.ListFilter
+		Limit  int32
+		Offset int32
+	}
+	mock.lockList.RLock()
+	calls = mock.calls.List
+	mock.lockList.RUnlock()
 	return calls
 }
