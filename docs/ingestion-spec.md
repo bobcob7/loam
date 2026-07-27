@@ -102,6 +102,30 @@ cheap enough to keep simple.
   partial-degrade this pipeline forbids (see Consistency & Failure below). The failure rides
   the same embedder error path as any other embed failure, so the enclosing ingest
   transaction aborts and the previous index stays live, per the stale-but-consistent rule.
+- **The chunker keeps chunks under that budget so the failure above is a rare defensive
+  backstop, not the normal path (loam-zoa).** `Embedder.ContextWindow()`
+  (`internal/ingest/embed`) is the budget's source: the Ollama `Embedder` reports it from a
+  `knownModelContextWindows` table (`internal/ingest/embed/ollama`) keyed by model, alongside
+  the existing `knownModelDimensions` table, so the budget follows whichever model is
+  configured rather than being a constant. The same table's values are also sent as
+  `options.num_ctx` on every embed request, so the window `truncate:false` is actually
+  enforced against is the one the chunker was told to respect, not whatever Ollama's
+  per-version default would otherwise apply — which also means an under-estimate in that
+  table now costs real served context, not just internal headroom (see the table's own doc
+  comment). `internal/ingest/chunk.EnforceBudget` is the chunk-time enforcement point: given
+  chunk units already produced by symbol/section/sliding-window chunking, it splits any unit
+  exceeding the budget into sequential pieces on line boundaries where possible, so an
+  oversized file is chunked into embeddable pieces instead of failing ingest. Concatenating
+  the pieces reproduces the original content exactly, except that a piece that would
+  otherwise be pure whitespace (no search value) is folded into its neighbor instead of
+  emitted as its own chunk. Because chunking is a pure function over file bytes with no
+  tokenizer available, the token budget is converted to a byte budget via a conservative
+  estimate (`bytesPerTokenBudget = 2.0` bytes/token, versus ~3.0-3.5 bytes/token measured for
+  source code — denser than the ~4 bytes/token typical of English prose, roughly 40%
+  headroom) — deliberately not tight enough to be safe for every input (dense CJK text,
+  base64 blobs, and minified JS can all run closer to 1 byte/token, defeating the estimate),
+  which is why the `truncate:false` rejection above remains as the backstop for that residual
+  risk rather than being removed now that the chunker respects the budget in the common case.
 
 ## Consistency & Failure
 

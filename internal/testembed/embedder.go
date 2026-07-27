@@ -34,6 +34,14 @@ import (
 // Dimension is the fixed vector width this Embedder produces.
 const Dimension = 768
 
+// ContextWindow is the fixed token budget this double reports, mirroring
+// the production Ollama default for nomic-embed-text
+// (internal/ingest/embed/ollama's knownModelContextWindows,
+// docs/ingestion-spec.md), so tests exercising the chunk-budget seam
+// (internal/ingest/chunk, loam-zoa) against this double see realistic
+// numbers rather than an arbitrary stand-in.
+const ContextWindow = 2048
+
 // modelIDPrefix identifies this double's projection. ModelID appends
 // Dimension to it, so a Dimension change is detectable as a model change by
 // the ingest pipeline, the same as it would be for the real embedding model.
@@ -71,6 +79,11 @@ func (e *Embedder) Dimension() int {
 // ModelID identifies this double's projection version, including Dimension.
 func (e *Embedder) ModelID() string {
 	return modelIDPrefix + strconv.Itoa(Dimension)
+}
+
+// ContextWindow reports the fixed token budget this double produces.
+func (e *Embedder) ContextWindow() int {
+	return ContextWindow
 }
 
 func embedOne(text string) []float32 {
