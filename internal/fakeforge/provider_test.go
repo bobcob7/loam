@@ -376,6 +376,7 @@ func TestProviderClosePRMergedIsRejected(t *testing.T) {
 	err = client.ClosePR(ctx, "acme/widgets", number)
 	require.Error(t, err, "closing an already-merged PR must be rejected, not silently succeed")
 	assert.ErrorIs(t, err, errPRMerged)
+	assert.ErrorIs(t, err, forge.ErrPRAlreadyMerged, "a Client caller matches the forge-level class, not fakeforge's own sentinel: internal/mirrorsync's ClosePRAndCleanup treats exactly this class as success-equivalent")
 	state, err = client.GetPRState(ctx, "acme/widgets", number)
 	require.NoError(t, err)
 	assert.Equal(t, "merged", state, "the rejected close must not regress the PR's state")

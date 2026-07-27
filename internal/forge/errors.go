@@ -72,6 +72,28 @@ var ErrRepoNotFound = errors.New("forge: repo not found")
 // can wrap it and giq.7 can match it with errors.Is.
 var ErrDuplicatePR = errors.New("forge: a pull request already exists for this head/target pair")
 
+// ErrPRAlreadyMerged indicates ClosePR was called on a pull request the
+// forge has already merged, so there is no open PR left to close.
+// Returned (bare) via doPullRequest on a 412 — verified empirically
+// against a real Forgejo 9.0.3 instance, PATCH .../pulls/{number} with
+// state=closed against a MERGED PR returns 412 Precondition Failed
+// ("cannot change state of this pull request, it was already merged")
+// and leaves the state untouched, while the identical PATCH against a
+// closed-but-unmerged PR returns 201 and silently no-ops (loam-5rh's
+// review, recorded in loam-giq.8 NOTES). Before this sentinel existed
+// that 412 fell through doPullRequest's generic "unexpected status"
+// branch, indistinguishable from a genuine transport or server failure —
+// the gap internal/fakeforge/errors.go explicitly deferred to loam-giq.8.
+//
+// Exported because the distinction is success-equivalent, not
+// retry-worthy, for every caller there is: the terminal-cleanup path
+// (StorePRPoller.ClosePRAndCleanup, internal/mirrorsync) closes a PR only
+// to drive it to a terminal state, and a merged PR is already there. A
+// caller must match it with errors.Is and proceed, rather than treating
+// it as a close failure and retrying forever against a state the forge
+// will never let it change.
+var ErrPRAlreadyMerged = errors.New("forge: pull request is already merged")
+
 // ErrNoWriteAccess indicates the repo exists and is readable with the
 // configured credential, but the write (receive-pack) probe was denied
 // with a 401/403 — the token can read but not push. Returned (wrapped)
@@ -93,5 +115,5 @@ var ErrNoWriteAccess = errors.New("forge: token lacks git write access")
 // ErrInsufficientScope (loam-ddv). Add every new sentinel here in the
 // same commit it is declared, or fakeforge's guard cannot see it either.
 func AllSentinels() []error {
-	return []error{ErrInvalidToken, ErrInsufficientScope, ErrRepoNotFound, ErrNoWriteAccess, ErrDuplicatePR}
+	return []error{ErrInvalidToken, ErrInsufficientScope, ErrRepoNotFound, ErrNoWriteAccess, ErrDuplicatePR, ErrPRAlreadyMerged}
 }

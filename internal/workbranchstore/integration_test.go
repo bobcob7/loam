@@ -334,24 +334,76 @@ func TestSetTitleDescription_RejectedOnceComplete(t *testing.T) {
 	assert.ErrorIs(t, err, ErrIllegalTransition)
 }
 
-// TestComplete_FromDraft_Rejected proves Complete's own guard --
-// state IN ('reviewable', 'reviewed') -- actually rejects a draft branch,
-// not just reviewable/reviewed reject something else: only an accepted
-// proposal (reviewable or reviewed) can complete (docs/cli-spec.md:
-// "There is no agent complete command"; a draft branch was never even
-// sent for review).
-func TestComplete_FromDraft_Rejected(t *testing.T) {
+// TestComplete_FromConflictResetDraft_Allowed pins the widened
+// CompleteWorkBranch guard (loam-giq.8): a reviewed proposal whose target
+// advanced with conflicts is reset all the way back to 'draft'
+// (docs/git-spec.md "Target Advances & Catch-Up") while its upstream PR is
+// left untouched and open. If that PR then merges, the forge merge is
+// authoritative and the branch MUST reach 'complete' from draft -- under
+// the original state IN ('reviewable','reviewed') guard it could not, and
+// internal/mirrorsync's PR poller would have re-reported the same
+// ErrIllegalTransition on every sync tick forever.
+//
+// This test replaces TestComplete_FromDraft_Rejected, which asserted the
+// opposite of this and was the only thing pinning the narrower guard.
+func TestComplete_FromConflictResetDraft_Allowed(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store, repoID := newTestStore(t)
 	wb, err := store.Create(ctx, repoID, "wb-complete-draft", "main", "grace-hopper-3-author")
 	require.NoError(t, err)
+	_, err = store.SetTitleDescription(ctx, wb.ID, "Title", "Description")
+	require.NoError(t, err)
+	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
+	require.NoError(t, err)
+	_, err = store.UpdateState(ctx, wb.ID, StateReviewed)
+	require.NoError(t, err)
+	reset, err := store.MarkConflicted(ctx, wb.ID)
+	require.NoError(t, err)
+	require.Equal(t, StateDraft, reset.State, "precondition: a conflicting advance resets a reviewed branch to draft")
+	completed, err := store.Complete(ctx, wb.ID)
+	require.NoError(t, err, "a merged upstream PR must complete the branch whatever conflict state it was reset into")
+	assert.Equal(t, StateComplete, completed.State)
+}
+
+// TestComplete_FromComplete_Rejected proves the widened guard still stops
+// at the terminal states: it is state NOT IN ('complete','closed'), not
+// "anything goes." Without this, widening the guard could have gone all
+// the way to unguarded and nothing here would have noticed.
+func TestComplete_FromComplete_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-complete-twice", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	_, err = store.SetTitleDescription(ctx, wb.ID, "Title", "Description")
+	require.NoError(t, err)
+	_, err = store.UpdateState(ctx, wb.ID, StateReviewable)
+	require.NoError(t, err)
 	_, err = store.Complete(ctx, wb.ID)
-	require.Error(t, err, "a draft branch was never sent for review -- it must not be completable")
+	require.NoError(t, err)
+	_, err = store.Complete(ctx, wb.ID)
+	require.Error(t, err, "a completed branch must not complete again")
+	assert.ErrorIs(t, err, ErrIllegalTransition)
+}
+
+// TestComplete_FromClosed_Rejected is the other half of the terminal
+// guard: a closed branch never becomes complete, so a late-arriving
+// "merged" poll can never resurrect a branch the admin already closed.
+func TestComplete_FromClosed_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-complete-closed", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	_, err = store.Close(ctx, wb.ID, "admin closed it")
+	require.NoError(t, err)
+	_, err = store.Complete(ctx, wb.ID)
+	require.Error(t, err, "a closed branch must not complete")
 	assert.ErrorIs(t, err, ErrIllegalTransition)
 	unchanged, err := store.Get(ctx, wb.ID)
 	require.NoError(t, err)
-	assert.Equal(t, StateDraft, unchanged.State, "a rejected Complete must not partially apply")
+	assert.Equal(t, StateClosed, unchanged.State, "a rejected Complete must not partially apply")
 }
 
 // TestConflictNarrative_FlaggedDraftRecoversByCatchUp narrates the "a

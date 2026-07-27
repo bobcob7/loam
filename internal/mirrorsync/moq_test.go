@@ -1419,3 +1419,355 @@ func (mock *workBranchConflictMarkerMock) MarkConflictedCalls() []struct {
 	mock.lockMarkConflicted.RUnlock()
 	return calls
 }
+
+// Ensure, that workBranchTerminatorMock does implement workBranchTerminator.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchTerminator = &workBranchTerminatorMock{}
+
+// workBranchTerminatorMock is a mock implementation of workBranchTerminator.
+//
+//	func TestSomethingThatUsesworkBranchTerminator(t *testing.T) {
+//
+//		// make and configure a mocked workBranchTerminator
+//		mockedworkBranchTerminator := &workBranchTerminatorMock{
+//			CloseFunc: func(ctx context.Context, id uuid.UUID, reason string) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the Close method")
+//			},
+//			CompleteFunc: func(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the Complete method")
+//			},
+//		}
+//
+//		// use mockedworkBranchTerminator in code that requires workBranchTerminator
+//		// and then make assertions.
+//
+//	}
+type workBranchTerminatorMock struct {
+	// CloseFunc mocks the Close method.
+	CloseFunc func(ctx context.Context, id uuid.UUID, reason string) (workbranchstore.WorkBranch, error)
+
+	// CompleteFunc mocks the Complete method.
+	CompleteFunc func(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Close holds details about calls to the Close method.
+		Close []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// Reason is the reason argument value.
+			Reason string
+		}
+		// Complete holds details about calls to the Complete method.
+		Complete []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+		}
+	}
+	lockClose    sync.RWMutex
+	lockComplete sync.RWMutex
+}
+
+// Close calls CloseFunc.
+func (mock *workBranchTerminatorMock) Close(ctx context.Context, id uuid.UUID, reason string) (workbranchstore.WorkBranch, error) {
+	if mock.CloseFunc == nil {
+		panic("workBranchTerminatorMock.CloseFunc: method is nil but workBranchTerminator.Close was just called")
+	}
+	callInfo := struct {
+		Ctx    context.Context
+		ID     uuid.UUID
+		Reason string
+	}{
+		Ctx:    ctx,
+		ID:     id,
+		Reason: reason,
+	}
+	mock.lockClose.Lock()
+	mock.calls.Close = append(mock.calls.Close, callInfo)
+	mock.lockClose.Unlock()
+	return mock.CloseFunc(ctx, id, reason)
+}
+
+// CloseCalls gets all the calls that were made to Close.
+// Check the length with:
+//
+//	len(mockedworkBranchTerminator.CloseCalls())
+func (mock *workBranchTerminatorMock) CloseCalls() []struct {
+	Ctx    context.Context
+	ID     uuid.UUID
+	Reason string
+} {
+	var calls []struct {
+		Ctx    context.Context
+		ID     uuid.UUID
+		Reason string
+	}
+	mock.lockClose.RLock()
+	calls = mock.calls.Close
+	mock.lockClose.RUnlock()
+	return calls
+}
+
+// Complete calls CompleteFunc.
+func (mock *workBranchTerminatorMock) Complete(ctx context.Context, id uuid.UUID) (workbranchstore.WorkBranch, error) {
+	if mock.CompleteFunc == nil {
+		panic("workBranchTerminatorMock.CompleteFunc: method is nil but workBranchTerminator.Complete was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  uuid.UUID
+	}{
+		Ctx: ctx,
+		ID:  id,
+	}
+	mock.lockComplete.Lock()
+	mock.calls.Complete = append(mock.calls.Complete, callInfo)
+	mock.lockComplete.Unlock()
+	return mock.CompleteFunc(ctx, id)
+}
+
+// CompleteCalls gets all the calls that were made to Complete.
+// Check the length with:
+//
+//	len(mockedworkBranchTerminator.CompleteCalls())
+func (mock *workBranchTerminatorMock) CompleteCalls() []struct {
+	Ctx context.Context
+	ID  uuid.UUID
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  uuid.UUID
+	}
+	mock.lockComplete.RLock()
+	calls = mock.calls.Complete
+	mock.lockComplete.RUnlock()
+	return calls
+}
+
+// Ensure, that pullRequestTrackerMock does implement pullRequestTracker.
+// If this is not the case, regenerate this file with moq.
+var _ pullRequestTracker = &pullRequestTrackerMock{}
+
+// pullRequestTrackerMock is a mock implementation of pullRequestTracker.
+//
+//	func TestSomethingThatUsespullRequestTracker(t *testing.T) {
+//
+//		// make and configure a mocked pullRequestTracker
+//		mockedpullRequestTracker := &pullRequestTrackerMock{
+//			ClosePRFunc: func(ctx context.Context, repo string, prNumber int) error {
+//				panic("mock out the ClosePR method")
+//			},
+//			GetPRStateFunc: func(ctx context.Context, repo string, prNumber int) (string, error) {
+//				panic("mock out the GetPRState method")
+//			},
+//		}
+//
+//		// use mockedpullRequestTracker in code that requires pullRequestTracker
+//		// and then make assertions.
+//
+//	}
+type pullRequestTrackerMock struct {
+	// ClosePRFunc mocks the ClosePR method.
+	ClosePRFunc func(ctx context.Context, repo string, prNumber int) error
+
+	// GetPRStateFunc mocks the GetPRState method.
+	GetPRStateFunc func(ctx context.Context, repo string, prNumber int) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ClosePR holds details about calls to the ClosePR method.
+		ClosePR []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// PrNumber is the prNumber argument value.
+			PrNumber int
+		}
+		// GetPRState holds details about calls to the GetPRState method.
+		GetPRState []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// PrNumber is the prNumber argument value.
+			PrNumber int
+		}
+	}
+	lockClosePR    sync.RWMutex
+	lockGetPRState sync.RWMutex
+}
+
+// ClosePR calls ClosePRFunc.
+func (mock *pullRequestTrackerMock) ClosePR(ctx context.Context, repo string, prNumber int) error {
+	if mock.ClosePRFunc == nil {
+		panic("pullRequestTrackerMock.ClosePRFunc: method is nil but pullRequestTracker.ClosePR was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		Repo     string
+		PrNumber int
+	}{
+		Ctx:      ctx,
+		Repo:     repo,
+		PrNumber: prNumber,
+	}
+	mock.lockClosePR.Lock()
+	mock.calls.ClosePR = append(mock.calls.ClosePR, callInfo)
+	mock.lockClosePR.Unlock()
+	return mock.ClosePRFunc(ctx, repo, prNumber)
+}
+
+// ClosePRCalls gets all the calls that were made to ClosePR.
+// Check the length with:
+//
+//	len(mockedpullRequestTracker.ClosePRCalls())
+func (mock *pullRequestTrackerMock) ClosePRCalls() []struct {
+	Ctx      context.Context
+	Repo     string
+	PrNumber int
+} {
+	var calls []struct {
+		Ctx      context.Context
+		Repo     string
+		PrNumber int
+	}
+	mock.lockClosePR.RLock()
+	calls = mock.calls.ClosePR
+	mock.lockClosePR.RUnlock()
+	return calls
+}
+
+// GetPRState calls GetPRStateFunc.
+func (mock *pullRequestTrackerMock) GetPRState(ctx context.Context, repo string, prNumber int) (string, error) {
+	if mock.GetPRStateFunc == nil {
+		panic("pullRequestTrackerMock.GetPRStateFunc: method is nil but pullRequestTracker.GetPRState was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		Repo     string
+		PrNumber int
+	}{
+		Ctx:      ctx,
+		Repo:     repo,
+		PrNumber: prNumber,
+	}
+	mock.lockGetPRState.Lock()
+	mock.calls.GetPRState = append(mock.calls.GetPRState, callInfo)
+	mock.lockGetPRState.Unlock()
+	return mock.GetPRStateFunc(ctx, repo, prNumber)
+}
+
+// GetPRStateCalls gets all the calls that were made to GetPRState.
+// Check the length with:
+//
+//	len(mockedpullRequestTracker.GetPRStateCalls())
+func (mock *pullRequestTrackerMock) GetPRStateCalls() []struct {
+	Ctx      context.Context
+	Repo     string
+	PrNumber int
+} {
+	var calls []struct {
+		Ctx      context.Context
+		Repo     string
+		PrNumber int
+	}
+	mock.lockGetPRState.RLock()
+	calls = mock.calls.GetPRState
+	mock.lockGetPRState.RUnlock()
+	return calls
+}
+
+// Ensure, that upstreamRefDeleterMock does implement upstreamRefDeleter.
+// If this is not the case, regenerate this file with moq.
+var _ upstreamRefDeleter = &upstreamRefDeleterMock{}
+
+// upstreamRefDeleterMock is a mock implementation of upstreamRefDeleter.
+//
+//	func TestSomethingThatUsesupstreamRefDeleter(t *testing.T) {
+//
+//		// make and configure a mocked upstreamRefDeleter
+//		mockedupstreamRefDeleter := &upstreamRefDeleterMock{
+//			DeleteRemoteRefFunc: func(ctx context.Context, host string, mirrorDir string, upstreamURL string, ref string) ([]byte, error) {
+//				panic("mock out the DeleteRemoteRef method")
+//			},
+//		}
+//
+//		// use mockedupstreamRefDeleter in code that requires upstreamRefDeleter
+//		// and then make assertions.
+//
+//	}
+type upstreamRefDeleterMock struct {
+	// DeleteRemoteRefFunc mocks the DeleteRemoteRef method.
+	DeleteRemoteRefFunc func(ctx context.Context, host string, mirrorDir string, upstreamURL string, ref string) ([]byte, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// DeleteRemoteRef holds details about calls to the DeleteRemoteRef method.
+		DeleteRemoteRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Host is the host argument value.
+			Host string
+			// MirrorDir is the mirrorDir argument value.
+			MirrorDir string
+			// UpstreamURL is the upstreamURL argument value.
+			UpstreamURL string
+			// Ref is the ref argument value.
+			Ref string
+		}
+	}
+	lockDeleteRemoteRef sync.RWMutex
+}
+
+// DeleteRemoteRef calls DeleteRemoteRefFunc.
+func (mock *upstreamRefDeleterMock) DeleteRemoteRef(ctx context.Context, host string, mirrorDir string, upstreamURL string, ref string) ([]byte, error) {
+	if mock.DeleteRemoteRefFunc == nil {
+		panic("upstreamRefDeleterMock.DeleteRemoteRefFunc: method is nil but upstreamRefDeleter.DeleteRemoteRef was just called")
+	}
+	callInfo := struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Ref         string
+	}{
+		Ctx:         ctx,
+		Host:        host,
+		MirrorDir:   mirrorDir,
+		UpstreamURL: upstreamURL,
+		Ref:         ref,
+	}
+	mock.lockDeleteRemoteRef.Lock()
+	mock.calls.DeleteRemoteRef = append(mock.calls.DeleteRemoteRef, callInfo)
+	mock.lockDeleteRemoteRef.Unlock()
+	return mock.DeleteRemoteRefFunc(ctx, host, mirrorDir, upstreamURL, ref)
+}
+
+// DeleteRemoteRefCalls gets all the calls that were made to DeleteRemoteRef.
+// Check the length with:
+//
+//	len(mockedupstreamRefDeleter.DeleteRemoteRefCalls())
+func (mock *upstreamRefDeleterMock) DeleteRemoteRefCalls() []struct {
+	Ctx         context.Context
+	Host        string
+	MirrorDir   string
+	UpstreamURL string
+	Ref         string
+} {
+	var calls []struct {
+		Ctx         context.Context
+		Host        string
+		MirrorDir   string
+		UpstreamURL string
+		Ref         string
+	}
+	mock.lockDeleteRemoteRef.RLock()
+	calls = mock.calls.DeleteRemoteRef
+	mock.lockDeleteRemoteRef.RUnlock()
+	return calls
+}

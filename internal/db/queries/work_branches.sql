@@ -92,11 +92,33 @@ RETURNING *;
 
 -- name: CompleteWorkBranch :one
 -- Set by the server when the upstream PR merges (docs/cli-spec.md: "There
--- is no agent complete command"); only a reviewable/reviewed branch (an
--- accepted proposal) can complete.
+-- is no agent complete command"; "the work branch flips to complete only
+-- when that PR merges" -- a statement about the trigger, with no state
+-- precondition attached to it).
+--
+-- The guard is any non-terminal state, matching CloseWorkBranch above, NOT
+-- the narrower state IN ('reviewable','reviewed') it started as. That
+-- narrower guard was unreachable-by-design in one real case and wrong in
+-- it: docs/git-spec.md "Target Advances & Catch-Up" resets a reviewable/
+-- reviewed branch -- "including an accepted proposal with an open PR" --
+-- all the way back to 'draft' on a conflicting target advance, while
+-- deliberately leaving the upstream PR untouched. If that PR then merges
+-- on the forge, the forge merge is authoritative (loam-giq.8 DESIGN:
+-- "merged -> state='complete' regardless of whatever conflict/round state
+-- it was in") and the branch must reach 'complete'; under the old guard it
+-- could not, and internal/mirrorsync's PR poller would have re-reported
+-- the same ErrIllegalTransition on every sync tick, forever, for a
+-- proposal that had in fact shipped.
+--
+-- The "only an accepted proposal completes" property is not lost, it just
+-- lives at the caller now: StorePRPoller (internal/mirrorsync/pr_poller.go)
+-- is the only caller in the tree and only ever completes a branch whose
+-- work_branches.upstream_pr_number is recorded and whose PR the forge just
+-- reported merged. That column is only ever written by proposal acceptance,
+-- which requires 'reviewed'.
 UPDATE work_branches
 SET state = 'complete', updated_at = now()
-WHERE id = $1 AND state IN ('reviewable', 'reviewed')
+WHERE id = $1 AND state NOT IN ('complete', 'closed')
 RETURNING *;
 
 -- name: MarkWorkBranchConflicted :one

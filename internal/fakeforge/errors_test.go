@@ -197,14 +197,14 @@ func TestFakeforgeSentinelsMatchOnlyTheirOwnForgeClass(t *testing.T) {
 		{"errPRExists", errPRExists, forge.ErrDuplicatePR},
 		{"errRepoExists", errRepoExists, nil},
 		{"errBranchNotFound", errBranchNotFound, nil},
-		{"errPRMerged", errPRMerged, nil},
+		{"errPRMerged", errPRMerged, forge.ErrPRAlreadyMerged},
 		{"errInvalidBranch", errInvalidBranch, nil},
 		{"errMergeConflict", errMergeConflict, nil},
 		{"errGitUnavailable", errGitUnavailable, nil},
 		{"errInvalidUpstream", errInvalidUpstream, nil},
 	}
 	forgeSentinels := forge.AllSentinels()
-	require.Len(t, forgeSentinels, 5, "forge.AllSentinels() grew (or shrank) a sentinel: reconcile the `want` column above against the new class, then update this count")
+	require.Len(t, forgeSentinels, 6, "forge.AllSentinels() grew (or shrank) a sentinel: reconcile the `want` column above against the new class, then update this count")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
