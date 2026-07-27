@@ -307,8 +307,12 @@ func (x *WorkBranch) GetUpstreamPrUrl() string {
 type Comment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Agent identifier of the comment's author.
-	Author        string `protobuf:"bytes,1,opt,name=author,proto3" json:"author,omitempty"`
-	Body          string `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	Author string `protobuf:"bytes,1,opt,name=author,proto3" json:"author,omitempty"`
+	Body   string `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	// The review round this comment was posted in. A reply can land in a LATER
+	// round than the thread it belongs to, so this is the comment's own round,
+	// never inherited from Thread.round (docs/persistence-spec.md → "comments").
+	Round         uint32 `protobuf:"varint,3,opt,name=round,proto3" json:"round,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -355,6 +359,13 @@ func (x *Comment) GetBody() string {
 		return x.Body
 	}
 	return ""
+}
+
+func (x *Comment) GetRound() uint32 {
+	if x != nil {
+		return x.Round
+	}
+	return 0
 }
 
 // A location within a file: a file path and an optional line. Shared by comment
@@ -418,8 +429,11 @@ type Thread struct {
 	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Resolved bool                   `protobuf:"varint,2,opt,name=resolved,proto3" json:"resolved,omitempty"`
 	// File/line anchor. Unset for a top-level thread.
-	Anchor        *FileLine  `protobuf:"bytes,3,opt,name=anchor,proto3,oneof" json:"anchor,omitempty"`
-	Comments      []*Comment `protobuf:"bytes,4,rep,name=comments,proto3" json:"comments,omitempty"`
+	Anchor   *FileLine  `protobuf:"bytes,3,opt,name=anchor,proto3,oneof" json:"anchor,omitempty"`
+	Comments []*Comment `protobuf:"bytes,4,rep,name=comments,proto3" json:"comments,omitempty"`
+	// The review round the thread was RAISED in. It never changes as the branch
+	// moves through later rounds (docs/cli-spec.md → "comments" output shape).
+	Round         uint32 `protobuf:"varint,5,opt,name=round,proto3" json:"round,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -480,6 +494,13 @@ func (x *Thread) GetComments() []*Comment {
 		return x.Comments
 	}
 	return nil
+}
+
+func (x *Thread) GetRound() uint32 {
+	if x != nil {
+		return x.Round
+	}
+	return 0
 }
 
 // A reviewer's recorded verdict on a work branch. Verdicts persist across rounds;
@@ -754,19 +775,21 @@ const file_loam_v1_common_proto_rawDesc = "" +
 	"\x05state\x18\x06 \x01(\x0e2\x18.loam.v1.WorkBranchStateR\x05state\x12\x16\n" +
 	"\x06author\x18\a \x01(\tR\x06author\x12+\n" +
 	"\x0fupstream_pr_url\x18\b \x01(\tH\x00R\rupstreamPrUrl\x88\x01\x01B\x12\n" +
-	"\x10_upstream_pr_url\"5\n" +
+	"\x10_upstream_pr_url\"K\n" +
 	"\aComment\x12\x16\n" +
 	"\x06author\x18\x01 \x01(\tR\x06author\x12\x12\n" +
-	"\x04body\x18\x02 \x01(\tR\x04body\"@\n" +
+	"\x04body\x18\x02 \x01(\tR\x04body\x12\x14\n" +
+	"\x05round\x18\x03 \x01(\rR\x05round\"@\n" +
 	"\bFileLine\x12\x12\n" +
 	"\x04file\x18\x01 \x01(\tR\x04file\x12\x17\n" +
 	"\x04line\x18\x02 \x01(\rH\x00R\x04line\x88\x01\x01B\a\n" +
-	"\x05_line\"\x9d\x01\n" +
+	"\x05_line\"\xb3\x01\n" +
 	"\x06Thread\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bresolved\x18\x02 \x01(\bR\bresolved\x12.\n" +
 	"\x06anchor\x18\x03 \x01(\v2\x11.loam.v1.FileLineH\x00R\x06anchor\x88\x01\x01\x12,\n" +
-	"\bcomments\x18\x04 \x03(\v2\x10.loam.v1.CommentR\bcommentsB\t\n" +
+	"\bcomments\x18\x04 \x03(\v2\x10.loam.v1.CommentR\bcomments\x12\x14\n" +
+	"\x05round\x18\x05 \x01(\rR\x05roundB\t\n" +
 	"\a_anchor\"\x8b\x01\n" +
 	"\x0eVerdictSummary\x12\x1a\n" +
 	"\breviewer\x18\x01 \x01(\tR\breviewer\x121\n" +
