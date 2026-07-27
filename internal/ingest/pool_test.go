@@ -1,12 +1,15 @@
 package ingest
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testLogger() *slog.Logger {
@@ -195,5 +198,160 @@ func TestWithBackoff_ClampsNonPositiveAndInvertedBounds(t *testing.T) {
 			assert.GreaterOrEqual(t, pool.backoffMax, pool.backoffBase, "max must never end up below base")
 			assert.Positive(t, backoffDelay(1, pool.backoffBase, pool.backoffMax), "the resulting bounds must never yield a zero or negative delay")
 		})
+	}
+}
+
+// TestRunOrchestrator_ConvertsAPanicIntoAJobError is loam-337's core unit:
+// a panicking Orchestrator must come back as an ordinary error, so run()
+// routes it into the existing fail() path with no panic-specific branch.
+//
+// require.NotPanics is what makes this test kill the mutation "delete the
+// recover" with an ASSERTION rather than by crashing the test binary: it
+// installs its own recover, so an escaping panic is reported as a failed
+// assertion here instead of taking the whole `go test` process (and every
+// sibling test in this package) down with it -- which is precisely the
+// production failure mode this bead exists to remove.
+//
+// db is nil and never touched: runOrchestrator does no I/O.
+func TestRunOrchestrator_ConvertsAPanicIntoAJobError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		boom        func()
+		wantMessage string
+	}{
+		{name: "string value", boom: func() { panic("chunker exploded") }, wantMessage: "chunker exploded"},
+		{name: "error value", boom: func() { panic(assert.AnError) }, wantMessage: assert.AnError.Error()},
+		{name: "non-string value", boom: func() { panic([]int{1, 2}) }, wantMessage: "[1 2]"},
+		{name: "zero value", boom: func() { panic(0) }, wantMessage: "0"},
+		{
+			// The loam-c94.11 shape: an index-out-of-range in the vector
+			// write path, raised by the runtime rather than by a literal
+			// panic() call, and found only by mutation testing.
+			name:        "runtime index-out-of-range",
+			boom:        func() { vec := []float32{}; _ = vec[3] },
+			wantMessage: "index out of range [3] with length 0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orch := &OrchestratorMock{
+				RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+					tt.boom()
+					return Stats{}, nil
+				},
+			}
+			pool := NewPool(testLogger(), nil, orch, 1)
+			job := Job{ID: uuid.New(), RepoID: uuid.New(), TargetBranch: "main", Kind: KindFull}
+			var stats Stats
+			var err error
+			require.NotPanics(t, func() { stats, err = pool.runOrchestrator(t.Context(), job) },
+				"a panicking orchestrator must not escape the per-job boundary -- if it does, the server process dies")
+			require.Error(t, err, "a recovered panic must be reported as a job error, not swallowed into a success")
+			assert.ErrorIs(t, err, errJobPanicked)
+			assert.Contains(t, err.Error(), tt.wantMessage, "the recovered value must survive into the message fail() records")
+			assert.Equal(t, Stats{}, stats, "a panicked job reports no stats")
+		})
+	}
+}
+
+// TestRunOrchestrator_PassesASuccessfulRunThrough is the mutation-catching
+// counterpart to the test above: without it, a runOrchestrator that
+// unconditionally returned an error (or dropped the orchestrator's stats)
+// would still satisfy every panic assertion.
+func TestRunOrchestrator_PassesASuccessfulRunThrough(t *testing.T) {
+	t.Parallel()
+	want := Stats{FilesParsed: 3, ChunksEmbedded: 9}
+	var gotJob Job
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			gotJob = job
+			return want, nil
+		},
+	}
+	pool := NewPool(testLogger(), nil, orch, 1)
+	job := Job{ID: uuid.New(), RepoID: uuid.New(), TargetBranch: "main", Kind: KindIncremental}
+	stats, err := pool.runOrchestrator(t.Context(), job)
+	require.NoError(t, err)
+	assert.Equal(t, want, stats)
+	assert.Equal(t, job, gotJob, "the claimed job must reach the orchestrator unmodified")
+}
+
+// TestRun_SurvivesAPanicWhileRecordingTheOutcome covers the second guard:
+// a panic from succeed/fail themselves -- not from the pipeline -- must
+// also not reach work() and kill the process.
+//
+// The injected fault is a nil *pgxpool.Pool, which is how every other unit
+// test in this file constructs a Pool (Pool.db is a concrete
+// *pgxpool.Pool with no querier seam a moq mock could stand in for). The
+// orchestrator returns an ordinary error, so fail() runs and its very
+// first database call dereferences the nil pool. That reproduces the exact
+// shape of the hole -- a panic raised after the orchestrator has already
+// returned -- without needing Postgres.
+//
+// The slot and waiter assertions are the leak checks the bead asks for,
+// and they are only satisfiable because run registers release and
+// notifyDrainWaiters as its own defers, before anything that can panic --
+// when they lived inside succeed/fail, a panic that skipped both functions
+// entirely would have skipped them too. The repo must not be left marked
+// busy, or claim() skips it and every future job for it is unclaimable
+// forever.
+func TestRun_SurvivesAPanicWhileRecordingTheOutcome(t *testing.T) {
+	t.Parallel()
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			return Stats{}, assert.AnError
+		},
+	}
+	pool := NewPool(testLogger(), nil, orch, 1)
+	job := Job{ID: uuid.New(), RepoID: uuid.New(), TargetBranch: "main", Kind: KindFull}
+	pool.mu.Lock()
+	pool.busy[job.RepoID] = struct{}{}
+	waiter := make(chan struct{})
+	pool.drainWaiters[job.RepoID] = append(pool.drainWaiters[job.RepoID], waiter)
+	pool.mu.Unlock()
+	require.NotPanics(t, func() { pool.run(t.Context(), job) },
+		"a panic while recording a job's outcome must not escape run() -- work() has no guard of its own")
+	pool.mu.Lock()
+	_, stillBusy := pool.busy[job.RepoID]
+	pool.mu.Unlock()
+	assert.False(t, stillBusy, "the per-repo serialization slot must be released even when recording the outcome panicked")
+	select {
+	case <-waiter:
+	default:
+		t.Fatal("a DrainRepoID waiter registered for this repo was never woken -- a recovered panic that wedges the pool is barely better than the crash")
+	}
+}
+
+// TestRun_ReleasesTheSlotAndWakesDrainWaitersOnAPipelinePanic is the
+// same two leak checks for the ordinary panic path (the pipeline panics,
+// runOrchestrator converts it, fail() records it). fail()'s database work
+// panics here too because db is nil, so this test proves only the
+// release/notify halves -- the persisted row is what the integration
+// tests in integration_test.go assert against real Postgres.
+func TestRun_ReleasesTheSlotAndWakesDrainWaitersOnAPipelinePanic(t *testing.T) {
+	t.Parallel()
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			panic("tree-sitter cgo boundary")
+		},
+	}
+	pool := NewPool(testLogger(), nil, orch, 1)
+	job := Job{ID: uuid.New(), RepoID: uuid.New(), TargetBranch: "main", Kind: KindFull}
+	pool.mu.Lock()
+	pool.busy[job.RepoID] = struct{}{}
+	waiter := make(chan struct{})
+	pool.drainWaiters[job.RepoID] = append(pool.drainWaiters[job.RepoID], waiter)
+	pool.mu.Unlock()
+	require.NotPanics(t, func() { pool.run(t.Context(), job) })
+	pool.mu.Lock()
+	_, stillBusy := pool.busy[job.RepoID]
+	pool.mu.Unlock()
+	assert.False(t, stillBusy, "a panicking job must not leak its repo's serialization slot")
+	select {
+	case <-waiter:
+	default:
+		t.Fatal("a DrainRepoID waiter must be woken on the panic path too")
 	}
 }
