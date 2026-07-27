@@ -183,3 +183,72 @@ func TestBuildRouter_WithPool_WorkBranchServiceIsGenuinelyRegistered(t *testing.
 	assert.NotContains(t, connectErr.Message(), "service registered",
 		"the request must reach the real WorkBranchServiceHandler, never the group fallback's canned message, once a pool is wired in")
 }
+
+// gitInfoRefsRequest builds a GET .../info/refs?service=git-upload-pack
+// request against srv, carrying the trusted Loam-Agent-* identity headers
+// every real /git/* request needs to get past internal/httpauth.Auth.
+// GitIdentity before either the group fallback or registerGitService's
+// real chain (GitIdentity -> GitRoleGate -> git.Handler) is ever reached --
+// unlike the /loam.v1.* pair above, there is no Connect client for git, so
+// this issues the raw HTTP request by hand.
+func gitInfoRefsRequest(t *testing.T, srv *httptest.Server) (status int, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/git/acme/widgets.git/info/refs?service=git-upload-pack", nil)
+	require.NoError(t, err)
+	req.Header.Set("Loam-Agent-Name", "ada-lovelace")
+	req.Header.Set("Loam-Agent-Id", "7")
+	req.Header.Set("Loam-Agent-Role", "author")
+	resp, err := newIsolatedHTTPClient(t).Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(raw)
+}
+
+// TestBuildRouter_NilPool_GitStillHitsGroupFallback is loam-ofg.16's
+// "before" half of the same registration proof the /loam.v1.* pair above
+// establishes: with no pool wired in, registerGitService's own nil guard
+// no-ops (see its doc comment), so RegisterGit is never called and every
+// /git/* request still gets internal/server's group-level fallback
+// (loam-cjq's gitNotFoundHandler) -- a FIXED body, unrelated to the
+// request, unlike git.Handler's own per-repo 404 ("loam: repository not
+// found\n"). That fixed string is exactly what
+// TestBuildRouter_WithPool_GitIsGenuinelyRegistered below is contrasted
+// against.
+func TestBuildRouter_NilPool_GitStillHitsGroupFallback(t *testing.T) {
+	t.Parallel()
+	router := buildRouter(testConfigForRouter(), nil)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	status, body := gitInfoRefsRequest(t, srv)
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "404 repository not found\n", body,
+		"with no pool wired in, /git/* must still be entirely unregistered -- the group fallback's own fixed body")
+}
+
+// TestBuildRouter_WithPool_GitIsGenuinelyRegistered is a fast, container-
+// free registration proof for loam-ofg.16, mirroring the /loam.v1.* trio
+// above: once a pool is supplied, the same request no longer hits
+// internal/server's group-level fallback. It does not need a live,
+// reachable Postgres to prove this -- only that the request reaches the
+// REAL chain (GitRoleGate's capability check attempts a real role-store
+// query against the unreachable pool and fails with a connection error,
+// mapped to a 500 by GitRoleGate.Middleware itself, never reaching
+// git.Handler) rather than the fallback's fixed 404 body.
+// TestServer_GitIsRegistered_NotGroupFallback (a follow-up for
+// registration_integration_test.go, once loam-ofg.18's policy socket and a
+// concrete RoleStore exist) is the real-Postgres version of this same
+// proof.
+func TestBuildRouter_WithPool_GitIsGenuinelyRegistered(t *testing.T) {
+	t.Parallel()
+	pool := unreachablePool(t)
+	router := buildRouter(testConfigForRouter(), pool)
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	status, body := gitInfoRefsRequest(t, srv)
+	assert.NotEqual(t, http.StatusNotFound, status,
+		"a real (if unreachable-database) failure inside the gate/handler chain must not coincidentally look like the fallback's 404")
+	assert.NotEqual(t, "404 repository not found\n", body,
+		"the request must reach the real GitRoleGate/git.Handler chain, never the group fallback's fixed body, once a pool is wired in")
+}

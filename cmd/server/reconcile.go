@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+
+	"github.com/bobcob7/loam/internal/mirrorpath"
 )
 
 // mirrorReconcilerFunc matches mirrorreconcile.ReconcileMirror's
@@ -41,13 +42,12 @@ func reconcileMirrors(ctx context.Context, logger *slog.Logger, dataDir string, 
 	return nil
 }
 
-// mirrorPath derives an enrolled repo's bare-mirror path from
-// docs/server-spec.md's LOAM_DATA_DIR row: "bare mirrors under
-// <dir>/mirrors/<group>/<repo_name>.git". repoName is repos.name, already
-// the "<group>/<repo_name>" string (docs/persistence-spec.md "Git
-// mirrors": "path derived from repos.name"; internal/mirrorsync.RepoID's
-// doc comment makes the same point), so this is a single join, not a
-// two-level split/join.
+// mirrorPath derives an enrolled repo's bare-mirror path. Delegates to
+// internal/mirrorpath.Dir, the single source of the join docs/server-
+// spec.md's LOAM_DATA_DIR row pins ("bare mirrors under
+// <dir>/mirrors/<group>/<repo_name>.git") -- kept as a thin wrapper (rather
+// than calling mirrorpath.Dir directly at the one call site above) so this
+// package's own tests keep exercising it by its existing name.
 func mirrorPath(dataDir, repoName string) string {
-	return filepath.Join(dataDir, "mirrors", repoName+".git")
+	return mirrorpath.Dir(dataDir, repoName)
 }

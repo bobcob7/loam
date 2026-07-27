@@ -5,8 +5,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/mirrorpath"
 )
 
 // allRefsRefspec is the wildcard positive refspec MirrorFetcher pairs with
@@ -79,12 +80,16 @@ func (f *MirrorFetcher) Fetch(ctx context.Context, repo RepoID) (FetchResult, er
 	return FetchResult{Refs: refs}, nil
 }
 
-// mirrorDir derives repo's bare-mirror path, mirroring cmd/server's own
+// mirrorDir derives repo's bare-mirror path. Delegates to
+// internal/mirrorpath.Dir, the single source of cmd/server's own
 // mirrorPath convention (docs/server-spec.md: "bare mirrors under
 // <dir>/mirrors/<group>/<repo_name>.git") -- RepoID is repos.name, already
-// the "<group>/<repo_name>" string that convention joins.
+// the "<group>/<repo_name>" string that convention joins. Kept as a thin
+// wrapper (rather than calling mirrorpath.Dir directly at the one call
+// site above) so this package's own tests keep exercising it by its
+// existing name.
 func (f *MirrorFetcher) mirrorDir(repo RepoID) string {
-	return filepath.Join(f.dataDir, "mirrors", string(repo)+".git")
+	return mirrorpath.Dir(f.dataDir, string(repo))
 }
 
 // buildFetchRefspecs returns the wildcard positive refspec plus one

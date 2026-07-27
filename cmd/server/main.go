@@ -71,6 +71,7 @@ import (
 	"github.com/bobcob7/loam/internal/db/migrations"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/handler/git"
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
@@ -208,9 +209,11 @@ func run(cfg config.Config) error {
 // every /loam.v1.*, /loam.admin.v1.*, and /git/* handler whose
 // dependencies pool makes available. Later handler beads (loam-ofg.8/.10
 // for the rest of /loam.v1.*, loam-ofg.12/.13/.14/.15 for
-// /loam.admin.v1.*, loam-ofg.16 for /git/*) each add their own RegisterCLI
-// / RegisterAdmin / RegisterGit call here, once their service constructors
-// exist -- the registration point this bead's DESIGN note establishes.
+// /loam.admin.v1.*) each add their own RegisterCLI / RegisterAdmin call
+// here, once their service constructors exist -- the registration point
+// this bead's DESIGN note establishes; registerGitService (loam-ofg.16,
+// gated by loam-ofg.17's role gate) is that same pattern applied to
+// /git/*.
 // pool may be nil (buildRouter's own tests exercise that path without a
 // live database); registerMetadataServices no-ops in that case rather than
 // registering handlers that would panic on their first real request. run()
@@ -223,6 +226,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool) *server.Router {
 	router.RegisterUnauthenticated("/readyz", placeholderHealthHandler("ready"))
 	registerMetadataServices(router, cfg, pool)
 	registerWorkBranchService(router, cfg, pool)
+	registerGitService(router, cfg, pool)
 	return router
 }
 
@@ -279,6 +283,30 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
 		workbranch.New(workBranches, repos, rounds, notImplementedDiffComputer{}, capabilities, errorMapper, cfg.Logger),
 	))
+}
+
+// registerGitService wires the /git/* smart-HTTP transport (loam-ofg.16)
+// behind internal/handler.GitRoleGate (loam-ofg.17), reusing the same
+// repos store and capability checker registerMetadataServices' and
+// registerWorkBranchService's services already build over pool. Wiring
+// composition recorded on loam-ofg.16 during loam-ofg.17's review:
+// router.RegisterGit(prefix, gate.Middleware(gitHandler)) -- RegisterGit
+// itself additionally wraps the result in httpauth.Auth.GitIdentity (see
+// internal/server/router.go), so the full chain a request passes through
+// is GitIdentity -> GitRoleGate -> git.Handler.
+//
+// pool == nil is the only guard here, for the same reason and exercised
+// the same way as registerMetadataServices' own guard.
+func registerGitService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
+	capabilities := handler.NewCapabilityChecker(roles)
+	gate := handler.NewGitRoleGate(capabilities, cfg.Logger)
+	gitHandler := git.New(cfg.DataDir, repos, cfg.Logger)
+	router.RegisterGit("/git/", gate.Middleware(gitHandler))
 }
 
 // roleStoreAdapter adapts internal/rolestore.Store's plain-string
