@@ -346,23 +346,35 @@ func TestServer_StartupSucceedsAgainstAVirginDatabase(t *testing.T) {
 }
 
 // TestServer_RequeuesOrphanedIngestJobsOnStartup directly proves
-// docs/server-spec.md Startup step 4 runs for real: a repo and ingest_jobs
-// row seeded with status='running' -- simulating a job orphaned by a prior
-// crash -- is no longer 'running' by the time the server has finished
-// starting, before this test ever calls ingest.Pool.RequeueOrphaned
-// itself. It cannot assert the row lands on exactly 'queued' and stays
-// there: this binary wires a real, live ingest.Pool (see main.go's
-// notImplementedOrchestrator), so once RequeueOrphaned flips the row to
-// 'queued' a real worker goroutine can race in and claim it before this
-// test's own request even returns -- and since notImplementedOrchestrator
-// always errors, a claimed row immediately becomes 'failed'. Both
-// outcomes are acceptable proof that RequeueOrphaned ran (the row is
-// provably no longer stuck at 'running', the state a crash would have
-// left it in); only 'failed' additionally requires the recorded error to
-// be the expected, clearly-labeled placeholder, not some other failure
-// this test would otherwise mask. Connecting directly with pgxpool (not
-// through this package) to seed and later assert keeps the proof
-// independent of the server binary's own database code.
+// docs/server-spec.md Startup step 4 runs for real: an ingest_jobs row
+// seeded with status='running' -- simulating a job orphaned by a prior
+// crash -- is picked back up by the server's own startup, before this test
+// ever calls ingest.Pool.RequeueOrphaned itself. Connecting directly with
+// pgxpool (not through this package) to seed and later assert keeps the
+// proof independent of the server binary's own database code.
+//
+// The signal is `attempts`, NOT `status`, and that choice is load-bearing.
+// This binary wires a real, live ingest.Pool, so a requeued job does not
+// come to rest anywhere: RequeueOrphaned flips the row to 'queued', a
+// worker claims it (ingest.Pool.claim sets status='running' again),
+// notImplementedOrchestrator errors, fail records 'failed', and
+// scheduleRetry puts it back to 'queued' after a backoff -- forever. So
+// 'running' is a RECURRING state on the happy path, not a one-time
+// window, and any single-sample assertion of "status is not running" is
+// unfalsifiable: it cannot tell a job still stuck from a crash apart from
+// a job correctly requeued and merely mid-attempt. This test asserted
+// exactly that and turned CI red intermittently (run 30292966379), which
+// is how the flaw was found.
+//
+// attempts has none of that trouble. It is incremented only by fail
+// (`attempts = attempts + 1`) and is never reset -- scheduleRetry sets
+// status and queued_at but deliberately leaves attempts alone -- so it is
+// monotonic. A job that is never requeued is never claimed (claim only
+// selects status='queued'), so it never fails, so attempts stays 0
+// forever. attempts >= 1 is therefore reachable if and only if
+// RequeueOrphaned ran, with no race to lose. Delete the RequeueOrphaned
+// call from main.go and this test hangs on the poll and fails; that is
+// the mutation it is built to catch.
 func TestServer_RequeuesOrphanedIngestJobsOnStartup(t *testing.T) {
 	dsn := newPostgres(t)
 	migrateOnce(t, dsn)
@@ -370,7 +382,7 @@ func TestServer_RequeuesOrphanedIngestJobsOnStartup(t *testing.T) {
 	rs := startServer(t, dsn)
 	_, status := getWithAuthorization(t, rs.addr, "/healthz", "")
 	require.Equal(t, http.StatusOK, status, "stderr: %s", rs.stderr.String())
-	assertJobLeftRunningState(t, dsn, jobID)
+	assertOrphanedJobWasRequeued(t, dsn, jobID, rs)
 }
 
 // migrateOnce runs the server binary once, just long enough to reach
@@ -411,23 +423,35 @@ func seedOrphanedIngestJob(t *testing.T, dsn string) (repoID, jobID uuid.UUID) {
 	return repoID, jobID
 }
 
-// assertJobLeftRunningState asserts jobID is no longer status='running'
-// (RequeueOrphaned's job) and, if a live worker has already claimed and
-// failed it, that the recorded error is the expected placeholder rather
-// than some other, masked failure. See
-// TestServer_RequeuesOrphanedIngestJobsOnStartup's doc comment for why
-// 'queued' and 'failed' are both acceptable outcomes here.
-func assertJobLeftRunningState(t *testing.T, dsn string, jobID uuid.UUID) {
+// assertOrphanedJobWasRequeued polls jobID until its attempts counter
+// leaves 0, proving a worker claimed and ran it -- which can only happen
+// after RequeueOrphaned moved it off the 'running' state a crash left it
+// in. See TestServer_RequeuesOrphanedIngestJobsOnStartup's doc comment for
+// why attempts rather than status is the signal.
+//
+// Once attempts has moved, the recorded error must be the labeled
+// placeholder: the job is expected to fail (notImplementedOrchestrator
+// always errors), but it must fail for THAT reason and not some other one
+// this test would otherwise mask. error is read in the same row read as
+// attempts so the two cannot describe different attempts, and it is only
+// asserted when the row is at rest in 'failed' -- mid-claim the column
+// still holds the previous attempt's text.
+func assertOrphanedJobWasRequeued(t *testing.T, dsn string, jobID uuid.UUID, rs *runningServer) {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	defer conn.Close()
+	var attempts int
 	var status string
 	var jobErr *string
-	require.NoError(t, conn.QueryRow(ctx, `SELECT status, error FROM ingest_jobs WHERE id = $1`, jobID).Scan(&status, &jobErr))
-	require.NotEqual(t, "running", status, "RequeueOrphaned should have reset this crash-orphaned job off running on startup")
-	require.Contains(t, []string{"queued", "failed"}, status)
+	require.Eventuallyf(t, func() bool {
+		if err := conn.QueryRow(ctx, `SELECT attempts, status, error FROM ingest_jobs WHERE id = $1`, jobID).Scan(&attempts, &status, &jobErr); err != nil {
+			return false
+		}
+		return attempts >= 1
+	}, 30*time.Second, 50*time.Millisecond,
+		"a crash-orphaned job must be requeued on startup and attempted; attempts never left 0. stderr: %s", rs.stderr.String())
 	if status == "failed" {
 		require.NotNil(t, jobErr)
 		assert.Contains(t, *jobErr, "not implemented", "a claimed job should only fail via the labeled ingest-orchestrator placeholder, not some other error")
