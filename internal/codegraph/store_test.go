@@ -584,7 +584,15 @@ func TestLookupReferencesByName_ClampsNonPositiveLimitToDefaultThenFetchesOneMor
 // TestLookupReferencesByName_TrimsToLimitAndReportsTruncated proves the
 // truncation contract this bead adds: given more rows than the caller's
 // limit, LookupReferencesByName must trim to exactly limit and report
-// truncated=true.
+// truncated=true. It also pins WHICH rows survive the trim (the head, not
+// the tail, of the limit+1 fetch): a query already orders results
+// deterministically before LIMIT applies, so a truncated answer's identity
+// depends on trimReferences keeping the front of that order, not an
+// arbitrary effectiveLimit-sized slice -- trimReferences returning
+// refs[len(refs)-effectiveLimit:] instead of refs[:effectiveLimit] would
+// still satisfy Len==2 and truncated==true while silently returning the
+// wrong rows, which the review round for this bead flagged as an
+// unasserted hole.
 func TestLookupReferencesByName_TrimsToLimitAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	repoID := uuid.Must(uuid.NewV7())
@@ -603,6 +611,7 @@ func TestLookupReferencesByName_TrimsToLimitAndReportsTruncated(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, truncated, "3 rows fetched for a limit of 2 must report truncated=true")
 	require.Len(t, refs, 2, "the result must be trimmed back down to the caller's limit")
+	assert.Equal(t, []string{"a.go", "b.go"}, []string{refs[0].File, refs[1].File}, "the trim must keep the HEAD of the fetched order (a.go, b.go), not an arbitrary 2 of the 3 fetched rows")
 }
 
 // TestLookupReferencesByName_ExactlyLimitRows_NotTruncated is the negative

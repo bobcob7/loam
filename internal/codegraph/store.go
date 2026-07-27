@@ -61,6 +61,12 @@ type ReferenceInput struct {
 // it easy for a caller to accidentally treat a use site as a definition
 // site (or vice versa) since the compiler could no longer tell them apart.
 // See LookupReferencesByName's doc comment for the read path this backs.
+//
+// Kind is carried because it is real symbol_references column data, but
+// docs/cli-spec.md:544's `refs` row shape (`{ repo, file, line, symbol }`)
+// deliberately omits a kind field -- unlike `def`/`deps`/`dependents`'s row
+// shapes, which all include one. A `graph refs` handler built on this type
+// must drop Kind when it serializes a result row, not pass it through.
 type Reference struct {
 	ID           uuid.UUID
 	RepoID       uuid.UUID
@@ -335,15 +341,26 @@ func (s *Store) LookupSymbolsByName(ctx context.Context, repoIDs []uuid.UUID, ta
 // calling this.
 //
 // Unlike LookupSymbolsByName, an empty result here is NOT by itself an
-// authoritative not-found signal: symbol_references carries no symbol_id
-// or FK to symbols (0002_code_intel.up.sql), so this query has no way to
-// tell "no symbol named name exists at all" apart from "the symbol exists
-// but has never been referenced" -- both come back as zero rows. A caller
-// that needs that distinction (docs/cli-spec.md exit 3 for `graph refs`)
-// must call LookupSymbolsByName(name) first to establish existence, the
-// same composition Dependents/Deps/History already require to turn a name
-// into a symbol id -- LookupReferencesByName's own empty result answers
-// only "which references exist", not "does the target exist".
+// authoritative not-found signal: this query answers only "which
+// references named name exist in scope", and "no symbol named name exists
+// at all" is a genuinely different question that "the symbol exists but
+// has never been referenced" also answers with zero rows here -- both
+// collapse to the same empty result. Joining symbol_references to symbols
+// to resolve that distinction in one query would be the wrong fix even
+// though the join is mechanically possible (no FK is required to join on
+// the shared (repo_id, target_branch, name) triple): it would silently
+// drop real reference rows whose target is defined in another repo or a
+// third-party library never present in symbols (docs/cli-spec.md:553-557,
+// the MVP does not resolve cross-repo edges), and it would multiply rows
+// under an ambiguous target (:528-533's several-Logins-in-several-files
+// case) before LIMIT ever sees them, breaking the truncated contract --
+// see internal/db/queries/code_graph.sql's LookupReferencesByName comment
+// for the full reasoning. A caller that needs the not-found distinction
+// (docs/cli-spec.md exit 3 for `graph refs`) must call
+// LookupSymbolsByName(name) first to establish existence, the same
+// composition Dependents/Deps/History already require to turn a name into
+// a symbol id -- refs joins an established two-step pattern rather than
+// inventing a new one.
 func (s *Store) LookupReferencesByName(ctx context.Context, repoIDs []uuid.UUID, targetBranch, name, file string, limit int32) (refs []Reference, truncated bool, err error) {
 	if len(repoIDs) == 0 {
 		return nil, false, nil

@@ -738,6 +738,28 @@ func TestLookupReferencesByName_NoMatchIsEmptyNotError(t *testing.T) {
 	assert.Empty(t, refs, "zero matching references must come back as an empty slice, never a phantom match from an unrelated name")
 }
 
+// TestLookupReferencesByName_EmptyNameMatchesNothing pins that the SQL's
+// empty-string-means-no-filter sentinel applies ONLY to $4 (--file), not
+// to $3 (name): symbol_references.name is NOT NULL text exactly like
+// symbol_references.file is, so widening $4's own OR-empty-string clause
+// to also cover $3 would compile and behave identically -- a
+// plausible-looking "make these consistent" edit that would silently turn
+// an empty name into "match every reference in scope" instead of matching
+// nothing. The review round for this bead flagged that no test pinned this
+// asymmetry.
+func TestLookupReferencesByName_EmptyNameMatchesNothing(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx := t.Context()
+	insertReference(ctx, t, pool, repoID, "a.go", "Login", 5)
+	insertReference(ctx, t, pool, repoID, "b.go", "Logout", 9)
+
+	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "", "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Empty(t, refs, "an empty name must match nothing, never every reference in scope -- name has no wildcard sentinel, unlike --file")
+}
+
 // TestLookupReferencesByName_DistinguishesFromUnreferencedSymbol is this
 // bead's central design point, exercised end-to-end: "no such symbol" and
 // "symbol exists but has never been referenced" both make
@@ -870,7 +892,14 @@ func TestLookupReferencesByName_IncludesMultipleInScopeRepos(t *testing.T) {
 // limit/truncated contract against a real database: docs/cli-spec.md:535-537
 // requires truncated: true on a capped `graph` response for every
 // subquery, refs included -- this seeds 4 use sites of the same name and
-// asks for at most 2.
+// asks for at most 2. It also pins WHICH 2 of the 4 survive (f0.go, f1.go,
+// the ORDER BY sr.file, sr.line, sr.id head), not merely that 2 survive:
+// the review round for this bead found that swapping the query's
+// `ORDER BY sr.file, sr.line, sr.id` for `ORDER BY sr.id DESC` still passed
+// the whole suite when only Len==2 was asserted here -- LIMIT's contract
+// depends entirely on which order it caps, exactly the failure mode
+// TestDependents_NearestDepthFirst_NotUUIDOrder (FIX 2, above) already
+// guards for Dependents.
 func TestLookupReferencesByName_TruncatesAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	store, pool, repoID := newTestStore(t)
@@ -882,7 +911,8 @@ func TestLookupReferencesByName_TruncatesAndReportsTruncated(t *testing.T) {
 	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
-	assert.Len(t, refs, 2)
+	require.Len(t, refs, 2)
+	assert.Equal(t, []string{"f0.go", "f1.go"}, []string{refs[0].File, refs[1].File}, "a capped result must keep the ORDER BY-first rows (f0.go, f1.go), not an arbitrary 2 of the 4 matches")
 }
 
 // TestLookupReferencesByName_ExactlyLimitMatches_NotTruncated is the

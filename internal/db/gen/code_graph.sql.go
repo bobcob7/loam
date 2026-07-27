@@ -330,20 +330,42 @@ type LookupReferencesByNameParams struct {
 // happen to be column-for-column compatible.
 //
 // symbol_references carries no symbol_id and no FK to symbols
-// (0002_code_intel.up.sql) -- unlike the from/to sides of graph_edges,
-// which resolve to real symbols.id foreign keys, references are only ever
-// addressable by (repo_id, target_branch, name), the same triple
-// LookupSymbolsByName resolves against the symbols table. That is why this
-// query selects straight from symbol_references rather than joining
-// through symbols: there is no id to join on, and the two tables answer
-// different questions ("where is this defined" vs "where is this used") --
-// see internal/codegraph.Reference's doc comment for why that is also
-// reason enough to give the row a distinct Go type rather than reusing
-// Symbol.
+// (0002_code_intel.up.sql), but that is NOT why this query selects straight
+// from symbol_references rather than joining through symbols on
+// (repo_id, target_branch, name) -- an FK is not required to join on a
+// plain triple, and LEFT JOIN symbols -> symbol_references would compile
+// and run fine. It is the wrong query anyway, for three independent
+// reasons, any one of which rules it out on its own:
+//  1. It would silently DROP legitimate reference rows: docs/cli-spec.md
+//     :553-557 says the MVP does not resolve cross-repo dependency edges,
+//     so a reference to a name defined in another repo, or in a
+//     third-party library never present in symbols at all, has no match
+//     on the symbols side of the join and would vanish from the result --
+//     a real use site returning zero rows instead of the row it should
+//     produce, contradicting the refs row shape at :544 and the exit-3
+//     "not found" contract at :570-571 (a reference existing is not the
+//     same as its target being locally defined).
+//  2. Ambiguity is data, not an error (docs/cli-spec.md:528-533): three
+//     distinct `Login` definitions joined against N references to
+//     "Login" produce a 3*N-row cartesian product before LIMIT ever
+//     applies, so a capped call would cap an inflated join rather than
+//     the real reference count -- breaking the truncated contract
+//     (:535-537) by making it depend on definition-side ambiguity that
+//     has nothing to do with how many references actually exist.
+//  3. --file becomes ambiguous the moment both sides of a join are in
+//     play: does it narrow the definition's file or the reference's
+//     file? symbol_references alone has exactly one file column, so the
+//     question does not arise.
+//
+// Selecting straight from symbol_references sidesteps all three: it
+// returns exactly the reference rows that exist, one row each, --file
+// narrows the one column it could possibly mean. See
+// internal/codegraph.Reference's doc comment for the analogous reasoning
+// on why the row also gets a distinct Go type rather than reusing Symbol.
 //
 // Scope is repo_id = ANY($1::uuid[]) for the identical reason
 // LookupSymbolsByName's is: `graph refs --all` fans out and unions across
-// enrolled repos (docs/cli-spec.md:550-557), and an empty repoIDs matches
+// enrolled repos (docs/cli-spec.md:553-557), and an empty repoIDs matches
 // nothing (internal/codegraph.Store.LookupReferencesByName), mirroring
 // internal/chunkstore.Search's "empty scope means search nothing" rule.
 //
