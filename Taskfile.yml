@@ -34,6 +34,32 @@ tasks:
     cmds:
       - go build ./...
 
+  build:bin:
+    desc: >-
+      Build the server, CLI, and pre-receive hook binaries into bin/, side by
+      side (loam-mce). `go build ./...` above builds every package to verify
+      it compiles, then discards the output -- it places no binaries
+      anywhere runnable. cmd/server/main.go's loamhookBinaryPath resolves
+      cmd/loamhook's compiled binary as a SIBLING of its own os.Executable
+      path (filepath.Dir(execPath)+"/loamhook") and os.Stats it at startup,
+      failing to boot if it is not there -- so the hook binary must land in
+      the exact same directory as the server binary, under the exact name
+      "loamhook" (loamhookBinaryPathName), or the server refuses to start.
+      `go install` was considered and rejected: it respects GOBIN, but that
+      scatters these three binaries into a shared GOPATH/bin alongside
+      unrelated pinned tool binaries (buf, moq, sqlc, ...) instead of a
+      clean, disposable, demo-ready directory, and does not by itself
+      guarantee cmd/server and cmd/loamhook land in the same directory
+      unless GOBIN is pointed at bin/ anyway -- an explicit -o per binary is
+      simpler and self-documenting. bin/ is gitignored; this target is safe
+      to rerun from a clean checkout with no other setup beyond the same
+      CGO_ENABLED=1 + C toolchain `build` above needs.
+    cmds:
+      - mkdir -p bin
+      - go build -o bin/server ./cmd/server
+      - go build -o bin/loam ./cmd/loam
+      - go build -o bin/loamhook ./cmd/loamhook
+
   test:
     desc: Run the test suite with the race detector
     cmds:

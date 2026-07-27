@@ -75,6 +75,7 @@ first build fails on this.
 ```bash
 task generate   # regenerate proto (buf) + moq mocks — do this after editing proto/*.proto or an Iface
 task build      # go build ./...
+task build:bin  # build server, loam, and loamhook binaries side by side into bin/ (loam-mce)
 task test       # go test ./... -race
 task lint       # gofmt -l . (must be empty) + go tool buf lint
 task proto:breaking  # pre-1.0 breaking-change check against the pinned baseline (see Taskfile.yml)

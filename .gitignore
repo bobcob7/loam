@@ -5,3 +5,8 @@
 .beads-credential-key
 .beads/proxieddb/
 .claude/worktrees/
+
+# Build output (task build:bin — loam-mce): server, loam, and loamhook
+# binaries built side by side so cmd/server's sibling-of-executable lookup
+# for loamhook resolves.
+/bin/
