@@ -164,7 +164,7 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 			{"repo", ""}, {"author", ""}, {"target", ""},
 			{"awaiting-review", "false"}, {"state", "reviewable"}, {"limit", "100"},
 		}},
-		{"work set", newWorkSetFlags, []flagExpectation{{"title", ""}}},
+		{"work set", func() *flag.FlagSet { fs, _ := newWorkSetFlags(); return fs }, []flagExpectation{{"title", ""}}},
 		{"work comments", newWorkCommentsFlags, []flagExpectation{{"staged", "false"}}},
 		{"work comment", newWorkCommentFlags, []flagExpectation{
 			{"file", ""}, {"line", "0"}, {"resolve", ""}, {"edit", ""}, {"discard", ""},

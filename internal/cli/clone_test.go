@@ -81,7 +81,7 @@ func cloneTestDeps(cfg Config, getRepo func(context.Context, *connect.Request[lo
 	repoClient := &RepoClientMock{GetRepoFunc: getRepo}
 	connectClient := &ConnectClientMock{RepoFunc: func() RepoClient { return repoClient }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, cloner)
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, cloner, nil)
 }
 
 func okGetRepo(repo string) func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
