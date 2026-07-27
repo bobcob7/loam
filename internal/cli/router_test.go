@@ -86,6 +86,14 @@ var stillStubbedExemptions = map[string]bool{
 	"work start":          true,
 	"work set":            true,
 	"work request-review": true,
+	// graph def/refs/deps/dependents/history are covered by
+	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
+	// commands_graph_test.go (loam-0pj.14).
+	"graph def":        true,
+	"graph refs":       true,
+	"graph deps":       true,
+	"graph dependents": true,
+	"graph history":    true,
 }
 
 // leafCommandKeys walks tree and returns the set of dispatchable leaf
@@ -150,12 +158,6 @@ func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
 		{"work comment", []string{"work", "comment", "acme/repo", "wb-1", "--file", "a.go", "--line", "3"}},
 		{"work reply", []string{"work", "reply", "acme/repo", "wb-1", "--thread", "t1"}},
 		{"work verdict", []string{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"}},
-		{"graph def", []string{"graph", "def", "Symbol"}},
-		{"graph refs", []string{"graph", "refs", "Symbol"}},
-		{"graph deps", []string{"graph", "deps", "file.go"}},
-		{"graph dependents", []string{"graph", "dependents", "file.go"}},
-		{"graph history", []string{"graph", "history", "Symbol"}},
-		{"graph def with file/limit", []string{"graph", "def", "Symbol", "--file", "a.go", "--limit", "5"}},
 		{"search", []string{"search", "how does auth work"}},
 		{"search with flags", []string{"search", "auth", "--repo", "acme/repo", "--limit", "3"}},
 	}
@@ -227,7 +229,7 @@ func TestRouter_RegistersZeroGlobalFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"work", "comment", "a", "b", "--file", "x.go", "--line", "3"},
 		{"work", "list", "--limit", "5"},
-		{"graph", "def", "Symbol", "--repo", "acme/repo"},
+		{"work", "verdict", "acme/repo", "wb-1", "--outcome", "approve"},
 		{"search", "q", "--limit", "3"},
 	} {
 		err := router.Dispatch(t.Context(), args)
