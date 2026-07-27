@@ -16,7 +16,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundOpener DiffComputer
+//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundStore DiffComputer
 
 // WorkBranchStore is the internal/workbranchstore.Store surface this
 // package's lifecycle RPCs need, defined here at the consumer per repo
@@ -56,49 +56,69 @@ type RepoStore interface {
 	ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
 }
 
-// RoundOpener opens a new review round -- the internal/reviewstore.RoundStore
-// surface RequestReview needs so "every transition into reviewable opens a
-// numbered review round" (docs/cli-spec.md -> "Work Branches") actually
-// happens: without it, loam-ofg.9's SubmitVerdict would have no round to
-// attach a verdict to, and a re-review's prior verdicts -- compared by round
-// number, never a stored flag (docs/web-spec.md -> ProposalService:
-// "`stale` is derived") -- would never go stale. Defined here at the
-// consumer; *reviewstore.RoundStore satisfies it directly in production.
+// RoundStore is the internal/reviewstore.RoundStore surface RequestReview
+// needs: OpenRound so "every transition into reviewable opens a numbered
+// review round" (docs/cli-spec.md -> "Work Branches") actually happens --
+// without it, loam-ofg.9's SubmitVerdict would have no round to attach a
+// verdict to, and a re-review's prior verdicts -- compared by round number,
+// never a stored flag (docs/web-spec.md -> ProposalService: "`stale` is
+// derived") -- would never go stale; and CurrentRound so RequestReview can
+// self-heal (see below). Defined here at the consumer; *reviewstore.RoundStore
+// satisfies it directly in production.
 //
-// RequestReview calls WorkBranchStore.UpdateState then RoundOpener.OpenRound
-// as two separate, non-atomic store writes: this package's declared seams
-// are each ordinary pool-backed interfaces, not a shared pgx.Tx, and wiring
-// true cross-store atomicity (the pattern every *StoreInTx constructor and
+// RequestReview calls WorkBranchStore.UpdateState then RoundStore.OpenRound
+// as two separate, non-atomic store writes, not one pgx.Tx -- true
+// cross-store atomicity (the pattern every *StoreInTx constructor and
 // internal/storetx's integration test exist to demonstrate) would require
-// this handler to also hold a transaction-opening seam -- out of this
-// bead's declared scope ("Consume a work-branch store seam, a role store
-// seam, and a git/diff seam"). A crash between the two writes would leave a
-// reviewable branch with no current round; rare, since both calls land
-// back-to-back against the same pool with nothing that can block between
-// them, but real. Flagged here rather than silently assumed away; a
-// follow-up bead can promote this to one transaction if it matters in
-// practice.
-type RoundOpener interface {
+// this handler to also hold a transaction-opening seam, filed as a
+// follow-up rather than built here. That gap is NOT merely a rare race: a
+// connect-go request context is cancelled on ordinary client disconnect or
+// deadline (ctrl-C, a CLI timeout) between the two round-trips -- no crash
+// needed -- and UpdateState has already autocommitted by the time OpenRound
+// would run, so this is routinely reachable. Left unhandled, the resulting
+// state is not just inconsistent but VISIBLE and UNRECOVERABLE: the branch
+// is reviewable with no round, so it satisfies every reviewer's
+// awaiting-review filter (workbranchstore's NOT EXISTS-on-current-round
+// predicate is vacuously true with zero rounds) while rejecting every
+// verdict (loam-ofg.9's SubmitVerdict resolves a round via CurrentRound,
+// which returns reviewstore.ErrNoCurrentRound) -- and UpdateWorkBranchState
+// has no reviewable->reviewable transition, so a bare retry answers
+// ErrIllegalTransition (misreported to the caller as "missing title or
+// description," the opposite of the truth) forever, with no agent-facing
+// recovery path at all.
+//
+// RequestReview therefore self-heals: when UpdateState fails with
+// workbranchstore.ErrIllegalTransition and the work branch was ALREADY
+// reviewable before the call (read via resolveWorkBranch, before
+// UpdateState ever ran), that is exactly the interrupted-retry shape above,
+// distinguished from a genuine reviewable->reviewable rejection by asking
+// CurrentRound: no round at all means the previous attempt's OpenRound
+// never landed, so this call opens one now and reports success; an
+// existing round means the branch is legitimately, unambiguously already
+// under review, and the illegal-transition error stands.
+type RoundStore interface {
 	OpenRound(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error)
+	CurrentRound(ctx context.Context, workBranchID uuid.UUID) (reviewstore.Round, error)
 }
 
 // DiffComputer computes a work branch's unified diff against its target
 // branch (docs/cli-spec.md -> "diff": "the unified diff of the work branch
 // against its target branch"). Defined here at the consumer -- but nothing
 // in this tree implements it yet. Locating a repo's bare-mirror path on
-// disk and shelling out to `git diff <target>...<name>` against it belongs
-// to the git-transport plumbing loam-ofg.16 has not landed; no other
-// package in this repo computes a diff either (confirmed by grep: no
-// exec.Command("git", "diff", ...) or equivalent exists anywhere in
-// internal/ as of this bead, despite docs/git-spec.md -> "Enforcement
-// Mechanics" asserting in passing that "the server already shells out to
-// git for sync, diffs, and ingest" -- that line does not match this tree's
-// actual state and should not be read as evidence the plumbing exists).
-// cmd/server/main.go wires a not-implemented stand-in
-// (notImplementedDiffComputer) so GetWorkBranchDiff is genuinely
-// reachable and fails loudly, not silently, until the real plumbing
-// exists -- the same choice notImplementedOrchestrator already makes there
-// for the ingest pipeline.
+// disk and shelling out to `git diff <target>...<name>` against it is
+// filed as loam-fwk, NOT loam-ofg.16 (the git smart-HTTP transport handler
+// -- upload-pack/receive-pack framing only, per its own DESCRIPTION; it
+// does not cover diff computation). No package in this repo computes a
+// diff either (confirmed by grep: no exec.Command("git", "diff", ...) or
+// equivalent exists anywhere in internal/ as of this bead, despite
+// docs/git-spec.md -> "Enforcement Mechanics" asserting in passing that
+// "the server already shells out to git for sync, diffs, and ingest" --
+// that line does not match this tree's actual state and should not be
+// read as evidence the plumbing exists). cmd/server/main.go wires a
+// not-implemented stand-in (notImplementedDiffComputer) so
+// GetWorkBranchDiff is genuinely reachable and fails loudly, not silently,
+// until loam-fwk lands -- the same choice notImplementedOrchestrator
+// already makes there for the ingest pipeline.
 type DiffComputer interface {
 	Diff(ctx context.Context, workBranch workbranchstore.WorkBranch) (string, error)
 }

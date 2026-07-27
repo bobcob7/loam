@@ -510,31 +510,44 @@ func (mock *RepoStoreMock) ListTargetBranchesCalls() []struct {
 	return calls
 }
 
-// Ensure, that RoundOpenerMock does implement RoundOpener.
+// Ensure, that RoundStoreMock does implement RoundStore.
 // If this is not the case, regenerate this file with moq.
-var _ RoundOpener = &RoundOpenerMock{}
+var _ RoundStore = &RoundStoreMock{}
 
-// RoundOpenerMock is a mock implementation of RoundOpener.
+// RoundStoreMock is a mock implementation of RoundStore.
 //
-//	func TestSomethingThatUsesRoundOpener(t *testing.T) {
+//	func TestSomethingThatUsesRoundStore(t *testing.T) {
 //
-//		// make and configure a mocked RoundOpener
-//		mockedRoundOpener := &RoundOpenerMock{
+//		// make and configure a mocked RoundStore
+//		mockedRoundStore := &RoundStoreMock{
+//			CurrentRoundFunc: func(ctx context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+//				panic("mock out the CurrentRound method")
+//			},
 //			OpenRoundFunc: func(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
 //				panic("mock out the OpenRound method")
 //			},
 //		}
 //
-//		// use mockedRoundOpener in code that requires RoundOpener
+//		// use mockedRoundStore in code that requires RoundStore
 //		// and then make assertions.
 //
 //	}
-type RoundOpenerMock struct {
+type RoundStoreMock struct {
+	// CurrentRoundFunc mocks the CurrentRound method.
+	CurrentRoundFunc func(ctx context.Context, workBranchID uuid.UUID) (reviewstore.Round, error)
+
 	// OpenRoundFunc mocks the OpenRound method.
 	OpenRoundFunc func(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// CurrentRound holds details about calls to the CurrentRound method.
+		CurrentRound []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// WorkBranchID is the workBranchID argument value.
+			WorkBranchID uuid.UUID
+		}
 		// OpenRound holds details about calls to the OpenRound method.
 		OpenRound []struct {
 			// Ctx is the ctx argument value.
@@ -545,13 +558,50 @@ type RoundOpenerMock struct {
 			RequestedBy string
 		}
 	}
-	lockOpenRound sync.RWMutex
+	lockCurrentRound sync.RWMutex
+	lockOpenRound    sync.RWMutex
+}
+
+// CurrentRound calls CurrentRoundFunc.
+func (mock *RoundStoreMock) CurrentRound(ctx context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+	if mock.CurrentRoundFunc == nil {
+		panic("RoundStoreMock.CurrentRoundFunc: method is nil but RoundStore.CurrentRound was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+	}{
+		Ctx:          ctx,
+		WorkBranchID: workBranchID,
+	}
+	mock.lockCurrentRound.Lock()
+	mock.calls.CurrentRound = append(mock.calls.CurrentRound, callInfo)
+	mock.lockCurrentRound.Unlock()
+	return mock.CurrentRoundFunc(ctx, workBranchID)
+}
+
+// CurrentRoundCalls gets all the calls that were made to CurrentRound.
+// Check the length with:
+//
+//	len(mockedRoundStore.CurrentRoundCalls())
+func (mock *RoundStoreMock) CurrentRoundCalls() []struct {
+	Ctx          context.Context
+	WorkBranchID uuid.UUID
+} {
+	var calls []struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+	}
+	mock.lockCurrentRound.RLock()
+	calls = mock.calls.CurrentRound
+	mock.lockCurrentRound.RUnlock()
+	return calls
 }
 
 // OpenRound calls OpenRoundFunc.
-func (mock *RoundOpenerMock) OpenRound(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
+func (mock *RoundStoreMock) OpenRound(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
 	if mock.OpenRoundFunc == nil {
-		panic("RoundOpenerMock.OpenRoundFunc: method is nil but RoundOpener.OpenRound was just called")
+		panic("RoundStoreMock.OpenRoundFunc: method is nil but RoundStore.OpenRound was just called")
 	}
 	callInfo := struct {
 		Ctx          context.Context
@@ -571,8 +621,8 @@ func (mock *RoundOpenerMock) OpenRound(ctx context.Context, workBranchID uuid.UU
 // OpenRoundCalls gets all the calls that were made to OpenRound.
 // Check the length with:
 //
-//	len(mockedRoundOpener.OpenRoundCalls())
-func (mock *RoundOpenerMock) OpenRoundCalls() []struct {
+//	len(mockedRoundStore.OpenRoundCalls())
+func (mock *RoundStoreMock) OpenRoundCalls() []struct {
 	Ctx          context.Context
 	WorkBranchID uuid.UUID
 	RequestedBy  string

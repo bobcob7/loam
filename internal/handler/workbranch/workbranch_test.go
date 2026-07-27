@@ -50,15 +50,11 @@ func (s fixedRoleStore) RoleCapabilities(context.Context, string) ([]handler.Cap
 	return s.capabilities, nil
 }
 
-// sampleRepo, sampleTitle, sampleDescription, and sampleWorkBranch are
-// shared fixture values every test below builds its store stubs around.
+// sampleRepoID and sampleWorkBranchID are shared fixture ids every test
+// below builds its store stubs around.
 var sampleRepoID = uuid.New()
 
 var sampleWorkBranchID = uuid.New()
-
-func sampleRepo() reposstore.Repo {
-	return reposstore.Repo{ID: sampleRepoID, Name: "bobcob7/doc-server"}
-}
 
 func sampleTitledWorkBranch(state workbranchstore.State) workbranchstore.WorkBranch {
 	title, description := "Add login", "Adds a login flow."
@@ -76,7 +72,7 @@ func sampleTitledWorkBranch(state workbranchstore.State) workbranchstore.WorkBra
 // mutation that removes an early-return gate must fall through to a real,
 // observable success this test can assert against, never a panic that
 // would obscure the real failure.
-func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *workbranch.RoundOpenerMock, *workbranch.DiffComputerMock) {
+func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *workbranch.RoundStoreMock, *workbranch.DiffComputerMock) {
 	wb := sampleTitledWorkBranch(workbranchstore.StateDraft)
 	workBranches := &workbranch.WorkBranchStoreMock{
 		CreateFunc: func(_ context.Context, _ uuid.UUID, name, target, author string) (workbranchstore.WorkBranch, error) {
@@ -110,9 +106,18 @@ func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *wo
 			return []reposstore.TargetBranch{{RepoID: repoID, Branch: "main"}}, nil
 		},
 	}
-	rounds := &workbranch.RoundOpenerMock{
+	rounds := &workbranch.RoundStoreMock{
 		OpenRoundFunc: func(_ context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
 			return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1, RequestedBy: requestedBy}, nil
+		},
+		// A fresh draft (allMocks' default fixture, sampleTitledWorkBranch's
+		// StateDraft) realistically has no round yet; only the self-heal
+		// tests exercise this path (RequestReview only calls CurrentRound
+		// when the pre-transition state was already reviewable), but it is
+		// configured here too so the "beware the incomplete-mock trap"
+		// discipline holds even if a future code path reaches it.
+		CurrentRoundFunc: func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+			return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, reviewstore.ErrNoCurrentRound)
 		},
 	}
 	diff := &workbranch.DiffComputerMock{
@@ -126,7 +131,7 @@ func allMocks() (*workbranch.WorkBranchStoreMock, *workbranch.RepoStoreMock, *wo
 // newHandler wires a workbranch.Handler over the four given seams with a
 // capability checker backed by roleCaps and an ErrorMapper that logs to buf
 // so tests can assert on the logged line for unmapped errors.
-func newHandler(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundOpener, diff workbranch.DiffComputer, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
+func newHandler(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundStore, diff workbranch.DiffComputer, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
 	checker := handler.NewCapabilityChecker(fixedRoleStore{capabilities: roleCaps})
 	mapper := handler.NewErrorMapper(slog.New(slog.NewJSONHandler(buf, nil)))
 	return workbranch.New(workBranches, repos, rounds, diff, checker, mapper, testLogger())
@@ -176,15 +181,21 @@ func TestCreateWorkBranch_AdminCaller_RejectedForNoAgentIdentity(t *testing.T) {
 // required fields are validated before any store call.
 func TestCreateWorkBranch_EmptyRepoOrFrom_ReturnsInvalidArgument(t *testing.T) {
 	t.Parallel()
-	cases := []struct{ repo, from string }{{"", "main"}, {"bobcob7/doc-server", ""}}
-	for _, tc := range cases {
-		var buf bytes.Buffer
-		workBranches, repos, rounds, diff := allMocks()
-		h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
-		_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: tc.repo, From: tc.from}))
-		require.Error(t, err)
-		assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
-		assert.Empty(t, workBranches.CreateCalls())
+	cases := map[string]struct{ repo, from string }{
+		"empty repo": {"", "main"},
+		"empty from": {"bobcob7/doc-server", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			workBranches, repos, rounds, diff := allMocks()
+			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+			_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: tc.repo, From: tc.from}))
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
+			assert.Empty(t, workBranches.CreateCalls())
+		})
 	}
 }
 
@@ -378,6 +389,147 @@ func TestRequestReview_MissingTitleOrDescription_ReturnsFailedPrecondition(t *te
 	assert.Empty(t, rounds.OpenRoundCalls(), "a round must not be opened when the state transition itself failed")
 }
 
+// TestRequestReview_SelfHealsAfterInterruptedRoundOpen is MUST-FIX 1's
+// acceptance test: an interrupted RequestReview (UpdateState landed,
+// OpenRound never did -- an ordinary client disconnect/deadline between
+// the two round-trips is enough, no crash required) must not leave the
+// work branch in the unrecoverable dead-end a bare retry would hit
+// (ErrIllegalTransition on reviewable->reviewable forever). The retry must
+// SUCCEED by opening the missing round itself, not merely fail
+// differently -- this proves the SECOND call's outcome, not just that the
+// first one errors.
+func TestRequestReview_SelfHealsAfterInterruptedRoundOpen(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	openRoundCalls := 0
+	rounds.OpenRoundFunc = func(_ context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
+		openRoundCalls++
+		if openRoundCalls == 1 {
+			return reviewstore.Round{}, context.DeadlineExceeded
+		}
+		return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1, RequestedBy: requestedBy}, nil
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err, "the first call's OpenRound failed, so it must not silently report success")
+	// The retry: the work branch is now already reviewable (UpdateState's
+	// write from the first call autocommitted), so a real store would
+	// reject a second UpdateState with ErrIllegalTransition -- simulated
+	// here since WorkBranchStoreMock does not itself hold state. There is
+	// still no current round (the first OpenRound never landed), so the
+	// handler must self-heal: open one now and report SUCCESS, not repeat
+	// the misleading "failed precondition" a bare retry would surface.
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return sampleTitledWorkBranch(workbranchstore.StateReviewable), nil
+	}
+	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
+	}
+	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, reviewstore.ErrNoCurrentRound)
+	}
+	resp, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.NoError(t, err, "the retry must self-heal: open the missing round and succeed, not repeat the misleading failed-precondition error")
+	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE, resp.Msg.GetWorkBranch().GetState())
+	assert.Equal(t, 2, openRoundCalls, "the self-heal must call OpenRound again")
+}
+
+// TestRequestReview_AlreadyReviewableWithRound_ReturnsFailedPrecondition
+// proves the self-heal does NOT fire for a genuine reviewable->reviewable
+// rejection: when a current round already exists, the branch is
+// legitimately already under review, and no round should be opened.
+func TestRequestReview_AlreadyReviewableWithRound_ReturnsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return sampleTitledWorkBranch(workbranchstore.StateReviewable), nil
+	}
+	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
+	}
+	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{ID: uuid.New(), WorkBranchID: workBranchID, Number: 1}, nil
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err, "an already-reviewable branch that already has a round is a genuine illegal transition, not something to self-heal")
+	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
+	assert.Empty(t, rounds.OpenRoundCalls(), "no round should be opened when one already exists")
+}
+
+// TestRequestReview_CurrentRoundLookupFails_MapsToInternal proves a genuine
+// (non-ErrNoCurrentRound) failure checking for a current round during the
+// self-heal attempt is reported, not silently swallowed into either a
+// false success or the misleading failed-precondition message.
+func TestRequestReview_CurrentRoundLookupFails_MapsToInternal(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return sampleTitledWorkBranch(workbranchstore.StateReviewable), nil
+	}
+	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
+	}
+	dbErr := errors.New("connection reset by peer")
+	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, dbErr)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInternal, connectCode(t, err))
+	assert.Contains(t, buf.String(), "connection reset by peer")
+}
+
+// TestRequestReview_TerminalState_MessageNamesTerminalState and
+// TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields are
+// SHOULD-FIX 3's acceptance tests: the CLI renders err.Message() directly
+// (docs/cli-spec.md -> Exit Codes & Errors), so the two causes
+// ErrIllegalTransition conflates must produce DIFFERENT, individually
+// accurate messages -- not the same generic "failed precondition" string
+// regardless of which is true.
+func TestRequestReview_TerminalState_MessageNamesTerminalState(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return sampleTitledWorkBranch(workbranchstore.StateClosed), nil
+	}
+	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), "terminal state")
+	assert.NotContains(t, connectErr.Message(), "title or description")
+}
+
+func TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	untitled := workbranchstore.WorkBranch{ID: sampleWorkBranchID, RepoID: sampleRepoID, Name: "wb-9c2f1a", Target: "main", State: workbranchstore.StateDraft, Author: "grace-hopper-3-author"}
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return untitled, nil
+	}
+	workBranches.UpdateStateFunc = func(_ context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, id, workbranchstore.ErrIllegalTransition)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), "title or description")
+	assert.NotContains(t, connectErr.Message(), "terminal state")
+}
+
 // --- ListWorkBranches ---
 
 // TestListWorkBranches_AgentLackingWorkRead_Denied proves the capability
@@ -473,6 +625,122 @@ func TestListWorkBranches_Truncated_SetWhenMoreRowsExist(t *testing.T) {
 	assert.Equal(t, uint32(5), resp.Msg.GetPageInfo().GetTotal())
 }
 
+// TestListWorkBranches_BuildsExactFilterAndPage is SHOULD-FIX 2's central
+// acceptance test: it sets Target, Author, an explicit State, and a
+// non-default Page{Limit, Offset} all at once and asserts the EXACT
+// workbranchstore.ListFilter and (limit, offset) handed to
+// WorkBranchStore.List -- not just that the call happened. This alone
+// kills "drop the Target filter", "drop the Author filter", and "ignore
+// Page.offset".
+func TestListWorkBranches_BuildsExactFilterAndPage(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	target, author := "feature-x", "grace-hopper-3-author"
+	state := loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED
+	req := &loamv1.ListWorkBranchesRequest{Target: &target, Author: &author, State: &state, Page: &loamv1.Page{Limit: 7, Offset: 20}}
+	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(req))
+	require.NoError(t, err)
+	require.Len(t, workBranches.ListCalls(), 1)
+	call := workBranches.ListCalls()[0]
+	assert.Equal(t, workbranchstore.ListFilter{Target: target, Author: author, State: workbranchstore.StateReviewed}, call.Filter)
+	assert.Equal(t, int32(7), call.Limit)
+	assert.Equal(t, int32(20), call.Offset)
+}
+
+// TestListWorkBranches_UnsetPage_DefaultsLimitTo100 proves the exact
+// default page size (docs/cli-spec.md -> "list": "defaults to 100"), not
+// just "some" default -- kills a mutation changing defaultListLimit to any
+// other value.
+func TestListWorkBranches_UnsetPage_DefaultsLimitTo100(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
+	require.NoError(t, err)
+	require.Len(t, workBranches.ListCalls(), 1)
+	assert.Equal(t, int32(100), workBranches.ListCalls()[0].Limit)
+	assert.Equal(t, int32(0), workBranches.ListCalls()[0].Offset)
+}
+
+// TestListWorkBranches_ExplicitUnspecifiedState_ReturnsInvalidArgument
+// proves an explicitly present but WORK_BRANCH_STATE_UNSPECIFIED filter is
+// rejected as a bad filter value (docs/cli-spec.md -> "list": "exit 2 on a
+// bad filter value"), not silently treated the same as an absent filter
+// (which defaults to reviewable).
+func TestListWorkBranches_ExplicitUnspecifiedState_ReturnsInvalidArgument(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	state := loamv1.WorkBranchState_WORK_BRANCH_STATE_UNSPECIFIED
+	_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{State: &state}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
+	assert.Empty(t, workBranches.ListCalls())
+}
+
+// TestListWorkBranches_StateFilter_RoundTripsEveryEnumValue is
+// protoToState's round-trip proof across every non-unspecified enum value,
+// killing a mutation that maps any one of them to the wrong
+// workbranchstore.State (e.g. DRAFT -> StateComplete).
+func TestListWorkBranches_StateFilter_RoundTripsEveryEnumValue(t *testing.T) {
+	t.Parallel()
+	cases := map[loamv1.WorkBranchState]workbranchstore.State{
+		loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT:      workbranchstore.StateDraft,
+		loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE: workbranchstore.StateReviewable,
+		loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED:   workbranchstore.StateReviewed,
+		loamv1.WorkBranchState_WORK_BRANCH_STATE_COMPLETE:   workbranchstore.StateComplete,
+		loamv1.WorkBranchState_WORK_BRANCH_STATE_CLOSED:     workbranchstore.StateClosed,
+	}
+	for proto, want := range cases {
+		t.Run(string(want), func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			workBranches, repos, rounds, diff := allMocks()
+			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			state := proto
+			_, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{State: &state}))
+			require.NoError(t, err)
+			require.Len(t, workBranches.ListCalls(), 1)
+			assert.Equal(t, want, workBranches.ListCalls()[0].Filter.State)
+		})
+	}
+}
+
+// TestListWorkBranches_NoRepoFilter_ResolvesEachDistinctRepoCorrectly
+// proves repoNamesFor pairs each row with ITS OWN repo's name via
+// RepoStore.GetRepoByID when no --repo filter narrows the list to one
+// already-known repo -- killing a mutation that resolves the wrong name
+// (e.g. reusing the first row's name for every row, or swapping two
+// repos' names).
+func TestListWorkBranches_NoRepoFilter_ResolvesEachDistinctRepoCorrectly(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	otherRepoID := uuid.New()
+	wbA := sampleTitledWorkBranch(workbranchstore.StateReviewable)
+	wbB := sampleTitledWorkBranch(workbranchstore.StateReviewable)
+	wbB.RepoID, wbB.Name = otherRepoID, "wb-other"
+	workBranches.ListFunc = func(_ context.Context, _ workbranchstore.ListFilter, _, _ int32) ([]workbranchstore.WorkBranch, int64, error) {
+		return []workbranchstore.WorkBranch{wbA, wbB}, 2, nil
+	}
+	repos.GetRepoByIDFunc = func(_ context.Context, id uuid.UUID) (reposstore.Repo, error) {
+		if id == otherRepoID {
+			return reposstore.Repo{ID: id, Name: "acme/other-repo"}, nil
+		}
+		return reposstore.Repo{ID: id, Name: "bobcob7/doc-server"}, nil
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	resp, err := h.ListWorkBranches(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.ListWorkBranchesRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetWorkBranches(), 2)
+	assert.Equal(t, "bobcob7/doc-server", resp.Msg.GetWorkBranches()[0].GetRepo())
+	assert.Equal(t, "acme/other-repo", resp.Msg.GetWorkBranches()[1].GetRepo())
+}
+
 // --- GetWorkBranch ---
 
 // TestGetWorkBranch_AgentLackingWorkRead_Denied proves the capability gate
@@ -515,6 +783,54 @@ func TestGetWorkBranch_NotFound_ReturnsCodeNotFound(t *testing.T) {
 	assert.Equal(t, connect.CodeNotFound, connectCode(t, err))
 }
 
+// TestGetWorkBranch_State_RoundTripsEveryEnumValue is stateToProto's
+// round-trip proof across every workbranchstore.State value, killing a
+// mutation that maps any one of them to the wrong proto enum value (e.g.
+// REVIEWED -> WORK_BRANCH_STATE_CLOSED).
+func TestGetWorkBranch_State_RoundTripsEveryEnumValue(t *testing.T) {
+	t.Parallel()
+	cases := map[workbranchstore.State]loamv1.WorkBranchState{
+		workbranchstore.StateDraft:      loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT,
+		workbranchstore.StateReviewable: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
+		workbranchstore.StateReviewed:   loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED,
+		workbranchstore.StateComplete:   loamv1.WorkBranchState_WORK_BRANCH_STATE_COMPLETE,
+		workbranchstore.StateClosed:     loamv1.WorkBranchState_WORK_BRANCH_STATE_CLOSED,
+	}
+	for store, want := range cases {
+		t.Run(string(store), func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			workBranches, repos, rounds, diff := allMocks()
+			workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+				return sampleTitledWorkBranch(store), nil
+			}
+			h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+			require.NoError(t, err)
+			assert.Equal(t, want, resp.Msg.GetWorkBranch().GetState())
+		})
+	}
+}
+
+// TestGetWorkBranch_PreservesUpstreamPRURL proves UpstreamPRURL survives
+// the store-to-proto conversion, killing a mutation that drops it.
+func TestGetWorkBranch_PreservesUpstreamPRURL(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff := allMocks()
+	url := "https://github.com/bobcob7/doc-server/pull/42"
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		wb := sampleTitledWorkBranch(workbranchstore.StateReviewed)
+		wb.UpstreamPRURL = &url
+		return wb, nil
+	}
+	h := newHandler(workBranches, repos, rounds, diff, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Msg.GetWorkBranch().UpstreamPrUrl)
+	assert.Equal(t, url, resp.Msg.GetWorkBranch().GetUpstreamPrUrl())
+}
+
 // --- GetWorkBranchDiff ---
 
 // TestGetWorkBranchDiff_AgentLackingWorkRead_Denied proves the capability
@@ -552,7 +868,7 @@ func TestGetWorkBranchDiff_ComputerNotImplemented_FailsLoudlyAsInternal(t *testi
 	t.Parallel()
 	var buf bytes.Buffer
 	workBranches, repos, rounds, diff := allMocks()
-	sentinel := errors.New("git diff plumbing not implemented (loam-ofg.16)")
+	sentinel := errors.New("git diff plumbing not implemented (loam-fwk)")
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
 		return "", sentinel
 	}

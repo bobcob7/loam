@@ -116,9 +116,10 @@ func (notImplementedOrchestrator) Run(_ context.Context, _ ingest.Job) (ingest.S
 // internal/handler/workbranch.DiffComputer's doc comment for the full
 // account, including why docs/git-spec.md's passing claim that "the server
 // already shells out to git for sync, diffs, and ingest" does not describe
-// this tree's actual state) -- that belongs to the git-transport plumbing
-// loam-ofg.16 has not landed yet.
-var errDiffComputerNotImplemented = errors.New("git diff plumbing not implemented (loam-ofg.16)")
+// this tree's actual state) -- that is filed as loam-fwk, NOT loam-ofg.16
+// (the git smart-HTTP transport handler, upload-pack/receive-pack framing
+// only; it does not cover diff computation).
+var errDiffComputerNotImplemented = errors.New("git diff plumbing not implemented (loam-fwk)")
 
 // notImplementedDiffComputer stands in for workbranch.DiffComputer, wired
 // here instead of leaving GetWorkBranchDiff unregistered so every other

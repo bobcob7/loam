@@ -55,7 +55,7 @@ func TestOpenRound_OtherError_NotMappedToRoundConflict(t *testing.T) {
 
 // TestCurrentRound_NoRows_ReturnsErrNoCurrentRound proves a work branch
 // with no review_rounds row yet reports the distinguishable
-// errNoCurrentRound rather than a bare pgx.ErrNoRows a caller has to know
+// ErrNoCurrentRound rather than a bare pgx.ErrNoRows a caller has to know
 // to check for separately.
 func TestCurrentRound_NoRows_ReturnsErrNoCurrentRound(t *testing.T) {
 	t.Parallel()
@@ -67,5 +67,5 @@ func TestCurrentRound_NoRows_ReturnsErrNoCurrentRound(t *testing.T) {
 	s := NewRoundStore(mock, testLogger())
 	_, err := s.CurrentRound(t.Context(), testWorkBranchID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNoCurrentRound)
+	assert.ErrorIs(t, err, ErrNoCurrentRound)
 }

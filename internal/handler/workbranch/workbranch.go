@@ -16,6 +16,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -48,7 +49,7 @@ type Handler struct {
 	loamv1connect.UnimplementedWorkBranchServiceHandler
 	workBranches WorkBranchStore
 	repos        RepoStore
-	rounds       RoundOpener
+	rounds       RoundStore
 	diff         DiffComputer
 	capabilities *handler.CapabilityChecker
 	errors       *handler.ErrorMapper
@@ -60,7 +61,7 @@ var _ loamv1connect.WorkBranchServiceHandler = (*Handler)(nil)
 
 // New builds a Handler over the given seams, gating every RPC with
 // capabilities and mapping domain errors through errors.
-func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundOpener, diff DiffComputer, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
+func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff DiffComputer, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
 	return &Handler{workBranches: workBranches, repos: repos, rounds: rounds, diff: diff, capabilities: capabilities, errors: errors, logger: logger}
 }
 
@@ -148,6 +149,12 @@ func (h *Handler) UpdateWorkBranch(ctx context.Context, req *connect.Request[loa
 // "comment") -- the bead DESIGN note's "optional comment" does not match
 // the proto this handler implements and is not followed here; feedback
 // lives in comment threads (loam-ofg.9), not on this RPC.
+//
+// If UpdateState succeeds but the following OpenRound is interrupted (an
+// ordinary client disconnect or deadline between the two round-trips is
+// enough -- see RoundStore's doc comment for why this is routinely
+// reachable, not a rare crash-window edge case), a retry self-heals: see
+// selfHealInterruptedRequestReview.
 func (h *Handler) RequestReview(ctx context.Context, req *connect.Request[loamv1.RequestReviewRequest]) (*connect.Response[loamv1.RequestReviewResponse], error) {
 	if err := h.capabilities.RequireCapability(ctx, handler.CapabilityWorkRequestReview); err != nil {
 		return nil, h.errors.ToConnectErr(err)
@@ -157,14 +164,50 @@ func (h *Handler) RequestReview(ctx context.Context, req *connect.Request[loamv1
 	if err != nil {
 		return nil, h.errors.ToConnectErr(err)
 	}
+	opContext := fmt.Sprintf("requesting review for work branch %s/%s", repo, name)
 	updated, err := h.workBranches.UpdateState(ctx, wb.ID, workbranchstore.StateReviewable)
 	if err != nil {
-		return nil, h.errors.ToConnectErr(mapWorkBranchStoreErr(err, fmt.Sprintf("requesting review for work branch %s/%s", repo, name)))
+		healed, healErr := h.selfHealInterruptedRequestReview(ctx, wb, err, opContext)
+		if healErr != nil {
+			return nil, h.errors.ToConnectErr(healErr)
+		}
+		if healed == nil {
+			return nil, h.errors.ToConnectErr(mapRequestReviewErr(err, wb, opContext))
+		}
+		return connect.NewResponse(&loamv1.RequestReviewResponse{WorkBranch: workBranchToProto(repoRow.Name, *healed)}), nil
 	}
 	if _, err := h.rounds.OpenRound(ctx, updated.ID, requestReviewActor(ctx)); err != nil {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("opening review round for work branch %s/%s: %w", repo, name, err))
 	}
 	return connect.NewResponse(&loamv1.RequestReviewResponse{WorkBranch: workBranchToProto(repoRow.Name, updated)}), nil
+}
+
+// selfHealInterruptedRequestReview recovers from the unrecoverable dead-end
+// an interrupted RequestReview otherwise leaves behind (see RoundStore's
+// doc comment): transitionErr is UpdateState's failure; before is the work
+// branch's state as read BEFORE that call was attempted. Returns a non-nil
+// *workbranchstore.WorkBranch (and a nil error) only when this genuinely
+// was the interrupted-retry shape and the round has now been opened --
+// callers must treat that as success. A nil, nil return means transitionErr
+// is an ordinary, unrelated failure the caller should map and report as
+// usual; a non-nil error means the healing attempt itself failed and must
+// be reported instead.
+func (h *Handler) selfHealInterruptedRequestReview(ctx context.Context, before workbranchstore.WorkBranch, transitionErr error, opContext string) (*workbranchstore.WorkBranch, error) {
+	if !errors.Is(transitionErr, workbranchstore.ErrIllegalTransition) || before.State != workbranchstore.StateReviewable {
+		return nil, nil
+	}
+	_, roundErr := h.rounds.CurrentRound(ctx, before.ID)
+	if roundErr == nil {
+		return nil, nil
+	}
+	if !errors.Is(roundErr, reviewstore.ErrNoCurrentRound) {
+		return nil, fmt.Errorf("checking for a current round while %s: %w", opContext, roundErr)
+	}
+	if _, err := h.rounds.OpenRound(ctx, before.ID, requestReviewActor(ctx)); err != nil {
+		return nil, fmt.Errorf("self-healing an interrupted request-review by opening the missing round while %s: %w", opContext, err)
+	}
+	h.logger.InfoContext(ctx, "self-healed an interrupted request-review", "work_branch_id", before.ID)
+	return &before, nil
 }
 
 // ListWorkBranches returns work branches across enrolled repos, filtered by
@@ -349,6 +392,46 @@ func mapWorkBranchStoreErr(err error, context string) error {
 		return fmt.Errorf("%s: %w", context, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
+	}
+}
+
+// mapRequestReviewErr is mapWorkBranchStoreErr's RequestReview-specific
+// sibling: unlike UpdateWorkBranch's SetTitleDescription guard (which
+// rejects only a terminal state), UpdateState's reviewable-transition guard
+// conflates "wrong current state" and "title or description not yet set"
+// into the same workbranchstore.ErrIllegalTransition (both checked in one
+// atomic WHERE clause -- internal/db/queries/work_branches.sql). The CLI
+// renders err.Message() directly to the caller (docs/cli-spec.md -> Exit
+// Codes & Errors), so leaving both causes to print the same generic string
+// would mislead an operator; before is the work branch's state as read
+// BEFORE the attempted transition (resolveWorkBranch), which is everything
+// needed to tell them apart without a second query.
+func mapRequestReviewErr(err error, before workbranchstore.WorkBranch, context string) error {
+	if errors.Is(err, workbranchstore.ErrIllegalTransition) {
+		return fmt.Errorf("%s: %s: %w", context, requestReviewPreconditionMessage(before), handler.ErrFailedPrecondition)
+	}
+	return mapWorkBranchStoreErr(err, context)
+}
+
+// requestReviewPreconditionMessage renders the specific, human-readable
+// reason RequestReview's ErrIllegalTransition applies to before (the work
+// branch's state as read before the attempted transition): a terminal
+// state, an already-reviewable branch with an existing round (the
+// self-heal in selfHealInterruptedRequestReview already ruled out the
+// no-round case before this is ever reached), or a missing title/
+// description on the only other states UpdateState's guard allows into
+// reviewable (draft, reviewed).
+func requestReviewPreconditionMessage(before workbranchstore.WorkBranch) string {
+	switch before.State {
+	case workbranchstore.StateComplete, workbranchstore.StateClosed:
+		return fmt.Sprintf("work branch is %s, a terminal state -- review cannot be requested", before.State)
+	case workbranchstore.StateReviewable:
+		return "work branch is already reviewable with an open review round"
+	default:
+		if derefOr(before.Title, "") == "" || derefOr(before.Description, "") == "" {
+			return "work branch has no title or description set -- both are required before review can be requested"
+		}
+		return fmt.Sprintf("work branch is %s, not eligible for this review transition", before.State)
 	}
 }
 
