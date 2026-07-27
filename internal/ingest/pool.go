@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -300,18 +301,108 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	return job, true, nil
 }
 
+// errJobPanicked marks a job failure that came from a recovered panic
+// rather than a returned error, so a reader of ingest_jobs.error (or
+// repos.sync_error) can tell "the pipeline reported a problem" apart from
+// "the pipeline had a defect". Unexported: nothing outside this package
+// branches on it today; it exists to give the recorded message a stable,
+// greppable prefix and to give runOrchestrator's test an identity to
+// assert on that is not the panic value's own wording.
+var errJobPanicked = errors.New("ingest job panicked")
+
 // run executes job through the injected Orchestrator and records the
 // outcome. It always releases the repo's per-repo serialization slot
-// before returning, whether the job succeeded or failed, so a coalesced
-// follow-up (or any other queued job for the same repo) becomes claimable
-// immediately.
+// before returning, whether the job succeeded, failed, or panicked, so a
+// coalesced follow-up (or any other queued job for the same repo) becomes
+// claimable immediately.
+//
+// This is the per-job panic boundary (loam-337). Note that a job does NOT
+// get a goroutine of its own -- work() calls this inline on the worker
+// goroutine -- so before the guards below, a panic anywhere in the
+// pipeline (chunking, tree-sitter's cgo boundary, a vector length that
+// disagrees with its column dimension) unwound straight out of work(),
+// past Run, and terminated the whole server process: the HTTP listener,
+// the policy socket git pushes depend on, and every other in-flight job.
+// The transaction is not the concern -- internal/chunkstore's transactor
+// doc comment records that a panic unwinds PAST the deferred rollback,
+// which therefore RUNS, closing the transaction correctly -- the process
+// dying is.
+//
+// Two guards, deliberately, because they cannot be one:
+//
+//   - runOrchestrator wraps the pipeline call and converts a panic into an
+//     ordinary error, so the recorded outcome goes through the SAME fail()
+//     path as any other failure (status, error, attempts, sync_state,
+//     sync_error, and the backoff/retry fail() already schedules). There is
+//     no parallel failure path to keep in sync.
+//   - recoverOutcomeRecording is the last-resort guard over succeed/fail
+//     themselves. It cannot route into fail(): if fail() is what panicked,
+//     calling it again would panic again and escape. So it only logs, and
+//     leaves the row where it was -- startup's RequeueOrphaned is what
+//     eventually recovers a row stranded in 'running' -- but the process,
+//     and every other repo's ingestion, survives.
+//
+// Neither guard re-panics. That is the entire point: one poisoned repo
+// must not be able to halt ingestion for every other repo.
+//
+// release and notifyDrainWaiters are deferred HERE rather than inside
+// succeed and fail (where they used to live, one copy each). Both orders
+// run them at the same instant -- succeed/fail are called from nowhere
+// else and returning from either is the last thing run does -- but only
+// this one reaches them on the panic path too, and reaches them exactly
+// once: registered before any statement that can panic, so every exit,
+// normal or unwinding, passes through both. That matters more than the
+// tidiness: a recovered panic that leaves a repo marked busy forever
+// (claim() skips it, so no future job for it is ever claimable) or leaves
+// a Drain/Shutdown caller parked on a channel nobody closes has traded a
+// crash for a wedge, which is barely an improvement.
 func (p *Pool) run(ctx context.Context, job Job) {
-	stats, err := p.orchestrator.Run(ctx, job)
+	defer p.recoverOutcomeRecording(ctx, job)
+	defer p.release(job.RepoID)
+	defer p.notifyDrainWaiters(job.RepoID)
+	stats, err := p.runOrchestrator(ctx, job)
 	if err != nil {
 		p.fail(ctx, job, err)
 		return
 	}
 	p.succeed(ctx, job, stats)
+}
+
+// runOrchestrator calls the injected Orchestrator, turning a panic into a
+// returned error so run's caller-side logic (and fail's bookkeeping) needs
+// no panic-specific branch at all.
+//
+// The stack is captured and logged, not stored on the row: ingest_jobs.
+// error is surfaced verbatim in the admin repo view and is copied into
+// repos.sync_error under SyncErrorPrefix, and a multi-kilobyte goroutine
+// dump in a status field is unreadable there. The recovered value plus
+// job_id in the log gives an operator both halves: the row says what class
+// of defect it was and which job, the log line keyed by the same job_id
+// says where.
+func (p *Pool) runOrchestrator(ctx context.Context, job Job) (stats Stats, err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err = fmt.Errorf("%w: %v", errJobPanicked, r)
+		p.logger.ErrorContext(ctx, "recovered panic running ingest job",
+			"job_id", job.ID, "repo_id", job.RepoID, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
+	}()
+	return p.orchestrator.Run(ctx, job)
+}
+
+// recoverOutcomeRecording is run's outermost guard: see run's doc comment
+// for why it only logs rather than routing into fail, and for why the
+// serialization slot and drain waiters are already handled by run's own
+// defers by the time this runs.
+func (p *Pool) recoverOutcomeRecording(ctx context.Context, job Job) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	p.logger.ErrorContext(ctx, "recovered panic recording ingest job outcome",
+		"job_id", job.ID, "repo_id", job.RepoID, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 }
 
 // succeed records a successful ingest: status=succeeded, stats persisted
@@ -327,9 +418,11 @@ func (p *Pool) run(ctx context.Context, job Job) {
 // otherwise report a last successful sync that only ever goes stale
 // (docs/persistence-spec.md "repos"; features/enrollment.feature's
 // "Enrolled repos report sync status" reads exactly this pair).
+//
+// Releasing the repo's serialization slot and waking its drain waiters is
+// run's job, not this function's -- see run's doc comment for why they
+// moved there.
 func (p *Pool) succeed(ctx context.Context, job Job, stats Stats) {
-	defer p.release(job.RepoID)
-	defer p.notifyDrainWaiters(job.RepoID)
 	statsJSON, err := json.Marshal(stats)
 	if err != nil {
 		p.logger.ErrorContext(ctx, "marshaling ingest job stats", "job_id", job.ID, "error", err)
@@ -377,9 +470,11 @@ func (p *Pool) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 // attempts)"). The repo moves to sync_state='error' carrying the same
 // message under syncErrorPrefix, in the same transaction as the job's own
 // terminal status (see the syncStateSyncingQuery block).
-// The repo's serialization slot is released immediately (not
-// held for the backoff wait), so a coalesced follow-up for the same repo
-// can run right away rather than waiting behind this job's retry timer.
+// The repo's serialization slot is released as soon as this returns (not
+// held for the backoff wait -- the retry is a detached goroutine), so a
+// coalesced follow-up for the same repo can run right away rather than
+// waiting behind this job's retry timer. The release itself is run's
+// deferred call, not one of this function's; see run's doc comment.
 //
 // last_synced_at is deliberately left where it was: the swap orchestrator
 // rolled back, so the previous index is still live and still reflects the
@@ -393,8 +488,6 @@ func (p *Pool) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 // falls out of claim being the only writer of 'syncing' rather than
 // needing a rule of its own here.
 func (p *Pool) fail(ctx context.Context, job Job, runErr error) {
-	defer p.release(job.RepoID)
-	defer p.notifyDrainWaiters(job.RepoID)
 	var attempts int
 	err := p.inTx(ctx, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
@@ -656,10 +749,18 @@ func (p *Pool) checkOrRegisterDrainWaiter(ctx context.Context, repoID uuid.UUID)
 }
 
 // notifyDrainWaiters wakes every DrainRepo call currently blocked on
-// repoID so each re-checks real DB state; it is called after every
-// transition that can reduce repoID's queued-or-running count (succeed,
-// fail), never after a transition that only holds or increases it, so a
-// waiter is never woken to do a check that could not have changed.
+// repoID so each re-checks real DB state. It is deferred once, in run, so
+// it fires after every job outcome that can reduce repoID's
+// queued-or-running count (succeed, fail, and a fail reached from a
+// recovered orchestrator panic) and never after a transition that only
+// holds or increases it.
+//
+// The one case where it wakes a waiter that cannot yet have changed is
+// run's outermost guard: a panic in succeed/fail itself leaves the row in
+// 'running', so a woken waiter re-checks, finds itself still un-drained,
+// and re-registers -- a wasted round trip, not a wrong answer, and far
+// better than the alternative of leaving a Drain/Shutdown caller parked on
+// a channel nobody will ever close.
 func (p *Pool) notifyDrainWaiters(repoID uuid.UUID) {
 	p.mu.Lock()
 	waiters := p.drainWaiters[repoID]

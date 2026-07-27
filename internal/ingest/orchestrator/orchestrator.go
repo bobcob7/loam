@@ -127,10 +127,14 @@ func newOrchestrator(
 // Every failure returns an error and rolls back, leaving the previous
 // index and the previous ingested_ref exactly as they were. Nothing here
 // indexes a slice positionally without having checked its length, and no
-// code path panics deliberately: internal/ingest.Pool runs each job on its
-// own goroutine with no recover(), so a panic in this function takes down
-// the whole server process rather than failing one job (loam-337, open and
-// deliberately not fixed here).
+// code path panics deliberately -- but that is now a cleanliness property,
+// not a survival one: loam-337 gave internal/ingest.Pool a per-job recover
+// (Pool.runOrchestrator), so a panic escaping this function fails that one
+// job through the ordinary fail() path -- status, error, attempts,
+// sync_state, sync_error, backoff/retry -- instead of terminating the
+// server process. Keep returning errors rather than panicking anyway: an
+// error carries its own context, a recovered panic only carries a stack in
+// the log.
 func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, error) {
 	repo, err := o.repos.GetRepoByID(ctx, job.RepoID)
 	if err != nil {

@@ -39,7 +39,10 @@ var errNonPositiveSyncInterval = errors.New("LOAM_SYNC_INTERVAL must be greater 
 // parses LOAM_SYNC_INTERVAL with time.ParseDuration and range-checks
 // nothing (config/env.go's parseDurationEnv), so "0s" and "-5m" both load
 // cleanly today; time.NewTicker panics on any non-positive duration; and
-// this binary installs no recover() anywhere. Without this check, a single
+// nothing on this binary's startup path installs a recover() (loam-337
+// added one, but it guards a claimed ingest job inside ingest.Pool, which
+// is started long after this value is consumed and would never see this
+// panic). Without this check, a single
 // mistyped environment variable turns startup into a panic-and-stack-trace
 // crash instead of a one-line configuration error. Checking here -- at the
 // consumer, before anything else in run() runs -- also means the process
