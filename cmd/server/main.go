@@ -18,9 +18,16 @@
 // policy socket (loam-ofg.18), the ingest worker pool, and the HTTP
 // listener, listener last, exactly as run's own doc comment below details.
 //
-// The sync scheduler (mirrorsync.Scheduler) is deliberately NOT wired here:
-// see run's doc comment for why constructing one today would do more harm
-// than good.
+// The sync scheduler (mirrorsync.Scheduler) IS wired here, as of loam-0do:
+// buildSyncScheduler (sync.go) constructs it and all seven of its
+// collaborators over the same pool and ingest pool built above, driven by a
+// real time.Ticker at cfg.SyncInterval (LOAM_SYNC_INTERVAL), and it joins
+// the ingest pool and policy socket in serve's background tier. An earlier
+// version of this comment explained why it was deliberately NOT wired --
+// most of its collaborators had no production implementation. That reason
+// has expired: internal/mirrorsync/production_assertions.go and
+// internal/mirrorsync/state/production_assertions.go now pin all seven at
+// compile time.
 //
 // buildRouter's pool parameter (loam-ofg.11) is the seam RepoService and
 // MetaService (registerMetadataServices, below) need: connectDatabase's
@@ -60,6 +67,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -190,33 +198,28 @@ func main() {
 // "Topology" paragraph): the harness calls run, not a hand-rolled subset
 // of its steps.
 //
-// The sync scheduler is deliberately not constructed here: 5 of its 7
-// collaborators (Fetcher/loam-giq.2, AdvanceDetector/loam-giq.4,
-// MergeabilityChecker/loam-giq.5, the IngestEnqueuer adapter/loam-c94.2,
-// PRPoller/loam-giq.8) have no production implementation anywhere in the
-// tree -- only RepoLister (loam-13z's StoreRepoLister) and
-// SyncStateReporter are real. Wiring a Scheduler with placeholder stand-ins
-// for those five would make every enrolled repo's Mirror Sync cycle fail
-// step 1 immediately and report sync_state='error' for the entire
-// enrollment on every tick -- materially worse and more misleading than
-// simply not starting it yet, the same conclusion loam-13z's own closing
-// NOTES reached constructing this package's RepoLister producer.
-// mirrorsync.Scheduler.Shutdown (added alongside this bead) and the
-// runner/closer seams in interfaces.go are both ready for that Scheduler to
-// be constructed and passed to serve as its background runner the moment
-// giq.2/4/5/8 and c94.2 land -- a single mechanical addition, not a
-// redesign of this function.
+// The sync scheduler is constructed here (loam-0do), by buildSyncScheduler
+// in sync.go, and handed to serve as a background runner alongside the
+// ingest worker pool and the policy socket. Its trigger is a real
+// time.Ticker at cfg.SyncInterval; validateSyncInterval runs first, at the
+// very top of this function, because time.NewTicker panics on a
+// non-positive duration and internal/config range-checks nothing today
+// (see validateSyncInterval's own doc comment). The ticker is stopped when
+// this function returns.
 //
-// loam-f75: this function -- production's only caller of Scheduler.Run --
-// still does not construct one, so the constraint it names ("never call
-// Scheduler.Run and Scheduler.Tick on the same Scheduler") cannot be
-// violated from here today. The acceptance harness (loam-li0.5) builds its
-// OWN Scheduler, over this same real ingest.Pool/reposstore wiring plus
-// fakeforge, purely to drive testsched.SyncHarness.Tick from step
-// definitions -- see cmd/server/acceptance_harness_test.go's
-// newSyncHarness doc comment for how that Scheduler is built so its Run is
-// never reachable at all, satisfying loam-f75 by construction rather than
-// by convention.
+// loam-f75 ("never call Scheduler.Run and Scheduler.Tick on the same
+// Scheduler") is satisfied by construction from this end: buildSyncScheduler
+// returns a plain runner and never lets the *mirrorsync.Scheduler value
+// escape, so nothing reachable from here can call Tick at all. The
+// acceptance harness (loam-li0.5) builds its OWN, separate Scheduler over
+// this same real pool/ingest.Pool wiring plus fakeforge, purely to drive
+// testsched.SyncHarness.Tick from step definitions, and reaches the same
+// constraint from its end by never letting its Scheduler escape either --
+// see cmd/server/acceptance_harness_test.go's newSyncHarness. The two
+// Schedulers are separate objects, so neither one's WaitGroup is ever
+// driven by both a Run and a Tick; the acceptance suite additionally sets
+// LOAM_SYNC_INTERVAL well past its own runtime so this function's
+// wall-clock scheduler cannot cycle a repo underneath a manual tick.
 //
 // onReady, if non-nil, is called exactly once, after every collaborator
 // below is constructed and reachable but before this function hands off to
@@ -244,6 +247,9 @@ func main() {
 // exists (loam-li0.5's acceptance harness) sends its handles over a
 // buffered channel and returns immediately, never blocking here.
 func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onReady func(pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string)) error {
+	if err := validateSyncInterval(cfg.SyncInterval); err != nil {
+		return err
+	}
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
 		return err
@@ -268,6 +274,16 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	if err := ingestPool.RequeueOrphaned(ctx); err != nil {
 		pool.Close()
 		return fmt.Errorf("requeuing orphaned ingest jobs: %w", err)
+	}
+	// The ticker is created here, after validateSyncInterval has already
+	// rejected a non-positive interval at the top of this function --
+	// time.NewTicker panics otherwise, and nothing in this binary recovers.
+	syncTicker := time.NewTicker(cfg.SyncInterval)
+	defer syncTicker.Stop()
+	syncScheduler, err := buildSyncScheduler(cfg, pool, ingestPool, syncTicker.C, defaultShutdownGrace)
+	if err != nil {
+		pool.Close()
+		return fmt.Errorf("building sync scheduler: %w", err)
 	}
 	// loam-ofg.18 (the policy socket) MUST start here, before newListener,
 	// not as another background runner passed into serve alongside the
@@ -299,7 +315,7 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	}
 	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
-	background := multiRunner{ingestPool, policyServer}
+	background := multiRunner{ingestPool, policyServer, syncScheduler}
 	if onReady != nil {
 		onReady(pool, ingestPool, hookBinaryPath)
 	}

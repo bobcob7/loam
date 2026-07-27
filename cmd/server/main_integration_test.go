@@ -30,6 +30,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -153,6 +156,16 @@ func shortDataDir(t *testing.T) string {
 // the test itself did not already stop it.
 func startServer(t *testing.T, databaseURL string) *runningServer {
 	t.Helper()
+	return startServerWithEnv(t, databaseURL)
+}
+
+// startServerWithEnv is startServer with extra LOAM_* environment entries
+// ("KEY=value") appended after the defaults, so a single test can vary one
+// setting -- LOAM_SYNC_INTERVAL, today -- without every other test in this
+// file inheriting it. Order matters: os/exec takes the LAST occurrence of a
+// duplicated key, so an entry here overrides the default above it.
+func startServerWithEnv(t *testing.T, databaseURL string, extraEnv ...string) *runningServer {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	addr := listener.Addr().String()
@@ -169,6 +182,7 @@ func startServer(t *testing.T, databaseURL string) *runningServer {
 		"LOAM_ENCRYPTION_KEY=" + testEncryptionKey,
 		"LOAM_DATA_DIR=" + shortDataDir(t),
 	}
+	env = append(env, extraEnv...)
 	cmd := exec.Command(serverBinary)
 	cmd.Env = env
 	cmd.ExtraFiles = []*os.File{listenerFile}
@@ -384,6 +398,189 @@ func TestServer_RequeuesOrphanedIngestJobsOnStartup(t *testing.T) {
 	_, status := getWithAuthorization(t, rs.addr, "/healthz", "")
 	require.Equal(t, http.StatusOK, status, "stderr: %s", rs.stderr.String())
 	assertOrphanedJobWasRequeued(t, dsn, jobID, rs)
+}
+
+// TestServer_RunsARealSyncCycleForEnrolledRepos is loam-0do's own
+// acceptance line and the thing Demo M3 (loam-bwu) depends on: the SHIPPED
+// BINARY, started with a short LOAM_SYNC_INTERVAL and then simply left
+// alone, runs a genuine Mirror Sync cycle against every enrolled repo. No
+// force-sync RPC, no test seam, no in-process scheduler -- exactly the
+// "start the server with LOAM_SYNC_INTERVAL=2s and just wait a few
+// seconds" that M3's design calls for.
+//
+// The fixture is an enrolled repo whose forge host has NO credential row,
+// so step 1 (fetch) fails at credential resolution inside
+// gittransport.Transport -- deterministically, with no network access and
+// no mirror on disk required. The cycle therefore reaches ReportError,
+// which is the observable.
+//
+// THE SIGNAL IS A SPECIFIC repos.sync_error TEXT, NOT repos.sync_state,
+// and that choice is load-bearing (loam-4q2). sync_state CYCLES while a
+// live scheduler runs: every tick writes 'syncing' at cycle start and
+// 'error' at cycle end, forever, so a single sample of it cannot
+// distinguish "never ticked" (still the 'idle' default) from "ticked and
+// currently mid-cycle" -- and polling for one specific value of a cycling
+// column is how TestServer_RequeuesOrphanedIngestJobsOnStartup turned CI
+// red.
+//
+// sync_error has no such trouble here, on two counts.
+//
+// It does not cycle for THIS fixture: it is NULL on every freshly inserted
+// repos row (0001_init.up.sql leaves it nullable with no default; the
+// helper below asserts that precondition rather than assuming it), it is
+// set by internal/mirrorsync/state's ReportError, and the only writer that
+// clears it is that package's ReportIdle -- which is unreachable here,
+// because step 1 can never succeed without a credential. So once written
+// it stays written; there is no window to lose a race in.
+//
+// And it is attributed, which is what keeps this honest as more writers
+// appear. loam-c94.13 makes ingest.Pool a SECOND writer of sync_state and
+// sync_error (claim/succeed/fail), so "sync_error is non-empty" would stop
+// being proof of a SYNC tick the moment that lands. The polled predicate
+// is therefore not "non-empty" but "contains 'fetching repo <name>'" --
+// the wrapper mirrorsync.Scheduler.runSteps puts on step 1's error, which
+// no other writer produces (the ingest-side writer prefixes its own text
+// with ingest.SyncErrorPrefix). Classifying by author, not by
+// non-emptiness, is what makes the assertion survive that merge; the
+// fixture additionally never enqueues an ingest job at all, since the
+// cycle aborts at step 1 and never reaches step 4.
+func TestServer_RunsARealSyncCycleForEnrolledRepos(t *testing.T) {
+	dsn := newPostgres(t)
+	migrateOnce(t, dsn)
+	const repoName = "acme/sync-tick"
+	seedEnrolledRepo(t, dsn, repoName)
+	rs := startServerWithEnv(t, dsn, "LOAM_SYNC_INTERVAL=1s")
+	_, status := getWithAuthorization(t, rs.addr, "/healthz", "")
+	require.Equal(t, http.StatusOK, status, "stderr: %s", rs.stderr.String())
+	assertSyncCycleRan(t, dsn, repoName, rs)
+}
+
+// seedEnrolledRepo inserts one enrolled repos row pointing at a forge host
+// with no credential on record -- the fixture
+// TestServer_RunsARealSyncCycleForEnrolledRepos needs for a sync cycle
+// that reliably reaches ReportError without any network access.
+func seedEnrolledRepo(t *testing.T, dsn, name string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer conn.Close()
+	repoID := uuid.Must(uuid.NewV7())
+	_, err = conn.Exec(ctx,
+		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch) VALUES ($1, $2, $3, $4, $5)`,
+		repoID, name, "https://forge.invalid/"+name, "forge.invalid", "main",
+	)
+	require.NoError(t, err)
+	var syncError *string
+	require.NoError(t, conn.QueryRow(ctx, `SELECT sync_error FROM repos WHERE id = $1`, repoID).Scan(&syncError))
+	require.Nil(t, syncError, "a freshly enrolled repo must start with a NULL sync_error, or this test's signal proves nothing")
+	return repoID
+}
+
+// assertSyncCycleRan polls repos.sync_error until mirrorsync.Scheduler's
+// OWN step-1 failure text lands there. The author-identifying fragment is
+// inside the polled predicate, not asserted after it: any other writer of
+// this column (loam-c94.13's ingest-side writer, once it lands) must not
+// be able to satisfy the wait. See
+// TestServer_RunsARealSyncCycleForEnrolledRepos's doc comment for why this
+// signal neither cycles nor races.
+func assertSyncCycleRan(t *testing.T, dsn, repoName string, rs *runningServer) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer conn.Close()
+	want := "fetching repo " + repoName
+	observed := &lastObserved{}
+	require.Eventuallyf(t, func() bool {
+		var syncError *string
+		if err := conn.QueryRow(ctx, `SELECT sync_error FROM repos WHERE name = $1`, repoName).Scan(&syncError); err != nil {
+			return false
+		}
+		if syncError == nil {
+			return false
+		}
+		observed.set(*syncError)
+		return strings.Contains(*syncError, want)
+	}, 30*time.Second, 100*time.Millisecond,
+		"the shipped binary must run a sync cycle on its own ticker and record %q in repos.sync_error; last observed value was %s. stderr: %s",
+		want, observed, rs.stderr.String())
+}
+
+// lastObserved carries the most recent value a polling predicate saw, so a
+// require.Eventuallyf failure message can report it. The indirection is
+// needed because Eventuallyf's message ARGUMENTS are evaluated before
+// polling begins (when nothing has been observed yet) while the message
+// itself is FORMATTED only on failure -- a *lastObserved passed with %s
+// therefore renders whatever the last poll stored. testify runs the
+// predicate on its own goroutine, hence the mutex.
+type lastObserved struct {
+	mu    sync.Mutex
+	value string
+}
+
+func (l *lastObserved) set(value string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.value = value
+}
+
+// String implements fmt.Stringer.
+func (l *lastObserved) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strconv.Quote(l.value)
+}
+
+// TestServer_NonPositiveSyncInterval_FailsFastInsteadOfPanicking proves
+// LOAM_SYNC_INTERVAL=0s is rejected as a configuration error rather than
+// crashing the process. time.NewTicker panics on a non-positive duration
+// and this binary installs no recover() anywhere, so without run()'s
+// validateSyncInterval guard this exact environment produces a panic and a
+// stack trace on startup. internal/config accepts the value today: it
+// parses the duration and range-checks nothing (loam-35b).
+//
+// It needs no Postgres at all, and that is itself part of the assertion:
+// the guard runs at the very top of run(), before connectDatabase, so an
+// unreachable DSN cannot be what killed the process. The stderr assertions
+// pin both halves -- the message names the variable, and no "panic:" line
+// appears.
+func TestServer_NonPositiveSyncInterval_FailsFastInsteadOfPanicking(t *testing.T) {
+	cmd := exec.Command(serverBinary)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"LOAM_HTTP_ADDR=127.0.0.1:0",
+		"LOAM_ADMIN_USER=" + testAdminUser,
+		"LOAM_ADMIN_PASSWORD=" + testAdminPassword,
+		"LOAM_DATABASE_URL=postgres://loam:loam@127.0.0.1:1/loam?sslmode=disable",
+		"LOAM_ENCRYPTION_KEY=" + testEncryptionKey,
+		"LOAM_DATA_DIR=" + shortDataDir(t),
+		"LOAM_SYNC_INTERVAL=0s",
+	}
+	// Both streams, into one buffer: config.Load builds cfg.Logger over
+	// os.Stdout, so run()'s own returned error is logged there, while the
+	// pre-config bootLogger and any runtime panic go to os.Stderr. A test
+	// asserting both "the message names the variable" and "there is no
+	// panic" has to watch both.
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	require.NoError(t, cmd.Start())
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		require.Error(t, err, "the server must exit non-zero on a non-positive LOAM_SYNC_INTERVAL; stderr: %s", output.String())
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("the server neither started nor exited on a non-positive LOAM_SYNC_INTERVAL; stderr: %s", output.String())
+	}
+	require.NotNil(t, cmd.ProcessState)
+	assert.Equal(t, 1, cmd.ProcessState.ExitCode(), "stderr: %s", output.String())
+	assert.Contains(t, output.String(), "LOAM_SYNC_INTERVAL",
+		"the failure must name the variable the operator has to fix, not surface as a database error")
+	assert.NotContains(t, output.String(), "panic:",
+		"a non-positive interval must be a configuration error, never a time.NewTicker panic")
 }
 
 // migrateOnce runs the server binary once, just long enough to reach

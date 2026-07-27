@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"github.com/bobcob7/loam/internal/credentialstore"
+	"github.com/bobcob7/loam/internal/reposstore"
 	"sync"
 )
 
@@ -196,5 +198,149 @@ func (mock *repoNameListerMock) ListAllRepoNamesCalls() []struct {
 	mock.lockListAllRepoNames.RLock()
 	calls = mock.calls.ListAllRepoNames
 	mock.lockListAllRepoNames.RUnlock()
+	return calls
+}
+
+// Ensure, that repoForgeLookupMock does implement repoForgeLookup.
+// If this is not the case, regenerate this file with moq.
+var _ repoForgeLookup = &repoForgeLookupMock{}
+
+// repoForgeLookupMock is a mock implementation of repoForgeLookup.
+//
+//	func TestSomethingThatUsesrepoForgeLookup(t *testing.T) {
+//
+//		// make and configure a mocked repoForgeLookup
+//		mockedrepoForgeLookup := &repoForgeLookupMock{
+//			GetRepoByNameFunc: func(ctx context.Context, name string) (reposstore.Repo, error) {
+//				panic("mock out the GetRepoByName method")
+//			},
+//		}
+//
+//		// use mockedrepoForgeLookup in code that requires repoForgeLookup
+//		// and then make assertions.
+//
+//	}
+type repoForgeLookupMock struct {
+	// GetRepoByNameFunc mocks the GetRepoByName method.
+	GetRepoByNameFunc func(ctx context.Context, name string) (reposstore.Repo, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetRepoByName holds details about calls to the GetRepoByName method.
+		GetRepoByName []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockGetRepoByName sync.RWMutex
+}
+
+// GetRepoByName calls GetRepoByNameFunc.
+func (mock *repoForgeLookupMock) GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error) {
+	if mock.GetRepoByNameFunc == nil {
+		panic("repoForgeLookupMock.GetRepoByNameFunc: method is nil but repoForgeLookup.GetRepoByName was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Name string
+	}{
+		Ctx:  ctx,
+		Name: name,
+	}
+	mock.lockGetRepoByName.Lock()
+	mock.calls.GetRepoByName = append(mock.calls.GetRepoByName, callInfo)
+	mock.lockGetRepoByName.Unlock()
+	return mock.GetRepoByNameFunc(ctx, name)
+}
+
+// GetRepoByNameCalls gets all the calls that were made to GetRepoByName.
+// Check the length with:
+//
+//	len(mockedrepoForgeLookup.GetRepoByNameCalls())
+func (mock *repoForgeLookupMock) GetRepoByNameCalls() []struct {
+	Ctx  context.Context
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Name string
+	}
+	mock.lockGetRepoByName.RLock()
+	calls = mock.calls.GetRepoByName
+	mock.lockGetRepoByName.RUnlock()
+	return calls
+}
+
+// Ensure, that forgeCredentialLookupMock does implement forgeCredentialLookup.
+// If this is not the case, regenerate this file with moq.
+var _ forgeCredentialLookup = &forgeCredentialLookupMock{}
+
+// forgeCredentialLookupMock is a mock implementation of forgeCredentialLookup.
+//
+//	func TestSomethingThatUsesforgeCredentialLookup(t *testing.T) {
+//
+//		// make and configure a mocked forgeCredentialLookup
+//		mockedforgeCredentialLookup := &forgeCredentialLookupMock{
+//			GetByHostFunc: func(ctx context.Context, host string) (credentialstore.Credential, error) {
+//				panic("mock out the GetByHost method")
+//			},
+//		}
+//
+//		// use mockedforgeCredentialLookup in code that requires forgeCredentialLookup
+//		// and then make assertions.
+//
+//	}
+type forgeCredentialLookupMock struct {
+	// GetByHostFunc mocks the GetByHost method.
+	GetByHostFunc func(ctx context.Context, host string) (credentialstore.Credential, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// GetByHost holds details about calls to the GetByHost method.
+		GetByHost []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Host is the host argument value.
+			Host string
+		}
+	}
+	lockGetByHost sync.RWMutex
+}
+
+// GetByHost calls GetByHostFunc.
+func (mock *forgeCredentialLookupMock) GetByHost(ctx context.Context, host string) (credentialstore.Credential, error) {
+	if mock.GetByHostFunc == nil {
+		panic("forgeCredentialLookupMock.GetByHostFunc: method is nil but forgeCredentialLookup.GetByHost was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Host string
+	}{
+		Ctx:  ctx,
+		Host: host,
+	}
+	mock.lockGetByHost.Lock()
+	mock.calls.GetByHost = append(mock.calls.GetByHost, callInfo)
+	mock.lockGetByHost.Unlock()
+	return mock.GetByHostFunc(ctx, host)
+}
+
+// GetByHostCalls gets all the calls that were made to GetByHost.
+// Check the length with:
+//
+//	len(mockedforgeCredentialLookup.GetByHostCalls())
+func (mock *forgeCredentialLookupMock) GetByHostCalls() []struct {
+	Ctx  context.Context
+	Host string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Host string
+	}
+	mock.lockGetByHost.RLock()
+	calls = mock.calls.GetByHost
+	mock.lockGetByHost.RUnlock()
 	return calls
 }

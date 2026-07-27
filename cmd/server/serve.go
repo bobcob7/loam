@@ -79,8 +79,8 @@ func newListener(addr string) (net.Listener, error) {
 	return listener, nil
 }
 
-// serve starts background (the ingest worker pool today; see run's doc
-// comment for why the sync scheduler is not one of these yet) and
+// serve starts background (the ingest worker pool, the policy socket's
+// accept loop, and the sync scheduler -- see run's doc comment) and
 // httpServer, then blocks until ctx is done (SIGINT/SIGTERM) or Serve
 // itself fails, at which point it runs docs/server-spec.md's Shutdown
 // sequence: stop watching for a second signal (so it falls through to
