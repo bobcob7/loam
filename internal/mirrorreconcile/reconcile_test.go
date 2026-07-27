@@ -11,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fakeHookBinaryContent stands in for cmd/loamhook's real compiled bytes:
+// this package's own tests only need to prove ReconcileMirror copies
+// hookBinaryPath's bytes faithfully and atomically, never that the copied
+// file actually behaves like a hook when executed (cmd/loamhook's own
+// tests, plus the real end-to-end proof elsewhere, cover that).
+const fakeHookBinaryContent = "FAKE-LOAMHOOK-BINARY-CONTENT-v1\x00\x01\x02not-real-elf-but-distinctive-bytes"
+
+// newFakeHookBinary writes fakeHookBinaryContent to a fresh file under
+// t.TempDir() and returns its path, standing in for hookBinaryPath.
+func newFakeHookBinary(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "loamhook")
+	require.NoError(t, os.WriteFile(path, []byte(fakeHookBinaryContent), 0o755))
+	return path
+}
+
 // newBareMirror creates a real bare git repository under t.TempDir(),
 // exactly what a bare mirror looks like on disk before reconciliation.
 func newBareMirror(t *testing.T) string {
@@ -43,11 +59,13 @@ func gitConfigGet(t *testing.T, repoPath, key string) (value string, ok bool) {
 // TestReconcileMirror_WritesRequiredConfigAndHook proves the substance of
 // this bead: after one call, both required config keys read back exactly
 // "true" via a separate git-config invocation, and the hook file exists,
-// executable, at the exact path loam-ofg.19's own DESIGN note pins.
+// executable, at the exact path loam-ofg.19's own DESIGN note pins, with
+// bytes identical to the hook binary ReconcileMirror was told to install.
 func TestReconcileMirror_WritesRequiredConfigAndHook(t *testing.T) {
 	t.Parallel()
 	repoPath := newBareMirror(t)
-	err := ReconcileMirror(t.Context(), repoPath)
+	hookBinaryPath := newFakeHookBinary(t)
+	err := ReconcileMirror(t.Context(), repoPath, hookBinaryPath)
 	require.NoError(t, err)
 	denyNonFF, ok := gitConfigGet(t, repoPath, "receive.denyNonFastForwards")
 	require.True(t, ok, "receive.denyNonFastForwards must be set")
@@ -61,7 +79,7 @@ func TestReconcileMirror_WritesRequiredConfigAndHook(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 	content, readErr := os.ReadFile(hookPath)
 	require.NoError(t, readErr)
-	assert.Contains(t, string(content), "loam-ofg.18")
+	assert.Equal(t, fakeHookBinaryContent, string(content), "the installed hook must be a byte-for-byte copy of hookBinaryPath")
 }
 
 // TestReconcileMirror_NonexistentPathIsNilNotError proves
@@ -69,14 +87,32 @@ func TestReconcileMirror_WritesRequiredConfigAndHook(t *testing.T) {
 // disk (not yet cloned, or lost) must not abort reconciliation -- it is
 // derived state the next Mirror Sync cycle re-clones. This also proves
 // ReconcileMirror creates nothing at a path that does not already exist as
-// a directory.
+// a directory, and that it never even reads hookBinaryPath in that case
+// (a nonexistent hookBinaryPath here must not turn into an error).
 func TestReconcileMirror_NonexistentPathIsNilNotError(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "never-cloned.git")
-	err := ReconcileMirror(t.Context(), missing)
+	nonexistentHookBinary := filepath.Join(t.TempDir(), "never-built-loamhook")
+	err := ReconcileMirror(t.Context(), missing, nonexistentHookBinary)
 	require.NoError(t, err)
 	_, statErr := os.Stat(missing)
 	assert.True(t, os.IsNotExist(statErr), "ReconcileMirror must not create a mirror path that did not already exist")
+}
+
+// TestReconcileMirror_MissingHookBinaryIsAHardError proves the other half
+// of that same guard: for a mirror that DOES exist on disk, a
+// hookBinaryPath that cannot be read is a real, loud error -- never
+// silently skipped, which would otherwise leave a real, already-serving
+// mirror with a stale or entirely absent hook.
+func TestReconcileMirror_MissingHookBinaryIsAHardError(t *testing.T) {
+	t.Parallel()
+	repoPath := newBareMirror(t)
+	nonexistentHookBinary := filepath.Join(t.TempDir(), "never-built-loamhook")
+	err := ReconcileMirror(t.Context(), repoPath, nonexistentHookBinary)
+	require.Error(t, err)
+	hookPath := filepath.Join(repoPath, "hooks", "pre-receive")
+	_, statErr := os.Stat(hookPath)
+	assert.True(t, os.IsNotExist(statErr), "no hook file must be left behind when the source binary could not be read")
 }
 
 // TestReconcileMirror_SecondCallIsNoopAndConfigStaysCorrect is the
@@ -86,7 +122,8 @@ func TestReconcileMirror_NonexistentPathIsNilNotError(t *testing.T) {
 func TestReconcileMirror_SecondCallIsNoopAndConfigStaysCorrect(t *testing.T) {
 	t.Parallel()
 	repoPath := newBareMirror(t)
-	require.NoError(t, ReconcileMirror(t.Context(), repoPath))
+	hookBinaryPath := newFakeHookBinary(t)
+	require.NoError(t, ReconcileMirror(t.Context(), repoPath, hookBinaryPath))
 	hookPath := filepath.Join(repoPath, "hooks", "pre-receive")
 	firstContent, err := os.ReadFile(hookPath)
 	require.NoError(t, err)
@@ -94,7 +131,7 @@ func TestReconcileMirror_SecondCallIsNoopAndConfigStaysCorrect(t *testing.T) {
 	require.NoError(t, err)
 	firstDenyNonFF, _ := gitConfigGet(t, repoPath, "receive.denyNonFastForwards")
 	firstDenyDeletes, _ := gitConfigGet(t, repoPath, "receive.denyDeletes")
-	require.NoError(t, ReconcileMirror(t.Context(), repoPath))
+	require.NoError(t, ReconcileMirror(t.Context(), repoPath, hookBinaryPath))
 	secondContent, err := os.ReadFile(hookPath)
 	require.NoError(t, err)
 	secondInfo, err := os.Stat(hookPath)
@@ -116,24 +153,25 @@ func TestReconcileMirror_SecondCallIsNoopAndConfigStaysCorrect(t *testing.T) {
 // re-chmods whatever is already there: a pre-existing hook file, left both
 // non-executable AND with the wrong content by some prior state (a hand
 // edit, an older version of this package, direct tampering), must come
-// back as both 0o755 AND byte-identical to hookScript. Asserting content
-// is load-bearing, not incidental: a mutant that skip-if-present guards
-// the write (only chmods an existing file, never rewrites its bytes) would
-// still pass a mode-only assertion here, silently leaving an edited or
-// truncated hook in place forever while every future reconciliation
-// reports success.
+// back as both 0o755 AND byte-identical to hookBinaryPath's content.
+// Asserting content is load-bearing, not incidental: a mutant that
+// skip-if-present guards the write (only chmods an existing file, never
+// rewrites its bytes) would still pass a mode-only assertion here,
+// silently leaving an edited or truncated hook in place forever while
+// every future reconciliation reports success.
 func TestReconcileMirror_RepairsAStaleHookMode(t *testing.T) {
 	t.Parallel()
 	repoPath := newBareMirror(t)
+	hookBinaryPath := newFakeHookBinary(t)
 	hookPath := filepath.Join(repoPath, "hooks", "pre-receive")
 	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 0\n"), 0o644))
-	require.NoError(t, ReconcileMirror(t.Context(), repoPath))
+	require.NoError(t, ReconcileMirror(t.Context(), repoPath, hookBinaryPath))
 	info, err := os.Stat(hookPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 	content, err := os.ReadFile(hookPath)
 	require.NoError(t, err)
-	assert.Equal(t, hookScript, string(content), "a tampered hook's CONTENT must be replaced, not just its mode repaired")
+	assert.Equal(t, fakeHookBinaryContent, string(content), "a tampered hook's CONTENT must be replaced, not just its mode repaired")
 }
 
 // TestReconcileMirror_NonRepoDirectoryInsideAGitWorktreeErrorsAndDoesNotTouchEnclosingRepo
@@ -156,7 +194,7 @@ func TestReconcileMirror_NonRepoDirectoryInsideAGitWorktreeErrorsAndDoesNotTouch
 	require.NoError(t, err, "git init: %s", out)
 	nonRepoSubdir := filepath.Join(enclosingRepo, "not-a-repo", "nested", "mirror.git")
 	require.NoError(t, os.MkdirAll(nonRepoSubdir, 0o755))
-	reconcileErr := ReconcileMirror(t.Context(), nonRepoSubdir)
+	reconcileErr := ReconcileMirror(t.Context(), nonRepoSubdir, newFakeHookBinary(t))
 	require.Error(t, reconcileErr, "a non-repo directory nested in a real git worktree must error, not silently harden the enclosing repo")
 	enclosingGitDir := filepath.Join(enclosingRepo, ".git")
 	_, ok := gitConfigGet(t, enclosingGitDir, "receive.denyDeletes")
@@ -181,7 +219,7 @@ func TestReconcileMirror_NonBareRepoErrorsWithoutWritingAPhantomHook(t *testing.
 	initCmd := exec.CommandContext(t.Context(), "git", "init", "--quiet", workTree)
 	out, err := initCmd.CombinedOutput()
 	require.NoError(t, err, "git init: %s", out)
-	reconcileErr := ReconcileMirror(t.Context(), workTree)
+	reconcileErr := ReconcileMirror(t.Context(), workTree, newFakeHookBinary(t))
 	require.Error(t, reconcileErr, "a non-bare repository must be rejected, not treated as a mirror")
 	phantomHook := filepath.Join(workTree, "hooks", "pre-receive")
 	_, statErr := os.Stat(phantomHook)
@@ -197,7 +235,7 @@ func TestReconcileMirror_DoesNotDisturbUnrelatedConfig(t *testing.T) {
 	repoPath := newBareMirror(t)
 	setCmd := exec.CommandContext(t.Context(), "git", "--git-dir="+repoPath, "config", "loam.testmarker", "keep-me")
 	require.NoError(t, setCmd.Run())
-	require.NoError(t, ReconcileMirror(t.Context(), repoPath))
+	require.NoError(t, ReconcileMirror(t.Context(), repoPath, newFakeHookBinary(t)))
 	marker, ok := gitConfigGet(t, repoPath, "loam.testmarker")
 	require.True(t, ok)
 	assert.Equal(t, "keep-me", marker)

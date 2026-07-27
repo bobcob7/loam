@@ -12,15 +12,17 @@ import (
 )
 
 // recordingReconciler builds a mirrorReconcilerFunc that records every
-// repoPath it was called with, thread-safely, and returns err verbatim --
-// so a test can prove which paths reconcileMirrors dispatched to without
-// touching real git.
-func recordingReconciler(err error) (fn mirrorReconcilerFunc, calls func() []string) {
+// (repoPath, hookBinaryPath) pair it was called with, thread-safely, and
+// returns err verbatim -- so a test can prove which paths reconcileMirrors
+// dispatched to without touching real git.
+func recordingReconciler(err error) (fn mirrorReconcilerFunc, calls func() []string, hookBinaryPaths func() []string) {
 	var mu sync.Mutex
 	var paths []string
-	fn = func(_ context.Context, repoPath string) error {
+	var hookPaths []string
+	fn = func(_ context.Context, repoPath, hookBinaryPath string) error {
 		mu.Lock()
 		paths = append(paths, repoPath)
+		hookPaths = append(hookPaths, hookBinaryPath)
 		mu.Unlock()
 		return err
 	}
@@ -29,7 +31,12 @@ func recordingReconciler(err error) (fn mirrorReconcilerFunc, calls func() []str
 		defer mu.Unlock()
 		return append([]string(nil), paths...)
 	}
-	return fn, calls
+	hookBinaryPaths = func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), hookPaths...)
+	}
+	return fn, calls, hookBinaryPaths
 }
 
 // TestReconcileMirrors_ReconcilesEveryEnrolledRepoAtItsDerivedMirrorPath
@@ -43,13 +50,14 @@ func TestReconcileMirrors_ReconcilesEveryEnrolledRepoAtItsDerivedMirrorPath(t *t
 			return []string{"acme/widgets", "acme/gadgets"}, nil
 		},
 	}
-	reconcile, calls := recordingReconciler(nil)
-	err := reconcileMirrors(t.Context(), testLogger(), "/data", lister, reconcile)
+	reconcile, calls, hookBinaryPaths := recordingReconciler(nil)
+	err := reconcileMirrors(t.Context(), testLogger(), "/data", "/data/loamhook", lister, reconcile)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		filepath.Join("/data", "mirrors", "acme/widgets.git"),
 		filepath.Join("/data", "mirrors", "acme/gadgets.git"),
 	}, calls())
+	assert.Equal(t, []string{"/data/loamhook", "/data/loamhook"}, hookBinaryPaths(), "the same hook binary path must be threaded to every reconcile call")
 }
 
 // TestReconcileMirrors_NoEnrolledReposCallsReconcilerZeroTimes proves an
@@ -59,8 +67,8 @@ func TestReconcileMirrors_NoEnrolledReposCallsReconcilerZeroTimes(t *testing.T) 
 	lister := &repoNameListerMock{
 		ListAllRepoNamesFunc: func(context.Context) ([]string, error) { return nil, nil },
 	}
-	reconcile, calls := recordingReconciler(nil)
-	err := reconcileMirrors(t.Context(), testLogger(), "/data", lister, reconcile)
+	reconcile, calls, _ := recordingReconciler(nil)
+	err := reconcileMirrors(t.Context(), testLogger(), "/data", "/data/loamhook", lister, reconcile)
 	require.NoError(t, err)
 	assert.Empty(t, calls())
 }
@@ -74,8 +82,8 @@ func TestReconcileMirrors_ListingFailurePropagatesAndReconcilerNeverRuns(t *test
 	lister := &repoNameListerMock{
 		ListAllRepoNamesFunc: func(context.Context) ([]string, error) { return nil, wantErr },
 	}
-	reconcile, calls := recordingReconciler(nil)
-	err := reconcileMirrors(t.Context(), testLogger(), "/data", lister, reconcile)
+	reconcile, calls, _ := recordingReconciler(nil)
+	err := reconcileMirrors(t.Context(), testLogger(), "/data", "/data/loamhook", lister, reconcile)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
 	assert.Empty(t, calls(), "reconcile must never run once listing enrolled repos has failed")
@@ -94,8 +102,8 @@ func TestReconcileMirrors_PerRepoFailureAbortsTheLoop(t *testing.T) {
 			return []string{"acme/first", "acme/second"}, nil
 		},
 	}
-	reconcile, calls := recordingReconciler(wantErr)
-	err := reconcileMirrors(t.Context(), testLogger(), "/data", lister, reconcile)
+	reconcile, calls, _ := recordingReconciler(wantErr)
+	err := reconcileMirrors(t.Context(), testLogger(), "/data", "/data/loamhook", lister, reconcile)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
 	assert.Equal(t, []string{filepath.Join("/data", "mirrors", "acme/first.git")}, calls(), "the loop must stop at the first failing repo, never reaching the second")

@@ -16,10 +16,17 @@
 // to diff existing state first; see ReconcileMirror's own doc comment for
 // why every call is unconditionally safe to repeat.
 //
-// The pre-receive hook's actual policy-enforcement BEHAVIOR belongs to
-// loam-ofg.18 (the policy socket), not this package: hookScript below is a
-// deliberate placeholder seam for that bead to replace wholesale, not a
-// real implementation. See hookScript's doc comment.
+// The pre-receive hook installed at every mirror is a byte-for-byte copy
+// of the compiled cmd/loamhook binary (loam-ofg.18): ReconcileMirror takes
+// the path to that binary as a parameter and copies it into place,
+// atomically, exactly as it always has for the string-literal placeholder
+// this package originally shipped (see writeHook's own doc comment for why
+// the copy must be atomic). The hook's actual policy-enforcement BEHAVIOR
+// -- dialing the policy socket, evaluating docs/git-spec.md's ref-policy
+// rules -- lives entirely in cmd/loamhook and internal/hooksocket /
+// internal/refpolicy, never in this package: this package only ever
+// concerns itself with getting the right bytes onto disk, at the right
+// path and mode, idempotently.
 package mirrorreconcile
 
 import (
@@ -47,55 +54,28 @@ const hookRelPath = "hooks/pre-receive"
 // "(0755)" figure -- docs/git-spec.md never mentions a mode.
 const hookMode = 0o755
 
-// hookScript is the pre-receive hook stub content this package installs.
-// Its real body -- dialing <LOAM_DATA_DIR>/hook.sock, forwarding git's
-// pre-receive stdin ("<old-sha> <new-sha> <ref>" per line, one invocation
-// for the whole push) plus the identity env the receive-pack subprocess
-// sets (LOAM_AGENT_NAME/LOAM_AGENT_ID/LOAM_AGENT_ROLE/LOAM_REPO), and
-// exiting non-zero on any rejected ref -- belongs entirely to loam-ofg.18
-// (docs/git-spec.md "Enforcement Mechanics": "a trivial stub that forwards
-// the proposed ref updates, plus the identity ... to the server over a
-// unix socket, and passes or fails on the answer"). This package only owns
-// getting a file onto disk at the right path, mode, and idempotently --
-// not what that file does once loam-ofg.18 lands.
-//
-// Until then, this stub exits non-zero unconditionally: docs/git-spec.md's
-// own policy design is fail-closed ("socket down means push rejected"), so
-// a stub with no socket to dial yet should refuse every push rather than
-// silently accept it -- the same silent-wrong-behavior-is-worse-than-loud-
-// failure choice cmd/server/main.go's notImplementedOrchestrator already
-// makes for the ingest pipeline. No caller in this tree invokes
-// receive-pack against a real mirror today (loam-ofg.16, the git
-// smart-HTTP handler, is still open), so this exit code is inert in
-// production until ofg.16 and ofg.18 both land -- at which point ofg.18
-// replaces this constant's content (and, if the path or mode ever need to
-// change, hookRelPath/hookMode above) with the real dispatch logic, not
-// this package.
-const hookScript = `#!/bin/sh
-# Placeholder pre-receive hook stub. See internal/mirrorreconcile's
-# hookScript doc comment: loam-ofg.18 replaces this file's content with the
-# real policy-socket dispatch. Fails closed until then.
-echo "loam: pre-receive policy socket not yet implemented (loam-ofg.18)" >&2
-exit 1
-`
-
-// ReconcileMirror idempotently writes the pre-receive hook stub and the
-// receive.denyNonFastForwards / receive.denyDeletes git config into the
-// bare mirror at repoPath, per docs/git-spec.md "Enforcement Mechanics".
-// Every call unconditionally (over)writes the hook file's bytes and mode,
-// then sets both config keys -- there is no read-modify-write diff step,
-// so two calls in a row produce byte-identical, config-identical results:
-// repeating this is always safe, at enrollment (loam-ofg.12) and again on
-// every server startup (docs/server-spec.md Startup step 3). Nothing here
-// touches the mirror's refs, objects, or any other config key, so a
-// reconciliation pass never disturbs work already stored in the mirror.
+// ReconcileMirror idempotently writes the pre-receive hook (a byte-for-
+// byte copy of the compiled binary at hookBinaryPath -- see writeHook's
+// own doc comment for why it must be a real, separate binary rather than
+// a shell script) and the receive.denyNonFastForwards / receive.denyDeletes
+// git config into the bare mirror at repoPath, per docs/git-spec.md
+// "Enforcement Mechanics". Every call unconditionally (over)writes the
+// hook file's bytes and mode, then sets both config keys -- there is no
+// read-modify-write diff step, so two calls in a row produce byte-
+// identical, config-identical results: repeating this is always safe, at
+// enrollment (loam-ofg.12) and again on every server startup
+// (docs/server-spec.md Startup step 3). Nothing here touches the mirror's
+// refs, objects, or any other config key, so a reconciliation pass never
+// disturbs work already stored in the mirror.
 //
 // A repoPath that does not exist on disk is NOT an error: it is either not
 // yet cloned, or lost -- both derived state docs/server-spec.md's Startup
 // step 3 says the next Mirror Sync cycle re-clones, with Postgres as the
 // record of enrollment, not the mirror's presence on disk. ReconcileMirror
 // returns nil rather than erroring so one missing mirror never aborts
-// reconciliation of every other enrolled repo.
+// reconciliation of every other enrolled repo. This check runs BEFORE
+// hookBinaryPath is ever read, so a missing mirror never depends on
+// hookBinaryPath existing either.
 //
 // repoPath must resolve, via git's own --git-dir (never -C/-cd, which
 // walks UP to an enclosing repository when the given directory is not
@@ -107,7 +87,7 @@ exit 1
 // land outside that repo's real (nested ".git/hooks") hook directory and
 // never run, while the config calls below would have silently hardened
 // nothing.
-func ReconcileMirror(ctx context.Context, repoPath string) error {
+func ReconcileMirror(ctx context.Context, repoPath, hookBinaryPath string) error {
 	info, err := os.Stat(repoPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -121,7 +101,7 @@ func ReconcileMirror(ctx context.Context, repoPath string) error {
 	if err := verifyBareRepo(ctx, repoPath); err != nil {
 		return err
 	}
-	if err := writeHook(repoPath); err != nil {
+	if err := writeHook(repoPath, hookBinaryPath); err != nil {
 		return err
 	}
 	if err := setConfig(ctx, repoPath, "receive.denyNonFastForwards", "true"); err != nil {
@@ -152,24 +132,36 @@ func verifyBareRepo(ctx context.Context, repoPath string) error {
 	return nil
 }
 
-// writeHook (over)writes repoPath's pre-receive hook with hookScript,
-// atomically: it writes hookScript's bytes to a temp file in the same
+// writeHook (over)writes repoPath's pre-receive hook with a byte-for-byte
+// copy of the compiled binary at hookBinaryPath, atomically: it reads
+// hookBinaryPath's bytes once, writes them to a temp file in the same
 // hooks directory (so the final os.Rename stays within one filesystem),
 // chmods that temp file to hookMode, then renames it over the real hook
 // path. os.Rename is atomic on POSIX filesystems, so any concurrent or
 // interrupted receive-pack invocation execs either the complete old hook
-// or the complete new one -- never a partially written file. Writing
-// hookScript's bytes directly via os.WriteFile at the final path, as an
-// earlier version of this function did, is NOT safe: os.WriteFile
-// truncates the destination before writing its new content, and a crash
-// or kill between that truncation and the write completing leaves an
-// empty, still-executable pre-receive hook on disk -- which git treats as
-// a hook that ran and exited 0, ACCEPTING every push, the exact fail-open
-// outcome this whole design forbids. The same risk applies at
-// loam-ofg.12's enroll call site, which runs against a live, already-
-// serving mirror, not just at startup before the listener accepts
-// connections.
-func writeHook(repoPath string) error {
+// or the complete new one -- never a partially written file. Writing the
+// bytes directly via os.WriteFile at the final path, as an earlier version
+// of this function did (when the hook was a small string literal, not a
+// copied binary), is NOT safe: os.WriteFile truncates the destination
+// before writing its new content, and a crash or kill between that
+// truncation and the write completing leaves an empty, still-executable
+// pre-receive hook on disk -- which git treats as a hook that ran and
+// exited 0, ACCEPTING every push, the exact fail-open outcome this whole
+// design forbids. The same risk applies at loam-ofg.12's enroll call site,
+// which runs against a live, already-serving mirror, not just at startup
+// before the listener accepts connections.
+//
+// hookBinaryPath not existing, or not being readable, is a real error,
+// never silently skipped: leaving a mirror's existing (possibly stale, or
+// entirely absent) hook in place because the new one could not be read
+// would leave that mirror either unprotected or running outdated policy
+// logic, exactly the fail-open outcome this whole package exists to
+// prevent.
+func writeHook(repoPath, hookBinaryPath string) error {
+	hookBinary, err := os.ReadFile(hookBinaryPath)
+	if err != nil {
+		return fmt.Errorf("reading hook binary %s: %w", hookBinaryPath, err)
+	}
 	hookPath := filepath.Join(repoPath, hookRelPath)
 	hooksDir := filepath.Dir(hookPath)
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
@@ -180,7 +172,7 @@ func writeHook(repoPath string) error {
 		return fmt.Errorf("creating temp hook file in %s: %w", repoPath, err)
 	}
 	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(hookScript); err != nil {
+	if _, err := tmp.Write(hookBinary); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp hook file in %s: %w", repoPath, err)

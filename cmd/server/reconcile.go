@@ -9,13 +9,15 @@ import (
 )
 
 // mirrorReconcilerFunc matches mirrorreconcile.ReconcileMirror's
-// signature. reconcileMirrors takes it as a parameter, rather than calling
-// mirrorreconcile.ReconcileMirror directly, so a test can substitute a
-// recording spy and prove which mirror paths it reconciled -- and that a
-// per-repo failure aborts the loop -- without touching real git. This
-// mirrors connectDatabase's migrateFunc/newPoolFunc convention in
-// database.go.
-type mirrorReconcilerFunc func(ctx context.Context, repoPath string) error
+// signature (loam-ofg.18 added hookBinaryPath: the path to the compiled
+// cmd/loamhook binary ReconcileMirror copies into place as every mirror's
+// pre-receive hook). reconcileMirrors takes it as a parameter, rather than
+// calling mirrorreconcile.ReconcileMirror directly, so a test can
+// substitute a recording spy and prove which mirror paths it reconciled --
+// and that a per-repo failure aborts the loop -- without touching real
+// git. This mirrors connectDatabase's migrateFunc/newPoolFunc convention
+// in database.go.
+type mirrorReconcilerFunc func(ctx context.Context, repoPath, hookBinaryPath string) error
 
 // reconcileMirrors runs docs/server-spec.md Startup step 3: idempotently
 // reconciles every enrolled repo's bare mirror (docs/git-spec.md
@@ -27,14 +29,17 @@ type mirrorReconcilerFunc func(ctx context.Context, repoPath string) error
 // a merely-missing mirror, which reconcile itself reports as nil) aborts
 // the loop immediately rather than continuing past it, matching
 // docs/server-spec.md Startup's own "failing fast at each step" contract.
-func reconcileMirrors(ctx context.Context, logger *slog.Logger, dataDir string, lister repoNameLister, reconcile mirrorReconcilerFunc) error {
+// hookBinaryPath is threaded straight through to every reconcile call,
+// unchanged across the whole loop -- every mirror on this host gets the
+// exact same hook binary.
+func reconcileMirrors(ctx context.Context, logger *slog.Logger, dataDir, hookBinaryPath string, lister repoNameLister, reconcile mirrorReconcilerFunc) error {
 	names, err := lister.ListAllRepoNames(ctx)
 	if err != nil {
 		return fmt.Errorf("listing enrolled repos for mirror reconciliation: %w", err)
 	}
 	for _, name := range names {
 		path := mirrorPath(dataDir, name)
-		if err := reconcile(ctx, path); err != nil {
+		if err := reconcile(ctx, path, hookBinaryPath); err != nil {
 			return fmt.Errorf("reconciling mirror for %s: %w", name, err)
 		}
 	}

@@ -10,20 +10,17 @@
 // migrations have created the pgvector extension deadlocks permanently on a
 // virgin database; this is the ordering loam-ut9 filed against the spec
 // text, fixed alongside this wiring); reconcile every enrolled repo's bare
-// mirror (Startup step 3, loam-ofg.19: idempotently rewrite the pre-receive
-// hook stub and the receive.denyNonFastForwards/receive.denyDeletes config,
-// docs/git-spec.md "Enforcement Mechanics"); build the ingest worker pool
-// and re-queue any ingest_jobs orphaned by a prior crash (Startup step 4);
-// then start the ingest worker pool and the HTTP listener, listener last,
-// exactly as run's own doc comment below details.
+// mirror (Startup step 3, loam-ofg.19/.18: idempotently copy the real
+// pre-receive hook binary (cmd/loamhook) into place and set the
+// receive.denyNonFastForwards/receive.denyDeletes config, docs/git-spec.md
+// "Enforcement Mechanics"); build the ingest worker pool and re-queue any
+// ingest_jobs orphaned by a prior crash (Startup step 4); then start the
+// policy socket (loam-ofg.18), the ingest worker pool, and the HTTP
+// listener, listener last, exactly as run's own doc comment below details.
 //
-// The policy socket half of step 5 (loam-ofg.18) is not wired here -- that
-// package does not exist yet in this tree, and loam-ofg.19's own hook stub
-// (internal/mirrorreconcile) is a deliberate placeholder ofg.18 replaces
-// wholesale (see that package's hookScript doc comment), not a real
-// implementation of ref policy. Nor is the sync scheduler
-// (mirrorsync.Scheduler): see run's doc comment for why constructing one
-// today would do more harm than good.
+// The sync scheduler (mirrorsync.Scheduler) is deliberately NOT wired here:
+// see run's doc comment for why constructing one today would do more harm
+// than good.
 //
 // buildRouter's pool parameter (loam-ofg.11) is the seam RepoService and
 // MetaService (registerMetadataServices, below) need: connectDatabase's
@@ -61,6 +58,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,6 +73,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
+	"github.com/bobcob7/loam/internal/hooksocket"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
@@ -173,8 +172,13 @@ func run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	hookBinaryPath, err := loamhookBinaryPath(os.Executable)
+	if err != nil {
+		pool.Close()
+		return fmt.Errorf("locating loamhook binary: %w", err)
+	}
 	repoStore := reposstore.NewStore(gen.New(pool), cfg.Logger)
-	if err := reconcileMirrors(ctx, cfg.Logger, cfg.DataDir, repoStore, mirrorreconcile.ReconcileMirror); err != nil {
+	if err := reconcileMirrors(ctx, cfg.Logger, cfg.DataDir, hookBinaryPath, repoStore, mirrorreconcile.ReconcileMirror); err != nil {
 		pool.Close()
 		return fmt.Errorf("reconciling mirrors: %w", err)
 	}
@@ -194,6 +198,18 @@ func run(cfg config.Config) error {
 	// background runner inside serve would let Serve start accepting
 	// connections before the socket is confirmed live -- it must be
 	// constructed and confirmed serving above this line instead.
+	//
+	// onAccept is nil: loam-giq.6 (catch-up detection, the consumer of
+	// refpolicy.PostAcceptFunc) does not exist anywhere in this tree yet.
+	// A nil hook is EvaluatePush's own documented no-op, not a missing
+	// wiring step here.
+	policyStore := policyStoreAdapter{repos: repoStore, workBranches: workbranchstore.New(gen.New(pool), cfg.Logger)}
+	policySocketPath := filepath.Join(cfg.DataDir, "hook.sock")
+	policyServer, err := hooksocket.Listen(policySocketPath, policyStore, nil, cfg.Logger)
+	if err != nil {
+		pool.Close()
+		return fmt.Errorf("starting policy socket: %w", err)
+	}
 	listener, err := newListener(cfg.HTTPAddr)
 	if err != nil {
 		pool.Close()
@@ -201,7 +217,36 @@ func run(cfg config.Config) error {
 	}
 	router := buildRouter(cfg, pool)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
-	return serve(ctx, stop, cfg.Logger, listener, httpServer, ingestPool, pool, defaultShutdownGrace)
+	background := multiRunner{ingestPool, policyServer}
+	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, pool, defaultShutdownGrace)
+}
+
+// loamhookBinaryPathName is the filename this process expects to find its
+// pre-receive hook client binary under, as a sibling of its own executable
+// -- both built from this same module (cmd/server and cmd/loamhook) and
+// shipped side by side, the same "install two binaries from one build"
+// convention forge tooling like git-lfs's own smudge/clean filters and
+// git's own remote helpers use. There is no LOAM_ environment variable for
+// this: docs/server-spec.md's configuration table is settled for the MVP
+// and does not name one, and the sibling-of-the-running-executable
+// location needs no new configuration surface at all.
+const loamhookBinaryPathName = "loamhook"
+
+// loamhookBinaryPath resolves cmd/loamhook's compiled binary path as a
+// sibling of this process's own executable (executable, typically
+// os.Executable, injected so tests can substitute a path without
+// depending on the actual test binary's own location). mirrorreconcile.
+// ReconcileMirror treats a hookBinaryPath it cannot read as a hard error
+// (see that function's own doc comment), so a missing sibling binary
+// aborts startup here with a clear message rather than surfacing later,
+// per-repo, as an opaque "reading hook binary: no such file" once
+// reconcileMirrors starts its loop.
+func loamhookBinaryPath(executable func() (string, error)) (string, error) {
+	execPath, err := executable()
+	if err != nil {
+		return "", fmt.Errorf("resolving own executable path: %w", err)
+	}
+	return filepath.Join(filepath.Dir(execPath), loamhookBinaryPathName), nil
 }
 
 // buildRouter wires the auth wrappers onto the mux and mounts the embedded
