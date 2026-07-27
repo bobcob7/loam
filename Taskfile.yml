@@ -606,6 +606,501 @@ tasks:
         echo "  $(echo "$reject3_out" | grep -o 'remote: loam:.*' || true)"
         echo "=== demo:m2 complete ==="
 
+  demo:m3:
+    desc: >-
+      Demo M3 (loam-bwu): boot the real compiled server + loam + loamhook
+      binaries against a real upstream forge, enroll fixture-polyglot
+      through the REAL RepoAdminService.EnrollRepo RPC, let one live sync
+      tick force-fetch a rewritten upstream history (pruning a deleted
+      branch, leaving work-branch refs alone), watch advance detection
+      enqueue the ingest job and the queue drain, then prove the index
+      lit up: `loam graph def/refs/deps/dependents` resolve
+      fixture-polyglot's cross-file symbols, `loam search` ranks the auth
+      chunk first, and every one of those responses names the commit that
+      was actually ingested. Needs the Go toolchain, git, curl, and a
+      docker-CLI-compatible client talking to a Docker (or
+      Docker-API-compatible) daemon, same as demo:m1/demo:m2; set
+      LOAM_DEMO_DOCKER if your client binary is not literally named
+      `docker`. Runs from a clean checkout with no manual setup -- in
+      particular with no Ollama installed and no model pulled, which is
+      the problem this target had to solve and is the first note below.
+      Every fixture choice is deliberate:
+        - THE EMBEDDER. Ingest cannot run without one, and internal/config
+          defaults LOAM_EMBEDDER_URL to http://localhost:11434 with model
+          nomic-embed-text -- i.e. to a local Ollama. Requiring an operator
+          to install Ollama and `ollama pull nomic-embed-text` would break
+          the no-manual-setup property demo:m1 and demo:m2 both hold, and
+          would make the "auth chunk ranks first" assertion depend on a
+          model whose output is not contractually deterministic. Stubbing
+          the embedder out was rejected for the opposite reason: it would
+          delete the production HTTP client from the demo entirely. So
+          this target does what demo:m2 did for the forge -- it fakes the
+          FAR side and drives the real near side. internal/fakeembed is a
+          deterministic server speaking Ollama's own /api/embed wire shape
+          over internal/testembed's bag-of-words projection, and
+          LOAM_EMBEDDER_URL points the server's real, shipped
+          ollama.Embedder at it. The client's request encoding
+          (truncate:false, options.num_ctx), its 404 classification, and
+          its returned-vector-width validation are all exercised for real;
+          only the far side is a fake. That is strictly more coverage than
+          stubbing, and it is why the ranking assertion below is a
+          property rather than a hope.
+        - THE RANKING IS PROVEN, NOT SAMPLED. testembed scores by exact
+          token overlap, so a chunk sharing none of the query's tokens has
+          a cosine of exactly zero -- not "a low score". cmd/demoenv's own
+          unit tests check, against the real fixture tree on disk, that
+          every token of the search query appears in the auth file and in
+          no other file of the corpus, AND that no query token collides
+          into another file's token bucket at testembed.Dimension (the
+          birthday-bound hazard internal/testembed/collision.go documents).
+          With both true, every other chunk scores zero and the auth chunk
+          ranks first by construction. If someone rewords the fixture's
+          doc comment, that unit test fails before this demo ever runs.
+        - ENROLLMENT IS THE REAL RPC, unlike demo:m2. demo:m2 seeds repos
+          with direct INSERTs because EnrollRepo needs a resolvable
+          credential row and a REAL reachable upstream, and that demo had
+          neither. This one has both: the fake forge is a genuinely
+          reachable upstream over authenticated smart HTTP, and
+          forge.Forgejo's CheckRepo -- the probe EnrollRepo gates on -- is
+          purely git (an authenticated ls-remote plus the receive-pack ref
+          advertisement, forge/forgejo_git.go), never the Forgejo REST
+          API, so it is satisfied by a fake that speaks only git. So this
+          target calls RepoAdminService.EnrollRepo over HTTP and gets the
+          real thing: identity derivation, credential resolution, the
+          upstream access probe, the initial `git clone --mirror`, hook
+          installation via mirrorreconcile, and the FULL ingest job
+          enrollment enqueues. The one row still seeded out of band is the
+          encrypted forge credential -- see cmd/demoenv's seed-credential
+          comment for why that is currently unavoidable (the token is
+          AES-GCM encrypted, and CredentialService.SetUpstreamToken has no
+          registered handler in cmd/server yet).
+        - THE REPO IS NAMED git/fixture-polyglot, which looks odd and is
+          not a typo. fakeforge mounts every repo under its own "/git/"
+          smart-HTTP prefix, and deriveRepoIdentity
+          (internal/handler/repoadmin/handler.go) takes the upstream URL's
+          whole path as the "<group>/<repo_name>" identifier. So seeding
+          "fixture-polyglot" yields .../git/fixture-polyglot.git and the
+          identifier git/fixture-polyglot -- exactly the derivation
+          repoadmin's own enroll_integration_test.go pins, exercised
+          against a real fake-forge URL rather than a hand-typed one.
+        - THE SYNC TICK IS REAL AND UNASSISTED. LOAM_SYNC_INTERVAL is set
+          to 2s and this target simply waits; cmd/server/sync.go wires the
+          production mirrorsync.Scheduler over the same pool and ingest
+          pool the rest of the server uses (loam-0do). No force-sync admin
+          RPC is invented, because the spec has none. Note
+          validateSyncInterval rejects a non-positive interval at startup,
+          so "0s" is a boot failure, not a fast loop.
+        - THE UPSTREAM EVENT IS A FORCE-PUSH, not an ordinary advance.
+          fakeforge.ForcePushBranch resets main to its parent and commits
+          the auth file there, so upstream's tip no longer contains the
+          mirror's tip anywhere in its history. A mirror that merely
+          fast-forwarded would reject it; only the forced refspec
+          MirrorFetcher builds accepts it. The same tick also prunes a
+          branch deleted upstream and must leave the work-branch ref
+          alone, so one fetch demonstrates all three halves of the
+          mirror's contract, and all three are asserted against the mirror
+          on disk rather than described in prose.
+        - THE DRAIN IS CONFIRMED ON A SIGNAL THAT CANNOT RACE. repos.
+          sync_state is NOT usable for this: under a live scheduler and
+          ingest pool it CYCLES idle -> syncing -> idle (loam-4q2), so a
+          single sample cannot tell "never ran" from "mid-cycle". This
+          polls ListIngestJobs for a compound predicate instead -- at
+          least N jobs exist AND every one of them is SUCCEEDED -- which
+          is monotone in both directions: job rows are never deleted so
+          the count only rises, a job reaches 'succeeded' only from the
+          pool's success transaction and never leaves it, and a job still
+          queued or running simply is not succeeded yet. The count half is
+          load-bearing on its own: enrollment's ingest can finish long
+          before the tick reacting to the rewrite has enqueued anything,
+          so "everything succeeded" alone would be a false green.
+        - PROOF BY PRESENCE AND ABSENCE. The demo commits LegacySignIn
+          upstream BEFORE enrolling, so the first ingest indexes it, and
+          the force-push rewrites it away while adding Login. The
+          post-drain queries then assert both directions: Login resolves
+          (so the rewritten tip was fetched, ingested and drained) and
+          LegacySignIn is gone (so the index followed a REWRITE rather
+          than merely accumulating commits). Neither symbol exists in
+          fixture-polyglot itself -- adding one would silently re-baseline
+          every pinned ingest golden -- so both arrive the way real code
+          does, as upstream commits.
+        - ASSERTIONS, NOT EYEBALLING. Every check runs through
+          `demoenv check-envelope` / `check-jobs`, which decode the JSON
+          and address named fields, so a SHA appearing in a snippet cannot
+          satisfy an ingested-ref assertion and "ranks first" is actually
+          positional. The raw output is printed too, because the bead's
+          definition of done is that a human can SEE the graph resolve and
+          see the ref it was built from.
+        - cmd/demoenv is NOT built by `task build:bin`. That target builds
+          the three binaries this repo ships, and cmd/server's startup
+          contract is specifically that loamhook sits beside it; adding a
+          fourth, non-shipped binary to that set would blur a contract
+          worth keeping sharp. This target builds it into the same bin/
+          itself, alongside the three real ones.
+        - LOAM_DATA_DIR is a short /tmp/loam-m3-data.XXXXXX for exactly
+          the reason demo:m2 documents: the policy socket binds
+          <LOAM_DATA_DIR>/hook.sock and unix sockets cap sun_path at ~104
+          bytes, so a long data dir makes the server exit before the
+          readiness poll could ever succeed.
+        - Readiness is always a poll, never a sleep: GET /healthz for the
+          server, Ollama's own GET / ("Ollama is running") for the fake
+          embedder, and a real authenticated `git ls-remote` for the fake
+          forge -- the last being the truest possible signal, since it is
+          the same probe EnrollRepo's own CheckRepo will make moments
+          later.
+        - Fixed ports (18091 forge, 18092 embedder, 18093 server) and a
+          fixed container name, all self-healed pre-flight exactly the way
+          demo:m2 self-heals its own, and for the identical reason:
+          mvdan/sh's EXIT trap does not fire on go-task's SIGINT
+          interception, so a Ctrl-C'd run would otherwise leak a process
+          that answers the next run's readiness poll and hands it a
+          false-positive "ready" for a boot that never happened.
+    cmds:
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        docker_cli="${LOAM_DEMO_DOCKER:-docker}"
+        pg_container="loam-demo-m3-pg"
+        server_bin="$repo_root/bin/server"
+        loam_bin="$repo_root/bin/loam"
+        demoenv_bin="$repo_root/bin/demoenv"
+        forge_port="18091"
+        embed_port="18092"
+        http_port="18093"
+        http_addr="127.0.0.1:$http_port"
+        forge_addr="127.0.0.1:$forge_port"
+        embed_addr="127.0.0.1:$embed_port"
+        forge_token="loam-demo-m3-forge-token"
+        forge_repo="fixture-polyglot"
+        repo_name="git/$forge_repo"
+        target_branch="main"
+        work_branch="wb-m3demo"
+        agent_name="ada-lovelace-1-author"
+        admin_password="throwaway-admin-pass"
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        upstream_url="http://$forge_addr/git/$forge_repo.git"
+        auth_upstream_url="http://demo:$forge_token@$forge_addr/git/$forge_repo.git"
+        data_dir=""
+        workspace=""
+        # find_pids/stop_proc locate and stop real OS-level processes by
+        # matching an absolute exec path via pgrep -f, never $! + kill,
+        # for the reasons demo:m2's own comment spells out: go-task's
+        # shell (mvdan/sh) has no `kill` builtin at all, and its $! is an
+        # internal job id rather than a signalable pid. Matching by
+        # absolute path also self-heals a process a Ctrl-C'd previous run
+        # leaked, with no pidfile to go stale.
+        find_pids() {
+          pgrep -f "$1" 2>/dev/null || true
+        }
+        stop_proc() {
+          stop_bin="$1"; stop_label="$2"
+          stop_pids="$(find_pids "$stop_bin")"
+          if [ -z "$stop_pids" ]; then
+            echo "$stop_label: no running process found"
+            return 0
+          fi
+          echo "$stop_label: stopping pid(s): $(echo "$stop_pids" | tr '\n' ' ')"
+          for stop_pid in $stop_pids; do
+            /bin/kill -TERM "$stop_pid" 2>/dev/null || true
+          done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_pids "$stop_bin")" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_pids "$stop_bin"); do
+            /bin/kill -9 "$stop_pid" 2>/dev/null || true
+          done
+        }
+        # clear_stale_port kills whatever is bound to a port regardless of
+        # which binary it is -- the belt-and-suspenders net demo:m2 added
+        # after a leaked process answered /healthz instantly and handed
+        # its readiness poll a false-positive for a boot that had not
+        # happened. Best-effort: lsof is present on both CI platforms but
+        # is not guaranteed everywhere, so its absence is tolerated.
+        clear_stale_port() {
+          command -v lsof >/dev/null 2>&1 || return 0
+          for stale_pid in $(lsof -ti "tcp:$1" 2>/dev/null || true); do
+            [ -z "$stale_pid" ] && continue
+            echo "  killing stale pid $stale_pid bound to port $1"
+            /bin/kill -9 "$stale_pid" 2>/dev/null || true
+          done
+        }
+        cleanup() {
+          echo ""
+          echo "=== demo:m3 cleanup: stopping server + upstream, removing container $pg_container and temp dirs ==="
+          stop_proc "$server_bin" "cleanup(server)"
+          stop_proc "$demoenv_bin upstream" "cleanup(upstream)"
+          clear_stale_port "$http_port"
+          clear_stale_port "$forge_port"
+          clear_stale_port "$embed_port"
+          if ! "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1; then
+            echo "demo:m3: NOTE -- $pg_container was not present to remove (already gone, or never created)" >&2
+          fi
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$workspace" ] && rm -rf "$workspace"
+        }
+        trap cleanup EXIT
+        echo "=== demo:m3 pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1 || true
+        stop_proc "$server_bin" "pre-flight(server)"
+        stop_proc "$demoenv_bin upstream" "pre-flight(upstream)"
+        clear_stale_port "$http_port"
+        clear_stale_port "$forge_port"
+        clear_stale_port "$embed_port"
+        wait_for_http_ok() {
+          poll_url="$1"; poll_log="$2"; poll_label="$3"; poll_timeout="${4:-30}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            if [ "$poll_code" = "200" ]; then
+              echo "$poll_label ready (HTTP 200 from $poll_url)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - poll_start ))" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s -- log:" >&2
+              cat "$poll_log" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        # admin_rpc posts a Connect unary call over JSON. connect-go
+        # registers the JSON codec by default and cmd/server passes no
+        # HandlerOptions, so plain curl is a first-class client here --
+        # no generated stub, no extra dependency.
+        admin_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$http_addr/loam.admin.v1.RepoAdminService/$1"
+        }
+        # agent_cli runs the real compiled loam CLI as an agent, with the
+        # same identity headers a real agent's environment supplies.
+        agent_cli() {
+          env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+            LOAM_AGENT_NAME="$agent_name" LOAM_AGENT_ID="1" LOAM_AGENT_ROLE="author" \
+            "$loam_bin" "$@"
+        }
+        echo ""
+        echo "=== step 1/12: build server, loam, loamhook (the shipped three) plus demoenv (demo support) ==="
+        mkdir -p bin
+        go build -o bin/server ./cmd/server
+        go build -o bin/loam ./cmd/loam
+        go build -o bin/loamhook ./cmd/loamhook
+        go build -o bin/demoenv ./cmd/demoenv
+        echo ""
+        echo "=== step 2/12: start a fresh Postgres/pgvector container ==="
+        "$docker_cli" run -d --name "$pg_container" \
+          -e POSTGRES_USER=loam -e POSTGRES_PASSWORD=loam -e POSTGRES_DB=loam \
+          -p 127.0.0.1::5432 pgvector/pgvector:pg16 >/dev/null
+        pg_wait_deadline=$(( $(date +%s) + 60 ))
+        until "$docker_cli" exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$pg_wait_deadline" ]; then
+            echo "postgres never became ready within 60s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        pg_hostport="$("$docker_cli" port "$pg_container" 5432 | head -1)"
+        echo "postgres ready at $pg_hostport"
+        database_url="postgres://loam:loam@${pg_hostport}/loam?sslmode=disable"
+        data_dir="$(mktemp -d /tmp/loam-m3-data.XXXXXX)"
+        workspace="$(mktemp -d /tmp/loam-m3-ws.XXXXXX)"
+        echo "LOAM_DATA_DIR=$data_dir (short, so <dir>/hook.sock fits unix's sun_path limit)"
+        echo ""
+        echo "=== step 3/12: start the fake upstream (forge seeded with fixture-polyglot + deterministic Ollama-shaped embedder) ==="
+        upstream_log="$workspace/upstream.log"
+        "$demoenv_bin" upstream -forge-addr "$forge_addr" -embed-addr "$embed_addr" \
+          -repo "$forge_repo" -branch "$target_branch" -token "$forge_token" \
+          -work-dir "$workspace/fixture" >"$upstream_log" 2>&1 &
+        wait_for_http_ok "http://$embed_addr/" "$upstream_log" "fake embedder" 60
+        forge_deadline=$(( $(date +%s) + 60 ))
+        until git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$forge_deadline" ]; then
+            echo "fake forge never served $upstream_url within 60s -- log:" >&2
+            cat "$upstream_log" >&2
+            exit 1
+          fi
+          sleep 0.3
+        done
+        echo "fake forge ready (authenticated git ls-remote succeeded against $upstream_url)"
+        pre_enroll_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        echo "upstream $target_branch is at $pre_enroll_ref (fixture-polyglot + LegacySignIn)"
+        echo ""
+        echo "=== step 4/12: boot the real server (LOAM_SYNC_INTERVAL=2s, embedder pointed at the fake) ==="
+        server_log="$workspace/server.log"
+        env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
+          LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+          LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+          LOAM_SYNC_INTERVAL=2s LOAM_INGEST_WORKERS=2 \
+          LOAM_EMBEDDER_URL="http://$embed_addr" LOAM_EMBEDDER_MODEL=nomic-embed-text \
+          "$server_bin" >"$server_log" 2>&1 &
+        wait_for_http_ok "http://$http_addr/healthz" "$server_log" "server" 60
+        echo ""
+        echo "=== step 5/12: store the encrypted forge credential EnrollRepo resolves by host ==="
+        "$demoenv_bin" seed-credential -database-url "$database_url" \
+          -host "$forge_addr" -token "$forge_token" -encryption-key "$encryption_key"
+        echo ""
+        echo "=== step 6/12: enroll through the REAL RepoAdminService.EnrollRepo RPC ==="
+        enroll_out="$(admin_rpc EnrollRepo "{\"upstream_url\":\"$upstream_url\",\"target_branches\":[\"$target_branch\"],\"indexed_branch\":\"$target_branch\"}")" || {
+          echo "FAIL: EnrollRepo was rejected: $enroll_out" >&2
+          cat "$server_log" >&2
+          exit 1
+        }
+        echo "$enroll_out"
+        case "$enroll_out" in
+          *"\"repo\":\"$repo_name\""*) echo "PASS: enrolled as $repo_name (derived from the fake forge's own URL shape)" ;;
+          *) echo "FAIL: EnrollRepo did not report the repo as $repo_name" >&2; exit 1 ;;
+        esac
+        mirror_dir="$data_dir/mirrors/$repo_name.git"
+        if [ ! -d "$mirror_dir" ]; then
+          echo "FAIL: EnrollRepo returned success but no mirror exists at $mirror_dir" >&2
+          exit 1
+        fi
+        echo "mirror cloned at $mirror_dir"
+        echo ""
+        echo "=== step 7/12: wait for enrollment's own FULL ingest to drain ==="
+        wait_for_jobs() {
+          jobs_label="$1"; jobs_min="$2"; jobs_kinds="$3"; jobs_timeout="${4:-180}"
+          jobs_start=$(date +%s)
+          while true; do
+            jobs_out="$(admin_rpc ListIngestJobs "{\"repo\":\"$repo_name\",\"page\":{\"limit\":50}}" || true)"
+            if printf '%s' "$jobs_out" | "$demoenv_bin" check-jobs -label "$jobs_label" \
+                 -min-jobs "$jobs_min" -all-succeeded -want-kinds "$jobs_kinds" >/dev/null 2>&1; then
+              printf '%s' "$jobs_out" | "$demoenv_bin" check-jobs -label "$jobs_label" \
+                -min-jobs "$jobs_min" -all-succeeded -want-kinds "$jobs_kinds"
+              echo "  jobs: $jobs_out"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - jobs_start ))" -ge "$jobs_timeout" ]; then
+              echo "$jobs_label: queue never reached the drained state within ${jobs_timeout}s" >&2
+              printf '%s' "$jobs_out" | "$demoenv_bin" check-jobs -label "$jobs_label" \
+                -min-jobs "$jobs_min" -all-succeeded -want-kinds "$jobs_kinds" >&2 || true
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 1
+          done
+        }
+        wait_for_jobs "enrollment ingest drained" 1 "INGEST_KIND_FULL"
+        echo ""
+        echo "=== step 8/12: register a work branch and put its ref in the mirror, so the tick has one to leave alone ==="
+        wb_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        repo_id="$("$docker_cli" exec "$pg_container" psql -U loam -d loam -tAc "SELECT id FROM repos WHERE name = '$repo_name';" | tr -d '[:space:]')"
+        if [ -z "$repo_id" ]; then
+          echo "FAIL: no repos row for $repo_name after a successful EnrollRepo" >&2
+          exit 1
+        fi
+        # The row matters as much as the ref: MirrorFetcher builds its
+        # negative refspecs ("^refs/heads/<name>") from the work branches
+        # REGISTERED for the repo, not from a name prefix, so a ref with
+        # no row would be pruned like any other upstream-absent ref and
+        # would prove the opposite of what this step is here to show.
+        "$docker_cli" exec "$pg_container" psql -U loam -d loam -v ON_ERROR_STOP=1 -c "
+        INSERT INTO work_branches (id, repo_id, name, target, state, author)
+        VALUES ('$wb_id', '$repo_id', '$work_branch', '$target_branch', 'draft', '$agent_name');" >/dev/null
+        git --git-dir="$mirror_dir" update-ref "refs/heads/$work_branch" "$pre_enroll_ref"
+        wb_ref_before="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        mirror_main_before="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$target_branch")"
+        if [ -z "$(git --git-dir="$mirror_dir" for-each-ref 'refs/heads/doomed' --format='%(objectname)')" ]; then
+          echo "FAIL: the mirror never carried refs/heads/doomed, so pruning it would prove nothing" >&2
+          exit 1
+        fi
+        echo "mirror before the tick: $target_branch=$mirror_main_before  $work_branch=$wb_ref_before  doomed=present"
+        echo ""
+        echo "=== step 9/12: rewrite upstream (force-push adding Login, dropping LegacySignIn) and delete the doomed branch ==="
+        advance_out="$("$demoenv_bin" advance -forge-url "http://$forge_addr" -git-url "$auth_upstream_url" -repo "$forge_repo" -branch "$target_branch")"
+        echo "$advance_out"
+        new_ref="$(printf '%s\n' "$advance_out" | sed -n 's/^new_ref=//p')"
+        if [ -z "$new_ref" ]; then
+          echo "FAIL: demoenv advance did not report the rewritten tip" >&2
+          exit 1
+        fi
+        if [ "$new_ref" = "$mirror_main_before" ]; then
+          echo "FAIL: upstream tip did not change, so no advance could be detected" >&2
+          exit 1
+        fi
+        echo "upstream $target_branch rewritten to $new_ref (its history does NOT contain the mirror's $mirror_main_before)"
+        echo ""
+        echo "=== step 10/12: one live sync tick -- no force-sync RPC, just LOAM_SYNC_INTERVAL=2s elapsing ==="
+        wait_for_jobs "advance-triggered ingest drained" 2 "INGEST_KIND_FULL,INGEST_KIND_INCREMENTAL"
+        mirror_main_after="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$target_branch")"
+        if [ "$mirror_main_after" != "$new_ref" ]; then
+          echo "FAIL: mirror's $target_branch is $mirror_main_after, want upstream's $new_ref" >&2
+          exit 1
+        fi
+        echo "PASS: the mirror follows upstream, always -- $target_branch moved $mirror_main_before -> $mirror_main_after across a non-fast-forward rewrite"
+        if [ -n "$(git --git-dir="$mirror_dir" for-each-ref 'refs/heads/doomed' --format='%(objectname)')" ]; then
+          echo "FAIL: refs/heads/doomed survived in the mirror after being deleted upstream" >&2
+          exit 1
+        fi
+        echo "PASS: a branch deleted upstream is pruned from the mirror -- refs/heads/doomed is gone"
+        wb_ref_after="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        if [ "$wb_ref_after" != "$wb_ref_before" ]; then
+          echo "FAIL: refs/heads/$work_branch moved from $wb_ref_before to $wb_ref_after" >&2
+          exit 1
+        fi
+        echo "PASS: sync never touches work branch refs -- refs/heads/$work_branch is still $wb_ref_after, and upstream never had it"
+        echo ""
+        echo "=== step 11/12: query the index with the real compiled loam CLI ==="
+        echo ""
+        echo "--- graph def $target_branch's newly-ingested symbol: Login (exists ONLY on the rewritten tip) ---"
+        def_login="$(agent_cli graph def Login --repo "$repo_name")"
+        echo "$def_login"
+        printf '%s' "$def_login" | "$demoenv_bin" check-envelope -label "graph def Login" \
+          -ref "$new_ref" -repo "$repo_name" -target "$target_branch" \
+          -min-results 1 -want-files "pkg/auth/auth.go" -want-symbols "Login" -deny-symbols "LegacySignIn"
+        echo ""
+        echo "--- graph def Validate: fixture-polyglot's deliberately ambiguous cross-language symbol ---"
+        def_validate="$(agent_cli graph def Validate --repo "$repo_name")"
+        echo "$def_validate"
+        printf '%s' "$def_validate" | "$demoenv_bin" check-envelope -label "graph def Validate" \
+          -ref "$new_ref" -min-results 2 -want-files "pkg/validate/validate.go,src/validate.ts" -want-symbols "Validate"
+        echo ""
+        echo "--- graph refs Validate: cross-file references (pkg/report imports pkg/validate) ---"
+        refs_validate="$(agent_cli graph refs Validate --repo "$repo_name")"
+        echo "$refs_validate"
+        printf '%s' "$refs_validate" | "$demoenv_bin" check-envelope -label "graph refs Validate" \
+          -ref "$new_ref" -min-results 1 -want-files "pkg/report/report.go"
+        echo ""
+        echo "--- graph deps Summarize: what Summarize depends on, resolved across files ---"
+        deps_summarize="$(agent_cli graph deps Summarize --repo "$repo_name")"
+        echo "$deps_summarize"
+        printf '%s' "$deps_summarize" | "$demoenv_bin" check-envelope -label "graph deps Summarize" \
+          -ref "$new_ref" -min-results 1 -want-symbols "Validate" -want-files "pkg/validate/validate.go"
+        echo ""
+        echo "--- graph dependents Validate: blast radius, resolved across files ---"
+        dependents_validate="$(agent_cli graph dependents Validate --repo "$repo_name")"
+        echo "$dependents_validate"
+        printf '%s' "$dependents_validate" | "$demoenv_bin" check-envelope -label "graph dependents Validate" \
+          -ref "$new_ref" -min-results 1 -want-symbols "Summarize" -want-files "pkg/report/report.go"
+        echo ""
+        echo "--- graph def LegacySignIn: MUST be gone, because upstream's history no longer contains it ---"
+        if legacy_out="$(agent_cli graph def LegacySignIn --repo "$repo_name" 2>&1)"; then
+          echo "$legacy_out"
+          echo "FAIL: LegacySignIn still resolves, so the index did not follow upstream's rewrite" >&2
+          exit 1
+        fi
+        echo "$legacy_out"
+        echo "PASS: LegacySignIn no longer resolves -- the index tracked a rewritten history, not just a growing one"
+        echo ""
+        echo "--- search \"authentication credentials password\": the auth chunk must rank FIRST ---"
+        search_out="$(agent_cli search "authentication credentials password" --repo "$repo_name")"
+        echo "$search_out"
+        printf '%s' "$search_out" | "$demoenv_bin" check-envelope -label "search ranks the auth chunk first" \
+          -ref "$new_ref" -repo "$repo_name" -target "$target_branch" \
+          -min-results 1 -first-file "pkg/auth/auth.go"
+        echo ""
+        echo "=== step 12/12: summary ==="
+        echo "Enrolled through the real RepoAdminService.EnrollRepo RPC against a real reachable upstream."
+        echo "One live sync tick (LOAM_SYNC_INTERVAL=2s, production mirrorsync.Scheduler) proved:"
+        echo "  - the mirror follows upstream, always      $mirror_main_before -> $mirror_main_after (non-fast-forward)"
+        echo "  - a branch deleted upstream is pruned      refs/heads/doomed removed"
+        echo "  - sync never touches work branch refs      refs/heads/$work_branch still $wb_ref_after"
+        echo "Advance detection enqueued an ingest job and the queue drained (ListIngestJobs: all SUCCEEDED)."
+        echo "Every graph and search response named the ingested commit: $new_ref"
+        echo "Graph resolved fixture-polyglot's cross-file symbols; search ranked pkg/auth/auth.go first."
+        echo "=== demo:m3 complete ==="
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:

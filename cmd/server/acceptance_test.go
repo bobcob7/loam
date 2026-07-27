@@ -49,6 +49,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/config"
+	"github.com/bobcob7/loam/internal/fakeembed"
 	"github.com/bobcob7/loam/internal/fakeforge"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/testdb"
@@ -181,7 +182,7 @@ func TestFeatures(t *testing.T) {
 	defer cancel()
 	dsn := acceptancePostgres(t)
 	dataDir := acceptanceShortDataDir(t)
-	cfg := acceptanceConfig(t, dsn, dataDir)
+	cfg := acceptanceConfig(t, dsn, dataDir, startAcceptanceEmbedder(t))
 	srv := startAcceptanceServer(t, ctx, cancel, cfg)
 	forge, forgeBaseURL, forgeHost := startAcceptanceForge(t)
 	harness := newAcceptanceHarness(t, srv, forge, forgeBaseURL, forgeHost, cfg)
@@ -276,7 +277,7 @@ func acceptanceShortDataDir(t *testing.T) string {
 // exactly one server for the whole suite (see its own doc comment), so
 // there is no concurrent config.Load() call anywhere in this binary for
 // these variables to race with.
-func acceptanceConfig(t *testing.T, databaseURL, dataDir string) config.Config {
+func acceptanceConfig(t *testing.T, databaseURL, dataDir, embedderURL string) config.Config {
 	t.Helper()
 	httpAddr := acceptanceFreeAddr(t)
 	t.Setenv("LOAM_HTTP_ADDR", httpAddr)
@@ -287,8 +288,8 @@ func acceptanceConfig(t *testing.T, databaseURL, dataDir string) config.Config {
 	t.Setenv("LOAM_DATA_DIR", dataDir)
 	t.Setenv("LOAM_SYNC_INTERVAL", acceptanceSyncInterval)
 	t.Setenv("LOAM_PR_ATTRIBUTION", "")
-	t.Setenv("LOAM_EMBEDDER_URL", "")
-	t.Setenv("LOAM_EMBEDDER_MODEL", "")
+	t.Setenv("LOAM_EMBEDDER_URL", embedderURL)
+	t.Setenv("LOAM_EMBEDDER_MODEL", fakeembed.DefaultModel)
 	t.Setenv("LOAM_INGEST_WORKERS", "")
 	t.Setenv("LOAM_LOG_LEVEL", "")
 	cfg, err := config.Load()
@@ -382,6 +383,41 @@ func acceptanceWaitHealthy(t *testing.T, baseURL string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("in-process server at %s never became ready", baseURL)
+}
+
+// startAcceptanceEmbedder starts one deterministic Ollama-shaped
+// embedding server (internal/fakeembed) for the whole suite and returns
+// its base URL, for acceptanceConfig to hand to LOAM_EMBEDDER_URL.
+//
+// Before this existed, the suite left LOAM_EMBEDDER_URL empty, which
+// internal/config resolves to its production default of
+// http://localhost:11434 -- a local Ollama that is not running on any CI
+// machine or developer box this suite is expected to work on. Every
+// ingest job the suite triggered therefore failed at the embed step, and
+// assertSyncNotErrored had to be written to tolerate the resulting
+// repos.sync_error as the EXPECTED outcome. That made ingest unobservable
+// from the acceptance layer: no scenario could assert on an index,
+// because there was never an index.
+//
+// Pointing the URL at a real listener serving the real /api/embed wire
+// shape fixes that without introducing a host prerequisite and without
+// stubbing the embedder out: run() still builds the production
+// ollama.Embedder (main.go's buildIngestOrchestrator and
+// registerSearchService), still speaks HTTP to it, and still validates
+// the returned vector width -- only the far side is a fake, and a
+// deterministic one, so an ingest here produces the same vectors on every
+// machine. It is the same trade startAcceptanceForge already makes for
+// the upstream forge.
+//
+// assertSyncNotErrored's tolerance is deliberately left in place: it
+// remains correct (the ingest worker owns sync_state after an enqueuing
+// tick, whatever that worker's outcome), it is simply no longer the path
+// every run takes.
+func startAcceptanceEmbedder(t *testing.T) string {
+	t.Helper()
+	ts := httptest.NewServer(fakeembed.New(fakeembed.DefaultModel, acceptanceLogger()))
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
 // startAcceptanceForge starts one in-process fakeforge.Server (li0.1) for
