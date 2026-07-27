@@ -212,6 +212,46 @@ func (s *Store) ReplaceFileReferences(ctx context.Context, repoID uuid.UUID, tar
 	return count, nil
 }
 
+// DropRepoBranch deletes every symbols and symbol_references row for
+// (repoID, targetBranch) -- the repo-scoped drop the full-rebuild path
+// runs before re-parsing the whole tree (docs/ingestion-spec.md
+// "Incremental Build" -> "Full rebuild"; loam-c94.12's own DESCRIPTION:
+// "Full-rebuild path drops all repo+target derived rows first").
+//
+// It is NOT expressible as a loop of ReplaceFileSymbols(nil) calls over
+// the new tree's files: the whole reason a full rebuild drops repo-wide is
+// that rows may exist for files which are no longer in the tree at the new
+// ref at all (the case a force-push or history rewrite creates, where
+// there is no usable diff to enumerate deletions from), and a per-file
+// loop keyed on the NEW tree can never name those files.
+//
+// graph_edges and symbol_history are not touched directly: both reference
+// symbols (id) ON DELETE CASCADE (0002_code_intel.up.sql), so deleting the
+// branch's symbols removes them. symbol_references does need its own
+// delete -- it carries no FK to symbols, by design (references are stored
+// unresolved and resolved on demand by RecomputeGraphEdges).
+//
+// Like every other mutating method here, this opens no transaction: a
+// caller composing it with the re-parse that follows must construct Store
+// over a transaction-scoped querier (NewInTx), or the drop commits on its
+// own and readers see an empty index until the rebuild lands.
+func (s *Store) DropRepoBranch(ctx context.Context, repoID uuid.UUID, targetBranch string) error {
+	if err := s.q.DeleteSymbolsForRepoBranch(ctx, gen.DeleteSymbolsForRepoBranchParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+	}); err != nil {
+		return fmt.Errorf("deleting symbols for %s@%s: %w", repoID, targetBranch, err)
+	}
+	if err := s.q.DeleteSymbolReferencesForRepoBranch(ctx, gen.DeleteSymbolReferencesForRepoBranchParams{
+		RepoID:       pgUUID(repoID),
+		TargetBranch: targetBranch,
+	}); err != nil {
+		return fmt.Errorf("deleting symbol references for %s@%s: %w", repoID, targetBranch, err)
+	}
+	s.logger.DebugContext(ctx, "dropped repo branch code graph", "repo_id", repoID, "target_branch", targetBranch)
+	return nil
+}
+
 // RecomputeGraphEdges rebuilds graph_edges for (repoID, targetBranch) from
 // scratch (docs/persistence-spec.md "graph_edges": "Recomputed each
 // ingest"): every existing edge for the repo/branch is deleted, then

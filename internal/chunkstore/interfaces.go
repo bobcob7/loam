@@ -24,6 +24,7 @@ import (
 type queries interface {
 	InsertChunk(ctx context.Context, arg gen.InsertChunkParams) (gen.Chunk, error)
 	DeleteChunksByFile(ctx context.Context, arg gen.DeleteChunksByFileParams) error
+	DeleteChunksForRepoBranch(ctx context.Context, arg gen.DeleteChunksForRepoBranchParams) error
 	SearchChunksByEmbeddingScoped(ctx context.Context, arg gen.SearchChunksByEmbeddingScopedParams) ([]gen.Chunk, error)
 }
 

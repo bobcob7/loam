@@ -119,3 +119,12 @@ FROM chunks
 WHERE repo_id = ANY($1::uuid[]) AND target_branch = $2
 ORDER BY embedding <=> $3
 LIMIT $4;
+
+-- name: DeleteChunksForRepoBranch :exec
+-- Repo-scoped delete for the full-rebuild path (loam-c94.12), the chunks
+-- analogue of DeleteSymbolsForRepoBranch: a full rebuild drops every chunk
+-- for (repo_id, target_branch) before re-embedding the whole tree, since
+-- per-file replacement alone leaves chunks behind for files that are no
+-- longer in the tree at the new ref.
+DELETE FROM chunks
+WHERE repo_id = $1 AND target_branch = $2;

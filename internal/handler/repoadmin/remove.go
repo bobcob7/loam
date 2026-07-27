@@ -42,7 +42,7 @@ const removeRepoListPageSize = 200
 // (the repoDeleter interface, interfaces.go) once the guard clears;
 // cmd/server/main.go wires a loud-failure stand-in until loam-cwb lands
 // (this composition root's existing convention for a missing cross-bead
-// dependency -- see notImplementedOrchestrator/notImplementedDiffComputer
+// dependency -- see notImplementedDiffComputer/notImplementedRepoDeleter
 // in that file), so RemoveRepo's guard is genuinely enforced in
 // production today even though the delete step is not yet implemented
 // anywhere.

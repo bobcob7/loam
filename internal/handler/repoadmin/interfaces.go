@@ -121,8 +121,7 @@ type jobLister interface {
 // return a typed RemovalBlocked detail) -- see that method's doc comment.
 // cmd/server/main.go wires a loud-failure stand-in until loam-cwb lands,
 // matching this composition root's existing convention for a missing
-// cross-bead dependency (notImplementedOrchestrator,
-// notImplementedDiffComputer).
+// cross-bead dependency (notImplementedDiffComputer).
 type repoDeleter interface {
 	DeleteRepo(ctx context.Context, id uuid.UUID) error
 }

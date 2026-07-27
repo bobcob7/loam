@@ -56,8 +56,8 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 
 // errAdvanceDetectorNotImplemented, errMergeabilityCheckerNotImplemented,
 // errIngestEnqueuerNotImplemented, and errPRPollerNotImplemented mirror
-// cmd/server/main.go's own notImplementedOrchestrator/DiffComputer/
-// RepoDeleter idiom: a labeled error standing in for a collaborator with
+// cmd/server/main.go's own notImplementedDiffComputer/
+// notImplementedRepoDeleter idiom: a labeled error standing in for a collaborator with
 // no production implementation anywhere in the tree yet (loam-giq.4,
 // loam-giq.5, loam-c94.2, loam-giq.8, respectively -- all still open),
 // rather than a silent no-op that would misrepresent "the next sync runs"

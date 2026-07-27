@@ -354,3 +354,25 @@ SELECT * FROM symbol_history
 WHERE symbol_id = $1
 ORDER BY id DESC
 LIMIT $2;
+
+-- name: DeleteSymbolsForRepoBranch :exec
+-- Repo-scoped delete for the full-rebuild path (loam-c94.12): a full
+-- rebuild drops every derived row for (repo_id, target_branch) before
+-- re-parsing the whole tree, rather than replacing file by file --
+-- per-file replacement alone would strand rows for files that no longer
+-- exist at the new ref at all. graph_edges and symbol_history both
+-- reference symbols (id) ON DELETE CASCADE (0002_code_intel.up.sql), so
+-- this one delete also clears the branch's edges and history; only
+-- symbol_references (which carries no FK to symbols) needs its own
+-- companion delete below.
+DELETE FROM symbols
+WHERE repo_id = $1 AND target_branch = $2;
+
+-- name: DeleteSymbolReferencesForRepoBranch :exec
+-- Repo-scoped companion to DeleteSymbolsForRepoBranch. symbol_references
+-- has no foreign key to symbols (0002_code_intel.up.sql -- references are
+-- stored unresolved and resolved on demand by
+-- ResolveGraphEdgeCandidates), so deleting the branch's symbols does NOT
+-- cascade to it and this must be issued separately.
+DELETE FROM symbol_references
+WHERE repo_id = $1 AND target_branch = $2;

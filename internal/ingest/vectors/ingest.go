@@ -135,11 +135,18 @@ func New(e embedder, logger *slog.Logger) *Indexer {
 // texts are flattened across all files in input order and sent in Embed
 // requests of up to maxEmbedBatch texts each (a single request may
 // therefore span a file boundary -- batching is by text count, not by
-// file). Doing all the network work up front keeps the caller's
-// transaction from being held open across slow Ollama calls, which is what
-// loam-c94.12's own DESIGN asks for ("prefer computing outside the tx and
-// keeping the write phase short"); it also means an embedder failure costs
-// zero writes rather than aborting halfway through the batch.
+// file). Doing all the network work up front means an embedder failure
+// costs zero writes rather than aborting halfway through the batch.
+//
+// It does NOT, on its own, keep the caller's transaction short. This
+// method is Prepare followed by Persist, so a caller that invokes it with
+// a transaction-bound store holds that transaction open for the embedding
+// run too -- the exact thing loam-c94.12's DESIGN says not to do ("prefer
+// computing outside the tx and keeping the write phase short"). A caller
+// that owns a transaction should call Prepare BEFORE opening it and
+// Persist inside it; this method is the convenience composition for a
+// caller with no such constraint, and it is what this package's own
+// single-call tests exercise.
 //
 // Anything that goes wrong -- ctx cancellation, an embed failure, a vector
 // count or width that disagrees with the Embedder's own Dimension(), or a
@@ -147,40 +154,130 @@ func New(e embedder, logger *slog.Logger) *Indexer {
 // per-file skip-and-continue here (see the package doc comment for why):
 // the enclosing transaction is going to roll back either way.
 func (ix *Indexer) IngestFileChunks(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, files []chunker.FileChunks) (Stats, error) {
+	prepared, stats, err := ix.Prepare(ctx, repoID, targetBranch, files)
+	if err != nil {
+		return stats, err
+	}
+	writeStats, err := ix.Persist(ctx, st, repoID, targetBranch, prepared)
+	stats.merge(writeStats)
+	return stats, err
+}
+
+// Prepared is one batch's embedding work, already done: every file's chunk
+// units paired with the vector that represents it, ready to be written
+// with no further network calls. It is deliberately opaque -- a caller
+// obtains one only from Prepare and can only spend it on Persist, so there
+// is no way to construct a Prepared whose vectors were never validated
+// against the Embedder's own Dimension().
+type Prepared struct {
+	files []preparedFile
+}
+
+// preparedFile is one file's share of a Prepared: its path, and the
+// ChunkInputs (possibly none) that must replace whatever chunks that file
+// currently has.
+type preparedFile struct {
+	path   string
+	inputs []chunkstore.ChunkInput
+}
+
+// Files reports how many files this Prepared will replace the chunks of --
+// including any that prepared to zero units. Exposed so the swap
+// orchestrator (loam-c94.12) can log the size of the write phase it is
+// about to enter without Prepared having to leak its contents.
+func (p Prepared) Files() int { return len(p.files) }
+
+// Prepare does the whole NETWORK half of IngestFileChunks and none of the
+// database half: it embeds every chunk unit in files and pairs each unit
+// with its vector, returning a Prepared that Persist can write with no
+// further Embed calls.
+//
+// It exists as its own entry point because the swap orchestrator
+// (loam-c94.12) must not hold its transaction open across slow Ollama
+// calls, and it cannot avoid that by calling IngestFileChunks -- that
+// method embeds INSIDE the call, so a caller that invokes it with a
+// transaction-bound store necessarily has the transaction open for the
+// whole embedding run. Splitting the phases is what actually delivers the
+// property IngestFileChunks's own doc comment claims: the orchestrator
+// calls Prepare before it begins its transaction (concurrently with the
+// parse->graph track's own compute), then Persist inside it. It is also
+// what makes the two tracks' compute genuinely concurrent, since a pgx.Tx
+// is not goroutine-safe and nothing that touches one can run in parallel
+// with anything else that does.
+//
+// repoID and targetBranch are used only to identify the batch in error
+// messages and logs; Prepare touches no database.
+func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch string, files []chunker.FileChunks) (Prepared, Stats, error) {
 	var stats Stats
 	if err := ctx.Err(); err != nil {
-		return stats, fmt.Errorf("embedding chunks for %s@%s: %w", repoID, targetBranch, err)
+		return Prepared{}, stats, fmt.Errorf("embedding chunks for %s@%s: %w", repoID, targetBranch, err)
 	}
 	dimension := ix.embedder.Dimension()
 	if dimension <= 0 {
-		return stats, fmt.Errorf("embedding chunks for %s@%s: %w: %d", repoID, targetBranch, errBadDimension, dimension)
+		return Prepared{}, stats, fmt.Errorf("embedding chunks for %s@%s: %w: %d", repoID, targetBranch, errBadDimension, dimension)
 	}
 	texts := flattenTexts(files)
 	embeddings, calls, err := ix.embedAll(ctx, texts, dimension)
 	stats.EmbedCalls = calls
 	if err != nil {
-		return stats, fmt.Errorf("embedding chunks for %s@%s: %w", repoID, targetBranch, err)
+		return Prepared{}, stats, fmt.Errorf("embedding chunks for %s@%s: %w", repoID, targetBranch, err)
 	}
 	perFile, err := chunkInputsFor(files, embeddings)
 	if err != nil {
-		return stats, fmt.Errorf("pairing chunks with vectors for %s@%s: %w", repoID, targetBranch, err)
+		return Prepared{}, stats, fmt.Errorf("pairing chunks with vectors for %s@%s: %w", repoID, targetBranch, err)
 	}
+	prepared := Prepared{files: make([]preparedFile, len(files))}
 	for i, f := range files {
+		prepared.files[i] = preparedFile{path: f.Path, inputs: perFile[i]}
+	}
+	return prepared, stats, nil
+}
+
+// Persist does the whole DATABASE half of IngestFileChunks and none of the
+// network half: one st.ReplaceFileChunks call per file in p, in the order
+// Prepare received them, making no Embed call at all. This is the only
+// part of this package that belongs inside the swap orchestrator's
+// transaction (see Prepare's doc comment).
+//
+// st MUST be bound to a transaction the CALLER owns and will commit --
+// chunkstore.NewInTx over the orchestrator's transaction. Persist begins
+// no transaction, commits nothing, and rolls nothing back: on any error it
+// returns with whatever it had already staged still staged, for the caller
+// to discard by rolling back.
+//
+// A file whose Prepared entry has zero inputs still gets its
+// ReplaceFileChunks call, with an empty slice -- ReplaceFileChunks's
+// documented delete-without-inserting case. That is what drops the stale
+// chunks of a file that now chunks to nothing, or that chunker.ChunkFiles
+// could only emit a zero-unit entry for because it turned binary or
+// stopped parsing (loam-8uo).
+func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, p Prepared) (Stats, error) {
+	var stats Stats
+	for _, f := range p.files {
 		if err := ctx.Err(); err != nil {
-			return stats, fmt.Errorf("replacing chunks for %s: %w", f.Path, err)
+			return stats, fmt.Errorf("replacing chunks for %s: %w", f.path, err)
 		}
-		inputs := perFile[i]
-		if _, err := st.ReplaceFileChunks(ctx, repoID, targetBranch, f.Path, inputs); err != nil {
-			return stats, fmt.Errorf("replacing chunks for %s: %w", f.Path, err)
+		if _, err := st.ReplaceFileChunks(ctx, repoID, targetBranch, f.path, f.inputs); err != nil {
+			return stats, fmt.Errorf("replacing chunks for %s: %w", f.path, err)
 		}
 		stats.FilesReplaced++
-		stats.ChunksWritten += len(inputs)
-		if len(inputs) == 0 {
+		stats.ChunksWritten += len(f.inputs)
+		if len(f.inputs) == 0 {
 			stats.FilesWithoutChunks++
-			ix.logger.InfoContext(ctx, "file chunked to zero units; dropping its prior chunks", "file", f.Path, "repo_id", repoID, "target_branch", targetBranch)
+			ix.logger.InfoContext(ctx, "file chunked to zero units; dropping its prior chunks", "file", f.path, "repo_id", repoID, "target_branch", targetBranch)
 		}
 	}
 	return stats, nil
+}
+
+// merge folds other's write-phase counters into s, which already carries
+// the embed-phase ones. Prepare and Persist each populate a disjoint set
+// of Stats fields, so this is an addition, never an overwrite.
+func (s *Stats) merge(other Stats) {
+	s.FilesReplaced += other.FilesReplaced
+	s.FilesWithoutChunks += other.FilesWithoutChunks
+	s.ChunksWritten += other.ChunksWritten
+	s.EmbedCalls += other.EmbedCalls
 }
 
 // chunkInputsFor pairs each file's units with the vectors embedAll produced

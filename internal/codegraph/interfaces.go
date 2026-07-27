@@ -75,8 +75,10 @@ import (
 // *pgxpool.Pool or a pgx.Tx (gen.New / (*gen.Queries).WithTx).
 type querier interface {
 	DeleteSymbolsForFile(ctx context.Context, arg gen.DeleteSymbolsForFileParams) error
+	DeleteSymbolsForRepoBranch(ctx context.Context, arg gen.DeleteSymbolsForRepoBranchParams) error
 	InsertSymbols(ctx context.Context, arg []gen.InsertSymbolsParams) (int64, error)
 	DeleteSymbolReferencesForFile(ctx context.Context, arg gen.DeleteSymbolReferencesForFileParams) error
+	DeleteSymbolReferencesForRepoBranch(ctx context.Context, arg gen.DeleteSymbolReferencesForRepoBranchParams) error
 	InsertSymbolReferences(ctx context.Context, arg []gen.InsertSymbolReferencesParams) (int64, error)
 	DeleteGraphEdgesForRepoBranch(ctx context.Context, arg gen.DeleteGraphEdgesForRepoBranchParams) error
 	ResolveGraphEdgeCandidates(ctx context.Context, arg gen.ResolveGraphEdgeCandidatesParams) ([]gen.ResolveGraphEdgeCandidatesRow, error)

@@ -22,6 +22,9 @@ var _ queries = &queriesMock{}
 //			DeleteChunksByFileFunc: func(ctx context.Context, arg gen.DeleteChunksByFileParams) error {
 //				panic("mock out the DeleteChunksByFile method")
 //			},
+//			DeleteChunksForRepoBranchFunc: func(ctx context.Context, arg gen.DeleteChunksForRepoBranchParams) error {
+//				panic("mock out the DeleteChunksForRepoBranch method")
+//			},
 //			InsertChunkFunc: func(ctx context.Context, arg gen.InsertChunkParams) (gen.Chunk, error) {
 //				panic("mock out the InsertChunk method")
 //			},
@@ -38,6 +41,9 @@ type queriesMock struct {
 	// DeleteChunksByFileFunc mocks the DeleteChunksByFile method.
 	DeleteChunksByFileFunc func(ctx context.Context, arg gen.DeleteChunksByFileParams) error
 
+	// DeleteChunksForRepoBranchFunc mocks the DeleteChunksForRepoBranch method.
+	DeleteChunksForRepoBranchFunc func(ctx context.Context, arg gen.DeleteChunksForRepoBranchParams) error
+
 	// InsertChunkFunc mocks the InsertChunk method.
 	InsertChunkFunc func(ctx context.Context, arg gen.InsertChunkParams) (gen.Chunk, error)
 
@@ -52,6 +58,13 @@ type queriesMock struct {
 			Ctx context.Context
 			// Arg is the arg argument value.
 			Arg gen.DeleteChunksByFileParams
+		}
+		// DeleteChunksForRepoBranch holds details about calls to the DeleteChunksForRepoBranch method.
+		DeleteChunksForRepoBranch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.DeleteChunksForRepoBranchParams
 		}
 		// InsertChunk holds details about calls to the InsertChunk method.
 		InsertChunk []struct {
@@ -69,6 +82,7 @@ type queriesMock struct {
 		}
 	}
 	lockDeleteChunksByFile            sync.RWMutex
+	lockDeleteChunksForRepoBranch     sync.RWMutex
 	lockInsertChunk                   sync.RWMutex
 	lockSearchChunksByEmbeddingScoped sync.RWMutex
 }
@@ -106,6 +120,42 @@ func (mock *queriesMock) DeleteChunksByFileCalls() []struct {
 	mock.lockDeleteChunksByFile.RLock()
 	calls = mock.calls.DeleteChunksByFile
 	mock.lockDeleteChunksByFile.RUnlock()
+	return calls
+}
+
+// DeleteChunksForRepoBranch calls DeleteChunksForRepoBranchFunc.
+func (mock *queriesMock) DeleteChunksForRepoBranch(ctx context.Context, arg gen.DeleteChunksForRepoBranchParams) error {
+	if mock.DeleteChunksForRepoBranchFunc == nil {
+		panic("queriesMock.DeleteChunksForRepoBranchFunc: method is nil but queries.DeleteChunksForRepoBranch was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.DeleteChunksForRepoBranchParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockDeleteChunksForRepoBranch.Lock()
+	mock.calls.DeleteChunksForRepoBranch = append(mock.calls.DeleteChunksForRepoBranch, callInfo)
+	mock.lockDeleteChunksForRepoBranch.Unlock()
+	return mock.DeleteChunksForRepoBranchFunc(ctx, arg)
+}
+
+// DeleteChunksForRepoBranchCalls gets all the calls that were made to DeleteChunksForRepoBranch.
+// Check the length with:
+//
+//	len(mockedqueries.DeleteChunksForRepoBranchCalls())
+func (mock *queriesMock) DeleteChunksForRepoBranchCalls() []struct {
+	Ctx context.Context
+	Arg gen.DeleteChunksForRepoBranchParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.DeleteChunksForRepoBranchParams
+	}
+	mock.lockDeleteChunksForRepoBranch.RLock()
+	calls = mock.calls.DeleteChunksForRepoBranch
+	mock.lockDeleteChunksForRepoBranch.RUnlock()
 	return calls
 }
 

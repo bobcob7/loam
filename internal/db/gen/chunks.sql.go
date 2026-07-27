@@ -32,6 +32,26 @@ func (q *Queries) DeleteChunksByFile(ctx context.Context, arg DeleteChunksByFile
 	return err
 }
 
+const deleteChunksForRepoBranch = `-- name: DeleteChunksForRepoBranch :exec
+DELETE FROM chunks
+WHERE repo_id = $1 AND target_branch = $2
+`
+
+type DeleteChunksForRepoBranchParams struct {
+	RepoID       pgtype.UUID
+	TargetBranch string
+}
+
+// Repo-scoped delete for the full-rebuild path (loam-c94.12), the chunks
+// analogue of DeleteSymbolsForRepoBranch: a full rebuild drops every chunk
+// for (repo_id, target_branch) before re-embedding the whole tree, since
+// per-file replacement alone leaves chunks behind for files that are no
+// longer in the tree at the new ref.
+func (q *Queries) DeleteChunksForRepoBranch(ctx context.Context, arg DeleteChunksForRepoBranchParams) error {
+	_, err := q.db.Exec(ctx, deleteChunksForRepoBranch, arg.RepoID, arg.TargetBranch)
+	return err
+}
+
 const insertChunk = `-- name: InsertChunk :one
 INSERT INTO chunks (id, repo_id, target_branch, file, start_line, end_line, content, embedding)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

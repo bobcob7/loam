@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"github.com/bobcob7/loam/internal/codegraph"
 )
 
 // Stats reports what one IngestFiles call did across a batch of files, so a
@@ -89,15 +91,69 @@ type Stats struct {
 // enclosing transaction is going to roll back regardless, so there is
 // nothing to gain from continuing.
 func (e *Extractor) IngestFiles(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, files []FileInput) (Stats, error) {
+	extracted, stats, err := e.ExtractFiles(ctx, files)
+	if err != nil {
+		return stats, err
+	}
+	writeStats, err := e.PersistFiles(ctx, st, repoID, targetBranch, extracted)
+	stats.merge(writeStats)
+	return stats, err
+}
+
+// Extracted is one batch's parse work, already done: per file, the symbols
+// and references extraction found, ready to be written with no further
+// Tree-sitter work. It is deliberately opaque -- a caller obtains one only
+// from ExtractFiles and can only spend it on PersistFiles -- so the
+// per-file skip policy (unsupported language and hard parse failures never
+// produce an entry, and therefore never produce a store call) cannot be
+// bypassed by hand-assembling one.
+type Extracted struct {
+	files []extractedFile
+}
+
+// extractedFile is one successfully parsed file's share of an Extracted.
+type extractedFile struct {
+	path       string
+	symbols    []codegraph.SymbolInput
+	references []codegraph.ReferenceInput
+}
+
+// Files reports how many files this Extracted will write, so the swap
+// orchestrator (loam-c94.12) can log the size of the write phase it is
+// about to enter without Extracted having to leak its contents.
+func (e Extracted) Files() int { return len(e.files) }
+
+// ExtractFiles does the whole TREE-SITTER half of IngestFiles and none of
+// the database half: it parses and extracts every file in files, applying
+// exactly the per-file resilience policy IngestFiles documents, and
+// returns an Extracted that PersistFiles can write with no further
+// parsing.
+//
+// It exists as its own entry point because the swap orchestrator
+// (loam-c94.12) must do its heavy compute BEFORE opening the transaction
+// that its store is bound to, and must run this track's compute
+// concurrently with the chunk->embed track's -- neither of which is
+// possible through IngestFiles, which interleaves parsing with store
+// writes file by file and so pins all of it inside whatever transaction
+// the store belongs to. A pgx.Tx is not goroutine-safe, so anything that
+// touches the transaction cannot run in parallel with anything else that
+// does; separating the phases is what makes the parallelism the design
+// asks for legal at all.
+//
+// Only ctx's own error stops the batch (checked before each file, and
+// again from any ExtractFile call that observes it mid-flight), returned
+// wrapped immediately.
+func (e *Extractor) ExtractFiles(ctx context.Context, files []FileInput) (Extracted, Stats, error) {
 	var stats Stats
+	extracted := Extracted{files: make([]extractedFile, 0, len(files))}
 	for _, f := range files {
 		if err := ctx.Err(); err != nil {
-			return stats, fmt.Errorf("ingesting %s: %w", f.Path, err)
+			return Extracted{}, stats, fmt.Errorf("ingesting %s: %w", f.Path, err)
 		}
 		result, ok, err := e.ExtractFile(ctx, f.Path, f.Content)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return stats, fmt.Errorf("ingesting %s: %w", f.Path, err)
+				return Extracted{}, stats, fmt.Errorf("ingesting %s: %w", f.Path, err)
 			}
 			stats.FilesFailed++
 			e.logger.ErrorContext(ctx, "skipping file after parse failure", "file", f.Path, "error", err)
@@ -111,15 +167,40 @@ func (e *Extractor) IngestFiles(ctx context.Context, st store, repoID uuid.UUID,
 			stats.FilesWithSyntaxErrors++
 			e.logger.WarnContext(ctx, "file parsed with syntax errors; extraction is best-effort", "file", f.Path)
 		}
-		if _, err := st.ReplaceFileSymbols(ctx, repoID, targetBranch, f.Path, result.Symbols); err != nil {
-			return stats, fmt.Errorf("replacing symbols for %s: %w", f.Path, err)
-		}
-		if _, err := st.ReplaceFileReferences(ctx, repoID, targetBranch, f.Path, result.References); err != nil {
-			return stats, fmt.Errorf("replacing references for %s: %w", f.Path, err)
-		}
+		extracted.files = append(extracted.files, extractedFile{path: f.Path, symbols: result.Symbols, references: result.References})
 		stats.FilesExtracted++
 		stats.SymbolsWritten += len(result.Symbols)
 		stats.ReferencesWritten += len(result.References)
+	}
+	return extracted, stats, nil
+}
+
+// PersistFiles does the whole DATABASE half of IngestFiles and none of the
+// parsing half: st's per-file delete-and-replace pair for every file in
+// ex, in the order ExtractFiles received them, then exactly one
+// st.RecomputeGraphEdges for the whole (repoID, targetBranch) once they
+// have all landed. This is the only part of this package that belongs
+// inside the swap orchestrator's transaction (see ExtractFiles's doc
+// comment).
+//
+// st is expected to be constructed over the transaction the orchestrator
+// owns: PersistFiles opens no transaction and commits nothing.
+//
+// The final ctx.Err() check before RecomputeGraphEdges guards the
+// empty-batch path, where the per-file loop never runs at all -- an
+// already-canceled context must abort rather than reach the recompute.
+func (e *Extractor) PersistFiles(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, ex Extracted) (Stats, error) {
+	var stats Stats
+	for _, f := range ex.files {
+		if err := ctx.Err(); err != nil {
+			return stats, fmt.Errorf("ingesting %s: %w", f.path, err)
+		}
+		if _, err := st.ReplaceFileSymbols(ctx, repoID, targetBranch, f.path, f.symbols); err != nil {
+			return stats, fmt.Errorf("replacing symbols for %s: %w", f.path, err)
+		}
+		if _, err := st.ReplaceFileReferences(ctx, repoID, targetBranch, f.path, f.references); err != nil {
+			return stats, fmt.Errorf("replacing references for %s: %w", f.path, err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return stats, fmt.Errorf("recomputing graph edges for %s@%s: %w", repoID, targetBranch, err)
@@ -130,4 +211,17 @@ func (e *Extractor) IngestFiles(ctx context.Context, st store, repoID uuid.UUID,
 	}
 	stats.EdgesRecomputed = edgeCount
 	return stats, nil
+}
+
+// merge folds other's write-phase counters into s, which already carries
+// the extract-phase ones. ExtractFiles and PersistFiles populate disjoint
+// sets of Stats fields, so this is an addition, never an overwrite.
+func (s *Stats) merge(other Stats) {
+	s.FilesExtracted += other.FilesExtracted
+	s.FilesWithSyntaxErrors += other.FilesWithSyntaxErrors
+	s.FilesSkippedUnsupportedLanguage += other.FilesSkippedUnsupportedLanguage
+	s.FilesFailed += other.FilesFailed
+	s.SymbolsWritten += other.SymbolsWritten
+	s.ReferencesWritten += other.ReferencesWritten
+	s.EdgesRecomputed += other.EdgesRecomputed
 }

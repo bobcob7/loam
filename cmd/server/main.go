@@ -88,8 +88,13 @@ import (
 	"github.com/bobcob7/loam/internal/hooksocket"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
+	"github.com/bobcob7/loam/internal/ingest/chunker"
 	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
+	ingestgraph "github.com/bobcob7/loam/internal/ingest/graph"
+	"github.com/bobcob7/loam/internal/ingest/orchestrator"
+	"github.com/bobcob7/loam/internal/ingest/vectors"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
+	"github.com/bobcob7/loam/internal/parser"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/rolestore"
@@ -98,28 +103,39 @@ import (
 	loamweb "github.com/bobcob7/loam/web"
 )
 
-// errIngestOrchestratorNotImplemented is returned by
-// notImplementedOrchestrator in place of loam-c94.12's real ingest
-// pipeline. See notImplementedOrchestrator's doc comment.
-var errIngestOrchestratorNotImplemented = errors.New("ingest orchestrator not implemented (loam-c94.12)")
-
-// notImplementedOrchestrator stands in for loam-c94.12's real ingest
-// pipeline (parse -> chunk -> embed -> swap), which has no production
-// implementation anywhere in this tree yet. It is wired into a real
-// ingest.Pool here -- rather than leaving the worker pool unconstructed
-// entirely -- so RequeueOrphaned and the pool's own start/drain lifecycle
-// run for real against Postgres from this bead onward. In practice this is
-// never invoked: nothing in the tree can enqueue an ingest_jobs row yet
-// either (loam-c94.2, also open), so the table stays empty. If a row is
-// ever present regardless (e.g. seeded by hand), this fails loudly and the
-// job retries with backoff rather than silently doing nothing -- the same
-// "loud failure over silent wrong behavior" choice this file already makes
-// for /healthz and /readyz below.
-type notImplementedOrchestrator struct{}
-
-// Run implements ingest.Orchestrator.
-func (notImplementedOrchestrator) Run(_ context.Context, _ ingest.Job) (ingest.Stats, error) {
-	return ingest.Stats{}, errIngestOrchestratorNotImplemented
+// buildIngestOrchestrator constructs loam-c94.12's real ingest pipeline
+// (plan -> parse/chunk -> embed -> one-transaction swap) and the collaborators
+// it owns, returning it alongside a closer that releases the Tree-sitter
+// queries the extractor compiled at construction. The returned closer is
+// always non-nil, so a caller can defer it unconditionally.
+//
+// Both compute tracks share ONE *parser.ParserPool: a single parser.Parser
+// is not safe for concurrent use (its Tree-sitter state lives in C memory),
+// and this orchestrator runs the parse->graph and chunk->embed tracks
+// concurrently within a job, on top of however many jobs LOAM_INGEST_WORKERS
+// allows at once. The pool leases a Parser per Parse call, which is exactly
+// that contract.
+//
+// A failure here fails startup rather than degrading to a stand-in: unlike
+// registerSearchService, which logs and skips its own registration when the
+// embedder model is unrecognized (a misconfigured search service must not
+// take down the graph service), an ingest pool with no working pipeline
+// would claim jobs, fail every one, and retry them forever with backoff
+// while quietly reporting the repo as enrolled and syncing. Refusing to
+// boot is the honest signal.
+func buildIngestOrchestrator(cfg config.Config, pool *pgxpool.Pool, repoStore *reposstore.Store) (ingest.Orchestrator, func(), error) {
+	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, &http.Client{}, cfg.Logger)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("building embedder: %w", err)
+	}
+	parsers := parser.NewParserPool(cfg.Logger)
+	extractor, err := ingestgraph.New(parsers, cfg.Logger)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("compiling symbol extraction queries: %w", err)
+	}
+	chunk := chunker.NewChunker(parsers, cfg.Logger)
+	indexer := vectors.New(embedder, cfg.Logger)
+	return orchestrator.New(cfg.Logger, cfg.DataDir, pool, repoStore, extractor, chunk, indexer, embedder), extractor.Close, nil
 }
 
 // errRepoDeleteNotImplemented is returned by notImplementedRepoDeleter in
@@ -136,7 +152,8 @@ var errRepoDeleteNotImplemented = errors.New("repo delete path not implemented (
 // delete path, wired here instead of leaving RemoveRepo unregistered so
 // its guard (the half loam-ofg.12 owns) is genuinely reachable and
 // enforced. The same "loud failure over silent wrong behavior" choice
-// this file already makes for notImplementedOrchestrator.
+// this file already makes for buildIngestOrchestrator, which fails
+// startup outright rather than wiring a stand-in pipeline.
 type notImplementedRepoDeleter struct{}
 
 // DeleteRepo implements internal/handler/repoadmin's repoDeleter.
@@ -241,7 +258,13 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 		pool.Close()
 		return fmt.Errorf("reconciling mirrors: %w", err)
 	}
-	ingestPool := ingest.NewPool(cfg.Logger, pool, notImplementedOrchestrator{}, cfg.IngestWorkers)
+	ingestOrchestrator, closeIngest, err := buildIngestOrchestrator(cfg, pool, repoStore)
+	if err != nil {
+		pool.Close()
+		return fmt.Errorf("building ingest orchestrator: %w", err)
+	}
+	defer closeIngest()
+	ingestPool := ingest.NewPool(cfg.Logger, pool, ingestOrchestrator, cfg.IngestWorkers)
 	if err := ingestPool.RequeueOrphaned(ctx); err != nil {
 		pool.Close()
 		return fmt.Errorf("requeuing orphaned ingest jobs: %w", err)

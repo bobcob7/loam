@@ -180,6 +180,37 @@ func (s *Store) ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetB
 	return result, nil
 }
 
+// DropRepoBranch deletes every chunks row for (repoID, targetBranch) --
+// the repo-scoped drop the full-rebuild path runs before re-embedding the
+// whole tree (docs/ingestion-spec.md "Incremental Build" -> "Full
+// rebuild"; loam-c94.12's own DESCRIPTION: "Full-rebuild path drops all
+// repo+target derived rows first").
+//
+// It is deliberately NOT expressible as a loop of ReplaceFileChunks(nil)
+// over the new tree's files: a full rebuild exists precisely for the cases
+// where there is no usable diff (force-push, history rewrite, first
+// ingest, version bump), so chunks may exist for files that the new tree
+// does not contain at all and a per-file loop keyed on the new tree can
+// never name them.
+//
+// Like ReplaceFileChunks, it runs through the Store's transactor -- so a
+// Store built with NewInTx stages this delete in the caller's transaction
+// (nothing is visible to readers until that one commit), while a Store
+// built with New commits it on its own.
+func (s *Store) DropRepoBranch(ctx context.Context, repoID uuid.UUID, targetBranch string) error {
+	err := s.tx.withinTx(ctx, func(q queries) error {
+		return q.DeleteChunksForRepoBranch(ctx, gen.DeleteChunksForRepoBranchParams{
+			RepoID:       pgUUID(repoID),
+			TargetBranch: targetBranch,
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("dropping chunks for repo %s branch %s: %w", repoID, targetBranch, err)
+	}
+	s.logger.InfoContext(ctx, "dropped repo branch chunks", "repo_id", repoID, "target_branch", targetBranch)
+	return nil
+}
+
 // Search returns the limit nearest chunks to embedding by cosine distance
 // (the chunks_embedding HNSW index's vector_cosine_ops), restricted to
 // targetBranch and to repoIDs — the scope's repo ids
