@@ -170,10 +170,35 @@ func TestTransport_ErrorAndLogNeverContainToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	transport := New(credStore, newGitCredsConverter(), logger)
 	mirrorDir := newBareMirror(t)
-	_, err := transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{"+refs/heads/*:refs/heads/*"})
-	require.Error(t, err, "wrong token must be rejected by the upstream")
-	assert.NotContains(t, err.Error(), wrongToken, "the wrong token must never appear in the returned error")
+	_, fetchErr := transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{"+refs/heads/*:refs/heads/*"})
+	require.Error(t, fetchErr, "wrong token must be rejected by the upstream")
+	assert.NotContains(t, fetchErr.Error(), wrongToken, "the wrong token must never appear in the returned error")
 	assert.NotContains(t, logBuf.String(), wrongToken, "the wrong token must never appear in a log line")
+}
+
+// TestRun_ScrubsEveryFormOfTheSecret exercises the scrubbing contract
+// directly, against text that actually contains each form. Asserting the
+// base64 is absent from a real failed fetch would pass vacuously: git does
+// not echo the Authorization header on a 401, so the encoded value never
+// reaches that output whether the scrubber handles it or not. The header
+// carries base64(user:token), which is trivially reversible, so a scrubber
+// that knew only the plaintext token would leak the credential intact.
+func TestRun_ScrubsEveryFormOfTheSecret(t *testing.T) {
+	t.Parallel()
+	const token = "scrub-me-secret-token"
+	encoded := basicAuthValue(t, token)
+	header := "Authorization: Basic " + encoded
+	captured := "fatal: could not read Username\ntoken=" + token +
+		"\nGIT_CONFIG_VALUE_0=" + header +
+		"\nraw-b64=" + encoded + "\n"
+
+	got := scrubSecrets(captured, token, token, encoded)
+
+	assert.NotContains(t, got, token, "the plaintext token must be redacted")
+	assert.NotContains(t, got, encoded, "the base64 payload must be redacted -- it decodes straight back to the token")
+	assert.NotContains(t, got, header, "the header line must be redacted via its base64 payload")
+	assert.Contains(t, got, "[REDACTED]")
+	assert.Contains(t, got, "fatal: could not read Username", "non-secret text must survive scrubbing")
 }
 
 func TestTransport_ResolvesCredentialFreshEveryInvocation(t *testing.T) {

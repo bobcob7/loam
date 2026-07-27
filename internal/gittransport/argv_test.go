@@ -73,6 +73,68 @@ func parseSpyCapture(t *testing.T, raw string) (argv []string, env []string) {
 	return argv, env
 }
 
+// TestTransport_RemovesItsTempHomeOnEveryPath pins that the per-invocation
+// HOME/XDG/GIT_CONFIG_GLOBAL scratch dir is cleaned up. Deleting run's
+// defer os.RemoveAll leaves every other test green, but the mirrorsync
+// scheduler fetches on every tick, so an un-removed dir per invocation is
+// unbounded growth on a long-running server.
+//
+// TMPDIR is redirected so this test owns its own temp parent and cannot be
+// confounded by dirs other (parallel) tests create. Deliberately not
+// t.Parallel(): t.Setenv.
+func TestTransport_RemovesItsTempHomeOnEveryPath(t *testing.T) {
+	tmpParent := t.TempDir()
+	t.Setenv("TMPDIR", tmpParent)
+	installLeakyGit(t)
+	transport := New(&staticCredentialSource{token: "tmpdir-cleanup-token"}, newGitCredsConverter(), testLogger())
+
+	_, err := transport.Fetch(t.Context(), "forge.example.invalid", t.TempDir(),
+		"https://forge.example.invalid/acme/widgets.git", []string{"+refs/heads/*:refs/heads/*"})
+	require.Error(t, err, "the fake git exits 128, so this exercises the FAILURE path")
+
+	left, globErr := filepath.Glob(filepath.Join(tmpParent, "loam-gittransport-*"))
+	require.NoError(t, globErr)
+	assert.Empty(t, left, "run must remove its per-invocation scratch HOME even when git fails")
+}
+
+// installLeakyGit puts a fake "git" first on PATH that echoes its own
+// injected auth header to stderr and fails. Real git never does this --
+// it does not print the Authorization header on a 401 -- which is exactly
+// why the scrubber's coverage cannot be proven against a real failed
+// fetch: the encoded value simply never reaches that output, so the
+// assertion would pass whether or not scrubbing handled it. This fake
+// makes git behave as badly as the scrubber is meant to defend against.
+func installLeakyGit(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"echo \"leaked header: $GIT_CONFIG_VALUE_0\" >&2\n" +
+		"exit 128\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestTransport_ScrubsHeaderGitEchoedIntoOutput pins the production call
+// site's secret list, not just scrubSecrets' own behaviour. Dropping
+// authHeaderValue from run's scrubSecrets call leaves every other test in
+// this package green, because nothing else ever puts the base64 into git's
+// output. The header carries base64(user:token), which decodes straight
+// back to the credential.
+//
+// Deliberately not t.Parallel(): t.Setenv.
+func TestTransport_ScrubsHeaderGitEchoedIntoOutput(t *testing.T) {
+	const token = "header-echoed-by-a-badly-behaved-git"
+	encoded := basicAuthValue(t, token)
+	installLeakyGit(t)
+	transport := New(&staticCredentialSource{token: token}, newGitCredsConverter(), testLogger())
+	_, err := transport.Fetch(t.Context(), "forge.example.invalid", t.TempDir(),
+		"https://forge.example.invalid/acme/widgets.git", []string{"+refs/heads/*:refs/heads/*"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "leaked header:", "precondition: the fake git must have echoed its header into the captured output")
+	assert.NotContains(t, err.Error(), encoded, "run must scrub the base64 header value, not only the plaintext token")
+	assert.NotContains(t, err.Error(), token, "run must scrub the plaintext token")
+}
+
 func TestTransport_NeverPutsCredentialsInArgv(t *testing.T) {
 	requireGit(t)
 	captureFile := installArgvSpyGit(t)
@@ -98,6 +160,7 @@ func TestTransport_NeverPutsCredentialsInArgv(t *testing.T) {
 	joinedArgv := strings.Join(argv, "\x00")
 	assert.NotContains(t, joinedArgv, token, "argv (visible to every process on the box via ps) must never contain the token")
 	assert.NotContains(t, joinedArgv, "Authorization", "argv must never carry the Authorization header itself")
+	assert.NotContains(t, joinedArgv, basicAuthValue(t, token), "argv must not carry the base64 header value either -- it is trivially reversible, and a plaintext-only check would miss it")
 	assert.Contains(t, argv, upstreamURL, "the upstream URL must be passed through exactly as given")
 	assert.Contains(t, argv, "-c", "credential.helper must be cleared via -c (a bare flag, no secret)")
 	assert.Contains(t, argv, "credential.helper=")

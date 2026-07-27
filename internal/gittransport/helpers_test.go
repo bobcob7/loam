@@ -2,6 +2,7 @@ package gittransport
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -78,6 +79,18 @@ func (s *staticCredentialSource) GetByHost(_ context.Context, _ string) (credent
 // GitCredentials").
 func newGitCredsConverter() gitCredentialConverter {
 	return fakeforge.NewClient("", "")
+}
+
+// basicAuthValue returns the exact base64 payload the transport puts in
+// its Authorization header for token. Scrubbing tests need this because
+// the header carries base64(user:token), not the token itself: a scrubber
+// that only knew the plaintext would happily print the encoded form,
+// which is trivially reversible.
+func basicAuthValue(t *testing.T, token string) string {
+	t.Helper()
+	user, pass, err := newGitCredsConverter().GitCredentials(t.Context(), token)
+	require.NoError(t, err)
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 }
 
 // newBareMirror creates an empty bare git repository at a fresh temp
