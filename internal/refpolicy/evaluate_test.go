@@ -291,3 +291,46 @@ func TestEvaluatePush_EmptyPushIsVacuouslyAllowed(t *testing.T) {
 	assert.True(t, allAllowed)
 	assert.Empty(t, verdicts)
 }
+
+// TestEvaluatePush_EmptyAgentNameNeverMatchesAnEmptyAuthor proves the
+// review-caught defense-in-depth gap: work_branches.author is NOT NULL
+// but does not forbid an empty string, so a plain "!=" author check would
+// let an unset LOAM_AGENT_NAME (agentName == "") incorrectly "match" a
+// row whose author somehow also reads back empty. This never happens
+// through the real request path (internal/httpauth.GitIdentity 403s a
+// missing identity before receive-pack runs at all), but EvaluatePush's
+// OWN contract must not silently accept it either.
+func TestEvaluatePush_EmptyAgentNameNeverMatchesAnEmptyAuthor(t *testing.T) {
+	t.Parallel()
+	const repoName = "acme/widgets"
+	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{Name: "wb-owned", Author: "", State: workbranchstore.StateDraft})
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, "", []RefUpdate{update}, nil)
+	require.NoError(t, err)
+	require.Len(t, verdicts, 1)
+	assert.False(t, allAllowed)
+	assert.False(t, verdicts[0].Allowed, "an empty agentName must never be treated as a matching author, even against a row whose author also reads back empty")
+	assert.True(t, strings.HasPrefix(verdicts[0].Reason, "loam: "))
+}
+
+// TestEvaluatePush_UnrecognizedStateFailsClosed proves rule 3's
+// allowlist-not-denylist shape: a State this package does not recognize
+// as one of the three explicitly pushable values (draft/reviewable/
+// reviewed) must be rejected, not silently treated as "not one of the two
+// terminal states, so it must be fine." This is what protects against a
+// future sixth work_branches.state value added to the schema without
+// this function being updated to match.
+func TestEvaluatePush_UnrecognizedStateFailsClosed(t *testing.T) {
+	t.Parallel()
+	const repoName = "acme/widgets"
+	const agentName = "alice"
+	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
+		Name: "wb-owned", Author: agentName, State: workbranchstore.State("some-future-state"),
+	})
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, []RefUpdate{update}, nil)
+	require.NoError(t, err)
+	require.Len(t, verdicts, 1)
+	assert.False(t, allAllowed)
+	assert.False(t, verdicts[0].Allowed, "a State outside the explicit draft/reviewable/reviewed allowlist must fail closed")
+}

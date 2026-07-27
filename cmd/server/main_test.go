@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -9,14 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fixedStat builds a stat func returning err for every path -- nil means
+// "the file exists" (fixedStatOK below is the shorthand for that).
+func fixedStat(err error) func(string) (os.FileInfo, error) {
+	return func(string) (os.FileInfo, error) { return nil, err }
+}
+
 // TestLoamhookBinaryPath_SiblingOfOwnExecutable proves the hook binary is
 // resolved as a sibling of the running server's own executable -- e.g.
 // "/opt/loam/loam-server" resolves "/opt/loam/loamhook" -- with no
-// environment variable involved.
+// environment variable involved, when the resolved path actually exists.
 func TestLoamhookBinaryPath_SiblingOfOwnExecutable(t *testing.T) {
 	t.Parallel()
 	executable := func() (string, error) { return filepath.Join("/opt/loam", "loam-server"), nil }
-	got, err := loamhookBinaryPath(executable)
+	got, err := loamhookBinaryPath(executable, fixedStat(nil))
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join("/opt/loam", "loamhook"), got)
 }
@@ -29,7 +36,24 @@ func TestLoamhookBinaryPath_ExecutableLookupFailurePropagates(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("os.Executable: not supported")
 	executable := func() (string, error) { return "", wantErr }
-	_, err := loamhookBinaryPath(executable)
+	_, err := loamhookBinaryPath(executable, fixedStat(nil))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
+}
+
+// TestLoamhookBinaryPath_MissingSiblingIsAHardErrorEvenWithNoReposEnrolled
+// is the MUST-fix a review of this bead caught: a missing "loamhook"
+// sibling binary must abort startup UNCONDITIONALLY -- not only be
+// discovered later, per-repo, by mirrorreconcile.ReconcileMirror, which
+// never even reads this path for a mirror that is not yet cloned (a
+// legitimate no-op on its own terms). Without this stat, a fresh install
+// with zero enrolled repos would start up cleanly with no hook binary
+// present at all and say nothing.
+func TestLoamhookBinaryPath_MissingSiblingIsAHardErrorEvenWithNoReposEnrolled(t *testing.T) {
+	t.Parallel()
+	executable := func() (string, error) { return filepath.Join("/opt/loam", "loam-server"), nil }
+	statErr := os.ErrNotExist
+	_, err := loamhookBinaryPath(executable, fixedStat(statErr))
+	require.Error(t, err, "a missing loamhook sibling must fail startup even when no repo is enrolled yet")
+	assert.ErrorIs(t, err, statErr)
 }

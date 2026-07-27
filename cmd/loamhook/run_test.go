@@ -156,3 +156,55 @@ func TestRun_RejectedPushPrintsOnlyFailingReasonsAndExitsNonzero(t *testing.T) {
 	assert.Contains(t, out, "loam: refs/heads/main is read-only (target branch)")
 	assert.Equal(t, 1, strings.Count(out, "loam:"), "only the failing ref's reason must be printed, not one for the allowed ref too")
 }
+
+// TestRun_MultipleFailingRefsPrintAllReasons proves atomicity's OUTPUT
+// half against more than one failing ref: a push with TWO bad refs must
+// print BOTH loam:-prefixed reasons, not stop after the first. A mutant
+// that "break"s out of the printing loop after the first rejected verdict
+// would still pass every other test in this file (each of which has
+// exactly one failing ref) but fails here.
+func TestRun_MultipleFailingRefsPrintAllReasons(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader(
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/main\n" +
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/wb-owned-by-bob\n",
+	)
+	var stderr strings.Builder
+	dial := func(string, hooksocket.Request) (hooksocket.Response, error) {
+		return hooksocket.Response{
+			Accepted: false,
+			Verdicts: []hooksocket.VerdictWire{
+				{Ref: "refs/heads/main", Allowed: false, Reason: "loam: refs/heads/main is read-only (target branch)"},
+				{Ref: "refs/heads/wb-owned-by-bob", Allowed: false, Reason: "loam: wb-owned-by-bob belongs to bob"},
+			},
+		}, nil
+	}
+	code := run(stdin, &stderr, fixedEnv(nil), fixedWd("/data/mirrors/acme/widgets.git", nil), dial)
+	assert.NotEqual(t, 0, code)
+	out := stderr.String()
+	assert.Contains(t, out, "loam: refs/heads/main is read-only (target branch)")
+	assert.Contains(t, out, "loam: wb-owned-by-bob belongs to bob")
+	assert.Equal(t, 2, strings.Count(out, "loam:"), "every failing ref's reason must be printed, not just the first")
+}
+
+// TestRun_HardEvaluationErrorResponseFailsClosed is the MUST-FIX case a
+// review of this bead caught: a rejected response with NO per-ref
+// verdicts at all -- exactly the shape internal/hooksocket.Server's own
+// evaluate produces on a hard evaluation error, {Accepted: false,
+// Verdicts: nil}, when Postgres is down or a context deadline expires
+// mid-lookup -- must still exit nonzero. A mutant of the form
+// `if resp.Accepted || len(resp.Verdicts) == 0 { return 0 }` accepts
+// every such push and passed this package's whole suite before this test
+// existed, because every OTHER test's rejected response carries at least
+// one verdict.
+func TestRun_HardEvaluationErrorResponseFailsClosed(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/wb-good\n")
+	var stderr strings.Builder
+	dial := func(string, hooksocket.Request) (hooksocket.Response, error) {
+		return hooksocket.Response{Accepted: false, Verdicts: nil}, nil
+	}
+	code := run(stdin, &stderr, fixedEnv(nil), fixedWd("/data/mirrors/acme/widgets.git", nil), dial)
+	assert.NotEqual(t, 0, code, "a rejected response with no verdicts (a hard evaluation error on the server side) must still fail closed")
+	assert.Contains(t, stderr.String(), "loam:", "the agent must see SOME loam:-prefixed explanation, not silence, even when the server had no per-ref detail to give")
+}

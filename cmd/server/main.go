@@ -172,7 +172,7 @@ func run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	hookBinaryPath, err := loamhookBinaryPath(os.Executable)
+	hookBinaryPath, err := loamhookBinaryPath(os.Executable, os.Stat)
 	if err != nil {
 		pool.Close()
 		return fmt.Errorf("locating loamhook binary: %w", err)
@@ -235,18 +235,32 @@ const loamhookBinaryPathName = "loamhook"
 // loamhookBinaryPath resolves cmd/loamhook's compiled binary path as a
 // sibling of this process's own executable (executable, typically
 // os.Executable, injected so tests can substitute a path without
-// depending on the actual test binary's own location). mirrorreconcile.
-// ReconcileMirror treats a hookBinaryPath it cannot read as a hard error
-// (see that function's own doc comment), so a missing sibling binary
-// aborts startup here with a clear message rather than surfacing later,
-// per-repo, as an opaque "reading hook binary: no such file" once
-// reconcileMirrors starts its loop.
-func loamhookBinaryPath(executable func() (string, error)) (string, error) {
+// depending on the actual test binary's own location) and confirms it
+// actually exists there (stat, typically os.Stat, likewise injected).
+//
+// The stat is deliberately UNCONDITIONAL -- run even when zero repos are
+// enrolled yet, not merely left for mirrorreconcile.ReconcileMirror's own
+// per-repo hard-error check (see that function's own doc comment) to
+// catch later. Review of this bead's first version found exactly that
+// gap: ReconcileMirror returns nil, without ever reading hookBinaryPath,
+// for a mirror that is not yet on disk (a legitimate, documented no-op --
+// see its own doc comment), so a fresh install with zero enrolled repos
+// started up cleanly with no loamhook binary present at all and said
+// nothing -- a fail-OPEN deployment gap that would only surface, silently,
+// the moment the first repo was enrolled and its mirror cloned. Stat-ing
+// here turns that latent failure into a loud one at startup, before this
+// process ever claims to be ready, on every boot, regardless of
+// enrollment state.
+func loamhookBinaryPath(executable func() (string, error), stat func(string) (os.FileInfo, error)) (string, error) {
 	execPath, err := executable()
 	if err != nil {
 		return "", fmt.Errorf("resolving own executable path: %w", err)
 	}
-	return filepath.Join(filepath.Dir(execPath), loamhookBinaryPathName), nil
+	path := filepath.Join(filepath.Dir(execPath), loamhookBinaryPathName)
+	if _, err := stat(path); err != nil {
+		return "", fmt.Errorf("loamhook binary not found at %s (expected as a sibling of this server's own executable): %w", path, err)
+	}
+	return path, nil
 }
 
 // buildRouter wires the auth wrappers onto the mux and mounts the embedded

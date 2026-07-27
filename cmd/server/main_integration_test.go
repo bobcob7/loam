@@ -60,7 +60,15 @@ const (
 // sharing one compiled binary across every test in this file.
 var serverBinary string
 
-// TestMain compiles cmd/server once before any test in this file runs.
+// TestMain compiles cmd/server, AND cmd/loamhook as its sibling in the
+// same directory, once before any test in this file runs. The loamhook
+// sibling is required for real: main.go's loamhookBinaryPath resolves the
+// hook binary as a sibling of the running server executable, and
+// (loam-ofg.18's review) that resolution is now a hard startup error, not
+// merely a per-repo one -- so every test in this file needs a genuine
+// "loamhook" binary sitting next to "server" to start at all, exactly as
+// a real deployment must (loam-mce tracks the still-missing Taskfile/
+// Dockerfile step that would build+place both binaries outside tests).
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "loam-server-test-*")
 	if err != nil {
@@ -72,6 +80,12 @@ func TestMain(m *testing.M) {
 	build := exec.Command("go", "build", "-o", serverBinary, ".")
 	if out, buildErr := build.CombinedOutput(); buildErr != nil {
 		fmt.Fprintf(os.Stderr, "building server binary: %v\n%s", buildErr, out)
+		os.Exit(1)
+	}
+	hookBinary := filepath.Join(dir, "loamhook")
+	hookBuild := exec.Command("go", "build", "-o", hookBinary, "github.com/bobcob7/loam/cmd/loamhook")
+	if out, buildErr := hookBuild.CombinedOutput(); buildErr != nil {
+		fmt.Fprintf(os.Stderr, "building loamhook binary: %v\n%s", buildErr, out)
 		os.Exit(1)
 	}
 	os.Exit(m.Run())
@@ -107,6 +121,27 @@ type runningServer struct {
 	stderr *bytes.Buffer
 }
 
+// shortDataDir returns a fresh, short-named temp directory for
+// LOAM_DATA_DIR, registered for removal via t.Cleanup. Unlike t.TempDir()
+// -- whose path embeds the full, often long, subtest-qualified test name
+// -- this stays well under the ~104-byte sun_path limit unix domain
+// sockets are subject to on macOS/BSD. loam-ofg.18's policy socket binds
+// "<LOAM_DATA_DIR>/hook.sock" at startup (before this file's readiness
+// poll can ever succeed): a t.TempDir()-based LOAM_DATA_DIR made that bind
+// fail loudly for every test in this file once the policy socket was
+// wired into Startup -- internal/hooksocket.Listen deliberately fails
+// loudly rather than working around a too-long path itself (see that
+// package's bindUnixSocket doc comment for why a same-package fallback was
+// tried and reverted), so the fix belongs here, at the actual source of
+// the long path.
+func shortDataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "loam-data")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // startServer launches the compiled binary against databaseURL, handing it
 // an already-bound listener via os/exec's ExtraFiles (LOAM_LISTENER_FD=3)
 // instead of the older "reserve a free port, close it, tell the child to
@@ -132,7 +167,7 @@ func startServer(t *testing.T, databaseURL string) *runningServer {
 		"LOAM_ADMIN_PASSWORD=" + testAdminPassword,
 		"LOAM_DATABASE_URL=" + databaseURL,
 		"LOAM_ENCRYPTION_KEY=" + testEncryptionKey,
-		"LOAM_DATA_DIR=" + t.TempDir(),
+		"LOAM_DATA_DIR=" + shortDataDir(t),
 	}
 	cmd := exec.Command(serverBinary)
 	cmd.Env = env

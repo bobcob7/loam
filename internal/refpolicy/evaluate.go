@@ -137,10 +137,27 @@ func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName, age
 		}
 		return RefVerdict{}, workbranchstore.WorkBranch{}, fmt.Errorf("looking up work branch %s: %w", branchName, err)
 	}
-	if wb.Author != agentName {
+	// agentName == "" is checked explicitly, not left to fall out of the
+	// plain inequality below: work_branches.author is NOT NULL but does
+	// not forbid an EMPTY string, so "" != "" would otherwise be false and
+	// an unset LOAM_AGENT_NAME (an empty agentName) would incorrectly
+	// "match" a row whose author somehow also reads back empty. In
+	// production internal/httpauth.GitIdentity already 403s a request with
+	// no identity before receive-pack ever runs, so this exact path needs
+	// that middleware bypassed to reach at all -- but that is precisely
+	// why this local check exists too: defense in depth for this
+	// function's OWN contract, not a rule that depends on some other
+	// package's gate always running first.
+	if agentName == "" || wb.Author != agentName {
 		return RefVerdict{Ref: update.Ref, Allowed: false, Reason: fmt.Sprintf("loam: %s belongs to %s", wb.Name, wb.Author)}, wb, nil
 	}
-	if isTerminal(wb.State) {
+	if !isNonTerminal(wb.State) {
+		// The exact wording here ("is closed") is docs/git-spec.md's own
+		// pinned example (its reason table's one terminal-state row); "is
+		// complete" for the OTHER terminal state is this package's own
+		// generalization of that same template, not a string the spec
+		// itself states -- docs/git-spec.md never shows a "complete"
+		// example, only "closed".
 		return RefVerdict{Ref: update.Ref, Allowed: false, Reason: fmt.Sprintf("loam: %s is %s", wb.Name, wb.State)}, wb, nil
 	}
 	return RefVerdict{Ref: update.Ref, Allowed: true}, wb, nil
@@ -185,10 +202,15 @@ func isZeroSHA(sha string) bool {
 	return true
 }
 
-// isTerminal reports whether state is one of work_branches' two terminal
-// states (docs/cli-spec.md "Its lifecycle"; workbranchstore's own State
-// doc comment: "Complete and closed are terminal") -- rule 3's "non-
-// terminal state" check.
-func isTerminal(state workbranchstore.State) bool {
-	return state == workbranchstore.StateComplete || state == workbranchstore.StateClosed
+// isNonTerminal reports whether state is one of the three states
+// docs/git-spec.md "Ref Policy (push)" rule 3 names POSITIVELY as
+// pushable -- "draft / reviewable / reviewed" -- rather than checking the
+// negative (state is complete or closed). This is an explicit allowlist,
+// not a denylist, so it fails CLOSED on anything it does not recognize:
+// an empty State (a zero-value bug elsewhere), a typo, or a future sixth
+// work_branches.state value added to the schema without this function
+// being updated all report false (not pushable) here, rather than
+// silently falling through a denylist's implicit "anything else is fine."
+func isNonTerminal(state workbranchstore.State) bool {
+	return state == workbranchstore.StateDraft || state == workbranchstore.StateReviewable || state == workbranchstore.StateReviewed
 }

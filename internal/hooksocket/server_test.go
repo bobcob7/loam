@@ -80,36 +80,29 @@ func registeredBranchStore(repoName, branchName string, wb workbranchstore.WorkB
 	}
 }
 
-// TestListen_SucceedsUnderAPathTooLongForADirectBind is the regression
-// test for a real failure this package caused once wired into
-// cmd/server's Startup: a LOAM_DATA_DIR long enough that
-// "<dataDir>/hook.sock" exceeds unix domain sockets' sun_path limit
-// (~104 bytes on macOS/BSD) made net.Listen fail with "bind: invalid
-// argument" -- observed for real via cmd/server/main_integration_test.go's
-// t.TempDir()-based LOAM_DATA_DIR, which nests the full test name into the
-// path. bindUnixSocket's chdir-and-retry fallback must make this succeed
-// regardless of path length.
-func TestListen_SucceedsUnderAPathTooLongForADirectBind(t *testing.T) {
+// TestListen_PathTooLongForADirectBindFailsLoudlyAtStartup is the
+// regression test for a real bug this package's review caught: an earlier
+// version of bindUnixSocket fell back to a chdir + relative-path bind
+// when a direct bind failed (e.g. under a LOAM_DATA_DIR long enough that
+// "<dataDir>/hook.sock" exceeds unix domain sockets' sun_path limit,
+// ~104 bytes on macOS/BSD). That fallback let Listen SUCCEED while making
+// every future push fail closed forever: cmd/loamhook's own dial has no
+// equivalent chdir trick and must connect to the exact same absolute
+// path, which is subject to the identical length limit -- so the
+// "fix" traded a loud, immediate startup failure for a silent,
+// undetectable outage. Listen must instead fail loudly, at startup, with
+// an error that names the actual constraint, so an operator sees the
+// problem before a single push is ever attempted.
+func TestListen_PathTooLongForADirectBindFailsLoudlyAtStartup(t *testing.T) {
 	t.Parallel()
 	base := shortTempDir(t)
 	longSubdir := filepath.Join(base, "TestServer_Healthz_ReachableWithAndWithoutAuthorizationHeaderVeryLongTestName1234567890", "001")
 	require.NoError(t, os.MkdirAll(longSubdir, 0o755))
 	socketPath := filepath.Join(longSubdir, "hook.sock")
-	require.Greater(t, len(socketPath), 104, "this test's own fixture must actually exceed the sun_path limit it is proving a workaround for")
-	srv, err := Listen(socketPath, &WorkBranchStoreMock{}, nil, testLogger())
-	require.NoError(t, err, "Listen must succeed even when the absolute socket path is too long for a direct bind")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		srv.Run(ctx)
-	}()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not shut down")
-	}
+	require.Greater(t, len(socketPath), 104, "this test's own fixture must actually exceed the sun_path limit it is proving fails loudly")
+	_, err := Listen(socketPath, &WorkBranchStoreMock{}, nil, testLogger())
+	require.Error(t, err, "Listen must fail, loudly, when the absolute socket path is too long to bind -- never silently succeed at a socket the hook client can never dial")
+	assert.Contains(t, err.Error(), "sun_path", "the error must name the actual constraint so an operator can act on it")
 }
 
 // TestServer_AllowedPush_RoundTrip proves a genuinely allowed push travels

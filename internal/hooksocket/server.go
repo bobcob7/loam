@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -70,45 +69,41 @@ func listen(socketPath string, store WorkBranchStore, onAccept refpolicy.PostAcc
 	return &Server{listener: listener, store: store, onAccept: onAccept, logger: logger, connDeadline: connDeadline}, nil
 }
 
-// bindUnixSocket binds socketPath, working around the sun_path length
-// limit unix domain sockets are subject to (~104 bytes on macOS/BSD, ~108
-// on Linux, including the null terminator): a sufficiently long
-// LOAM_DATA_DIR -- observed for real against this exact function, via a
-// deeply-nested t.TempDir() LOAM_DATA_DIR in cmd/server's own
-// main_integration_test.go harness, which made every test in that file
-// fail with "server ... never became ready" once this package's Listen
-// call was wired into cmd/server's Startup -- makes a direct net.Listen
-// fail with "bind: invalid argument" (macOS) even though nothing is
-// actually wrong with the path.
+// maxSunPathBytes is the tightest widely-deployed sun_path buffer size
+// unix domain sockets are subject to (104 bytes on macOS/BSD, including
+// the null terminator; Linux's is 108) -- used only to produce an
+// actionable error message here, not to reject a path early: the real
+// bind(2)/connect(2) syscalls are still what decide whether a given path
+// actually fits, on whatever platform is running.
+const maxSunPathBytes = 104
+
+// bindUnixSocket binds socketPath directly -- no chdir-and-retry
+// workaround. An earlier version of this function fell back to a
+// temporary os.Chdir + relative bind when the direct bind failed, on the
+// theory that only the STRING passed to bind(2) is subject to the
+// sun_path length limit. That reasoning does not survive contact with the
+// other side of this same wire protocol: cmd/loamhook (run.go) has no
+// equivalent chdir trick and must dial the exact same absolute path this
+// server bound, since connect(2) is subject to the identical sun_path
+// limit -- so the fallback let Listen succeed while making 100% of pushes
+// fail closed afterward, forever, with an opaque "connect: invalid
+// argument" error and no signal at server startup that anything was
+// wrong. A loud, immediate startup failure (this function's current
+// behavior) is far preferable to a policy socket that reports healthy but
+// can never actually be reached by the one client that matters.
 //
-// The fallback is only attempted after a direct bind has already failed,
-// so the common case (a short, real-world LOAM_DATA_DIR) never pays for
-// it: temporarily os.Chdir into socketPath's parent directory and bind
-// the bare filename instead, which the kernel accepts regardless of how
-// long the absolute path to that directory is, since only the string
-// actually passed to bind() is subject to the length limit. This is safe
-// specifically because Listen runs once, synchronously, at server
-// startup, before any other goroutine (the ingest pool, the HTTP
-// listener) exists yet -- nothing else in the process can observe or
-// depend on the working directory during the brief window it is changed
-// (see cmd/server/main.go's run(), which calls this before newListener
-// and before serve starts any background goroutine).
+// The real fix for a LOAM_DATA_DIR long enough to hit this belongs at the
+// deployment/test-harness level: keep LOAM_DATA_DIR short enough that
+// "<LOAM_DATA_DIR>/hook.sock" fits (this is exactly what
+// cmd/server/main_integration_test.go's own long, per-test-name t.TempDir()
+// path was doing wrong -- fixed there, not here, by using a short temp
+// directory instead).
 func bindUnixSocket(socketPath string) (net.Listener, error) {
-	listener, directErr := net.Listen("unix", socketPath)
-	if directErr == nil {
-		return listener, nil
-	}
-	dir := filepath.Dir(socketPath)
-	name := filepath.Base(socketPath)
-	originalWd, err := os.Getwd()
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("binding %s directly failed (%w), and could not get the working directory to retry via a relative bind: %w", socketPath, directErr, err)
+		return nil, fmt.Errorf("%w (policy socket path is %d bytes; unix domain sockets are typically limited to a sun_path of ~%d bytes -- set LOAM_DATA_DIR to a shorter path)", err, len(socketPath), maxSunPathBytes)
 	}
-	if err := os.Chdir(dir); err != nil {
-		return nil, fmt.Errorf("binding %s directly failed (%w), and could not change into %s to retry via a relative bind: %w", socketPath, directErr, dir, err)
-	}
-	defer func() { _ = os.Chdir(originalWd) }()
-	return net.Listen("unix", name)
+	return listener, nil
 }
 
 // Run accepts connections until ctx is canceled, handling each on its own

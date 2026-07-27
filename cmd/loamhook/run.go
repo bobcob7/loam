@@ -70,10 +70,24 @@ func run(stdin io.Reader, stderr io.Writer, getenv func(string) string, getwd fu
 	if resp.Accepted {
 		return 0
 	}
+	printedAReason := false
 	for _, v := range resp.Verdicts {
 		if !v.Allowed {
 			fmt.Fprintln(stderr, v.Reason)
+			printedAReason = true
 		}
+	}
+	// A rejected response with no per-ref reason to print is exactly the
+	// shape a hard evaluation error produces (internal/hooksocket.Server's
+	// own evaluate: {Accepted: false, Verdicts: nil} when the store errors
+	// or a context deadline expires mid-lookup) -- the most important
+	// fail-closed case this hook has, since it is what a down/unreachable
+	// Postgres looks like from here. Without this fallback, the agent sees
+	// only git's own bare "pre-receive hook declined", with no loam: line
+	// at all, which looks like a transport bug rather than a deliberate
+	// policy rejection.
+	if !printedAReason {
+		fmt.Fprintln(stderr, "loam: push rejected by policy (no per-ref reason available)")
 	}
 	return 1
 }
