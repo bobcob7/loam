@@ -13,11 +13,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -262,4 +263,39 @@ type workBranchNameLister interface {
 // the consumer. *reposstore.Store satisfies it structurally.
 type targetBranchLister interface {
 	ListTargetBranches(ctx context.Context, repoID uuid.UUID) ([]reposstore.TargetBranch, error)
+}
+
+// ingestedRefLookup is the reposstore.Store surface StoreIngestEnqueuer uses
+// to read the incremental-ingest diff base recorded for a repo's indexed
+// branch (repo_target_branches.ingested_ref) before deciding whether, and
+// with what Kind, to enqueue a job -- defined here at the consumer.
+// *reposstore.Store satisfies it structurally. A NULL column (IngestedRef.Ok
+// false) is the "never ingested this branch" signal StoreIngestEnqueuer
+// reads as first enrollment (docs/persistence-spec.md "repo_target_branches":
+// "null until first ingest"); a wrapped reposstore.ErrNotFound means branch
+// is not enrolled as a target for repoID at all, which StoreIngestEnqueuer
+// treats as a hard error rather than silently coercing into "first
+// enrollment" -- repos.indexed_branch is validated to always be one of a
+// repo's target branches at enrollment (RepoAdminService.EnrollRepo) and
+// whenever it is changed, so a missing row here means that invariant broke,
+// not that the branch is new.
+type ingestedRefLookup interface {
+	IngestedRef(ctx context.Context, repoID uuid.UUID, branch string) (reposstore.IngestedRef, error)
+}
+
+// ingestJobEnqueuer is the ingest.Enqueuer surface StoreIngestEnqueuer calls
+// to queue a job, defined here at the consumer per this package's own
+// convention (every other collaborator below gets the same treatment) even
+// though ingest.Enqueuer (internal/ingest/interfaces.go) already declares
+// this identical one-method shape for exactly this cross-package use --
+// *ingest.Pool satisfies both structurally. Enqueue never takes a ref pair:
+// ingest_jobs has no old/new ref columns, so the diff base
+// (repo_target_branches.ingested_ref) and new tip (the live mirror) are the
+// Orchestrator/diffplan.Planner's responsibility to resolve at run time from
+// RepoID+TargetBranch (internal/ingest.Job's own doc comment), never this
+// package's to pass through -- see StoreIngestEnqueuer's doc comment for
+// what that means for where the incremental-vs-full decision actually
+// lives.
+type ingestJobEnqueuer interface {
+	Enqueue(ctx context.Context, repoID uuid.UUID, targetBranch string, kind ingest.Kind) error
 }
