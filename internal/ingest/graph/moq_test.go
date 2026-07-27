@@ -99,6 +99,9 @@ var _ store = &storeMock{}
 //
 //		// make and configure a mocked store
 //		mockedstore := &storeMock{
+//			RecomputeGraphEdgesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+//				panic("mock out the RecomputeGraphEdges method")
+//			},
 //			ReplaceFileReferencesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string, refs []codegraph.ReferenceInput) (int64, error) {
 //				panic("mock out the ReplaceFileReferences method")
 //			},
@@ -112,6 +115,9 @@ var _ store = &storeMock{}
 //
 //	}
 type storeMock struct {
+	// RecomputeGraphEdgesFunc mocks the RecomputeGraphEdges method.
+	RecomputeGraphEdgesFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error)
+
 	// ReplaceFileReferencesFunc mocks the ReplaceFileReferences method.
 	ReplaceFileReferencesFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string, refs []codegraph.ReferenceInput) (int64, error)
 
@@ -120,6 +126,15 @@ type storeMock struct {
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// RecomputeGraphEdges holds details about calls to the RecomputeGraphEdges method.
+		RecomputeGraphEdges []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+		}
 		// ReplaceFileReferences holds details about calls to the ReplaceFileReferences method.
 		ReplaceFileReferences []struct {
 			// Ctx is the ctx argument value.
@@ -147,8 +162,49 @@ type storeMock struct {
 			Symbols []codegraph.SymbolInput
 		}
 	}
+	lockRecomputeGraphEdges   sync.RWMutex
 	lockReplaceFileReferences sync.RWMutex
 	lockReplaceFileSymbols    sync.RWMutex
+}
+
+// RecomputeGraphEdges calls RecomputeGraphEdgesFunc.
+func (mock *storeMock) RecomputeGraphEdges(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+	if mock.RecomputeGraphEdgesFunc == nil {
+		panic("storeMock.RecomputeGraphEdgesFunc: method is nil but store.RecomputeGraphEdges was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+	}{
+		Ctx:          ctx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+	}
+	mock.lockRecomputeGraphEdges.Lock()
+	mock.calls.RecomputeGraphEdges = append(mock.calls.RecomputeGraphEdges, callInfo)
+	mock.lockRecomputeGraphEdges.Unlock()
+	return mock.RecomputeGraphEdgesFunc(ctx, repoID, targetBranch)
+}
+
+// RecomputeGraphEdgesCalls gets all the calls that were made to RecomputeGraphEdges.
+// Check the length with:
+//
+//	len(mockedstore.RecomputeGraphEdgesCalls())
+func (mock *storeMock) RecomputeGraphEdgesCalls() []struct {
+	Ctx          context.Context
+	RepoID       uuid.UUID
+	TargetBranch string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+	}
+	mock.lockRecomputeGraphEdges.RLock()
+	calls = mock.calls.RecomputeGraphEdges
+	mock.lockRecomputeGraphEdges.RUnlock()
+	return calls
 }
 
 // ReplaceFileReferences calls ReplaceFileReferencesFunc.

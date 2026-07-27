@@ -227,6 +227,103 @@ func TestIngestFiles_Reparse_DropsStaleSymbolsAndReferences(t *testing.T) {
 	assert.Equal(t, 2, count, "exactly module+Check, not 3+ rows from an accumulated stale insert")
 }
 
+// edgeRow is one graph_edges row joined back to both endpoints' (file, name)
+// identity -- the shape TestIngestFiles_FixturePolyglot_GraphEdgesResolved
+// asserts against, since a bare symbol-id pair is meaningless to a reader of
+// test output.
+type edgeRow struct {
+	fromFile, fromName string
+	toFile, toName     string
+}
+
+// graphEdges queries every graph_edges row for repoID, joined back to the
+// endpoints' (file, name) identity, ordered for deterministic comparison.
+func graphEdges(t *testing.T, repoID uuid.UUID) []edgeRow {
+	t.Helper()
+	rows, err := sharedPool.Query(t.Context(), `
+		SELECT sf.file, sf.name, st.file, st.name
+		FROM graph_edges ge
+		JOIN symbols sf ON sf.id = ge.from_symbol_id
+		JOIN symbols st ON st.id = ge.to_symbol_id
+		WHERE ge.repo_id = $1
+		ORDER BY sf.file, sf.name, st.file, st.name`, repoID)
+	require.NoError(t, err)
+	defer rows.Close()
+	var edges []edgeRow
+	for rows.Next() {
+		var e edgeRow
+		require.NoError(t, rows.Scan(&e.fromFile, &e.fromName, &e.toFile, &e.toName))
+		edges = append(edges, e)
+	}
+	require.NoError(t, rows.Err())
+	return edges
+}
+
+// TestIngestFiles_FixturePolyglot_GraphEdgesResolvedEndToEnd is loam-c94.6's
+// central proof: running the real IngestFiles pipeline (real Tree-sitter
+// extraction, real codegraph.Store, real Postgres) over fixture-polyglot's
+// full file set must leave graph_edges holding exactly the edges the
+// fixture's own doc comments describe, resolved by RecomputeGraphEdges after
+// every file's symbols/references land -- not merely stats reported in
+// memory (loam-c94.5's golden test already covers that half).
+//
+// fixture-polyglot's "Validate" is deliberately ambiguous by design
+// (pkg/validate/validate.go's and src/validate.ts's own doc comments): a Go
+// export and a TypeScript export share the name. Both report.go (Go, calls
+// validate.Validate) and index.ts (TS, calls Validate) therefore fan out to
+// BOTH same-named definitions -- docs/cli-spec.md's "ambiguous target is
+// data, not an error" applied to edges, not just to `graph def` lookups.
+// is_even/is_odd's mutual recursion (scripts/parity.py) proves a same-file
+// cycle resolves in both directions. validate.go's TrimSpace reference and
+// validate.ts's trim reference are stdlib/built-in calls with no matching
+// symbols row anywhere in the repo -- docs/cli-spec.md's "MVP does not
+// resolve cross-repo/third-party edges" -- and must produce NO edge at all,
+// proved by their total absence from the result set, not a NULL-ended row.
+func TestIngestFiles_FixturePolyglot_GraphEdgesResolvedEndToEnd(t *testing.T) {
+	t.Parallel()
+	repo := testfixture.NewT(t.Context(), t)
+	e := newIntegrationExtractor(t)
+	store, repoID := newIntegrationRepo(t)
+
+	files := []FileInput{
+		{Path: "pkg/validate/validate.go", Content: readFile(t, repo.Dir(), "pkg/validate/validate.go")},
+		{Path: "pkg/report/report.go", Content: readFile(t, repo.Dir(), "pkg/report/report.go")},
+		{Path: "src/validate.ts", Content: readFile(t, repo.Dir(), "src/validate.ts")},
+		{Path: "src/index.ts", Content: readFile(t, repo.Dir(), "src/index.ts")},
+		{Path: "scripts/parity.py", Content: readFile(t, repo.Dir(), "scripts/parity.py")},
+		{Path: "docs/OVERVIEW.md", Content: readFile(t, repo.Dir(), "docs/OVERVIEW.md")},
+	}
+	stats, err := e.IngestFiles(t.Context(), store, repoID, "main", files)
+	require.NoError(t, err)
+
+	want := []edgeRow{
+		{fromFile: "pkg/report/report.go", fromName: "Summarize", toFile: "pkg/validate/validate.go", toName: "Validate"},
+		{fromFile: "pkg/report/report.go", fromName: "Summarize", toFile: "src/validate.ts", toName: "Validate"},
+		{fromFile: "scripts/parity.py", fromName: "is_even", toFile: "scripts/parity.py", toName: "is_odd"},
+		{fromFile: "scripts/parity.py", fromName: "is_odd", toFile: "scripts/parity.py", toName: "is_even"},
+		{fromFile: "src/index.ts", fromName: "summarize", toFile: "pkg/validate/validate.go", toName: "Validate"},
+		{fromFile: "src/index.ts", fromName: "summarize", toFile: "src/validate.ts", toName: "Validate"},
+	}
+	assert.Equal(t, int64(len(want)), stats.EdgesRecomputed, "Stats.EdgesRecomputed must report the exact edge count RecomputeGraphEdges inserted")
+	got := graphEdges(t, repoID)
+	assert.Equal(t, want, got, "graph_edges must hold exactly these 6 rows: Validate's cross-language ambiguity fanning out to 2 edges per caller, is_even/is_odd's mutual recursion in both directions, and nothing for TrimSpace/trim")
+
+	for _, edge := range got {
+		assert.NotEqual(t, "TrimSpace", edge.toName, "TrimSpace is a stdlib call with no matching symbols row -- it must never appear as an edge target")
+		assert.NotEqual(t, "trim", edge.toName, "trim is a built-in method call with no matching symbols row -- it must never appear as an edge target")
+	}
+
+	// Re-running IngestFiles over the identical file set (as a second ingest
+	// of an unchanged tree would) must leave graph_edges at exactly the same
+	// 6 rows, not 12 -- RecomputeGraphEdges' delete-then-rebuild contract
+	// applied through this package's actual call path, not just
+	// internal/codegraph's own already-covered unit test of it in isolation.
+	statsAgain, err := e.IngestFiles(t.Context(), store, repoID, "main", files)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(want)), statsAgain.EdgesRecomputed)
+	assert.Equal(t, want, graphEdges(t, repoID), "recomputing edges for an unchanged tree must not accumulate duplicate rows")
+}
+
 // TestIngestFiles_UnsupportedLanguageFile_NeverWritesRows corroborates the
 // in-memory Stats assertion in the golden test above against the real
 // table directly: a .md file must leave zero symbols/symbol_references

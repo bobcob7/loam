@@ -39,12 +39,20 @@ type Stats struct {
 	// equals the row count each call inserts).
 	SymbolsWritten    int
 	ReferencesWritten int
+	// EdgesRecomputed is the graph_edges row count RecomputeGraphEdges
+	// inserted for (repoID, targetBranch) after this batch's per-file writes
+	// landed (loam-c94.6) -- the whole repo+branch's edge set, not just
+	// edges touched by this batch's files, since RecomputeGraphEdges always
+	// rebuilds from scratch (see this file's IngestFiles doc comment).
+	EdgesRecomputed int64
 }
 
 // IngestFiles extracts and persists symbols/references for each of files
 // (typically diffplan.Plan.ReparseFiles paired with content read at
 // new_ref) via st's per-file delete-and-replace pair (codegraph.Store.
-// ReplaceFileSymbols / ReplaceFileReferences). st is expected to be
+// ReplaceFileSymbols / ReplaceFileReferences), then resolves graph_edges for
+// the WHOLE (repoID, targetBranch) via one st.RecomputeGraphEdges call
+// (loam-c94.6) once every file's writes have landed. st is expected to be
 // constructed over the transaction the swap orchestrator (loam-c94.12)
 // owns -- IngestFiles opens no transaction and commits nothing itself,
 // mirroring codegraph.Store's own transactional-scope contract.
@@ -54,7 +62,11 @@ type Stats struct {
 // file's existing rows, then inserts the fresh set, as two sequential
 // calls against the same querier before returning -- internal/codegraph/
 // store.go) -- IngestFiles does not need to, and does not, add any
-// ordering of its own beyond calling them.
+// ordering of its own beyond calling them. RecomputeGraphEdges runs AFTER
+// the per-file loop completes, not per file and not interleaved with it:
+// resolving edges against a partially-written batch would miss symbols the
+// later files in the same batch are about to define, exactly the "unchanged
+// file references a symbol that moved" case this bead exists to get right.
 //
 // A single file's extraction trouble never aborts the batch:
 //   - An unsupported language (ExtractFile's ok=false, err=nil) is counted
@@ -68,12 +80,14 @@ type Stats struct {
 //     is only counted (Stats.FilesWithSyntaxErrors), never treated as a
 //     failure.
 //
-// Only two things stop the batch outright, both returned wrapped and
-// immediately: ctx's own error (checked before each file, and surfacing
-// again from ExtractFile/store calls that observe it mid-flight), and a
-// store write failing -- the enclosing transaction is going to roll back
-// regardless once one write fails, so there is nothing to gain from
-// continuing to process the rest of files.
+// Three things stop the batch (and skip RecomputeGraphEdges) outright, all
+// returned wrapped and immediately: ctx's own error (checked before each
+// file and once more before the recompute call, so an already-canceled ctx
+// short-circuits even an empty files batch; also surfacing from
+// ExtractFile/store calls that observe it mid-flight), a per-file store
+// write failing, and RecomputeGraphEdges itself failing -- in every case the
+// enclosing transaction is going to roll back regardless, so there is
+// nothing to gain from continuing.
 func (e *Extractor) IngestFiles(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, files []FileInput) (Stats, error) {
 	var stats Stats
 	for _, f := range files {
@@ -107,5 +121,13 @@ func (e *Extractor) IngestFiles(ctx context.Context, st store, repoID uuid.UUID,
 		stats.SymbolsWritten += len(result.Symbols)
 		stats.ReferencesWritten += len(result.References)
 	}
+	if err := ctx.Err(); err != nil {
+		return stats, fmt.Errorf("recomputing graph edges for %s@%s: %w", repoID, targetBranch, err)
+	}
+	edgeCount, err := st.RecomputeGraphEdges(ctx, repoID, targetBranch)
+	if err != nil {
+		return stats, fmt.Errorf("recomputing graph edges for %s@%s: %w", repoID, targetBranch, err)
+	}
+	stats.EdgesRecomputed = edgeCount
 	return stats, nil
 }

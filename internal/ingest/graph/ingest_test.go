@@ -13,16 +13,23 @@ import (
 )
 
 // newFakeStore returns a storeMock that records every ReplaceFileSymbols/
-// ReplaceFileReferences call it receives (in order, interleaved) plus the
-// counts a caller would see back -- every method has a configured Func, per
-// this codebase's "unconfigured mock method panicking means real
-// assertions never run" trap, so a test that reaches a call this mock does
-// not expect fails loudly via the mock's own panic, not silently.
+// ReplaceFileReferences/RecomputeGraphEdges call it receives (in order,
+// interleaved) plus the counts a caller would see back -- every method has a
+// configured Func, per this codebase's "unconfigured mock method panicking
+// means real assertions never run" trap, so a test that reaches a call this
+// mock does not expect fails loudly via the mock's own panic, not silently.
+// RecomputeGraphEdgesFunc always reports 3 edges recomputed (a stand-in
+// nonzero count) so Stats.EdgesRecomputed-propagation tests have something
+// distinguishable from the zero value to assert against.
 type recordedCall struct {
-	method string
-	file   string
-	names  []string
+	method       string
+	file         string
+	names        []string
+	repoID       uuid.UUID
+	targetBranch string
 }
+
+const fakeRecomputedEdgeCount = int64(3)
 
 func newFakeStore(t *testing.T) (*storeMock, *[]recordedCall) {
 	t.Helper()
@@ -33,7 +40,7 @@ func newFakeStore(t *testing.T) (*storeMock, *[]recordedCall) {
 			for i, s := range symbols {
 				names[i] = s.Name
 			}
-			*calls = append(*calls, recordedCall{method: "symbols", file: file, names: names})
+			*calls = append(*calls, recordedCall{method: "symbols", file: file, names: names, repoID: repoID, targetBranch: targetBranch})
 			return nil, nil
 		},
 		ReplaceFileReferencesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, refs []codegraph.ReferenceInput) (int64, error) {
@@ -41,8 +48,12 @@ func newFakeStore(t *testing.T) (*storeMock, *[]recordedCall) {
 			for i, r := range refs {
 				names[i] = r.Name
 			}
-			*calls = append(*calls, recordedCall{method: "references", file: file, names: names})
+			*calls = append(*calls, recordedCall{method: "references", file: file, names: names, repoID: repoID, targetBranch: targetBranch})
 			return int64(len(refs)), nil
+		},
+		RecomputeGraphEdgesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+			*calls = append(*calls, recordedCall{method: "recompute", repoID: repoID, targetBranch: targetBranch})
+			return fakeRecomputedEdgeCount, nil
 		},
 	}
 	return mock, calls
@@ -116,7 +127,12 @@ func TestIngestFiles_UnsupportedLanguage_SkipsWithoutStoreCall(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.FilesSkippedUnsupportedLanguage)
 	assert.Equal(t, 0, stats.FilesExtracted)
-	assert.Empty(t, *calls, "an unsupported-language file must never reach the store")
+	for _, c := range *calls {
+		assert.NotEqual(t, "symbols", c.method, "an unsupported-language file must never reach ReplaceFileSymbols")
+		assert.NotEqual(t, "references", c.method, "an unsupported-language file must never reach ReplaceFileReferences")
+	}
+	require.Len(t, *calls, 1, "RecomputeGraphEdges still runs once for the batch even though the only file was skipped -- it resolves whatever symbols/references already exist for the repo, not just this batch's files")
+	assert.Equal(t, "recompute", (*calls)[0].method)
 }
 
 // TestIngestFiles_HardParseFailure_SkipsFileNotBatch proves a single file's
@@ -173,7 +189,7 @@ func TestIngestFiles_SyntaxError_StillWritesBestEffort(t *testing.T) {
 	assert.Equal(t, 1, stats.FilesExtracted)
 	assert.Equal(t, 1, stats.FilesWithSyntaxErrors)
 	assert.Equal(t, 0, stats.FilesFailed)
-	require.Len(t, *calls, 2, "both ReplaceFileSymbols and ReplaceFileReferences must still run for a best-effort partial extraction")
+	require.Len(t, *calls, 3, "ReplaceFileSymbols, ReplaceFileReferences, and the batch-final RecomputeGraphEdges must all run for a best-effort partial extraction")
 	for _, c := range *calls {
 		if c.method == "symbols" {
 			assert.Contains(t, c.names, "Clean")
@@ -251,4 +267,149 @@ func TestIngestFiles_MultipleFiles_EachGetsItsOwnStoreCallWithItsOwnPath(t *test
 	assert.NotContains(t, seenFiles["a.go"], "B")
 	assert.Contains(t, seenFiles["b.go"], "B")
 	assert.NotContains(t, seenFiles["b.go"], "A")
+}
+
+// --- loam-c94.6: wiring RecomputeGraphEdges into IngestFiles. ---
+
+// TestIngestFiles_RecomputesGraphEdgesOnceAfterAllFiles is MUTATION A's kill
+// switch (dropping the RecomputeGraphEdges call entirely -- this fails with
+// zero "recompute" calls recorded and stats.EdgesRecomputed left at its
+// zero value) and MUTATION B's kill switch (moving the call inside the
+// per-file loop, once per file, instead of once after the whole batch --
+// this fails because it asserts the call happens exactly ONCE, as the LAST
+// recorded call, for a 2-file batch that would otherwise record it twice or
+// interleaved with the per-file symbol/reference calls).
+func TestIngestFiles_RecomputesGraphEdgesOnceAfterAllFiles(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	st, calls := newFakeStore(t)
+	repoID := uuid.Must(uuid.NewV7())
+	files := []FileInput{
+		{Path: "a.go", Content: []byte("package a\n\nfunc A() {}\n")},
+		{Path: "b.go", Content: []byte("package a\n\nfunc B() {}\n")},
+	}
+	stats, err := e.IngestFiles(t.Context(), st, repoID, "main", files)
+	require.NoError(t, err)
+	recomputeCalls := 0
+	for _, c := range *calls {
+		if c.method == "recompute" {
+			recomputeCalls++
+		}
+	}
+	assert.Equal(t, 1, recomputeCalls, "RecomputeGraphEdges must be called exactly once per IngestFiles batch, never once per file")
+	require.NotEmpty(t, *calls)
+	assert.Equal(t, "recompute", (*calls)[len(*calls)-1].method, "RecomputeGraphEdges must run AFTER every file's symbols/references have been written, not interleaved with them")
+	assert.Equal(t, fakeRecomputedEdgeCount, stats.EdgesRecomputed, "Stats.EdgesRecomputed must carry through RecomputeGraphEdges' own return count")
+}
+
+// TestIngestFiles_RecomputeGraphEdges_ScopedToCorrectRepoAndBranch is
+// MUTATION C's kill switch: if RecomputeGraphEdges were ever called with a
+// hardcoded or swapped repoID/targetBranch instead of the ones IngestFiles
+// was actually given, this catches it -- two distinct repoIDs and a
+// non-default branch name make a hardcoded/swapped value observably wrong
+// rather than accidentally correct.
+func TestIngestFiles_RecomputeGraphEdges_ScopedToCorrectRepoAndBranch(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	st, calls := newFakeStore(t)
+	repoID := uuid.Must(uuid.NewV7())
+	const branch = "feature/edge-scope"
+	_, err := e.IngestFiles(t.Context(), st, repoID, branch, []FileInput{
+		{Path: "a.go", Content: []byte("package a\n\nfunc A() {}\n")},
+	})
+	require.NoError(t, err)
+	var recompute *recordedCall
+	for i := range *calls {
+		if (*calls)[i].method == "recompute" {
+			recompute = &(*calls)[i]
+		}
+	}
+	require.NotNil(t, recompute, "RecomputeGraphEdges must have been called")
+	assert.Equal(t, repoID, recompute.repoID, "RecomputeGraphEdges must be scoped to the exact repoID IngestFiles received")
+	assert.Equal(t, branch, recompute.targetBranch, "RecomputeGraphEdges must be scoped to the exact targetBranch IngestFiles received, not a hardcoded default")
+}
+
+// TestIngestFiles_RecomputeGraphEdges_RunsEvenWhenBatchIsEmpty proves
+// recompute is not gated on FilesExtracted > 0: an ingest whose plan had
+// only deleted/renamed-file drops (applied by the orchestrator before
+// calling IngestFiles) still needs graph_edges rebuilt from whatever
+// symbols/references remain, per this bead's DESIGN ("per-repo recompute",
+// not incremental patching).
+func TestIngestFiles_RecomputeGraphEdges_RunsEvenWhenBatchIsEmpty(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	st, calls := newFakeStore(t)
+	stats, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", nil)
+	require.NoError(t, err)
+	require.Len(t, *calls, 1, "an empty files batch must still trigger exactly one RecomputeGraphEdges call")
+	assert.Equal(t, "recompute", (*calls)[0].method)
+	assert.Equal(t, fakeRecomputedEdgeCount, stats.EdgesRecomputed)
+}
+
+// TestIngestFiles_RecomputeGraphEdgesErrorWraps is MUTATION D's kill switch:
+// if IngestFiles ever swallowed RecomputeGraphEdges' error instead of
+// returning it, this fails with require.Error finding none.
+func TestIngestFiles_RecomputeGraphEdgesErrorWraps(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	boom := errors.New("recompute boom")
+	st := &storeMock{
+		ReplaceFileSymbolsFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, symbols []codegraph.SymbolInput) ([]codegraph.Symbol, error) {
+			return nil, nil
+		},
+		ReplaceFileReferencesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, refs []codegraph.ReferenceInput) (int64, error) {
+			return 0, nil
+		},
+		RecomputeGraphEdgesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+			return 0, boom
+		},
+	}
+	stats, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", []FileInput{
+		{Path: "a.go", Content: []byte("package a\n\nfunc A() {}\n")},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, boom, "the underlying RecomputeGraphEdges error must be matchable by identity through the wrap")
+	assert.Zero(t, stats.EdgesRecomputed, "a failed recompute must leave EdgesRecomputed at zero, not a partial/stale count")
+}
+
+// TestIngestFiles_RecomputeGraphEdges_NotCalledAfterStoreError is MUTATION
+// F's kill switch: if IngestFiles ever called RecomputeGraphEdges after a
+// per-file store write already failed, this mock -- which configures NO
+// RecomputeGraphEdgesFunc -- panics the instant that call happens (this
+// codebase's "unconfigured mock method panicking means real assertions
+// never run" convention doubling as a hard trip-wire here), so a passing
+// run is itself the proof recompute was never reached.
+func TestIngestFiles_RecomputeGraphEdges_NotCalledAfterStoreError(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	boom := errors.New("db boom")
+	st := &storeMock{
+		ReplaceFileSymbolsFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, symbols []codegraph.SymbolInput) ([]codegraph.Symbol, error) {
+			return nil, boom
+		},
+	}
+	_, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", []FileInput{
+		{Path: "a.go", Content: []byte("package a\n\nfunc A() {}\n")},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, boom)
+}
+
+// TestIngestFiles_RecomputeGraphEdges_SkippedOnEmptyBatchWithCanceledContext
+// proves the final ctx.Err() check guards the empty-files path too: the
+// per-file loop's own ctx check (proved by
+// TestIngestFiles_ContextCanceledStopsImmediately) never runs at all when
+// files is empty, so without a second check immediately before the
+// recompute call, an already-canceled context would silently reach
+// RecomputeGraphEdges instead of aborting.
+func TestIngestFiles_RecomputeGraphEdges_SkippedOnEmptyBatchWithCanceledContext(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	st, calls := newFakeStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := e.IngestFiles(ctx, st, uuid.Must(uuid.NewV7()), "main", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, *calls, "an already-canceled context must stop before RecomputeGraphEdges is ever called, even for an empty files batch")
 }
