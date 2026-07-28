@@ -1,5 +1,6 @@
-// Command demoenv is the support tool for `task demo:m3` and `task
-// demo:m4`. It is NOT part of the shipped product: `task build:bin` builds
+// Command demoenv is the support tool for `task demo:m3`, `task demo:m4`
+// and `task demo:m5`. It is NOT part of the shipped product: `task
+// build:bin` builds
 // exactly the three binaries this repo ships (server, loam, loamhook) and
 // deliberately does not build this one, because cmd/server's startup
 // contract is that loamhook sits beside it and nothing else has to.
@@ -29,6 +30,14 @@
 //     subcommand keeps the demo's dependency set at "the Go toolchain,
 //     git, curl, and a docker CLI", the same set demo:m1 and demo:m2
 //     already need.
+//   - a FORGEJO-REST-SHAPED pull-request surface in front of the fake
+//     forge (forgejoapi.go, added for demo:m5). internal/fakeforge serves
+//     its own /provider/* REST shape, which the acceptance suite reaches
+//     through a *fakeforge.Client substituted for the whole
+//     forge.Provider; the real compiled server instead builds a
+//     *forge.Forgejo and calls Forgejo's actual /api/v1/repos/.../pulls
+//     endpoints, which the fake does not serve. See forgejoapi.go for why
+//     that translator lives here rather than in internal/fakeforge.
 //
 // Subcommands:
 //
