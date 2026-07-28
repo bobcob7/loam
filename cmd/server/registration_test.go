@@ -363,3 +363,60 @@ func TestBuildRouter_NilPool_RepoAdminServiceRejectsAgentIdentity(t *testing.T) 
 	require.ErrorAs(t, err, &connectErr)
 	assert.Equal(t, connect.CodeUnauthenticated, connectErr.Code(), "agent identity headers alone must never satisfy AdminOnly")
 }
+
+// TestBuildRouter_NilPool_CredentialServiceStillHitsGroupFallback is the
+// "before" half of loam-ofg.15's registration proof, and it documents the
+// gap that bead closed: for the whole life of this binary before it,
+// loam.admin.v1.CredentialService was declared in the proto and generated
+// into internal/gen with no handler package and no registration anywhere,
+// so every /loam.admin.v1.CredentialService/* request fell through
+// internal/server's group-level 404 fallback. That left NO supported way
+// to store an encrypted forge token at all, while EnrollRepo,
+// internal/gittransport, and internal/mirrorsync had all been reading the
+// credentials table since they landed. This exercises registerCredential
+// Service's nil-pool guard, the case run() itself never hits.
+func TestBuildRouter_NilPool_CredentialServiceStillHitsGroupFallback(t *testing.T) {
+	t.Parallel()
+	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := adminv1connect.NewCredentialServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetCredentialStatus(ctx, connect.NewRequest(&adminv1.GetCredentialStatusRequest{Host: "forgejo.example.com"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code())
+	assert.Contains(t, connectErr.Message(), "no /loam.admin.v1. service registered",
+		"with no pool wired in, CredentialService must be entirely unregistered -- the group fallback's own message")
+}
+
+// TestBuildRouter_WithPool_CredentialServiceIsGenuinelyRegistered is the
+// fast, container-free registration proof for loam-ofg.15. The
+// discriminator here is unusually clean: the group fallback answers
+// CodeNotFound, whereas the real handler over an UNREACHABLE pool answers
+// CodeInternal -- its GetStatus call fails to dial, which is neither
+// credentialstore.ErrNotFound (which would be a successful "no credential
+// present" response) nor anything else handler.ErrorMapper classifies. So
+// a code that is not NotFound proves the request reached real code that
+// really tried to query.
+func TestBuildRouter_WithPool_CredentialServiceIsGenuinelyRegistered(t *testing.T) {
+	t.Parallel()
+	pool := unreachablePool(t)
+	ingestPool := ingest.NewPool(testConfigForRouter().Logger, pool, nil, 1)
+	router := buildRouter(testConfigForRouter(), pool, ingestPool, "")
+	srv := httptest.NewServer(router.Handler())
+	t.Cleanup(srv.Close)
+	client := adminv1connect.NewCredentialServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetCredentialStatus(ctx, connect.NewRequest(&adminv1.GetCredentialStatusRequest{Host: "forgejo.example.com"}))
+	require.Error(t, err, "the underlying pool is unreachable, so this must still fail -- but for a REAL reason")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInternal, connectErr.Code(),
+		"the real handler's store call fails to dial and maps to CodeInternal; the fallback would have said CodeNotFound")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real CredentialServiceHandler registerCredentialService wires in buildRouter")
+}

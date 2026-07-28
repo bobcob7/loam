@@ -88,6 +88,7 @@ import (
 	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/handler/credential"
 	"github.com/bobcob7/loam/internal/handler/git"
 	"github.com/bobcob7/loam/internal/handler/graph"
 	"github.com/bobcob7/loam/internal/handler/meta"
@@ -397,6 +398,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool,
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
 	registerRepoAdminService(router, cfg, pool, ingestPool, hookBinaryPath)
+	registerCredentialService(router, cfg, pool)
 	registerProposalService(router, cfg, pool)
 	registerGraphService(router, cfg, pool)
 	registerSearchService(router, cfg, pool)
@@ -548,6 +550,50 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
 		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
+	))
+}
+
+// registerCredentialService wires loam.admin.v1.CredentialService
+// (loam-ofg.15) over pool: the one token per forge host that every repo on
+// that host shares. It builds the same crypto.NewEncryptor +
+// credentialstore.New pair registerRepoAdminService builds -- deliberately
+// a second, independent construction rather than a shared one, so a
+// failure to build either service's encryptor takes down only that
+// service, matching the log-and-skip choice every other register* function
+// here already makes for its own optional collaborator.
+//
+// Until this line existed there was NO supported way to store an encrypted
+// forge token at all: /loam.admin.v1.CredentialService/* 404'd through
+// internal/server's group-level fallback, and the only writer of the
+// credentials table in the tree was cmd/demoenv's seed-credential
+// subcommand reaching through internal/credentialstore directly (a plain
+// psql INSERT cannot substitute -- token_ciphertext is AES-GCM under
+// LOAM_ENCRYPTION_KEY). RepoAdminService.EnrollRepo, gittransport, and
+// mirrorsync have all been READING that table since they landed.
+//
+// The forge provider passed as the token validator is a single,
+// host-agnostic *forge.Forgejo (host and token both empty), the same shape
+// registerRepoAdminService reuses for gittransport's credential converter
+// and for the same reason: Provider.ValidateToken takes its host and token
+// explicitly, so no per-host binding is needed or wanted here. That is the
+// opposite of repoadmin.ForgeChecker, which must rebuild per call because
+// CheckRepo compares against the instance's own bound host.
+//
+// pool == nil is the only unconditional guard, for the same reason and
+// exercised the same way as registerMetadataServices' own guard.
+func registerCredentialService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	enc, err := crypto.NewEncryptor(cfg.EncryptionKey)
+	if err != nil {
+		cfg.Logger.Error("credential service: building encryptor, not registering", "error", err)
+		return
+	}
+	credentials := credentialstore.New(pool, enc, cfg.Logger)
+	validator := forge.NewForgejo("", "", &http.Client{}, cfg.Logger)
+	router.RegisterAdmin(adminv1connect.NewCredentialServiceHandler(
+		credential.New(credentials, validator, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 	))
 }
 
