@@ -1117,7 +1117,15 @@ func TestLookupSymbolsByName_IncludesMultipleInScopeRepos(t *testing.T) {
 // limit/truncated contract against a real database, not just a mock:
 // docs/cli-spec.md:535-537 requires truncated: true on a capped `graph`
 // response for every subquery, not only the blast-radius ones -- this
-// seeds 4 same-named symbols and asks for at most 2.
+// seeds 4 same-named symbols and asks for at most 2. It also pins WHICH 2
+// of the 4 survive (f0.go, f1.go, the ORDER BY s.file, s.line NULLS LAST,
+// s.id head), not merely that 2 survive, mirroring
+// TestLookupReferencesByName_TruncatesAndReportsTruncated above: asserting
+// only Len==2 leaves two mutants undetected -- trimSymbols returning the
+// tail (symbols[len-effectiveLimit:]) instead of the head, and the query's
+// ORDER BY being swapped for an arbitrary one such as `id DESC` -- exactly
+// the failure mode TestDependents_NearestDepthFirst_NotUUIDOrder (FIX 2,
+// above) already guards for Dependents.
 func TestLookupSymbolsByName_TruncatesAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	store, pool, repoID := newTestStore(t)
@@ -1129,7 +1137,8 @@ func TestLookupSymbolsByName_TruncatesAndReportsTruncated(t *testing.T) {
 	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
-	assert.Len(t, symbols, 2)
+	require.Len(t, symbols, 2)
+	assert.Equal(t, []string{"f0.go", "f1.go"}, []string{symbols[0].File, symbols[1].File}, "a capped result must keep the ORDER BY-first rows (f0.go, f1.go), not an arbitrary 2 of the 4 matches")
 }
 
 // TestLookupSymbolsByName_ExactlyLimitMatches_NotTruncated is the negative
