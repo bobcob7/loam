@@ -1689,6 +1689,831 @@ tasks:
         echo "  - loam-8d2   work show reports no round, because the proto carries none"
         echo "=== demo:m4 complete ==="
 
+  demo:m5:
+    desc: >-
+      Demo M5 (loam-rle): the loop closes. An admin accepts a reviewed,
+      approved proposal through the REAL ProposalService.AcceptProposal
+      RPC; the sync engine pushes loam/<work-branch> upstream and opens the
+      pull request, body and all; a conflicting target advance resets the
+      proposal to draft and flags a second, never-reviewed branch merely
+      conflicted; the author catches BOTH up with real pushes through
+      /git/* and the real pre-receive hook, which restores the reviewed one
+      to reviewable with no request-review call and leaves the draft one
+      draft; a second accept fast-forwards the SAME pull request rather
+      than opening another; and merging that pull request on the forge
+      flips the branch complete on the next sync tick, with graph and
+      search then resolving the merged code at the merge commit. Needs the
+      Go toolchain, git, curl, and a docker-CLI-compatible client talking
+      to a Docker (or Docker-API-compatible) daemon, same as
+      demo:m1/m2/m3/m4; set LOAM_DEMO_DOCKER if your client binary is not
+      literally named `docker`. Runs from a clean checkout with no manual
+      setup. Every fixture choice is deliberate:
+        - THE FORGE'S PR API IS FAKED, THE CLIENT IS REAL. This is the
+          first demo whose subject is the forge REST surface rather than
+          git, and it is the first thing that has to be solved. The
+          acceptance suite substitutes a *fakeforge.Client for the whole
+          forge.Provider, so *forge.Forgejo -- the production client
+          cmd/server/sync.go's forgePRTracker actually builds -- is never
+          on its path. This demo drives the real compiled bin/server, so
+          that client IS on the path and it speaks Forgejo's own endpoints
+          (POST/GET/PATCH .../api/v1/repos/<owner>/<repo>/pulls[/<n>]),
+          which internal/fakeforge does not serve. cmd/demoenv's
+          forgejoapi.go is a Forgejo-REST-shaped translator mounted in
+          FRONT of the fake forge, exactly the way demo:m3 fakes Ollama's
+          wire shape in front of the real ollama.Embedder: the production
+          client's request encoding, its 404/401/409/412 classification,
+          its html_url/number/state/merged decoding, and GetPRState's own
+          "closed + merged -> merged" fold are all exercised for real.
+          Numbering, the state machine, and the real git merge behind
+          /control/merge-pr all stay in internal/fakeforge; the shim only
+          translates. It lives in cmd/demoenv rather than in the fake
+          because internal/fakeforge's provider surface has a shared
+          contract suite (loam-li0.9) pinning fake and real Forgejo against
+          ONE table of behaviours, and a second differently-shaped surface
+          in that package would force that whole contract to say which
+          surface each row applies to.
+        - repos.forge_host CARRIES A SCHEME HERE, AND THAT IS A WORKAROUND,
+          NOT A FIXTURE PREFERENCE. forge.Forgejo's apiBaseURL prepends
+          `https://` to any host that does not already contain `://`, and
+          repoadmin's deriveRepoIdentity stores url.Host -- a bare
+          `127.0.0.1:18095`. So a real EnrollRepo against ANY plain-HTTP
+          forge produces a repo whose PR calls go to https:// and fail at
+          the TLS handshake. Real forges are HTTPS, so this is not a
+          production defect, but it does mean the only way to reach a local
+          http forge's PR API is a forge_host of `http://127.0.0.1:18095`
+          -- a shape apiBaseURL explicitly supports ("host may ... include a
+          scheme"). That is why this demo seeds its enrolled repo the way
+          demo:m2 and demo:m4 seed theirs, with a direct INSERT plus a real
+          `git clone --mirror`, instead of calling EnrollRepo the way
+          demo:m3 does. Filed as loam-0l9m. demo:m3 remains the demo that
+          proves EnrollRepo; the row seeded here is byte-for-byte what
+          EnrollRepo would write apart from that one scheme.
+        - THE REPO NAME IS ONE NAME EVERYWHERE, WHICH THE SEEDING BUYS.
+          `loam-demo/doc-server` is simultaneously repos.name, the fake
+          forge's own repo name, the `<owner>/<repo>` in the PR API path,
+          and the path inside the git URL. That alignment is what makes the
+          accepter's CreatePR(repos.name, ...) address the same repository
+          the push went to. It is also exactly one '/', which
+          internal/handler/git's validRepoName requires and
+          mirrorpath.DataDir's inverse depends on.
+        - ONE WORK BRANCH DOES THE WHOLE ARC, WHICH IS WHY THE PR NUMBER IS
+          A SINGLE NUMBER. The reviewed branch is accepted, conflicted,
+          caught up, re-reviewed, accepted AGAIN, and only then merged. Two
+          AcceptProposal calls, one pr_number, one forge merge -- the
+          bead's definition of done -- is only expressible on one branch;
+          merging first would leave it terminal and the second accept would
+          have to be a different branch's first accept, which proves
+          nothing about idempotency.
+        - A SECOND, DRAFT WORK BRANCH IS THE CONTROL. docs/git-spec.md's
+          catch-up rule is conditional: a branch DEMOTED by the advance
+          (conflict 'reset') flips back to reviewable and the server opens
+          a fresh review round for it; a branch that was merely FLAGGED
+          (never demoted, still draft) loses the flag and gains no round at
+          all. One branch cannot show a conditional. So the same advance
+          hits both, and both catch up with real pushes: the reviewed one
+          comes back reviewable with round 2 opened by requested_by
+          'server', and the draft one comes back with conflict 'none',
+          state still draft, and review_rounds still EMPTY. The empty half
+          is the load-bearing one -- a rule that always opened a round
+          would satisfy the first assertion on its own.
+        - THE TWO BRANCHES CONFLICT ON DIFFERENT FILES. README.md for the
+          reviewed branch, CHANGELOG.md for the draft one, rewritten by two
+          upstream commits in one advance. A shared conflict file would
+          make the second branch's catch-up depend on what the first one
+          resolved, so the reset-versus-flagged halves could no longer be
+          read independently -- and after the merge, the draft branch would
+          re-conflict against its own target for a reason that has nothing
+          to do with what this demo is showing.
+        - THE ADVANCE IS ORDINARY, NOT demo:m3's FORCE-PUSH. That demo's
+          subject is "the mirror follows upstream, always", so it needs a
+          rewrite. This demo's subject is mergeability, so it needs a plain
+          fast-forward advance that happens to touch the same lines. Both
+          go through the same fake-forge control API; the difference is
+          which contract is being shown.
+        - THE CATCH-UP IS A REAL PUSH, NOT A FETCH. internal/catchup is
+          wired as the policy socket's post-accept hook
+          (cmd/server/main.go), so it only ever runs on a push that reached
+          and passed the real pre-receive hook. A `git fetch` in the
+          author's clone would move nothing on the server and the flag
+          would never clear. This target therefore does what a real agent
+          does: fetch origin, merge origin/<target>, resolve the conflict
+          by hand, commit, push -- and asserts the merge really did
+          conflict first, so a fixture edit that made the two sides
+          auto-mergeable would fail loudly rather than pass vacuously.
+          loam-ppb is what makes that push possible at all: until it was
+          fixed, internal/refpolicy compared work_branches.author (the full
+          identifier) against the bare LOAM_AGENT_NAME the hook inherited,
+          and no author could push to their own branch.
+        - REVIEW IS THE MINIMUM AcceptProposal REQUIRES, DELIBERATELY.
+          Each round here is one approve verdict with no staged comments.
+          The comment/stage/publish machinery is demo:m4's subject and is
+          proven there; repeating it would add moving parts to a demo whose
+          subject is what the ADMIN does with the result. The verdicts are
+          not decoration: AcceptProposal refuses a branch with no approve
+          verdict IN THE CURRENT ROUND, so the round-2 re-review is what
+          makes the second accept legal at all -- the round-1 approve is
+          stale by then, and the demo asserts that too.
+        - THE PR IS READ BACK FROM THE FORGE, NOT FROM LOAM. Every claim
+          about the pull request -- one PR ever created, its number, its
+          head and base branches, its title, its body, its merged flag --
+          is asserted against the forge's own list-pulls response, decoded
+          by `demoenv check-prs`. Asking Loam what PR it thinks it opened
+          would make the assertion circular. The list is requested with
+          state=all, not the default state=open, precisely because the
+          count is the "no second PR" claim and an open-only list empties
+          itself the moment the PR merges -- it would report zero and pass
+          for the wrong reason.
+        - THE BODY ASSERTION IS EXACT AND TWO-SIDED. docs/sync-spec.md
+          specifies the body as the work branch's description followed by
+          "---\nProposed via Loam.", and says agent attribution belongs in
+          the commit authors, not here. check-prs asserts the body EQUALS
+          description + blank line + that footer (not "contains", which a
+          footer buried mid-body would satisfy) AND that neither agent
+          identifier nor the word "admin" appears anywhere in it.
+        - COMPLETION IS OBSERVED, NEVER ASSERTED INTO EXISTENCE. Nothing
+          in this target writes work_branches.state, upstream_pr_number, or
+          conflict. The PR merges on the forge; one live sync tick
+          (LOAM_SYNC_INTERVAL=2s, the production mirrorsync.Scheduler that
+          cmd/server/sync.go starts) polls it, and the branch reaches
+          complete on its own. work_branches.upstream_pr_number is
+          StorePRPoller's ENTIRE poll set and *mirrorsync
+          .StoreProposalAccepter is its only writer tree-wide, so this
+          demo's first accept is also what puts anything in that poll set
+          at all.
+        - THE INDEX PROOF IS PROVEN, NOT SAMPLED, the same way demo:m3's
+          is. The proposal adds pkg/session/session.go, whose StartSession
+          exists on the work branch and nowhere upstream, so its appearance
+          in the graph AT THE MERGE COMMIT can only mean the merge was
+          fetched, ingested and drained. The search query's four tokens
+          appear verbatim in the doc comment attached to that function and
+          in no other file of the POST-MERGE corpus -- which includes the
+          two Markdown files this demo itself rewrites, not just
+          fixture-polyglot's tree. cmd/demoenv/m5fixture_test.go checks
+          that, plus hash-bucket collision freedom at testembed.Dimension
+          and that the tokens land inside the chunk the chunker builds for
+          that symbol, against the fixture on disk. So every other chunk
+          scores exactly zero and "ranks first" is a property, not a hope.
+          Those same unit tests also assert the two conflict fixtures
+          genuinely differ from each other and from the fixture's original,
+          so no future edit can make the conflicts auto-merge.
+        - THE EMBEDDER IS demo:m3's, FOR demo:m3's REASONS. Ingest cannot
+          run without one and internal/config defaults to a local Ollama;
+          internal/fakeembed speaks Ollama's /api/embed wire shape
+          deterministically and LOAM_EMBEDDER_URL points the server's real,
+          shipped ollama.Embedder at it, so no operator has to install
+          anything.
+        - KNOWN DEFECT (loam-8d2): `loam work show` reports no round, and
+          cannot -- proto WorkBranch has no round field. It also does not
+          print upstream_pr_url even though the proto carries it (filed as
+          loam-ls7u). So this demo reads state from `work show`, rounds from
+          `work verdicts`, and the recorded PR from the ADMIN queue
+          (ListProposals, whose Proposal.work_branch does carry
+          upstream_pr_url) and from the forge itself.
+        - KNOWN DEFECT (loam-5iu): `loam work diff` is precondition_failed
+          until a ref exists in the mirror. demo:m4 shows that failure at
+          the moment it bites; this demo simply never calls work diff
+          before its first push, so the defect does not arise here.
+        - A CONFLICTED BRANCH'S REJECTION IS SHOWN AS THE STATE ONE. The
+          demo asserts AcceptProposal refuses the reset branch, and the
+          refusal names its STATE ("is draft, not reviewed"), not its
+          conflict flag. That is correct and not a gap in the assertion:
+          MarkConflicted demotes a reviewed branch in the same statement
+          that flags it, so a reviewed-AND-conflicted row cannot arise from
+          a target advance at all, and the handler's conflict precondition
+          is reachable only from a conflicted branch that was separately
+          moved back to reviewed.
+        - LOAM_DATA_DIR is a short /tmp/loam-m5-data.XXXXXX for exactly the
+          reason demo:m2, demo:m3 and demo:m4 document: the policy socket
+          binds <LOAM_DATA_DIR>/hook.sock and unix sockets cap sun_path at
+          ~104 bytes, so a long data dir makes the server exit before the
+          readiness poll could ever succeed.
+        - Readiness is always a poll, never a sleep: GET /healthz for the
+          server, Ollama's own GET / for the fake embedder, a real
+          authenticated `git ls-remote` for the fake forge, and, for every
+          asynchronous transition afterwards, a poll on the state itself
+          rather than a fixed wait. The fixed ports (18095 forge, 18096
+          embedder, 18097 server) and the container name are self-healed
+          pre-flight exactly as demo:m2/m3/m4 self-heal theirs, and for the
+          identical reason: mvdan/sh's EXIT trap does not fire on go-task's
+          SIGINT interception, so a Ctrl-C'd run would otherwise leak a
+          process that answers the next run's readiness poll and hands it a
+          false-positive "ready" for a boot that never happened.
+    cmds:
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        docker_cli="${LOAM_DEMO_DOCKER:-docker}"
+        pg_container="loam-demo-m5-pg"
+        server_bin="$repo_root/bin/server"
+        loam_bin="$repo_root/bin/loam"
+        demoenv_bin="$repo_root/bin/demoenv"
+        forge_port="18095"
+        embed_port="18096"
+        http_port="18097"
+        http_addr="127.0.0.1:$http_port"
+        forge_addr="127.0.0.1:$forge_port"
+        embed_addr="127.0.0.1:$embed_port"
+        forge_token="loam-demo-m5-forge-token"
+        repo_name="loam-demo/doc-server"
+        target_branch="main"
+        upstream_url="http://$forge_addr/git/$repo_name.git"
+        auth_upstream_url="http://demo:$forge_token@$forge_addr/git/$repo_name.git"
+        forge_api="http://$forge_addr/api/v1/repos/$repo_name/pulls"
+        # forge_host carries the scheme on purpose -- see the "repos.
+        # forge_host CARRIES A SCHEME HERE" note above. It is both the
+        # repos.forge_host column and the credentials.host key, so the two
+        # must agree, which is why the credential is seeded under exactly
+        # this string.
+        forge_host="http://$forge_addr"
+        author_name="ada-lovelace"
+        author_id="1"
+        author_role="author"
+        author_identifier="$author_name-$author_id-$author_role"
+        reviewer_name="grace-hopper"
+        reviewer_id="2"
+        reviewer_role="reviewer"
+        reviewer_identifier="$reviewer_name-$reviewer_id-$reviewer_role"
+        admin_password="throwaway-admin-pass"
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        proposal_title="Add pkg/session, the fixture's first stateful package"
+        proposal_description="Adds StartSession and documents it. Raised so there is a real proposal to accept, conflict, and merge."
+        data_dir=""
+        author_ws=""
+        reviewer_ws=""
+        workspace=""
+        # find_pids/stop_proc/clear_stale_port are demo:m3's and demo:m4's,
+        # verbatim in behaviour and for the reasons their own comments
+        # give: go-task's shell (mvdan/sh) has no `kill` builtin at all and
+        # its `$!` is an internal job id rather than a signalable pid, so
+        # processes are located by absolute exec path via pgrep -f -- which
+        # also self-heals anything a Ctrl-C'd previous run leaked, with no
+        # pidfile to go stale. clear_stale_port is the belt-and-suspenders
+        # net for a leftover process of ANY kind squatting on a fixed port
+        # and answering a readiness poll with a false-positive.
+        find_pids() {
+          pgrep -f "$1" 2>/dev/null || true
+        }
+        stop_proc() {
+          stop_bin="$1"; stop_label="$2"
+          stop_pids="$(find_pids "$stop_bin")"
+          if [ -z "$stop_pids" ]; then
+            echo "$stop_label: no running process found"
+            return 0
+          fi
+          echo "$stop_label: stopping pid(s): $(echo "$stop_pids" | tr '\n' ' ')"
+          for stop_pid in $stop_pids; do
+            /bin/kill -TERM "$stop_pid" 2>/dev/null || true
+          done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_pids "$stop_bin")" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_pids "$stop_bin"); do
+            /bin/kill -9 "$stop_pid" 2>/dev/null || true
+          done
+        }
+        clear_stale_port() {
+          command -v lsof >/dev/null 2>&1 || return 0
+          for stale_pid in $(lsof -ti "tcp:$1" 2>/dev/null || true); do
+            [ -z "$stale_pid" ] && continue
+            echo "  killing stale pid $stale_pid bound to port $1"
+            /bin/kill -9 "$stale_pid" 2>/dev/null || true
+          done
+        }
+        cleanup() {
+          echo ""
+          echo "=== demo:m5 cleanup: stopping server + upstream, removing container $pg_container and temp dirs ==="
+          stop_proc "$server_bin" "cleanup(server)"
+          stop_proc "$demoenv_bin upstream-m5" "cleanup(upstream)"
+          clear_stale_port "$http_port"
+          clear_stale_port "$forge_port"
+          clear_stale_port "$embed_port"
+          if ! "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1; then
+            echo "demo:m5: NOTE -- $pg_container was not present to remove (already gone, or never created)" >&2
+          fi
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$author_ws" ] && rm -rf "$author_ws"
+          [ -n "$reviewer_ws" ] && rm -rf "$reviewer_ws"
+          [ -n "$workspace" ] && rm -rf "$workspace"
+        }
+        trap cleanup EXIT
+        echo "=== demo:m5 pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1 || true
+        stop_proc "$server_bin" "pre-flight(server)"
+        stop_proc "$demoenv_bin upstream-m5" "pre-flight(upstream)"
+        clear_stale_port "$http_port"
+        clear_stale_port "$forge_port"
+        clear_stale_port "$embed_port"
+        wait_for_http_ok() {
+          poll_url="$1"; poll_log="$2"; poll_label="$3"; poll_timeout="${4:-60}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            if [ "$poll_code" = "200" ]; then
+              echo "$poll_label ready (HTTP 200 from $poll_url)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - poll_start ))" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s -- log:" >&2
+              cat "$poll_log" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        # assert_equal is the shell-side counterpart to demoenv's decoders,
+        # for the handful of claims that are about a single scalar the
+        # server does not expose over any RPC (a conflict flag, a review
+        # round's requested_by, a recorded PR number). It exits non-zero on
+        # mismatch rather than printing a warning: everything in this demo
+        # either passes loudly or fails loudly.
+        assert_equal() {
+          if [ "$2" != "$3" ]; then
+            echo "FAIL: $1: got \"$2\", want \"$3\"" >&2
+            exit 1
+          fi
+          echo "PASS: $1 ($3)"
+        }
+        psql_scalar() {
+          "$docker_cli" exec "$pg_container" psql -U loam -d loam -tAc "$1" | tr -d '[:space:]'
+        }
+        # admin RPCs go over the Connect JSON transport with HTTP Basic
+        # auth. connect-go registers the JSON codec by default and
+        # cmd/server passes no HandlerOptions, so plain curl is a
+        # first-class client here -- which matters more for this demo than
+        # for demo:m3's, because ProposalService is the ONE service with no
+        # CLI at all: the admin surface is the web interface, and this is
+        # what that interface would send.
+        proposal_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$http_addr/loam.admin.v1.ProposalService/$1"
+        }
+        repo_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$http_addr/loam.admin.v1.RepoAdminService/$1"
+        }
+        forge_api_get() {
+          curl -sS --fail-with-body -H "Authorization: token $forge_token" "$1"
+        }
+        author_cwd=""
+        reviewer_cwd=""
+        author_cli() {
+          ( cd "$author_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+              LOAM_AGENT_NAME="$author_name" LOAM_AGENT_ID="$author_id" LOAM_AGENT_ROLE="$author_role" \
+              "$loam_bin" "$@" )
+        }
+        reviewer_cli() {
+          ( cd "$reviewer_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+              LOAM_AGENT_NAME="$reviewer_name" LOAM_AGENT_ID="$reviewer_id" LOAM_AGENT_ROLE="$reviewer_role" \
+              "$loam_bin" "$@" )
+        }
+        boot_server() {
+          boot_log="$1"; boot_label="$2"
+          env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
+            LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+            LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+            LOAM_SYNC_INTERVAL=2s LOAM_INGEST_WORKERS=2 \
+            LOAM_EMBEDDER_URL="http://$embed_addr" LOAM_EMBEDDER_MODEL=nomic-embed-text \
+            "$server_bin" >"$boot_log" 2>&1 &
+          wait_for_http_ok "http://$http_addr/healthz" "$boot_log" "$boot_label" 60
+        }
+        # wait_for_state polls the work branch's own state through the real
+        # CLI. State is monotone for every transition this demo waits on
+        # (reviewed -> draft on a conflicting advance, draft -> reviewable
+        # on a catch-up push, reviewed -> complete on a merge), and nothing
+        # else is moving these rows, so a poll that has seen the target
+        # state has seen the transition rather than a moment of one.
+        wait_for_state() {
+          state_wb="$1"; state_want="$2"; state_label="$3"; state_timeout="${4:-90}"
+          state_start=$(date +%s)
+          while true; do
+            state_got="$(author_cli work show "$repo_name" "$state_wb" 2>/dev/null | "$demoenv_bin" field -name state 2>/dev/null || true)"
+            if [ "$state_got" = "$state_want" ]; then
+              echo "PASS: $state_label (state=$state_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - state_start ))" -ge "$state_timeout" ]; then
+              echo "FAIL: $state_label: $state_wb is in state \"$state_got\" after ${state_timeout}s, want \"$state_want\"" >&2
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 0.5
+          done
+        }
+        wait_for_conflict() {
+          conflict_wb="$1"; conflict_want="$2"; conflict_label="$3"; conflict_timeout="${4:-90}"
+          conflict_start=$(date +%s)
+          while true; do
+            conflict_got="$(psql_scalar "SELECT conflict FROM work_branches WHERE name = '$conflict_wb';")"
+            if [ "$conflict_got" = "$conflict_want" ]; then
+              echo "PASS: $conflict_label (conflict=$conflict_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - conflict_start ))" -ge "$conflict_timeout" ]; then
+              echo "FAIL: $conflict_label: $conflict_wb carries conflict \"$conflict_got\" after ${conflict_timeout}s, want \"$conflict_want\"" >&2
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 0.5
+          done
+        }
+        # wait_for_ingest polls the one signal that cannot race: the
+        # indexed branch's own repo_target_branches.ingested_ref. demo:m3
+        # explains at length why repos.sync_state is unusable for this (it
+        # CYCLES idle -> syncing -> idle under a live scheduler, loam-4q2,
+        # so one sample cannot tell "never ran" from "mid-cycle"), and
+        # counting ingest_jobs rows is not usable HERE either: the pool
+        # coalesces on (repo, branch, kind), so whether the merge produces
+        # a second row or folds into a still-queued one is an
+        # implementation detail this demo has no business pinning.
+        # ingested_ref is written only by a SUCCESSFUL ingest, only ever
+        # moves forward, and is exactly the ref the graph and search
+        # envelopes below are asserted to name -- so a poll that has seen
+        # it has seen the whole pipeline finish for that commit.
+        wait_for_ingest() {
+          ingest_want="$1"; ingest_label="$2"; ingest_timeout="${3:-240}"
+          ingest_start=$(date +%s)
+          while true; do
+            ingest_got="$(psql_scalar "SELECT coalesce(ingested_ref, '') FROM repo_target_branches WHERE branch = '$target_branch' AND repo_id = (SELECT id FROM repos WHERE name = '$repo_name');")"
+            if [ "$ingest_got" = "$ingest_want" ]; then
+              echo "PASS: $ingest_label (ingested_ref=$ingest_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - ingest_start ))" -ge "$ingest_timeout" ]; then
+              echo "FAIL: $ingest_label: ingested_ref is \"$ingest_got\" after ${ingest_timeout}s, want \"$ingest_want\"" >&2
+              repo_rpc ListIngestJobs "{\"repo\":\"$repo_name\",\"page\":{\"limit\":50}}" >&2 || true
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 1
+          done
+        }
+        # catch_up performs one agent-side catch-up: fetch the target, merge
+        # it into the work branch, resolve the ONE conflicting file with the
+        # fixture's recorded resolution, commit, and push through /git/*.
+        # The merge is ASSERTED to conflict: if a future fixture edit made
+        # the two sides auto-mergeable, the whole catch-up half of this demo
+        # would otherwise pass while proving nothing.
+        catch_up() {
+          catch_wb="$1"; catch_file="$2"; catch_fixture="$3"; catch_label="$4"
+          git -C "$author_clone" checkout -q "$catch_wb"
+          git -C "$author_clone" fetch -q origin "$target_branch"
+          if git -C "$author_clone" merge --no-edit -q FETCH_HEAD >/dev/null 2>&1; then
+            echo "FAIL: $catch_label: merging $target_branch into $catch_wb succeeded cleanly, so there was no conflict to catch up from" >&2
+            exit 1
+          fi
+          catch_conflicts="$(git -C "$author_clone" diff --name-only --diff-filter=U)"
+          if [ "$catch_conflicts" != "$catch_file" ]; then
+            echo "FAIL: $catch_label: git reported conflicts in [$catch_conflicts], want exactly [$catch_file]" >&2
+            exit 1
+          fi
+          echo "$catch_label: git reported a real conflict in $catch_file; the author resolves it"
+          "$demoenv_bin" fixture-file -name "$catch_fixture" > "$author_clone/$catch_file"
+          git -C "$author_clone" add "$catch_file"
+          git -C "$author_clone" commit --quiet -m "merge $target_branch into $catch_wb, resolving $catch_file"
+          if ! catch_push="$(git -C "$author_clone" push origin "$catch_wb" 2>&1)"; then
+            echo "$catch_push"
+            echo "FAIL: $catch_label: the author's catch-up push was REJECTED. Catch-up detection only ever runs" >&2
+            echo "      on a push that reached the real pre-receive hook, so a rejected push means nothing" >&2
+            echo "      downstream of this point can be true. See loam-ppb." >&2
+            exit 1
+          fi
+          echo "$catch_push"
+        }
+        echo ""
+        echo "=== step 1/18: build server, loam, loamhook (the shipped three) plus demoenv (demo support) ==="
+        mkdir -p bin
+        go build -o bin/server ./cmd/server
+        go build -o bin/loam ./cmd/loam
+        go build -o bin/loamhook ./cmd/loamhook
+        go build -o bin/demoenv ./cmd/demoenv
+        echo ""
+        echo "=== step 2/18: start a fresh Postgres/pgvector container ==="
+        "$docker_cli" run -d --name "$pg_container" \
+          -e POSTGRES_USER=loam -e POSTGRES_PASSWORD=loam -e POSTGRES_DB=loam \
+          -p 127.0.0.1::5432 pgvector/pgvector:pg16 >/dev/null
+        pg_wait_deadline=$(( $(date +%s) + 60 ))
+        until "$docker_cli" exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$pg_wait_deadline" ]; then
+            echo "postgres never became ready within 60s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        pg_hostport="$("$docker_cli" port "$pg_container" 5432 | head -1)"
+        echo "postgres ready at $pg_hostport"
+        database_url="postgres://loam:loam@${pg_hostport}/loam?sslmode=disable"
+        data_dir="$(mktemp -d /tmp/loam-m5-data.XXXXXX)"
+        workspace="$(mktemp -d /tmp/loam-m5-ws.XXXXXX)"
+        author_ws="$(mktemp -d /tmp/loam-m5-author.XXXXXX)"
+        reviewer_ws="$(mktemp -d /tmp/loam-m5-reviewer.XXXXXX)"
+        author_cwd="$author_ws"
+        reviewer_cwd="$reviewer_ws"
+        server_log="$workspace/server.log"
+        echo "LOAM_DATA_DIR=$data_dir (short, so <dir>/hook.sock fits unix's sun_path limit)"
+        echo "author   workspace: $author_ws   identity: $author_identifier"
+        echo "reviewer workspace: $reviewer_ws   identity: $reviewer_identifier"
+        echo ""
+        echo "=== step 3/18: start the fake upstream: fake forge + Forgejo-shaped PR API + deterministic Ollama-shaped embedder ==="
+        upstream_log="$workspace/upstream.log"
+        "$demoenv_bin" upstream-m5 -forge-addr "$forge_addr" -embed-addr "$embed_addr" \
+          -repo "$repo_name" -token "$forge_token" -work-dir "$workspace/fixture" >"$upstream_log" 2>&1 &
+        wait_for_http_ok "http://$embed_addr/" "$upstream_log" "fake embedder" 60
+        forge_deadline=$(( $(date +%s) + 60 ))
+        until git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$forge_deadline" ]; then
+            echo "fake forge never served $upstream_url within 60s -- log:" >&2
+            cat "$upstream_log" >&2
+            exit 1
+          fi
+          sleep 0.3
+        done
+        echo "fake forge ready (authenticated git ls-remote succeeded against $upstream_url)"
+        seed_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        echo "upstream $target_branch is at $seed_ref (fixture-polyglot, verbatim)"
+        echo ""
+        echo "=== step 4/18: first server boot -- applies migrations (which also seed the built-in author/reviewer roles) -- then stop it ==="
+        boot_server "$workspace/server-first-boot.log" "first boot"
+        stop_proc "$server_bin" "first boot"
+        echo "migrations applied; first boot stopped cleanly"
+        echo ""
+        echo "=== step 5/18: store the encrypted forge credential, keyed by the SCHEME-QUALIFIED forge host ==="
+        echo "    forge_host=$forge_host, not the bare $forge_addr EnrollRepo would derive: forge.Forgejo's"
+        echo "    apiBaseURL prepends https:// to a bare host, and this fake forge speaks plain HTTP. See loam-0l9m."
+        "$demoenv_bin" seed-credential -database-url "$database_url" \
+          -host "$forge_host" -token "$forge_token" -encryption-key "$encryption_key"
+        echo ""
+        echo "=== step 6/18: seed the enrolled repo (demo:m2/m4's fixture technique) and clone its bare mirror for real ==="
+        repo_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        "$docker_cli" exec "$pg_container" psql -U loam -d loam -v ON_ERROR_STOP=1 -c "
+        INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
+        VALUES ('$repo_id', '$repo_name', '$upstream_url', '$forge_host', '$target_branch');
+        INSERT INTO repo_target_branches (repo_id, branch) VALUES ('$repo_id', '$target_branch');
+        " >/dev/null
+        mirror_dir="$data_dir/mirrors/$repo_name.git"
+        mkdir -p "$(dirname "$mirror_dir")"
+        git clone --quiet --mirror "$auth_upstream_url" "$mirror_dir"
+        echo "repo $repo_name seeded; mirror cloned at $mirror_dir (git clone --mirror, exactly EnrollRepo's own clone step)"
+        echo ""
+        echo "=== step 7/18: second server boot -- reconciles the mirror (installs the real loamhook as its pre-receive hook) ==="
+        boot_server "$server_log" "server"
+        echo ""
+        echo "=== step 8/18: AUTHOR ($author_identifier) -- clone, start the PROPOSAL work branch, title and describe it ==="
+        author_cli clone "$repo_name" "$target_branch"
+        author_clone="$author_ws/doc-server"
+        if [ ! -d "$author_clone" ]; then
+          echo "FAIL: the author's clone was not created at $author_clone" >&2
+          exit 1
+        fi
+        git -C "$author_clone" config user.email "$author_identifier@example.invalid"
+        git -C "$author_clone" config user.name "$author_name"
+        start_out="$(author_cli work start "$repo_name" "$target_branch")"
+        echo "$start_out"
+        proposal_wb="$(printf '%s' "$start_out" | "$demoenv_bin" field -name name)"
+        echo "proposal work branch: $proposal_wb"
+        printf '%s' "$proposal_description" | author_cli work set "$repo_name" "$proposal_wb" --title "$proposal_title"
+        echo ""
+        echo "--- the proposal's commit: a new package, plus the README edit that will later conflict ---"
+        git -C "$author_clone" checkout -q -b "$proposal_wb"
+        mkdir -p "$author_clone/pkg/session"
+        "$demoenv_bin" fixture-file -name session > "$author_clone/pkg/session/session.go"
+        "$demoenv_bin" fixture-file -name proposal-readme > "$author_clone/README.md"
+        git -C "$author_clone" add pkg/session/session.go README.md
+        git -C "$author_clone" commit --quiet -m "feat(session): add StartSession"
+        if ! push_out="$(git -C "$author_clone" push origin "$proposal_wb" 2>&1)"; then
+          echo "$push_out"
+          echo "FAIL: the author's push to their own work branch was REJECTED (see loam-ppb)" >&2
+          exit 1
+        fi
+        echo "$push_out"
+        echo "PASS: the author pushed to their own work branch through /git/* and the real pre-receive hook"
+        author_cli work request-review "$repo_name" "$proposal_wb"
+        echo ""
+        echo "=== step 9/18: AUTHOR -- start a SECOND work branch and leave it in draft (the control for the catch-up rule) ==="
+        draft_start="$(author_cli work start "$repo_name" "$target_branch")"
+        draft_wb="$(printf '%s' "$draft_start" | "$demoenv_bin" field -name name)"
+        echo "draft work branch: $draft_wb (never sent for review, on purpose)"
+        git -C "$author_clone" checkout -q "$target_branch"
+        git -C "$author_clone" checkout -q -b "$draft_wb"
+        "$demoenv_bin" fixture-file -name draft-changelog > "$author_clone/CHANGELOG.md"
+        git -C "$author_clone" add CHANGELOG.md
+        git -C "$author_clone" commit --quiet -m "docs: note the unreleased draft work"
+        git -C "$author_clone" push -q origin "$draft_wb"
+        assert_equal "the draft branch is in draft and has no review round" \
+          "$(psql_scalar "SELECT state || '/' || (SELECT count(*) FROM review_rounds r WHERE r.work_branch_id = w.id) FROM work_branches w WHERE name = '$draft_wb';")" \
+          "draft/0"
+        echo ""
+        echo "=== step 10/18: REVIEWER ($reviewer_identifier) -- approve the proposal, opening round 1's verdict ==="
+        reviewer_cli clone "$repo_name" "$proposal_wb"
+        reviewer_clone="$reviewer_ws/doc-server"
+        reviewer_cwd="$reviewer_clone"
+        reviewer_cli work verdict "$repo_name" "$proposal_wb" --outcome approve
+        verdicts_1="$(reviewer_cli work verdicts "$repo_name" "$proposal_wb")"
+        echo "$verdicts_1"
+        printf '%s' "$verdicts_1" | "$demoenv_bin" check-verdicts -label "round 1 carries a current approve verdict" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale false
+        author_cli work show "$repo_name" "$proposal_wb"
+        echo ""
+        echo "=== step 11/18: ADMIN -- the proposal queue, then the FIRST AcceptProposal ==="
+        echo "--- ProposalService.ListProposals (no CLI exists for this service; this is what the web interface sends) ---"
+        queue_1="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_1"
+        printf '%s' "$queue_1" | "$demoenv_bin" check-proposals -label "the approved proposal is queued, with no PR yet" \
+          -count 1 -want-names "$proposal_wb" -deny-names "$draft_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_REVIEWED -approver "$reviewer_identifier" -round 1
+        echo ""
+        echo "--- ProposalService.AcceptProposal (call 1 of 2) ---"
+        accept_1="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_name\",\"work_branch\":\"$proposal_wb\"}")"
+        echo "$accept_1"
+        pr_url="$(printf '%s' "$accept_1" | "$demoenv_bin" field -name prUrl)"
+        upstream_branch="$(printf '%s' "$accept_1" | "$demoenv_bin" field -name upstreamBranch)"
+        pr_number="${pr_url##*/}"
+        echo ""
+        echo "    PR URL:          $pr_url"
+        echo "    PR number:       $pr_number"
+        echo "    upstream branch: $upstream_branch"
+        assert_equal "the accept pushed the namespaced upstream branch" "$upstream_branch" "loam/$proposal_wb"
+        upstream_wb_sha="$(git ls-remote "$auth_upstream_url" "refs/heads/loam/$proposal_wb" | cut -f1)"
+        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$proposal_wb")"
+        assert_equal "loam/$proposal_wb upstream is the work branch's own tip" "$upstream_wb_sha" "$mirror_wb_sha"
+        assert_equal "the PR number was recorded on the work branch" \
+          "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
+        echo ""
+        echo "--- the FORGE's own view of its pull requests (state=all, so a later merge cannot empty this list) ---"
+        prs_1="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_1"
+        printf '%s' "$prs_1" | "$demoenv_bin" check-prs -label "exactly one PR exists, from loam/$proposal_wb into $target_branch, attributing Loam and only Loam" \
+          -count 1 -number "$pr_number" -url "$pr_url" \
+          -head "loam/$proposal_wb" -base "$target_branch" -state open -merged false \
+          -title "$proposal_title" -description "$proposal_description" \
+          -deny-body "$author_identifier,$reviewer_identifier,$author_name,admin"
+        echo ""
+        echo "=== step 12/18: one conflicting upstream advance -- two commits, one per work branch's file ==="
+        advance_out="$("$demoenv_bin" conflicting-advance -forge-url "http://$forge_addr" -git-url "$auth_upstream_url" -repo "$repo_name" -branch "$target_branch")"
+        echo "$advance_out"
+        advanced_ref="$(printf '%s\n' "$advance_out" | sed -n 's/^new_ref=//p')"
+        if [ -z "$advanced_ref" ]; then
+          echo "FAIL: demoenv conflicting-advance did not report the new tip" >&2
+          exit 1
+        fi
+        echo ""
+        echo "--- one live sync tick (LOAM_SYNC_INTERVAL=2s, the production mirrorsync.Scheduler) reacts ---"
+        wait_for_conflict "$proposal_wb" reset "the REVIEWED proposal was demoted: conflict 'reset'"
+        wait_for_state "$proposal_wb" draft "the REVIEWED proposal was reset to draft"
+        wait_for_conflict "$draft_wb" flagged "the DRAFT branch was merely flagged: conflict 'flagged'"
+        assert_equal "the draft branch was NOT demoted -- it was already draft" \
+          "$(psql_scalar "SELECT state FROM work_branches WHERE name = '$draft_wb';")" "draft"
+        echo ""
+        echo "--- the proposal has left the admin's queue, and the upstream PR is untouched ---"
+        queue_2="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_2"
+        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch leaves the proposal queue" \
+          -count 0 -deny-names "$proposal_wb"
+        echo ""
+        echo "--- and accepting it now is refused. The refusal names its STATE, not its conflict flag, and that is"
+        echo "    correct: MarkConflicted demotes a reviewed branch in the SAME statement that flags it, so a"
+        echo "    reviewed-and-conflicted row cannot arise from a target advance at all."
+        if reject_out="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_name\",\"work_branch\":\"$proposal_wb\"}" 2>&1)"; then
+          echo "$reject_out"
+          echo "FAIL: AcceptProposal accepted a conflict-reset draft branch" >&2
+          exit 1
+        fi
+        echo "$reject_out"
+        case "$reject_out" in
+          *failed_precondition*) echo "PASS: AcceptProposal refuses a branch that is not reviewed (failed_precondition)" ;;
+          *) echo "FAIL: expected a failed_precondition from AcceptProposal, got the above" >&2; exit 1 ;;
+        esac
+        echo ""
+        echo "=== step 13/18: AUTHOR -- catch BOTH branches up with real pushes through /git/* ==="
+        echo "--- the PROPOSAL branch (conflict 'reset'): README.md ---"
+        catch_up "$proposal_wb" README.md caught-up-readme "proposal catch-up"
+        wait_for_conflict "$proposal_wb" none "the catch-up push cleared the proposal's conflict flag"
+        wait_for_state "$proposal_wb" reviewable "the catch-up push restored the proposal to reviewable"
+        assert_equal "the SERVER opened round 2 for the restored branch -- no request-review was called or needed" \
+          "$(psql_scalar "SELECT number || '/' || requested_by FROM review_rounds WHERE work_branch_id = (SELECT id FROM work_branches WHERE name = '$proposal_wb') ORDER BY number DESC LIMIT 1;")" \
+          "2/server"
+        echo "    (this target never calls 'loam work request-review' after the reset -- grep it: the only"
+        echo "     request-review in this demo is the one at step 8, before the proposal was ever accepted)"
+        stale_verdicts="$(reviewer_cli work verdicts "$repo_name" "$proposal_wb")"
+        echo "$stale_verdicts"
+        printf '%s' "$stale_verdicts" | "$demoenv_bin" check-verdicts -label "the round-1 approve went stale when round 2 opened" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale true
+        echo ""
+        echo "--- the DRAFT branch (conflict 'flagged'): CHANGELOG.md ---"
+        catch_up "$draft_wb" CHANGELOG.md caught-up-changelog "draft catch-up"
+        wait_for_conflict "$draft_wb" none "the catch-up push cleared the draft branch's conflict flag"
+        assert_equal "the draft branch stayed draft and gained NO review round -- the restore rule is conditional" \
+          "$(psql_scalar "SELECT state || '/' || (SELECT count(*) FROM review_rounds r WHERE r.work_branch_id = w.id) FROM work_branches w WHERE name = '$draft_wb';")" \
+          "draft/0"
+        echo ""
+        echo "=== step 14/18: REVIEWER -- re-review the caught-up proposal, approving in ROUND 2 ==="
+        reviewer_cli work verdict "$repo_name" "$proposal_wb" --outcome approve
+        verdicts_2="$(reviewer_cli work verdicts "$repo_name" "$proposal_wb")"
+        echo "$verdicts_2"
+        printf '%s' "$verdicts_2" | "$demoenv_bin" check-verdicts -label "the re-review is recorded in round 2 and is current" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 2 -stale false
+        wait_for_state "$proposal_wb" reviewed "the re-approved proposal is reviewed again"
+        echo ""
+        echo "=== step 15/18: ADMIN -- the SECOND AcceptProposal. It must fast-forward the SAME pull request ==="
+        queue_3="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_3"
+        printf '%s' "$queue_3" | "$demoenv_bin" check-proposals -label "the caught-up, re-approved proposal is queued again, still carrying its original PR" \
+          -count 1 -want-names "$proposal_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_REVIEWED -pr-url "$pr_url" \
+          -approver "$reviewer_identifier" -round 2
+        echo ""
+        echo "--- ProposalService.AcceptProposal (call 2 of 2) ---"
+        accept_2="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_name\",\"work_branch\":\"$proposal_wb\"}")"
+        echo "$accept_2"
+        pr_url_2="$(printf '%s' "$accept_2" | "$demoenv_bin" field -name prUrl)"
+        assert_equal "the second accept returned the SAME pull request URL" "$pr_url_2" "$pr_url"
+        assert_equal "the recorded PR number never changed" \
+          "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
+        upstream_wb_sha_2="$(git ls-remote "$auth_upstream_url" "refs/heads/loam/$proposal_wb" | cut -f1)"
+        mirror_wb_sha_2="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$proposal_wb")"
+        assert_equal "the second accept fast-forwarded loam/$proposal_wb to the caught-up tip" "$upstream_wb_sha_2" "$mirror_wb_sha_2"
+        if [ "$upstream_wb_sha_2" = "$upstream_wb_sha" ]; then
+          echo "FAIL: loam/$proposal_wb never moved, so the second accept pushed nothing" >&2
+          exit 1
+        fi
+        echo "PASS: loam/$proposal_wb advanced $upstream_wb_sha -> $upstream_wb_sha_2, never forced (the refspec carries no '+')"
+        echo ""
+        echo "--- the forge, again: still exactly ONE pull request ---"
+        prs_2="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_2"
+        printf '%s' "$prs_2" | "$demoenv_bin" check-prs -label "two accepts, ONE pull request -- no second PR was opened" \
+          -count 1 -number "$pr_number" -url "$pr_url" -head "loam/$proposal_wb" -base "$target_branch" \
+          -state open -merged false -description "$proposal_description"
+        echo ""
+        echo "=== step 16/18: the pull request MERGES on the forge, and one sync tick completes the branch ==="
+        curl -sS --fail-with-body -X POST "http://$forge_addr/control/merge-pr" \
+          -H 'Content-Type: application/json' -d "{\"repo\":\"$repo_name\",\"number\":$pr_number}"
+        echo "merged PR #$pr_number on the fake forge (a real git merge into $target_branch, not a flag flip)"
+        merged_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        if [ "$merged_ref" = "$advanced_ref" ]; then
+          echo "FAIL: upstream $target_branch did not move on the merge" >&2
+          exit 1
+        fi
+        echo "upstream $target_branch moved $advanced_ref -> $merged_ref (the merge commit)"
+        prs_3="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_3"
+        printf '%s' "$prs_3" | "$demoenv_bin" check-prs -label "the forge reports the pull request merged" \
+          -count 1 -number "$pr_number" -state closed -merged true
+        echo ""
+        echo "--- nothing here writes work_branches.state: StorePRPoller polls the forge and the branch completes ---"
+        wait_for_state "$proposal_wb" complete "the merged pull request completed the work branch"
+        author_cli work show "$repo_name" "$proposal_wb"
+        queue_4="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_4"
+        printf '%s' "$queue_4" | "$demoenv_bin" check-proposals -label "a completed branch leaves the proposal queue for good" \
+          -count 0 -deny-names "$proposal_wb"
+        echo ""
+        echo "=== step 17/18: the merged code reaches the index, and graph + search resolve it ==="
+        wait_for_ingest "$merged_ref" "the merge commit is what the index was built from"
+        jobs_out="$(repo_rpc ListIngestJobs "{\"repo\":\"$repo_name\",\"page\":{\"limit\":50}}")"
+        echo "$jobs_out"
+        printf '%s' "$jobs_out" | "$demoenv_bin" check-jobs -label "every ingest job this run enqueued succeeded" -min-jobs 1 -all-succeeded
+        echo ""
+        echo "--- graph def StartSession: the proposal's symbol, which reached $target_branch only by merging ---"
+        def_out="$(author_cli graph def StartSession --repo "$repo_name")"
+        echo "$def_out"
+        printf '%s' "$def_out" | "$demoenv_bin" check-envelope -label "graph def StartSession resolves at the merge commit" \
+          -ref "$merged_ref" -repo "$repo_name" -target "$target_branch" \
+          -min-results 1 -want-files "pkg/session/session.go" -want-symbols "StartSession"
+        echo ""
+        search_query="$("$demoenv_bin" fixture-file -name search-query)"
+        echo "--- search \"$search_query\": the merged chunk must rank FIRST ---"
+        search_out="$(author_cli search "$search_query" --repo "$repo_name")"
+        echo "$search_out"
+        printf '%s' "$search_out" | "$demoenv_bin" check-envelope -label "search ranks the merged session chunk first" \
+          -ref "$merged_ref" -repo "$repo_name" -target "$target_branch" \
+          -min-results 1 -first-file "pkg/session/session.go"
+        echo ""
+        echo "=== step 18/18: summary ==="
+        echo "One work branch, two AcceptProposal calls, one pull request, one real forge merge:"
+        echo "  proposal work branch  $proposal_wb   ($author_identifier, approved by $reviewer_identifier)"
+        echo "  upstream branch       loam/$proposal_wb   $upstream_wb_sha -> $upstream_wb_sha_2 (never forced)"
+        echo "  pull request          #$pr_number  $pr_url"
+        echo "Observed and asserted, not merely printed:"
+        echo "  - the accept pushed loam/<name> and opened the PR       head loam/$proposal_wb into $target_branch"
+        echo "  - the PR body attributes Loam and only Loam             description + \"---/Proposed via Loam.\", no agent identity"
+        echo "  - a conflicting target advance reset the proposal       reviewed -> draft, conflict 'reset', queue emptied"
+        echo "  - the same advance merely FLAGGED the draft branch      draft branch $draft_wb: conflict 'flagged', still draft"
+        echo "  - a catch-up push restored the proposal to review       reviewable, round 2 opened by requested_by 'server'"
+        echo "  - no request-review was needed, or called               the round-1 approve went stale, the reviewer re-approved"
+        echo "  - the draft branch's catch-up opened NO round           conflict 'none', still draft, review_rounds still empty"
+        echo "  - the second accept updated the SAME pull request       one pr_number ($pr_number), one PR on the forge, fast-forwarded"
+        echo "  - the merged PR completed the branch                    complete, set by StorePRPoller, never by this script"
+        echo "  - the merged code reached the index                     graph def StartSession and search, both at $merged_ref"
+        echo "Known defects shown honestly, never worked around silently:"
+        echo "  - loam-8d2   work show reports no round, because the proto carries none"
+        echo "  - loam-ls7u   work show does not print upstream_pr_url, though the proto carries it"
+        echo "  - loam-0l9m   a bare repos.forge_host makes forge.Forgejo address an http forge over https"
+        echo "=== demo:m5 complete ==="
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:

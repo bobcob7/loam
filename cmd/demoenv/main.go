@@ -34,14 +34,21 @@
 //
 //	upstream         host the fake forge + fake embedder, seeded with
 //	                 fixture-polyglot, until signalled
+//	upstream-m5      the same pair for demo:m5, with a Forgejo-REST-shaped
+//	                 pull-request surface in front of the fake forge
 //	advance          rewrite the upstream target branch (force-push) and
 //	                 delete the branch whose prune the demo asserts
+//	conflicting-advance  advance the target branch so it no longer merges
+//	                 with either of demo:m5's work branches
+//	fixture-file     print one of demo:m5's fixture blobs verbatim
 //	seed-credential  write the encrypted forge token EnrollRepo needs
 //	check-envelope   assert over a `loam graph`/`loam search` JSON envelope
 //	check-jobs       assert over a ListIngestJobs JSON response
 //	check-comments   assert over a `loam work comments` document, staged or not
 //	check-verdicts   assert over a `loam work verdicts` document
 //	check-worklist   assert over a `loam work list` document
+//	check-proposals  assert over a ListProposals JSON response
+//	check-prs        assert over the forge's own Forgejo pull-request list
 //	thread-id        print the id of the thread anchored to a given file
 //	field            print one named top-level string field of a JSON object
 package main
@@ -56,21 +63,26 @@ import (
 )
 
 // usage lists the subcommands, printed on a missing or unknown one.
-const usage = `demoenv is the support tool for task demo:m3 and demo:m4 (not a shipped binary).
+const usage = `demoenv is the support tool for task demo:m3, demo:m4 and demo:m5 (not a shipped binary).
 
 usage: demoenv <subcommand> [flags]
 
 subcommands:
-  upstream         host the fake forge + fake embedder, seeded with fixture-polyglot
-  advance          force-push the upstream target branch and delete the pruned branch
-  seed-credential  write the encrypted forge token EnrollRepo requires
-  check-envelope   assert over a loam graph/search JSON envelope read from stdin
-  check-jobs       assert over a ListIngestJobs JSON response read from stdin
-  check-comments   assert over a loam work comments document read from stdin
-  check-verdicts   assert over a loam work verdicts document read from stdin
-  check-worklist   assert over a loam work list document read from stdin
-  thread-id        print the id of the thread anchored to -file
-  field            print one named top-level string field of a JSON object
+  upstream             host the fake forge + fake embedder, seeded with fixture-polyglot
+  upstream-m5          the same, with a Forgejo-REST-shaped pull-request surface in front
+  advance              force-push the upstream target branch and delete the pruned branch
+  conflicting-advance  advance the target branch so open work branches no longer merge
+  fixture-file         print one of demo:m5's fixture blobs verbatim
+  seed-credential      write the encrypted forge token EnrollRepo requires
+  check-envelope       assert over a loam graph/search JSON envelope read from stdin
+  check-jobs           assert over a ListIngestJobs JSON response read from stdin
+  check-comments       assert over a loam work comments document read from stdin
+  check-verdicts       assert over a loam work verdicts document read from stdin
+  check-worklist       assert over a loam work list document read from stdin
+  check-proposals      assert over a ListProposals JSON response read from stdin
+  check-prs            assert over a Forgejo pull-request list read from stdin
+  thread-id            print the id of the thread anchored to -file
+  field                print one named top-level string field of a JSON object
 `
 
 func main() {
@@ -89,8 +101,14 @@ func main() {
 	switch os.Args[1] {
 	case "upstream":
 		err = runUpstream(ctx, logger, os.Args[2:])
+	case "upstream-m5":
+		err = runUpstreamM5(ctx, logger, os.Args[2:])
 	case "advance":
 		err = runAdvance(ctx, os.Args[2:])
+	case "conflicting-advance":
+		err = runConflictingAdvance(ctx, os.Args[2:])
+	case "fixture-file":
+		err = runFixtureFile(os.Args[2:], os.Stdout)
 	case "seed-credential":
 		err = runSeedCredential(ctx, logger, os.Args[2:])
 	case "check-envelope":
@@ -103,6 +121,10 @@ func main() {
 		err = runCheckVerdicts(os.Args[2:], os.Stdin, os.Stdout)
 	case "check-worklist":
 		err = runCheckWorkList(os.Args[2:], os.Stdin, os.Stdout)
+	case "check-proposals":
+		err = runCheckProposals(os.Args[2:], os.Stdin, os.Stdout)
+	case "check-prs":
+		err = runCheckPRs(os.Args[2:], os.Stdin, os.Stdout)
 	case "thread-id":
 		err = runThreadID(os.Args[2:], os.Stdin, os.Stdout)
 	case "field":
