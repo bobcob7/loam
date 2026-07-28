@@ -20,3 +20,7 @@
 /server
 /loam
 /loamhook
+
+# Agent gate-run logs. An agent chain committed .gatelogs/integration_run.log
+# alongside loam-blc; these are per-run scratch output, not source.
+/.gatelogs/
