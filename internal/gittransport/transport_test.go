@@ -363,6 +363,100 @@ func TestTransport_CredentialLookupFailurePreventsGitInvocation(t *testing.T) {
 	assert.Len(t, credStore.GetByHostCalls(), 1)
 }
 
+// TestTransport_RejectsUpstreamURLWithUserinfo pins loam-ys1 item (1):
+// upstreamURL is passed straight into exec.Command args by every exported
+// method here, so a URL enrolled as https://user:token@forge/... would
+// leak that credential into `ps` output on every scheduler tick --
+// scrubSecrets would NOT redact it, since it is not the credential this
+// package itself resolves and injects. Transport must reject such a URL
+// before it ever reaches the credential store or the git subprocess, for
+// every method that accepts an upstreamURL.
+// TestValidateUpstreamURL_NeverEchoesTheCredential covers the shapes
+// url.URL.Redacted() does NOT protect, which is where the first version of
+// this guard leaked. Redacted() masks only the PASSWORD, and only when a
+// ":" is present -- so the two forms below passed through it verbatim:
+//
+//	https://<token>@host/path      the standard PAT-in-URL form for
+//	                               GitHub/GitLab/Forgejo, and the likeliest
+//	                               way a repo is enrolled with a credential
+//	https://user%3A<token>@host/   a percent-encoded colon, which defeats
+//	                               the "is there a password" test entirely
+//
+// The unparseable case is the same hazard by another route: *url.Error
+// renders as `parse "<raw url>": <reason>`, so a token containing a byte
+// net/url rejects would land in the message whole.
+//
+// This matters beyond the returned error: it is %w-wrapped to the RPC
+// boundary and, on the enroll path, written into repos.sync_error.
+func TestValidateUpstreamURL_NeverEchoesTheCredential(t *testing.T) {
+	t.Parallel()
+	const secret = "leaked-token"
+	for _, tt := range []struct {
+		name string
+		url  string
+	}{
+		{"userinfo with no password (the PAT form)", "https://" + secret + "@forge.example.invalid/acme/widgets.git"},
+		{"percent-encoded colon defeats Redacted", "https://user%3A" + secret + "@forge.example.invalid/acme/widgets.git"},
+		{"userinfo with a password", "https://user:" + secret + "@forge.example.invalid/acme/widgets.git"},
+		{"unparseable, credential in the raw string", "https://user:" + secret + " with a space@forge.example.invalid/x.git"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateUpstreamURL(tt.url)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errUpstreamURLHasUserinfo)
+			assert.NotContains(t, err.Error(), secret, "the rejected URL's embedded credential must never appear in the error")
+		})
+	}
+}
+
+func TestTransport_RejectsUpstreamURLWithUserinfo(t *testing.T) {
+	t.Parallel()
+	const poisoned = "https://user:leaked-token@forge.example.invalid/acme/widgets.git"
+	tests := []struct {
+		name string
+		call func(tr *Transport) ([]byte, error)
+	}{
+		{"Fetch", func(tr *Transport) ([]byte, error) {
+			return tr.Fetch(t.Context(), "forge.example.invalid", "/nonexistent-mirror", poisoned, []string{"+refs/heads/*:refs/heads/*"})
+		}},
+		{"Push", func(tr *Transport) ([]byte, error) {
+			return tr.Push(t.Context(), "forge.example.invalid", "/nonexistent-mirror", poisoned, "abc:refs/heads/loam/wb-1")
+		}},
+		{"DeleteRemoteRef", func(tr *Transport) ([]byte, error) {
+			return tr.DeleteRemoteRef(t.Context(), "forge.example.invalid", "/nonexistent-mirror", poisoned, "refs/heads/loam/wb-1")
+		}},
+		{"Clone", func(tr *Transport) ([]byte, error) {
+			return tr.Clone(t.Context(), "forge.example.invalid", filepath.Join(t.TempDir(), "widgets.git"), poisoned)
+		}},
+		{"LsRemote", func(tr *Transport) ([]byte, error) {
+			return tr.LsRemote(t.Context(), "forge.example.invalid", poisoned)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			credStore := &credentialSourceMock{
+				GetByHostFunc: func(_ context.Context, _ string) (credentialstore.Credential, error) {
+					t.Fatal("credential lookup must not happen once upstream URL validation rejects it")
+					return credentialstore.Credential{}, nil
+				},
+			}
+			gitCreds := &gitCredentialConverterMock{
+				GitCredentialsFunc: func(_ context.Context, _ string) (string, string, error) {
+					t.Fatal("git credential conversion must not happen once upstream URL validation rejects it")
+					return "", "", nil
+				},
+			}
+			transport := New(credStore, gitCreds, testLogger())
+			_, err := tt.call(transport)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errUpstreamURLHasUserinfo)
+			assert.NotContains(t, err.Error(), "leaked-token", "the rejected URL's embedded credential must never appear in the returned error")
+		})
+	}
+}
+
 func TestTransport_GitCredentialConversionFailurePreventsGitInvocation(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("boom: forge rejects this token shape")
