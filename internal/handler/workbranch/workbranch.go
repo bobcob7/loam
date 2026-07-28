@@ -410,18 +410,26 @@ func mapWorkBranchStoreErr(err error, context string) error {
 // (repo, work branch) is valid -- resolveWorkBranch already confirmed the
 // work branch itself exists before Diff is ever called -- but the mirror's
 // current state (a missing ref, or target and name sharing no merge base)
-// does not support computing the range. gitdiff.ErrMirrorMissing has
-// deliberately no case here: a bare mirror missing on disk for an enrolled
-// repo is an operational fault, not a caller-fixable precondition, so it
-// falls through to the default branch below and ErrorMapper's own
-// CodeInternal-and-log path -- the same "loud failure over silent wrong
-// behavior" choice notImplementedDiffComputer made for every error before
-// this bead, now narrowed to just the cases that are genuinely someone's
-// operational problem rather than the caller's.
+// does not support computing the range. Both cases wrap err itself
+// alongside handler.ErrFailedPrecondition (Go 1.20+'s multi-%w), rather
+// than discarding it: err already names the missing ref or the ref pair
+// with no merge base (internal/gitdiff's own %w wrapping), and dropping it
+// left the message an operator or agent sees terminate in the generic
+// "handler: failed precondition" with nothing pointing at the actual
+// cause (loam-blc). errors.Is(mapped, gitdiff.ErrRefMissing) and
+// errors.Is(mapped, handler.ErrFailedPrecondition) both still hold.
+// gitdiff.ErrMirrorMissing has deliberately no case here: a bare mirror
+// missing on disk for an enrolled repo is an operational fault, not a
+// caller-fixable precondition, so it falls through to the default branch
+// below and ErrorMapper's own CodeInternal-and-log path -- the same "loud
+// failure over silent wrong behavior" choice notImplementedDiffComputer
+// made for every error before this bead, now narrowed to just the cases
+// that are genuinely someone's operational problem rather than the
+// caller's.
 func mapDiffComputerErr(err error, context string) error {
 	switch {
 	case errors.Is(err, gitdiff.ErrRefMissing), errors.Is(err, gitdiff.ErrNoMergeBase):
-		return fmt.Errorf("%s: %w", context, handler.ErrFailedPrecondition)
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
 	}

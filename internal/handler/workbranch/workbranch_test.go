@@ -957,6 +957,33 @@ func TestGetWorkBranchDiff_RefMissing_MapsToFailedPrecondition(t *testing.T) {
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
 }
 
+// TestGetWorkBranchDiff_RefMissing_MessageNamesMissingRef is loam-blc's
+// acceptance test: mapDiffComputerErr used to wrap only
+// handler.ErrFailedPrecondition and discard gitdiff.ErrRefMissing, so the
+// message an agent or operator saw ended in the generic "handler: failed
+// precondition" with nothing pointing at a missing ref. err already names
+// the ref (internal/gitdiff's own "<ref>: %w" wrapping in Diff), so the
+// mapped error must preserve it -- both in the rendered message (the CLI
+// prints connectErr.Message() directly, per docs/cli-spec.md -> Exit Codes
+// & Errors) and via errors.Is, which callers may still match on.
+func TestGetWorkBranchDiff_RefMissing_MessageNamesMissingRef(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
+		return "", fmt.Errorf("wb-9c2f1a: %w", gitdiff.ErrRefMissing)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), gitdiff.ErrRefMissing.Error(), "the message must name the missing ref, not just terminate in the generic \"handler: failed precondition\"")
+	assert.NotEqual(t, "computing diff for work branch bobcob7/doc-server/wb-9c2f1a: handler: failed precondition", connectErr.Message())
+	assert.ErrorIs(t, err, gitdiff.ErrRefMissing)
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 // TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition is the same
 // proof for gitdiff.ErrNoMergeBase (target and the work branch share no
 // common ancestor -- unrelated histories).
