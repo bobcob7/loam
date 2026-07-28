@@ -170,7 +170,7 @@ func (h *acceptanceHarness) stepAWorkBranchExists(ctx context.Context, name stri
 	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
 		return err
 	}
-	world.workBranch = name
+	world.setPrimaryWorkBranch(name)
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.agentName); err != nil {
 		return err
 	}
@@ -406,6 +406,7 @@ func (h *acceptanceHarness) stepAnAcceptedWorkBranchWhosePRHasMerged(ctx context
 	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
 		return err
 	}
+	world.setPrimaryWorkBranch(world.workBranch)
 	if err := h.insertWorkBranchRow(ctx, world.repoID, world.workBranch, world.targetBranch, "reviewed", world.agentName); err != nil {
 		return err
 	}

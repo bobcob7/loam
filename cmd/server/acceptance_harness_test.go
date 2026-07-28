@@ -44,6 +44,11 @@ type acceptanceHarness struct {
 	syncHarness   *testsched.SyncHarness
 	ingestHarness *testsched.IngestHarness
 	accepter      *mirrorsync.StoreProposalAccepter
+	// prAttribution is the loaded LOAM_PR_ATTRIBUTION value the server and
+	// the harness's own accepter were both built with, so the step that
+	// asserts an upstream PR's body predicts the SAME body the running
+	// configuration produces rather than assuming the default.
+	prAttribution bool
 }
 
 // newAcceptanceHarness assembles the fixed, whole-suite acceptanceHarness.
@@ -69,6 +74,7 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 		syncHarness:   newSyncHarness(srv, transport, forgeClient),
 		ingestHarness: testsched.NewIngestHarness(srv.ingestPool),
 		accepter:      newAcceptanceAccepter(srv, transport, forgeClient, cfg),
+		prAttribution: cfg.PRAttribution,
 	}
 }
 
@@ -204,4 +210,5 @@ func (h *acceptanceHarness) initializeScenario(sc *godog.ScenarioContext) {
 	h.registerVocabularySteps(sc)
 	h.registerIngestAndQuerySteps(sc)
 	h.registerReviewSteps(sc)
+	h.registerProposalSteps(sc)
 }

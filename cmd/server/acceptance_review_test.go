@@ -37,6 +37,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 )
@@ -189,7 +190,7 @@ type acceptanceCLIError struct {
 func (h *acceptanceHarness) registerReviewSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^a work branch "([^"]*)" is in state "([^"]*)"$`, h.stepAWorkBranchNamedIsInState)
 	sc.Step(`^the work branch "([^"]*)" is in state "([^"]*)"$`, h.stepTheWorkBranchNamedIsInState)
-	sc.Step(`^a work branch in state "([^"]*)"$`, h.stepASecondWorkBranchInState)
+	sc.Step(`^a work branch in state "([^"]*)"$`, h.stepAWorkBranchInState)
 	sc.Step(`^I am the reviewer agent "([^"]*)"$`, h.stepIAmTheReviewerAgent)
 	sc.Step(`^I list work branches awaiting my review$`, h.stepIListWorkBranchesAwaitingMyReview)
 	sc.Step(`^"([^"]*)" is included$`, h.stepIsIncluded)
@@ -403,7 +404,12 @@ func (h *acceptanceHarness) submitVerdict(world *acceptanceWorld, actor acceptan
 // requestReview drives `loam work request-review` as actor: draft ->
 // reviewable opening round 1, or reviewed -> reviewable opening the next
 // round (internal/handler/workbranch/workbranch.go -> RequestReview).
+// It counts every call on the world, which is what makes "no request for
+// review was needed" (features/work-branch-lifecycle.feature, via
+// acceptance_proposal_test.go) a claim about what this harness actually
+// did rather than only about what the resulting row says.
 func (h *acceptanceHarness) requestReview(world *acceptanceWorld, actor acceptanceActor, workBranch string) error {
+	world.requestReviews++
 	res := h.runLoamAs(world, actor, "", "work", "request-review", world.repo(), workBranch)
 	return requireLoamOK(res, fmt.Sprintf("loam work request-review (as %s)", actor.identifier()))
 }
@@ -545,7 +551,7 @@ func verdictByReviewer(verdicts []acceptanceVerdict, reviewer string) (acceptanc
 // touches git.
 func (h *acceptanceHarness) stepAWorkBranchNamedIsInState(ctx context.Context, name, state string) error {
 	world := worldFrom(ctx)
-	world.workBranch = name
+	world.setPrimaryWorkBranch(name)
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier()); err != nil {
 		return err
 	}
@@ -577,19 +583,21 @@ func (h *acceptanceHarness) stepTheWorkBranchNamedIsInState(ctx context.Context,
 	return h.forceWorkBranchState(ctx, worldFrom(ctx), name, state)
 }
 
-// stepASecondWorkBranchInState seeds an ADDITIONAL work branch in state,
-// with no review round at all -- reviewing.feature's "A verdict cannot be
-// submitted before review is requested". The scenario's own Background
-// branch is left untouched, so the rejection cannot be confused with
-// anything about it.
-func (h *acceptanceHarness) stepASecondWorkBranchInState(ctx context.Context, state string) error {
+// stepAWorkBranchInState seeds one work branch directly in state, with no
+// review round at all, under whichever name acceptanceWorld.claimWorkBranch
+// hands it (see that method for the first-come rule and why both feature
+// files it serves get the branch they mean).
+//
+// In reviewing.feature's "A verdict cannot be submitted before review is
+// requested" that is an ADDITIONAL, roundless branch, leaving the
+// Background's own branch untouched so the rejection cannot be confused
+// with anything about it. In admin-proposals.feature's "Closing a work
+// branch ends it" it is the scenario's own branch, which is what "When I
+// close it" then closes.
+func (h *acceptanceHarness) stepAWorkBranchInState(ctx context.Context, state string) error {
 	world := worldFrom(ctx)
-	name := world.workBranch + "-second"
-	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, state, world.author.identifier()); err != nil {
-		return err
-	}
-	world.secondWorkBranch = name
-	return nil
+	name := world.claimWorkBranch()
+	return h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, state, world.author.identifier())
 }
 
 // stepIAmTheReviewerAgent records the literal reviewer identity a scenario
@@ -1040,11 +1048,25 @@ func (h *acceptanceHarness) stepITryToSubmitAVerdictOnIt(ctx context.Context) er
 }
 
 // stepTheAttemptIsRejectedAsFailedPrecondition asserts the last attempt was
-// refused as a state-gate violation. It backs both reviewing.feature's "the
-// attempt is rejected as a failed precondition" and replies.feature's "the
-// reply is rejected as a failed precondition".
+// refused as a state-gate violation. It backs reviewing.feature's "the
+// attempt is rejected as a failed precondition", replies.feature's "the
+// reply is rejected as a failed precondition", and admin-proposals.feature's
+// two refused AcceptProposal scenarios.
+//
+// Those last two are not CLI invocations -- no `loam` command accepts a
+// proposal; the admin's only surface is the ProposalService RPC -- so this
+// step has two arms. Which arm runs is decided by whether a "When I try
+// to ..." step actually made an admin RPC in this scenario
+// (world.rpcAttempted), never by which of the two recorded outcomes looks
+// more like a rejection: an unset acceptanceWorld carries a zero
+// loamCLIResult (exit 0) and a nil lastRPCErr, so a scenario whose When
+// never ran at all fails whichever arm it lands in rather than passing on
+// the other's silence.
 func (h *acceptanceHarness) stepTheAttemptIsRejectedAsFailedPrecondition(ctx context.Context) error {
 	world := worldFrom(ctx)
+	if world.rpcAttempted {
+		return requireRPCRejected(world.lastRPCErr, "the attempted admin RPC", connect.CodeFailedPrecondition)
+	}
 	return requireLoamRejected(world.lastCLI, "the attempted operation", "precondition_failed", 2)
 }
 
