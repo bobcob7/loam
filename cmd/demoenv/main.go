@@ -1,10 +1,10 @@
-// Command demoenv is the support tool for `task demo:m3`. It is NOT part
-// of the shipped product: `task build:bin` builds exactly the three
-// binaries this repo ships (server, loam, loamhook) and deliberately does
-// not build this one, because cmd/server's startup contract is that
-// loamhook sits beside it and nothing else has to.
+// Command demoenv is the support tool for `task demo:m3` and `task
+// demo:m4`. It is NOT part of the shipped product: `task build:bin` builds
+// exactly the three binaries this repo ships (server, loam, loamhook) and
+// deliberately does not build this one, because cmd/server's startup
+// contract is that loamhook sits beside it and nothing else has to.
 //
-// It exists because demo:m3 needs three things from real Loam packages
+// It exists because those demos need three things from real Loam packages
 // that no shipped binary provides, and that a shell script cannot produce
 // on its own:
 //
@@ -39,6 +39,11 @@
 //	seed-credential  write the encrypted forge token EnrollRepo needs
 //	check-envelope   assert over a `loam graph`/`loam search` JSON envelope
 //	check-jobs       assert over a ListIngestJobs JSON response
+//	check-comments   assert over a `loam work comments` document, staged or not
+//	check-verdicts   assert over a `loam work verdicts` document
+//	check-worklist   assert over a `loam work list` document
+//	thread-id        print the id of the thread anchored to a given file
+//	field            print one named top-level string field of a JSON object
 package main
 
 import (
@@ -51,7 +56,7 @@ import (
 )
 
 // usage lists the subcommands, printed on a missing or unknown one.
-const usage = `demoenv is the support tool for task demo:m3 (not a shipped binary).
+const usage = `demoenv is the support tool for task demo:m3 and demo:m4 (not a shipped binary).
 
 usage: demoenv <subcommand> [flags]
 
@@ -61,6 +66,11 @@ subcommands:
   seed-credential  write the encrypted forge token EnrollRepo requires
   check-envelope   assert over a loam graph/search JSON envelope read from stdin
   check-jobs       assert over a ListIngestJobs JSON response read from stdin
+  check-comments   assert over a loam work comments document read from stdin
+  check-verdicts   assert over a loam work verdicts document read from stdin
+  check-worklist   assert over a loam work list document read from stdin
+  thread-id        print the id of the thread anchored to -file
+  field            print one named top-level string field of a JSON object
 `
 
 func main() {
@@ -87,6 +97,16 @@ func main() {
 		err = runCheckEnvelope(os.Args[2:], os.Stdin, os.Stdout)
 	case "check-jobs":
 		err = runCheckJobs(os.Args[2:], os.Stdin, os.Stdout)
+	case "check-comments":
+		err = runCheckComments(os.Args[2:], os.Stdin, os.Stdout)
+	case "check-verdicts":
+		err = runCheckVerdicts(os.Args[2:], os.Stdin, os.Stdout)
+	case "check-worklist":
+		err = runCheckWorkList(os.Args[2:], os.Stdin, os.Stdout)
+	case "thread-id":
+		err = runThreadID(os.Args[2:], os.Stdin, os.Stdout)
+	case "field":
+		err = runField(os.Args[2:], os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "demoenv: unknown subcommand %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)

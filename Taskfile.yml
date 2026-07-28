@@ -1114,6 +1114,574 @@ tasks:
         echo "Graph resolved fixture-polyglot's cross-file symbols; search ranked pkg/auth/auth.go first."
         echo "=== demo:m3 complete ==="
 
+  demo:m4:
+    desc: >-
+      Demo M4 (loam-gd7): the review round-trip, driven entirely through the
+      real compiled binaries by TWO agent identities against one running
+      server -- no admin step (that is M5). The author starts a work branch,
+      titles and describes it, and requests review; the reviewer clones it,
+      stages comments that are provably invisible to everyone (including the
+      author) until submitted, then publishes the whole batch atomically as
+      one approve verdict; the author replies immediately, pushes a
+      follow-up, and requests review again, which opens a fresh round and
+      leaves the reviewer's prior verdict stale and the branch queued for
+      another look. Needs the Go toolchain, git, curl, and a
+      docker-CLI-compatible client talking to a Docker (or
+      Docker-API-compatible) daemon, same as demo:m1/m2/m3; set
+      LOAM_DEMO_DOCKER if your client binary is not literally named
+      `docker`. Runs from a clean checkout with no manual setup.
+      Every fixture choice is deliberate:
+        - TWO IDENTITIES, TWO ROLES, AND THE SPLIT IS ENFORCED. The author
+          is ada-lovelace-1-author and the reviewer is
+          grace-hopper-2-reviewer -- the "<name>-<id>-<role>" identifier
+          internal/httpauth.Identity renders from the three Loam-Agent-*
+          headers the real CLI sends. Both roles are the ones migration
+          0001_init seeds, and their capability sets do NOT overlap where it
+          matters: `author` holds work.start / work.set /
+          work.request_review / git.push but NOT work.verdict, and
+          `reviewer` holds work.verdict but NOT work.start or
+          work.request_review. So this demo could not be performed by one
+          identity wearing both hats -- the server would refuse each half in
+          turn -- and the two-actor shape is a property of the system, not
+          stage dressing.
+        - THE TWO AGENTS GET SEPARATE WORKSPACES, WHICH IS WHAT MAKES THE
+          HEADLINE PROOF REAL. Staged comments live in
+          <workspace>/.loam/staging/<repo>/<work-branch>/<agent identifier>
+          (internal/cli/workspace.go), where <workspace> is the CLONE'S
+          PARENT. Each agent therefore runs its own `loam clone` into its
+          own /tmp workspace, and the reviewer's staged batch is invisible
+          to the author at the filesystem level, not by convention. The
+          demo then shows the same thing from the server's side: with the
+          batch staged, `loam work comments --staged` lists two items while
+          plain `loam work comments` returns exactly `[]` -- for the
+          reviewer AND for the author, since staged items are not on the
+          server at all (internal/handler/workbranch/review.go ->
+          ListComments: "Staged comments are never returned here and cannot
+          be").
+        - THE REPO IS SEEDED demo:m2's WAY, NOT demo:m3's. demo:m3 enrolls
+          for real through RepoAdminService.EnrollRepo, which is the right
+          call THERE because that demo's subject is sync and ingest, and it
+          already stands up a fake forge and a fake embedder to have a real
+          reachable upstream. This demo's subject is the review round-trip,
+          which touches neither. Going through EnrollRepo here would mean
+          hosting a fake forge, seeding an encrypted credential, AND
+          standing up a fake embedder purely so enrollment's own FULL
+          ingest job could succeed -- three extra moving parts, none of
+          which a round or a verdict depends on. So the repo, its target
+          branch, and its bare mirror are seeded exactly the way
+          cmd/server/clonepush_integration_test.go's own
+          seedEnrolledRepoWithMirror does it, which demo:m2 already
+          established as this repo's proven fixture for "an enrolled repo
+          exists, now do git things to it".
+        - THE WORK BRANCH IS NOT SEEDED. Everything about the work branch
+          itself -- its random name, its author column, its title and
+          description, its state transitions, every round -- comes from the
+          real `loam work start` / `work set` / `work request-review`
+          commands hitting the real WorkBranchService. That is the
+          difference from demo:m2, which seeded a work_branches row
+          directly because its subject was the git transport rather than
+          the lifecycle.
+        - LOAM_SYNC_INTERVAL IS 24h, THE OPPOSITE OF demo:m3's 2s. The
+          seeded repo's upstream_url points at example.invalid, which is
+          deliberately unresolvable (RFC 6761 reserves it): there is no
+          upstream here, because this demo has nothing to sync. A live tick
+          would only fill the log with fetch failures and, worse, could
+          race the mirror this demo writes a work-branch ref into.
+          validateSyncInterval rejects a non-positive interval at startup,
+          so 24h -- not 0 -- is how you say "never, within this run".
+        - THE ROUND IS READ FROM `verdicts` AND `comments`, NEVER FROM
+          `show`. `loam work show` reports no round, and that is not an
+          oversight in the CLI: proto/loam/v1/common.proto's WorkBranch has
+          no round field at all, so there is nothing on the wire for it to
+          print (loam-8d2). Thread.round and Comment.round DO exist
+          (loam-ofg.9), so `work comments` and `work verdicts` are where
+          this demo reads the round from. `work show` is still printed
+          once, for its title/description/state, with that noted inline.
+        - THE INCREMENT IS SHOWN INSIDE ONE DOCUMENT. After the second
+          request-review, a single `loam work comments` response carries a
+          thread RAISED in round 1 whose comments read round 1, round 1,
+          round 2 -- the reviewer's opening comment, the author's immediate
+          reply, and the author's reply after the new round opened. The
+          thread's own round does not move (proto: Comment.round is "never
+          inherited from Thread.round"), which is exactly the distinction
+          that makes the sequence meaningful rather than decorative. The
+          assertion compares that sequence IN ORDER, so a document
+          containing a 2 somewhere cannot satisfy it.
+        - STALENESS IS PROVEN IN BOTH DIRECTIONS. The same reviewer's same
+          verdict is asserted stale=false while round 1 is current, and
+          stale=true once round 2 opens. Only the pair proves anything: a
+          flag that was hard-coded true would satisfy the second assertion
+          on its own. The same is true of the reviewer's queue --
+          `work list --awaiting-review` is asserted to CONTAIN the branch
+          in round 1, to be EMPTY once the verdict lands, and to contain it
+          again in round 2.
+        - KNOWN DEFECT (loam-ppb), FOUND BY THIS DEMO: the author's `git
+          push` to their own `work start` branch is REJECTED, every time,
+          with "loam: <name> belongs to ada-lovelace-1-author" -- naming
+          the pushing agent as the owner it is refusing. CreateWorkBranch
+          writes work_branches.author as the full identifier
+          (internal/handler/workbranch/workbranch.go -> authorIdentifier)
+          while internal/refpolicy compares it against the BARE
+          LOAM_AGENT_NAME the hook inherited (internal/hooksocket ->
+          req.Agent.Name), so "ada-lovelace" never equals
+          "ada-lovelace-1-author". Nothing caught it because every existing
+          fixture seeds author=<bare agent name> instead of letting the RPC
+          write it. This demo runs the real push, shows the real rejection,
+          and ASSERTS the rejection reason -- so if loam-ppb is fixed, this
+          target fails and tells you to update it. It then lands the commit
+          in the bare mirror with a local `git fetch` from the author's own
+          clone, which is fixture plumbing standing in for the blocked
+          push, labelled as such inline and never presented as success.
+        - KNOWN DEFECT (loam-5iu): `loam work diff` on a freshly started
+          work branch exits 2 with precondition_failed, because nothing
+          creates refs/heads/<name> in the mirror at CreateWorkBranch time.
+          The demo shows that honest failure at the exact moment it bites
+          and asserts the exit code and the reason. It runs `work diff`
+          again after the commit has reached the mirror, where it produces
+          a real unified diff -- that second call is not a workaround for
+          loam-5iu, it is what proves internal/gitdiff itself is sound and
+          that loam-5iu is precisely and only about the missing ref.
+        - THREADS ARE ADDRESSED BY ANCHOR, NEVER BY INDEX. SubmitVerdict
+          publishes the whole staged batch in ONE transaction, so every
+          thread in it shares a single `now()` and
+          ListThreadsForWorkBranch's `ORDER BY t.created_at ASC, t.id`
+          falls through to the random-uuid tie-break. An index-addressed
+          assertion would pass or fail depending on which uuid sorted
+          first. demoenv's -select-file / thread-id -file resolve a thread
+          by its file anchor and fail loudly unless exactly one matches.
+        - ASSERTIONS, NOT EYEBALLING -- and this demo needs them more than
+          its predecessors did, because its headline property is about
+          something being ABSENT. `grep -q <body>` finding nothing in the
+          unstaged listing is equally consistent with the CLI having
+          crashed, printed usage, or emitted null; only decoding the
+          document and asserting the count is exactly zero distinguishes
+          those. Same for the round (a number nested inside an array, in
+          order) and for staleness (a flag belonging to a named reviewer).
+          `demoenv check-comments` / `check-verdicts` / `check-worklist`
+          decode and address named fields; the raw output is printed too,
+          because the bead's definition of done is that a human can SEE the
+          round increment and SEE stale:true.
+        - LOAM_DATA_DIR is a short /tmp/loam-m4-data.XXXXXX for exactly the
+          reason demo:m2 and demo:m3 document: the policy socket binds
+          <LOAM_DATA_DIR>/hook.sock and unix sockets cap sun_path at ~104
+          bytes, so a long data dir makes the server exit before the
+          readiness poll could ever succeed.
+        - Readiness is a poll against GET /healthz until 200, never a fixed
+          sleep, and the fixed port (18094) and container name
+          (loam-demo-m4-pg) are self-healed pre-flight -- both exactly as
+          demo:m2 and demo:m3 do, and for the same reason: mvdan/sh's EXIT
+          trap does not fire on go-task's SIGINT interception, so a
+          Ctrl-C'd run would otherwise leak a process that answers the next
+          run's readiness poll and hands it a false-positive "ready" for a
+          boot that never happened.
+    cmds:
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        docker_cli="${LOAM_DEMO_DOCKER:-docker}"
+        pg_container="loam-demo-m4-pg"
+        server_bin="$repo_root/bin/server"
+        loam_bin="$repo_root/bin/loam"
+        demoenv_bin="$repo_root/bin/demoenv"
+        http_port="18094"
+        http_addr="127.0.0.1:$http_port"
+        repo_name="bobcob7/doc-server"
+        target_branch="main"
+        author_name="ada-lovelace"
+        author_id="1"
+        author_role="author"
+        author_identifier="$author_name-$author_id-$author_role"
+        reviewer_name="grace-hopper"
+        reviewer_id="2"
+        reviewer_role="reviewer"
+        reviewer_identifier="$reviewer_name-$reviewer_id-$reviewer_role"
+        admin_password="throwaway-admin-pass"
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        data_dir=""
+        author_ws=""
+        reviewer_ws=""
+        # find_pids/stop_proc/clear_stale_port are demo:m3's, verbatim in
+        # behaviour and for the reasons its own comments give: go-task's
+        # shell (mvdan/sh) has no `kill` builtin at all and its `$!` is an
+        # internal job id rather than a signalable pid, so processes are
+        # located by absolute exec path via pgrep -f -- which also
+        # self-heals anything a Ctrl-C'd previous run leaked, with no
+        # pidfile to go stale. clear_stale_port is the belt-and-suspenders
+        # net for a leftover process of ANY kind squatting on the fixed
+        # port and answering /healthz with a false-positive "ready".
+        find_pids() {
+          pgrep -f "$1" 2>/dev/null || true
+        }
+        stop_proc() {
+          stop_bin="$1"; stop_label="$2"
+          stop_pids="$(find_pids "$stop_bin")"
+          if [ -z "$stop_pids" ]; then
+            echo "$stop_label: no running process found"
+            return 0
+          fi
+          echo "$stop_label: stopping pid(s): $(echo "$stop_pids" | tr '\n' ' ')"
+          for stop_pid in $stop_pids; do
+            /bin/kill -TERM "$stop_pid" 2>/dev/null || true
+          done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_pids "$stop_bin")" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_pids "$stop_bin"); do
+            /bin/kill -9 "$stop_pid" 2>/dev/null || true
+          done
+        }
+        clear_stale_port() {
+          command -v lsof >/dev/null 2>&1 || return 0
+          for stale_pid in $(lsof -ti "tcp:$1" 2>/dev/null || true); do
+            [ -z "$stale_pid" ] && continue
+            echo "  killing stale pid $stale_pid bound to port $1"
+            /bin/kill -9 "$stale_pid" 2>/dev/null || true
+          done
+        }
+        cleanup() {
+          echo ""
+          echo "=== demo:m4 cleanup: stopping the server, removing container $pg_container and both agents' temp workspaces ==="
+          stop_proc "$server_bin" "cleanup(server)"
+          clear_stale_port "$http_port"
+          if ! "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1; then
+            echo "demo:m4: NOTE -- $pg_container was not present to remove (already gone, or never created)" >&2
+          fi
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$author_ws" ] && rm -rf "$author_ws"
+          [ -n "$reviewer_ws" ] && rm -rf "$reviewer_ws"
+        }
+        trap cleanup EXIT
+        echo "=== demo:m4 pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        "$docker_cli" rm -f "$pg_container" >/dev/null 2>&1 || true
+        stop_proc "$server_bin" "pre-flight(server)"
+        clear_stale_port "$http_port"
+        wait_for_http_ok() {
+          poll_url="$1"; poll_log="$2"; poll_label="$3"; poll_timeout="${4:-60}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            if [ "$poll_code" = "200" ]; then
+              echo "$poll_label ready (HTTP 200 from $poll_url)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - poll_start ))" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s -- log:" >&2
+              cat "$poll_log" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        # author_cli/reviewer_cli run the real compiled loam binary as one
+        # of the two agents, each from ITS OWN working directory: the CLI
+        # infers the repo from the enclosing clone's origin remote and the
+        # work branch from its checked-out branch, and keys the staging
+        # area by the clone's PARENT plus the caller's identifier
+        # (internal/cli/workspace.go). Running both agents from one
+        # directory would collapse two genuinely separate staging areas
+        # into one and quietly destroy the property this demo exists to
+        # show. The cd lives inside a subshell so it never leaks into the
+        # rest of the script.
+        author_cwd=""
+        reviewer_cwd=""
+        author_cli() {
+          ( cd "$author_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+              LOAM_AGENT_NAME="$author_name" LOAM_AGENT_ID="$author_id" LOAM_AGENT_ROLE="$author_role" \
+              "$loam_bin" "$@" )
+        }
+        reviewer_cli() {
+          ( cd "$reviewer_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$http_addr" \
+              LOAM_AGENT_NAME="$reviewer_name" LOAM_AGENT_ID="$reviewer_id" LOAM_AGENT_ROLE="$reviewer_role" \
+              "$loam_bin" "$@" )
+        }
+        boot_server() {
+          boot_log="$1"; boot_label="$2"
+          env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
+            LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+            LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+            LOAM_SYNC_INTERVAL=24h \
+            "$server_bin" >"$boot_log" 2>&1 &
+          wait_for_http_ok "http://$http_addr/healthz" "$boot_log" "$boot_label" 60
+        }
+        echo ""
+        echo "=== step 1/14: build server, loam, loamhook (the shipped three) plus demoenv (demo support) ==="
+        mkdir -p bin
+        go build -o bin/server ./cmd/server
+        go build -o bin/loam ./cmd/loam
+        go build -o bin/loamhook ./cmd/loamhook
+        go build -o bin/demoenv ./cmd/demoenv
+        echo ""
+        echo "=== step 2/14: start a fresh Postgres/pgvector container ==="
+        "$docker_cli" run -d --name "$pg_container" \
+          -e POSTGRES_USER=loam -e POSTGRES_PASSWORD=loam -e POSTGRES_DB=loam \
+          -p 127.0.0.1::5432 pgvector/pgvector:pg16 >/dev/null
+        pg_wait_deadline=$(( $(date +%s) + 60 ))
+        until "$docker_cli" exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "$pg_wait_deadline" ]; then
+            echo "postgres never became ready within 60s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        pg_hostport="$("$docker_cli" port "$pg_container" 5432 | head -1)"
+        echo "postgres ready at $pg_hostport"
+        database_url="postgres://loam:loam@${pg_hostport}/loam?sslmode=disable"
+        data_dir="$(mktemp -d /tmp/loam-m4-data.XXXXXX)"
+        author_ws="$(mktemp -d /tmp/loam-m4-author.XXXXXX)"
+        reviewer_ws="$(mktemp -d /tmp/loam-m4-reviewer.XXXXXX)"
+        author_cwd="$author_ws"
+        reviewer_cwd="$reviewer_ws"
+        echo "LOAM_DATA_DIR=$data_dir (short, so <dir>/hook.sock fits unix's sun_path limit)"
+        echo "author   workspace: $author_ws   identity: $author_identifier"
+        echo "reviewer workspace: $reviewer_ws   identity: $reviewer_identifier"
+        echo ""
+        echo "=== step 3/14: first server boot -- applies migrations (which also seed the built-in author/reviewer roles) -- then stop it ==="
+        boot_server "$author_ws/server-first-boot.log" "first boot"
+        stop_proc "$server_bin" "first boot"
+        echo "migrations applied; first boot stopped cleanly"
+        echo ""
+        echo "=== step 4/14: seed the enrolled repo directly in Postgres (demo:m2's fixture technique -- NOT the work branch, which the CLI creates for real) ==="
+        repo_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        "$docker_cli" exec "$pg_container" psql -U loam -d loam -v ON_ERROR_STOP=1 -c "
+        INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
+        VALUES ('$repo_id', '$repo_name', 'https://example.invalid/$repo_name', 'example.invalid', '$target_branch');
+        INSERT INTO repo_target_branches (repo_id, branch) VALUES ('$repo_id', '$target_branch');
+        "
+        echo ""
+        echo "=== step 5/14: seed the bare mirror on disk, holding only the target branch ==="
+        mirror_dir="$data_dir/mirrors/$repo_name.git"
+        mkdir -p "$(dirname "$mirror_dir")"
+        seed_src="$(mktemp -d /tmp/loam-m4-src.XXXXXX)"
+        git init --quiet --initial-branch="$target_branch" "$seed_src"
+        git -C "$seed_src" config user.email "seed@example.com"
+        git -C "$seed_src" config user.name "seed"
+        printf 'doc-server\nA small service.\n' > "$seed_src/README.md"
+        printf 'package main\n\nfunc main() {\n\tserve()\n}\n' > "$seed_src/main.go"
+        git -C "$seed_src" add README.md main.go
+        git -C "$seed_src" commit --quiet -m "init"
+        git clone --quiet --bare "$seed_src" "$mirror_dir"
+        rm -rf "$seed_src"
+        echo "mirror seeded at $mirror_dir with refs/heads/$target_branch only"
+        echo ""
+        echo "=== step 6/14: second server boot -- reconciles the pre-existing mirror (installs the real loamhook as its pre-receive hook) ==="
+        server_log="$author_ws/server.log"
+        boot_server "$server_log" "server"
+        echo ""
+        echo "=== step 7/14: AUTHOR ($author_identifier) -- clone the target branch, start a work branch, title and describe it ==="
+        author_cli clone "$repo_name" "$target_branch"
+        author_clone="$author_ws/doc-server"
+        if [ ! -d "$author_clone" ]; then
+          echo "FAIL: the author's clone was not created at $author_clone" >&2
+          exit 1
+        fi
+        echo ""
+        echo "--- loam work start $repo_name $target_branch (the name is server-generated and meaning-carrying-nothing) ---"
+        start_out="$(author_cli work start "$repo_name" "$target_branch")"
+        echo "$start_out"
+        work_branch="$(printf '%s' "$start_out" | "$demoenv_bin" field -name name)"
+        echo "work branch: $work_branch"
+        echo ""
+        echo "--- loam work set --title ... (description on stdin) ---"
+        printf '%s' "Demotes the README heading and documents main(). Raised so the reviewer has something anchored to comment on." \
+          | author_cli work set "$repo_name" "$work_branch" --title "Tidy the README heading and document main()"
+        echo ""
+        echo "=== step 8/14: KNOWN DEFECT (loam-5iu) -- loam work diff on a freshly started work branch ==="
+        echo "    Nothing creates refs/heads/$work_branch in the mirror at CreateWorkBranch time, so"
+        echo "    GetWorkBranchDiff has no ref to diff and answers FailedPrecondition. This is the honest"
+        echo "    failure, printed and asserted rather than skipped: if loam-5iu is fixed, this step FAILS"
+        echo "    and this target must be updated. A fabricated empty diff would read as \"no changes\"."
+        if diff_out="$(author_cli work diff "$repo_name" "$work_branch" 2>&1)"; then
+          echo "$diff_out"
+          echo "FAIL: work diff succeeded on a work branch with no mirror ref -- loam-5iu may be fixed; update demo:m4" >&2
+          exit 1
+        fi
+        echo "$diff_out"
+        case "$diff_out" in
+          *precondition_failed*) echo "KNOWN DEFECT CONFIRMED (loam-5iu): exit 2, precondition_failed, no ref in the mirror" ;;
+          *) echo "FAIL: expected a precondition_failed error from work diff, got the above" >&2; exit 1 ;;
+        esac
+        echo ""
+        echo "=== step 9/14: AUTHOR -- commit on the work branch and push it with plain git ==="
+        git -C "$author_clone" checkout -q -b "$work_branch"
+        printf '## doc-server\nA small service.\n' > "$author_clone/README.md"
+        git -C "$author_clone" add README.md
+        git -C "$author_clone" commit --quiet -m "docs: demote the README heading"
+        echo "--- git push origin $work_branch ---"
+        if push_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
+          echo "$push_out"
+          echo "FAIL: the push SUCCEEDED -- loam-ppb may be fixed; drop the fixture fetch below and update demo:m4" >&2
+          exit 1
+        fi
+        echo "$push_out"
+        echo "    KNOWN DEFECT (loam-ppb), found by this demo: the rejection above names the pushing"
+        echo "    agent as the owner it is refusing. CreateWorkBranch writes work_branches.author as the"
+        echo "    full identifier \"$author_identifier\", while internal/refpolicy compares it against the"
+        echo "    bare LOAM_AGENT_NAME the hook inherited (\"$author_name\"), so an author can never push to"
+        echo "    their own 'work start' branch. Asserted, not tolerated: the reason is pinned below."
+        case "$push_out" in
+          *"remote: loam: $work_branch belongs to $author_identifier"*)
+            echo "KNOWN DEFECT CONFIRMED (loam-ppb): remote: loam: $work_branch belongs to $author_identifier" ;;
+          *) echo "FAIL: expected the loam-ppb rejection reason naming $author_identifier" >&2; exit 1 ;;
+        esac
+        echo ""
+        echo "--- FIXTURE PLUMBING, NOT A FIX: landing the same commit in the bare mirror with a local git fetch ---"
+        echo "    This stands in for the push loam-ppb blocks, so the rest of the round-trip can be shown."
+        echo "    It is a plain fetch between two local repositories: it does not go through /git/*, does"
+        echo "    not run the pre-receive hook, and proves nothing about push policy."
+        git --git-dir="$mirror_dir" fetch --quiet "$author_clone" "refs/heads/$work_branch:refs/heads/$work_branch"
+        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        clone_wb_sha="$(git -C "$author_clone" rev-parse HEAD)"
+        if [ "$mirror_wb_sha" != "$clone_wb_sha" ]; then
+          echo "FAIL: the mirror's $work_branch ($mirror_wb_sha) does not match the author's commit ($clone_wb_sha)" >&2
+          exit 1
+        fi
+        echo "mirror now carries refs/heads/$work_branch at $mirror_wb_sha"
+        echo ""
+        echo "--- loam work diff again, now that the ref exists: gitdiff itself is sound, loam-5iu is only the missing ref ---"
+        author_cwd="$author_clone"
+        author_cli work diff
+        echo ""
+        echo "=== step 10/14: AUTHOR -- request review, opening round 1 ==="
+        author_cli work request-review
+        echo ""
+        echo "--- loam work show: title, description and state. It reports NO round, and cannot: ---"
+        echo "    proto WorkBranch has no round field (loam-8d2). Rounds are read from verdicts/comments."
+        author_cli work show
+        echo ""
+        echo "--- REVIEWER ($reviewer_identifier): loam work list --awaiting-review -- the branch is queued ---"
+        queued_1="$(reviewer_cli work list --awaiting-review --repo "$repo_name")"
+        echo "$queued_1"
+        printf '%s' "$queued_1" | "$demoenv_bin" check-worklist -label "round 1: the branch is awaiting the reviewer's verdict" \
+          -count 1 -want-names "$work_branch" -want-state reviewable -want-repo "$repo_name"
+        echo ""
+        echo "=== step 11/14: REVIEWER -- clone the work branch and stage two comments (THE HEART OF THIS DEMO) ==="
+        reviewer_cli clone "$repo_name" "$work_branch"
+        reviewer_clone="$reviewer_ws/doc-server"
+        reviewer_cwd="$reviewer_clone"
+        echo "reviewer's clone is at $reviewer_clone, checked out on:"
+        git -C "$reviewer_clone" symbolic-ref --short HEAD
+        echo ""
+        echo "--- loam work comment --file README.md --line 1 (body on stdin) ---"
+        printf '%s' "An h2 in the first line reads oddly for a repo README; h1 is conventional." \
+          | reviewer_cli work comment --file README.md --line 1
+        echo "--- loam work comment --file main.go --line 3 (body on stdin) ---"
+        printf '%s' "main() still has no doc comment despite the title promising one." \
+          | reviewer_cli work comment --file main.go --line 3
+        echo ""
+        echo "--- loam work comments --staged: the reviewer sees their own two staged items ---"
+        staged_out="$(reviewer_cli work comments --staged)"
+        echo "$staged_out"
+        printf '%s' "$staged_out" | "$demoenv_bin" check-comments -label "the reviewer's own staged batch is listed" \
+          -staged -count 2 -want-files "README.md,main.go" \
+          -want-bodies "main() still has no doc comment despite the title promising one."
+        echo ""
+        echo "--- loam work comments (no --staged): NOTHING is published yet ---"
+        published_out="$(reviewer_cli work comments)"
+        echo "$published_out"
+        printf '%s' "$published_out" | "$demoenv_bin" check-comments -label "staged comments are NOT visible in the published listing" -count 0
+        echo ""
+        echo "--- and the AUTHOR cannot see them either -- they are not on the server at all ---"
+        author_view="$(author_cli work comments)"
+        echo "$author_view"
+        printf '%s' "$author_view" | "$demoenv_bin" check-comments -label "the author cannot see the reviewer's staged comments" -count 0
+        echo ""
+        echo "=== step 12/14: REVIEWER -- one verdict publishes the whole staged batch atomically ==="
+        reviewer_cli work verdict --outcome approve
+        echo ""
+        echo "--- loam work comments: both threads are now published, both raised in round 1 ---"
+        round1_threads="$(author_cli work comments)"
+        echo "$round1_threads"
+        printf '%s' "$round1_threads" | "$demoenv_bin" check-comments -label "the verdict published the whole batch, in round 1" \
+          -count 2 -want-files "README.md,main.go" \
+          -select-file README.md -thread-round 1 -comment-rounds "1" -comment-authors "$reviewer_identifier"
+        echo ""
+        echo "--- loam work comments --staged: the staging area was cleared by the same command ---"
+        cleared_out="$(reviewer_cli work comments --staged)"
+        echo "$cleared_out"
+        printf '%s' "$cleared_out" | "$demoenv_bin" check-comments -label "publishing cleared the reviewer's staging area" -staged -count 0
+        echo ""
+        echo "--- loam work verdicts: round 1, and NOT stale -- round 1 is still the current round ---"
+        verdicts_1="$(author_cli work verdicts)"
+        echo "$verdicts_1"
+        printf '%s' "$verdicts_1" | "$demoenv_bin" check-verdicts -label "the approve verdict is recorded in round 1 and is current" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale false
+        echo ""
+        echo "--- loam work list --awaiting-review: the reviewer's queue is now EMPTY, they have voted ---"
+        queued_2="$(reviewer_cli work list --awaiting-review --repo "$repo_name")"
+        echo "$queued_2"
+        printf '%s' "$queued_2" | "$demoenv_bin" check-worklist -label "a voted-on branch leaves the reviewer's queue" \
+          -count 0 -deny-names "$work_branch"
+        echo ""
+        echo "=== step 13/14: AUTHOR -- reply immediately, push a follow-up, request review again ==="
+        thread_id="$(printf '%s' "$round1_threads" | "$demoenv_bin" thread-id -file README.md)"
+        echo "replying to the README.md thread: $thread_id"
+        echo "--- loam work reply --thread <id> (immediate: never staged, no verdict needed) ---"
+        printf '%s' "Fair -- restoring h1 in the follow-up commit." | author_cli work reply --thread "$thread_id"
+        echo ""
+        echo "--- follow-up commit, pushed the same way (same loam-ppb rejection, same fixture stand-in) ---"
+        printf '# doc-server\nA small service.\n' > "$author_clone/README.md"
+        printf 'package main\n\n// main starts the server.\nfunc main() {\n\tserve()\n}\n' > "$author_clone/main.go"
+        git -C "$author_clone" add README.md main.go
+        git -C "$author_clone" commit --quiet -m "docs: restore h1 and document main"
+        if followup_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
+          echo "$followup_out"
+          echo "FAIL: the follow-up push SUCCEEDED -- loam-ppb may be fixed; update demo:m4" >&2
+          exit 1
+        fi
+        case "$followup_out" in
+          *"remote: loam: $work_branch belongs to $author_identifier"*)
+            echo "$followup_out" | grep 'remote: loam:' || true ;;
+          *) echo "FAIL: expected the same loam-ppb rejection reason on the follow-up push" >&2; exit 1 ;;
+        esac
+        git --git-dir="$mirror_dir" fetch --quiet "$author_clone" "refs/heads/$work_branch:refs/heads/$work_branch"
+        echo "mirror's $work_branch advanced to $(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch") (fixture stand-in for the blocked push)"
+        echo ""
+        echo "--- loam work request-review again: this opens ROUND 2 ---"
+        author_cli work request-review
+        echo ""
+        echo "--- loam work reply --thread <id> again, on the same thread, now that round 2 is open ---"
+        printf '%s' "Pushed the follow-up: h1 restored and main() documented." | author_cli work reply --thread "$thread_id"
+        echo ""
+        echo "=== step 14/14: the round incremented, and the prior round's verdict is stale ==="
+        echo ""
+        echo "--- loam work comments: ONE thread, raised in round 1, whose comments read round 1, 1, 2 ---"
+        round2_threads="$(author_cli work comments)"
+        echo "$round2_threads"
+        printf '%s' "$round2_threads" | "$demoenv_bin" check-comments -label "the round incremented: 1 -> 1 -> 2 within one thread raised in round 1" \
+          -count 2 -select-file README.md -thread-round 1 -comment-rounds "1,1,2" \
+          -comment-authors "$reviewer_identifier,$author_identifier,$author_identifier"
+        echo ""
+        echo "--- loam work verdicts: the SAME verdict, still round 1, now stale:true ---"
+        verdicts_2="$(reviewer_cli work verdicts)"
+        echo "$verdicts_2"
+        printf '%s' "$verdicts_2" | "$demoenv_bin" check-verdicts -label "the prior round's verdict is now stale" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale true
+        echo ""
+        echo "--- loam work list --awaiting-review: queued for the reviewer again ---"
+        queued_3="$(reviewer_cli work list --awaiting-review --repo "$repo_name")"
+        echo "$queued_3"
+        printf '%s' "$queued_3" | "$demoenv_bin" check-worklist -label "a fresh round re-queues the branch for its reviewer" \
+          -count 1 -want-names "$work_branch" -want-state reviewable -want-repo "$repo_name"
+        echo ""
+        echo "=== demo:m4 summary ==="
+        echo "Two identities, one server, only the shipped binaries:"
+        echo "  author   $author_identifier   (work.start, work.set, work.request_review -- no work.verdict)"
+        echo "  reviewer $reviewer_identifier   (work.verdict -- no work.start, no work.request_review)"
+        echo "Observed and asserted, not merely printed:"
+        echo "  - staged comments are invisible until submitted   2 staged, 0 published, for BOTH agents"
+        echo "  - one verdict publishes the batch atomically      published=2, state reviewable -> reviewed"
+        echo "  - a reply is immediate and unstaged               posted with no verdict of its own"
+        echo "  - the round incremented                           thread raised in round 1, comments 1, 1, 2"
+        echo "  - the prior round's verdict went stale            $reviewer_identifier approve round 1: false -> true"
+        echo "  - the branch re-queued for review                 --awaiting-review: listed, empty, listed"
+        echo "Known defects shown honestly, never worked around silently:"
+        echo "  - loam-5iu   work diff on a freshly started work branch: precondition_failed"
+        echo "  - loam-ppb   the author cannot push to their own work branch (found by this demo)"
+        echo "  - loam-8d2   work show reports no round, because the proto carries none"
+        echo "=== demo:m4 complete ==="
+
   lint:
     desc: Run all lint gates (gofmt + buf lint)
     cmds:
