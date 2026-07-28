@@ -27,7 +27,7 @@ import (
 func TestRejection5_ForcePush_RejectedByGitOwnDenyNonFastForwards_NotTheHook(t *testing.T) {
 	t.Parallel()
 	branches := map[string]workbranchstore.WorkBranch{
-		"wb-good": {Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft},
+		"wb-good": {Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 	}
 	env := newStack(t, branches, loamhookBinary, true)
 	clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
@@ -55,7 +55,7 @@ func TestRejection5_ForcePush_RejectedByGitOwnDenyNonFastForwards_NotTheHook(t *
 func TestRejection6_Delete_RejectedByGitOwnDenyDeletes_NotTheHook(t *testing.T) {
 	t.Parallel()
 	branches := map[string]workbranchstore.WorkBranch{
-		"wb-good2": {Name: "wb-good2", Author: "alice", State: workbranchstore.StateDraft},
+		"wb-good2": {Name: "wb-good2", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 	}
 	env := newStack(t, branches, loamhookBinary, true)
 	clonePath := cloneWithIdentity(t, env, "alice", "1", "author")

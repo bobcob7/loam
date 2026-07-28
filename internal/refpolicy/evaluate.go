@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -99,12 +100,12 @@ type PostAcceptFunc func(ctx context.Context, wb workbranchstore.WorkBranch, upd
 // failed -- so a partially-evaluated or atomically-rejected push never
 // triggers loam-giq.6's future catch-up bookkeeping for the refs that
 // individually looked fine.
-func EvaluatePush(ctx context.Context, store WorkBranchPolicyStore, repoName, agentName string, updates []RefUpdate, onAccept PostAcceptFunc) (verdicts []RefVerdict, allAllowed bool, err error) {
+func EvaluatePush(ctx context.Context, store WorkBranchPolicyStore, repoName string, agent httpauth.Identity, updates []RefUpdate, onAccept PostAcceptFunc) (verdicts []RefVerdict, allAllowed bool, err error) {
 	verdicts = make([]RefVerdict, len(updates))
 	workBranches := make([]workbranchstore.WorkBranch, len(updates))
 	allAllowed = true
 	for i, update := range updates {
-		verdict, wb, evalErr := evaluateOne(ctx, store, repoName, agentName, update)
+		verdict, wb, evalErr := evaluateOne(ctx, store, repoName, agent, update)
 		if evalErr != nil {
 			return nil, false, fmt.Errorf("evaluating push to %s for ref %s: %w", repoName, update.Ref, evalErr)
 		}
@@ -132,7 +133,7 @@ func EvaluatePush(ctx context.Context, store WorkBranchPolicyStore, repoName, ag
 // hard evaluation error rather than folding it into a per-ref Reason
 // string, so the whole push fails closed rather than one ref quietly
 // reporting a misleading rejection reason.
-func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName, agentName string, update RefUpdate) (RefVerdict, workbranchstore.WorkBranch, error) {
+func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName string, agent httpauth.Identity, update RefUpdate) (RefVerdict, workbranchstore.WorkBranch, error) {
 	if !strings.HasPrefix(update.Ref, refsHeadsPrefix) {
 		return readOnlyVerdict(update.Ref), workbranchstore.WorkBranch{}, nil
 	}
@@ -144,18 +145,33 @@ func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName, age
 		}
 		return RefVerdict{}, workbranchstore.WorkBranch{}, fmt.Errorf("looking up work branch %s: %w", branchName, err)
 	}
-	// agentName == "" is checked explicitly, not left to fall out of the
-	// plain inequality below: work_branches.author is NOT NULL but does
-	// not forbid an EMPTY string, so "" != "" would otherwise be false and
-	// an unset LOAM_AGENT_NAME (an empty agentName) would incorrectly
-	// "match" a row whose author somehow also reads back empty. In
-	// production internal/httpauth.GitIdentity already 403s a request with
-	// no identity before receive-pack ever runs, so this exact path needs
-	// that middleware bypassed to reach at all -- but that is precisely
-	// why this local check exists too: defense in depth for this
+	// The comparison is against agent.Identifier() -- the "<name>-<id>-
+	// <role>" rendering -- because that is exactly what
+	// work_branches.author holds: internal/handler/workbranch's
+	// authorIdentifier() stores httpauth.Identity.Identifier() at
+	// CreateWorkBranch time, and docs/persistence-spec.md calls the column
+	// an "agent identifier" (and says author/reviewer are "stored as
+	// identifier strings"). This function used to compare the row against
+	// the BARE agent name, which can only match when a name happens to be
+	// identifier-shaped -- so in production an author could never push to
+	// the work branch they had just started, and the rejection named the
+	// pushing agent as the owner it was refusing (loam-ppb). Every fixture
+	// in the tree seeded author as a bare name, so the suite agreed with
+	// itself and disagreed with production; those fixtures were corrected
+	// alongside this change.
+	//
+	// The emptiness guard checks the identity's PARTS, not the rendered
+	// string, and that distinction is load-bearing: a zero Identity
+	// renders as "--", not "", so a rendered-string check would let an
+	// unset identity through against a row whose author somehow also read
+	// back as "--". work_branches.author is NOT NULL but does not forbid
+	// an empty string. In production internal/httpauth.GitIdentity already
+	// 403s a request with no identity before receive-pack ever runs, so
+	// reaching this path at all needs that middleware bypassed -- but that
+	// is precisely why this local check exists: defense in depth for this
 	// function's OWN contract, not a rule that depends on some other
 	// package's gate always running first.
-	if agentName == "" || wb.Author != agentName {
+	if agent.Name == "" || agent.ID == "" || agent.Role == "" || wb.Author != agent.Identifier() {
 		return RefVerdict{Ref: update.Ref, Allowed: false, Reason: fmt.Sprintf("loam: %s belongs to %s", wb.Name, wb.Author)}, wb, nil
 	}
 	if !isNonTerminal(wb.State) {

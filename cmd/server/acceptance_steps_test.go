@@ -116,7 +116,7 @@ func (h *acceptanceHarness) stepIAmTheAuthorAgent(ctx context.Context, agentName
 func (h *acceptanceHarness) stepIHaveStartedTheWorkBranch(ctx context.Context, workBranch string) error {
 	world := worldFrom(ctx)
 	world.workBranch = workBranch
-	if err := h.insertWorkBranchRow(ctx, world.repoID, workBranch, world.targetBranch, "draft", world.agentName); err != nil {
+	if err := h.insertWorkBranchRow(ctx, world.repoID, workBranch, world.targetBranch, "draft", world.agentIdentifier()); err != nil {
 		return err
 	}
 	mirrorDir, err := seedBareMirrorWithBranches(ctx, h.server.dataDir, world.repo(), world.targetBranch, workBranch)

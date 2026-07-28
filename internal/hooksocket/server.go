@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/refpolicy"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
@@ -174,7 +175,7 @@ func (s *Server) evaluate(ctx context.Context, req Request) Response {
 	for i, u := range req.Updates {
 		updates[i] = refpolicy.RefUpdate{OldSHA: u.OldSHA, NewSHA: u.NewSHA, Ref: u.Ref}
 	}
-	verdicts, allAllowed, err := refpolicy.EvaluatePush(ctx, s.store, req.Repo, req.Agent.Name, updates, s.postAccept(req))
+	verdicts, allAllowed, err := refpolicy.EvaluatePush(ctx, s.store, req.Repo, httpauth.Identity{Name: req.Agent.Name, ID: req.Agent.ID, Role: req.Agent.Role}, updates, s.postAccept(req))
 	if err != nil {
 		s.logger.ErrorContext(ctx, "policy socket: evaluating push", "repo", req.Repo, "error", err)
 		return Response{Accepted: false}

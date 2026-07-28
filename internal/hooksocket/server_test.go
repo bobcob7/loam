@@ -111,7 +111,7 @@ func TestListen_PathTooLongForADirectBindFailsLoudlyAtStartup(t *testing.T) {
 func TestServer_AllowedPush_RoundTrip(t *testing.T) {
 	t.Parallel()
 	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 	})
 	socketPath := startTestServer(t, store)
 	req := Request{
@@ -159,7 +159,7 @@ func TestServer_RejectedPush_ReasonSurfacesOverTheWire(t *testing.T) {
 func TestServer_MixedPush_WholeResponseRejectedOverTheWire(t *testing.T) {
 	t.Parallel()
 	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 	})
 	socketPath := startTestServer(t, store)
 	req := Request{
@@ -189,8 +189,14 @@ func TestServer_StoreError_FailsClosedOverTheWire(t *testing.T) {
 	}
 	socketPath := startTestServer(t, store)
 	req := Request{
-		Repo:    "acme/widgets",
-		Agent:   AgentIdentity{Name: "alice"},
+		Repo: "acme/widgets",
+		// A COMPLETE identity: this test is about the server surviving a
+		// malformed request and still serving the next one, so the
+		// follow-up push must be accepted for the right reason. A
+		// name-only AgentIdentity would now be rejected on the identity
+		// guard (loam-ppb) and the test would "pass" its recovery claim
+		// while asserting the opposite of what it means to assert.
+		Agent:   AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"}},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
@@ -207,7 +213,7 @@ func TestServer_StoreError_FailsClosedOverTheWire(t *testing.T) {
 func TestServer_MalformedRequestDoesNotCrashOrWedgeTheServer(t *testing.T) {
 	t.Parallel()
 	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 	})
 	socketPath := startTestServer(t, store)
 	conn, err := net.Dial("unix", socketPath)
@@ -218,8 +224,13 @@ func TestServer_MalformedRequestDoesNotCrashOrWedgeTheServer(t *testing.T) {
 
 	// The server must still answer a well-formed follow-up request.
 	req := Request{
-		Repo:    "acme/widgets",
-		Agent:   AgentIdentity{Name: "alice"},
+		Repo: "acme/widgets",
+		// A COMPLETE identity: this test is about the server surviving a
+		// malformed request and still answering the NEXT one, so that
+		// follow-up must be accepted for the right reason. A name-only
+		// AgentIdentity is now rejected on the identity guard (loam-ppb),
+		// which would leave this test asserting the opposite of its point.
+		Agent:   AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"}},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
@@ -235,7 +246,7 @@ func TestServer_MalformedRequestDoesNotCrashOrWedgeTheServer(t *testing.T) {
 func TestServer_StalledClientIsClosedByServerSideDeadline(t *testing.T) {
 	t.Parallel()
 	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 	})
 	socketPath := startTestServerWithDeadline(t, store, 200*time.Millisecond)
 	conn, err := net.Dial("unix", socketPath)
@@ -327,7 +338,7 @@ func startTestServerWithAccept(t *testing.T, store WorkBranchStore, onAccept Pos
 func TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow(t *testing.T) {
 	t.Parallel()
 	wb := workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 		Target: "main", Conflict: workbranchstore.ConflictReset,
 	}
 	store := registeredBranchStore("acme/widgets", "wb-good", wb)
@@ -361,7 +372,7 @@ func TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow(t *testing.T)
 func TestServer_RejectedPush_PostAcceptNeverFires(t *testing.T) {
 	t.Parallel()
 	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
-		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft,
 	})
 	fired := make(chan AcceptedPush, 4)
 	socketPath := startTestServerWithAccept(t, store, func(_ context.Context, a AcceptedPush) { fired <- a })
@@ -377,3 +388,22 @@ func TestServer_RejectedPush_PostAcceptNeverFires(t *testing.T) {
 	require.False(t, resp.Accepted)
 	assert.Empty(t, fired, "an atomically rejected push must trigger no post-accept bookkeeping at all")
 }
+
+// aliceIdentifier is what work_branches.author actually holds -- the
+// "<name>-<id>-<role>" rendering internal/handler/workbranch stores at
+// CreateWorkBranch time -- and it matches the AgentIdentity the requests
+// in this file carry, so the pushing identity and the stored author agree.
+//
+// These fixtures used to seed the bare name "alice", agreeing with the
+// bare-name comparison internal/refpolicy made before loam-ppb was fixed.
+// That mutual agreement is what hid the bug from the entire suite while
+// production could never let an author push to their own work branch.
+const (
+	aliceIdentifier = "alice-agent-1-author"
+	// bobIdentifier is a DIFFERENT agent, used by the not-the-author
+	// rejection cases. It must stay identifier-shaped too: a bare "bob"
+	// would still be rejected, but for the wrong reason -- it would fail
+	// the shape rather than the ownership, and the test would pass while
+	// proving nothing about ownership.
+	bobIdentifier = "bob-agent-2-author"
+)

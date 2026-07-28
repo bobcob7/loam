@@ -57,9 +57,9 @@ import (
 // deliberately push somewhere absent from it) shares.
 func registeredBranches() map[string]workbranchstore.WorkBranch {
 	return map[string]workbranchstore.WorkBranch{
-		"wb-owned-by-bob": {Name: "wb-owned-by-bob", Author: "bob", State: workbranchstore.StateDraft},
-		"wb-closed":       {Name: "wb-closed", Author: "alice", State: workbranchstore.StateClosed},
-		"wb-alice-draft":  {Name: "wb-alice-draft", Author: "alice", State: workbranchstore.StateDraft},
+		"wb-owned-by-bob": {Name: "wb-owned-by-bob", Author: bobIdentifier, State: workbranchstore.StateDraft},
+		"wb-closed":       {Name: "wb-closed", Author: aliceIdentifier, State: workbranchstore.StateClosed},
+		"wb-alice-draft":  {Name: "wb-alice-draft", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 	}
 }
 

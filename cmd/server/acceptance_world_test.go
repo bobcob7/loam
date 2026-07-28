@@ -249,3 +249,17 @@ func (h *acceptanceHarness) afterScenario(ctx context.Context, _ *godog.Scenario
 	}
 	return ctx, nil
 }
+
+// agentIdentifier renders this world's agent triple the way
+// internal/handler/workbranch's authorIdentifier() does at
+// CreateWorkBranch time -- "<name>-<id>-<role>" -- which is what
+// work_branches.author actually holds and what internal/refpolicy compares
+// a pushing agent against.
+//
+// The seeders used to pass world.agentName, the BARE name. That agreed
+// with the bare-name comparison refpolicy made before loam-ppb was fixed,
+// so this suite was self-consistent and disagreed with production, where
+// an author could never push to the work branch they had just started.
+func (w *acceptanceWorld) agentIdentifier() string {
+	return w.agentName + "-" + w.agentID + "-" + w.agentRole
+}

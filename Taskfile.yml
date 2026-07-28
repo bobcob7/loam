@@ -1242,23 +1242,21 @@ tasks:
           `work list --awaiting-review` is asserted to CONTAIN the branch
           in round 1, to be EMPTY once the verdict lands, and to contain it
           again in round 2.
-        - KNOWN DEFECT (loam-ppb), FOUND BY THIS DEMO: the author's `git
-          push` to their own `work start` branch is REJECTED, every time,
-          with "loam: <name> belongs to ada-lovelace-1-author" -- naming
-          the pushing agent as the owner it is refusing. CreateWorkBranch
-          writes work_branches.author as the full identifier
-          (internal/handler/workbranch/workbranch.go -> authorIdentifier)
-          while internal/refpolicy compares it against the BARE
-          LOAM_AGENT_NAME the hook inherited (internal/hooksocket ->
-          req.Agent.Name), so "ada-lovelace" never equals
-          "ada-lovelace-1-author". Nothing caught it because every existing
-          fixture seeds author=<bare agent name> instead of letting the RPC
-          write it. This demo runs the real push, shows the real rejection,
-          and ASSERTS the rejection reason -- so if loam-ppb is fixed, this
-          target fails and tells you to update it. It then lands the commit
-          in the bare mirror with a local `git fetch` from the author's own
-          clone, which is fixture plumbing standing in for the blocked
-          push, labelled as such inline and never presented as success.
+        - The author's `git push` to their own `work start` branch goes
+          through /git/* and the REAL pre-receive hook, and is asserted to
+          SUCCEED -- both the first push and the follow-up. This demo is
+          what found loam-ppb: work_branches.author holds the full
+          identifier (internal/handler/workbranch -> authorIdentifier)
+          while internal/refpolicy compared it against the BARE
+          LOAM_AGENT_NAME the hook inherited, so "ada-lovelace" never
+          equalled "ada-lovelace-1-author" and an author could never push
+          to their own branch. Nothing else caught it because every fixture
+          in the tree seeded author=<bare name>, so the suite agreed with
+          itself and disagreed with production. Fixed by comparing
+          identifiers at the policy boundary; the fixtures were corrected
+          in the same change, and the fixture `git fetch` this target used
+          to need as a stand-in for the blocked push is gone -- the commit
+          now reaches the mirror by being pushed.
         - KNOWN DEFECT (loam-5iu): `loam work diff` on a freshly started
           work branch exits 2 with precondition_failed, because nothing
           creates refs/heads/<name> in the mirror at CreateWorkBranch time.
@@ -1536,35 +1534,23 @@ tasks:
         git -C "$author_clone" add README.md
         git -C "$author_clone" commit --quiet -m "docs: demote the README heading"
         echo "--- git push origin $work_branch ---"
-        if push_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
+        if ! push_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
           echo "$push_out"
-          echo "FAIL: the push SUCCEEDED -- loam-ppb may be fixed; drop the fixture fetch below and update demo:m4" >&2
+          echo "FAIL: the author's push to their own work branch was REJECTED." >&2
+          echo "      This is the loam-ppb regression: work_branches.author holds the identifier" >&2
+          echo "      \"$author_identifier\", and internal/refpolicy must compare against that, not" >&2
+          echo "      against the bare LOAM_AGENT_NAME (\"$author_name\")." >&2
           exit 1
         fi
         echo "$push_out"
-        echo "    KNOWN DEFECT (loam-ppb), found by this demo: the rejection above names the pushing"
-        echo "    agent as the owner it is refusing. CreateWorkBranch writes work_branches.author as the"
-        echo "    full identifier \"$author_identifier\", while internal/refpolicy compares it against the"
-        echo "    bare LOAM_AGENT_NAME the hook inherited (\"$author_name\"), so an author can never push to"
-        echo "    their own 'work start' branch. Asserted, not tolerated: the reason is pinned below."
-        case "$push_out" in
-          *"remote: loam: $work_branch belongs to $author_identifier"*)
-            echo "KNOWN DEFECT CONFIRMED (loam-ppb): remote: loam: $work_branch belongs to $author_identifier" ;;
-          *) echo "FAIL: expected the loam-ppb rejection reason naming $author_identifier" >&2; exit 1 ;;
-        esac
-        echo ""
-        echo "--- FIXTURE PLUMBING, NOT A FIX: landing the same commit in the bare mirror with a local git fetch ---"
-        echo "    This stands in for the push loam-ppb blocks, so the rest of the round-trip can be shown."
-        echo "    It is a plain fetch between two local repositories: it does not go through /git/*, does"
-        echo "    not run the pre-receive hook, and proves nothing about push policy."
-        git --git-dir="$mirror_dir" fetch --quiet "$author_clone" "refs/heads/$work_branch:refs/heads/$work_branch"
+        echo "PASS: the author pushed to their own work branch through /git/* and the real pre-receive hook"
         mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
         clone_wb_sha="$(git -C "$author_clone" rev-parse HEAD)"
         if [ "$mirror_wb_sha" != "$clone_wb_sha" ]; then
           echo "FAIL: the mirror's $work_branch ($mirror_wb_sha) does not match the author's commit ($clone_wb_sha)" >&2
           exit 1
         fi
-        echo "mirror now carries refs/heads/$work_branch at $mirror_wb_sha"
+        echo "mirror now carries refs/heads/$work_branch at $mirror_wb_sha (landed by the push, not by fixture plumbing)"
         echo ""
         echo "--- loam work diff again, now that the ref exists: gitdiff itself is sound, loam-5iu is only the missing ref ---"
         author_cwd="$author_clone"
@@ -1647,23 +1633,17 @@ tasks:
         echo "--- loam work reply --thread <id> (immediate: never staged, no verdict needed) ---"
         printf '%s' "Fair -- restoring h1 in the follow-up commit." | author_cli work reply --thread "$thread_id"
         echo ""
-        echo "--- follow-up commit, pushed the same way (same loam-ppb rejection, same fixture stand-in) ---"
+        echo "--- follow-up commit, pushed the same way (a real push, same as the first) ---"
         printf '# doc-server\nA small service.\n' > "$author_clone/README.md"
         printf 'package main\n\n// main starts the server.\nfunc main() {\n\tserve()\n}\n' > "$author_clone/main.go"
         git -C "$author_clone" add README.md main.go
         git -C "$author_clone" commit --quiet -m "docs: restore h1 and document main"
-        if followup_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
+        if ! followup_out="$(git -C "$author_clone" push origin "$work_branch" 2>&1)"; then
           echo "$followup_out"
-          echo "FAIL: the follow-up push SUCCEEDED -- loam-ppb may be fixed; update demo:m4" >&2
+          echo "FAIL: the author's follow-up push was REJECTED (loam-ppb regression)" >&2
           exit 1
         fi
-        case "$followup_out" in
-          *"remote: loam: $work_branch belongs to $author_identifier"*)
-            echo "$followup_out" | grep 'remote: loam:' || true ;;
-          *) echo "FAIL: expected the same loam-ppb rejection reason on the follow-up push" >&2; exit 1 ;;
-        esac
-        git --git-dir="$mirror_dir" fetch --quiet "$author_clone" "refs/heads/$work_branch:refs/heads/$work_branch"
-        echo "mirror's $work_branch advanced to $(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch") (fixture stand-in for the blocked push)"
+        echo "mirror's $work_branch advanced to $(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch") (landed by a real push)"
         echo ""
         echo "--- loam work request-review again: this opens ROUND 2 ---"
         author_cli work request-review

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -39,8 +40,13 @@ func registeredBranch(repoName, branchName string, wb workbranchstore.WorkBranch
 func TestEvaluatePush_TableDriven(t *testing.T) {
 	t.Parallel()
 	const repoName = "acme/widgets"
-	const agentName = "alice"
-	draftOwnedByAlice := workbranchstore.WorkBranch{Name: "wb-owned", Author: agentName, State: workbranchstore.StateDraft}
+	// The identity is seeded as a whole, and the fixture rows below store
+	// its Identifier() -- exactly what internal/handler/workbranch writes
+	// into work_branches.author at CreateWorkBranch time. This file used
+	// to seed the BARE name, which is why the suite agreed with itself
+	// and disagreed with production (loam-ppb).
+	agent := httpauth.Identity{Name: "alice", ID: "1", Role: "author"}
+	draftOwnedByAlice := workbranchstore.WorkBranch{Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateDraft}
 	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
@@ -98,7 +104,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			name: "rejection 4: terminal state -- closed",
 			ctx:  t.Context(),
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
-				Name: "wb-owned", Author: agentName, State: workbranchstore.StateClosed,
+				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateClosed,
 			}),
 			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
 			wantAllowed: false,
@@ -108,7 +114,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			name: "rejection 4: terminal state -- complete",
 			ctx:  t.Context(),
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
-				Name: "wb-owned", Author: agentName, State: workbranchstore.StateComplete,
+				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateComplete,
 			}),
 			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
 			wantAllowed: false,
@@ -118,7 +124,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			name: "allowed: reviewable and reviewed are non-terminal too",
 			ctx:  t.Context(),
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
-				Name: "wb-owned", Author: agentName, State: workbranchstore.StateReviewable,
+				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateReviewable,
 			}),
 			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
 			wantAllowed: true,
@@ -155,7 +161,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			verdicts, allAllowed, err := EvaluatePush(tt.ctx, tt.store, repoName, agentName, []RefUpdate{tt.update}, nil)
+			verdicts, allAllowed, err := EvaluatePush(tt.ctx, tt.store, repoName, agent, []RefUpdate{tt.update}, nil)
 			if tt.wantErr {
 				require.Error(t, err, "fail-closed case must surface a hard error, not a per-ref verdict")
 				assert.Nil(t, verdicts, "a hard evaluation error must not also return a partial verdict list a caller could mistake for a real decision")
@@ -185,8 +191,13 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 func TestEvaluatePush_AtomicRejection(t *testing.T) {
 	t.Parallel()
 	const repoName = "acme/widgets"
-	const agentName = "alice"
-	store := registeredBranch(repoName, "wb-good", workbranchstore.WorkBranch{Name: "wb-good", Author: agentName, State: workbranchstore.StateDraft})
+	// The identity is seeded as a whole, and the fixture rows below store
+	// its Identifier() -- exactly what internal/handler/workbranch writes
+	// into work_branches.author at CreateWorkBranch time. This file used
+	// to seed the BARE name, which is why the suite agreed with itself
+	// and disagreed with production (loam-ppb).
+	agent := httpauth.Identity{Name: "alice", ID: "1", Role: "author"}
+	store := registeredBranch(repoName, "wb-good", workbranchstore.WorkBranch{Name: "wb-good", Author: agent.Identifier(), State: workbranchstore.StateDraft})
 	goodUpdate := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}
 	badUpdate := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/main"} // not a registered work branch
 
@@ -200,7 +211,7 @@ func TestEvaluatePush_AtomicRejection(t *testing.T) {
 	// one evaluated.
 	t.Run("bad ref last", func(t *testing.T) {
 		t.Parallel()
-		verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, []RefUpdate{goodUpdate, badUpdate}, nil)
+		verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, []RefUpdate{goodUpdate, badUpdate}, nil)
 		require.NoError(t, err)
 		require.Len(t, verdicts, 2)
 		assert.True(t, verdicts[0].Allowed, "the individually-fine ref is still reported allowed on its own verdict")
@@ -210,7 +221,7 @@ func TestEvaluatePush_AtomicRejection(t *testing.T) {
 
 	t.Run("bad ref first", func(t *testing.T) {
 		t.Parallel()
-		verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, []RefUpdate{badUpdate, goodUpdate}, nil)
+		verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, []RefUpdate{badUpdate, goodUpdate}, nil)
 		require.NoError(t, err)
 		require.Len(t, verdicts, 2)
 		assert.False(t, verdicts[0].Allowed)
@@ -228,8 +239,13 @@ func TestEvaluatePush_AtomicRejection(t *testing.T) {
 func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T) {
 	t.Parallel()
 	const repoName = "acme/widgets"
-	const agentName = "alice"
-	goodWB := workbranchstore.WorkBranch{Name: "wb-good", Author: agentName, State: workbranchstore.StateDraft}
+	// The identity is seeded as a whole, and the fixture rows below store
+	// its Identifier() -- exactly what internal/handler/workbranch writes
+	// into work_branches.author at CreateWorkBranch time. This file used
+	// to seed the BARE name, which is why the suite agreed with itself
+	// and disagreed with production (loam-ppb).
+	agent := httpauth.Identity{Name: "alice", ID: "1", Role: "author"}
+	goodWB := workbranchstore.WorkBranch{Name: "wb-good", Author: agent.Identifier(), State: workbranchstore.StateDraft}
 	store := registeredBranch(repoName, "wb-good", goodWB)
 
 	t.Run("mixed push: onAccept never called", func(t *testing.T) {
@@ -240,7 +256,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 			{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"},
 			{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/main"},
 		}
-		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, updates, onAccept)
+		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, onAccept)
 		require.NoError(t, err)
 		require.False(t, allAllowed)
 		assert.Empty(t, calls, "onAccept must not fire for any ref in an atomically-rejected push")
@@ -255,7 +271,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 			gotWB = append(gotWB, wb)
 		}
 		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}}
-		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, updates, onAccept)
+		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, onAccept)
 		require.NoError(t, err)
 		require.True(t, allAllowed)
 		require.Len(t, calls, 1)
@@ -268,7 +284,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 		t.Parallel()
 		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}}
 		assert.NotPanics(t, func() {
-			_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, updates, nil)
+			_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, nil)
 			require.NoError(t, err)
 			require.True(t, allAllowed)
 		})
@@ -286,7 +302,7 @@ func TestEvaluatePush_EmptyPushIsVacuouslyAllowed(t *testing.T) {
 			return workbranchstore.WorkBranch{}, nil
 		},
 	}
-	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, "acme/widgets", "alice", nil, nil)
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, "acme/widgets", httpauth.Identity{Name: "alice", ID: "1", Role: "author"}, nil, nil)
 	require.NoError(t, err)
 	assert.True(t, allAllowed)
 	assert.Empty(t, verdicts)
@@ -305,12 +321,43 @@ func TestEvaluatePush_EmptyAgentNameNeverMatchesAnEmptyAuthor(t *testing.T) {
 	const repoName = "acme/widgets"
 	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{Name: "wb-owned", Author: "", State: workbranchstore.StateDraft})
 	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
-	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, "", []RefUpdate{update}, nil)
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, httpauth.Identity{}, []RefUpdate{update}, nil)
 	require.NoError(t, err)
 	require.Len(t, verdicts, 1)
 	assert.False(t, allAllowed)
 	assert.False(t, verdicts[0].Allowed, "an empty agentName must never be treated as a matching author, even against a row whose author also reads back empty")
 	assert.True(t, strings.HasPrefix(verdicts[0].Reason, "loam: "))
+}
+
+// TestEvaluatePush_ZeroIdentityNeverMatchesItsOwnRendering is the case the
+// parts-emptiness guard actually exists for, and the reason the guard
+// checks agent.Name/ID/Role rather than the rendered identifier.
+//
+// A zero httpauth.Identity renders as "--" (two separator dashes and three
+// empty parts), NOT as "". So a row whose author literally reads back "--"
+// would be matched by a plain `wb.Author != agent.Identifier()` check, and
+// an unset identity would be accepted as that row's author. Its sibling
+// test above cannot catch this: it seeds author = "", which "--" never
+// equals, so the inequality rejects it regardless of whether the guard is
+// present. Verified by mutation -- deleting the parts check leaves that
+// test green and only turns this one red.
+//
+// work_branches.author is NOT NULL but does not forbid "--", and in
+// production internal/httpauth.GitIdentity 403s a missing identity before
+// receive-pack runs at all, so this is defense in depth for EvaluatePush's
+// own contract rather than a reachable production path.
+func TestEvaluatePush_ZeroIdentityNeverMatchesItsOwnRendering(t *testing.T) {
+	t.Parallel()
+	const repoName = "acme/widgets"
+	zero := httpauth.Identity{}
+	require.Equal(t, "--", zero.Identifier(), "precondition: a zero identity renders as \"--\", which is what makes this row's author matchable")
+	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{Name: "wb-owned", Author: zero.Identifier(), State: workbranchstore.StateDraft})
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, zero, []RefUpdate{update}, nil)
+	require.NoError(t, err)
+	require.Len(t, verdicts, 1)
+	assert.False(t, allAllowed)
+	assert.False(t, verdicts[0].Allowed, "an identity with empty parts must be rejected even against a row whose author equals its rendering")
 }
 
 // TestEvaluatePush_UnrecognizedStateFailsClosed proves rule 3's
@@ -323,12 +370,17 @@ func TestEvaluatePush_EmptyAgentNameNeverMatchesAnEmptyAuthor(t *testing.T) {
 func TestEvaluatePush_UnrecognizedStateFailsClosed(t *testing.T) {
 	t.Parallel()
 	const repoName = "acme/widgets"
-	const agentName = "alice"
+	// The identity is seeded as a whole, and the fixture rows below store
+	// its Identifier() -- exactly what internal/handler/workbranch writes
+	// into work_branches.author at CreateWorkBranch time. This file used
+	// to seed the BARE name, which is why the suite agreed with itself
+	// and disagreed with production (loam-ppb).
+	agent := httpauth.Identity{Name: "alice", ID: "1", Role: "author"}
 	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
-		Name: "wb-owned", Author: agentName, State: workbranchstore.State("some-future-state"),
+		Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.State("some-future-state"),
 	})
 	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
-	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agentName, []RefUpdate{update}, nil)
+	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, []RefUpdate{update}, nil)
 	require.NoError(t, err)
 	require.Len(t, verdicts, 1)
 	assert.False(t, allAllowed)

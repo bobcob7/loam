@@ -96,7 +96,7 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 	t.Run("3-analogue non-author: now ACCEPTED under an always-allow hook, even though the store holds a real owner", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
-			"wb-owned-by-bob-analog": {Name: "wb-owned-by-bob-analog", Author: "bob", State: workbranchstore.StateDraft},
+			"wb-owned-by-bob-analog": {Name: "wb-owned-by-bob-analog", Author: bobIdentifier, State: workbranchstore.StateDraft},
 		}
 		env := newStack(t, branches, hookBinary, true)
 		clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
@@ -108,7 +108,7 @@ func TestCrossCheck_AlwaysAllowHook_OnlyGitConfigAndGatesStillReject(t *testing.
 	t.Run("4-analogue terminal state: now ACCEPTED under an always-allow hook, even though the store holds a real closed state", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
-			"wb-closed-analog": {Name: "wb-closed-analog", Author: "alice", State: workbranchstore.StateClosed},
+			"wb-closed-analog": {Name: "wb-closed-analog", Author: aliceIdentifier, State: workbranchstore.StateClosed},
 		}
 		env := newStack(t, branches, hookBinary, true)
 		clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
@@ -182,8 +182,8 @@ func TestCrossCheck_RemovingDenyConfig_OnlyThatCaseFlips(t *testing.T) {
 	t.Run("removing denyNonFastForwards: force push now succeeds, delete is UNCHANGED (still rejected)", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
-			"wb-force": {Name: "wb-force", Author: "alice", State: workbranchstore.StateDraft},
-			"wb-del":   {Name: "wb-del", Author: "alice", State: workbranchstore.StateDraft},
+			"wb-force": {Name: "wb-force", Author: aliceIdentifier, State: workbranchstore.StateDraft},
+			"wb-del":   {Name: "wb-del", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 		}
 		env := newStack(t, branches, loamhookBinary, true)
 		// Two independent clones, one per ref under test, so amending
@@ -208,8 +208,8 @@ func TestCrossCheck_RemovingDenyConfig_OnlyThatCaseFlips(t *testing.T) {
 	t.Run("removing denyDeletes: delete now succeeds, force push is UNCHANGED (still rejected)", func(t *testing.T) {
 		t.Parallel()
 		branches := map[string]workbranchstore.WorkBranch{
-			"wb-force2": {Name: "wb-force2", Author: "alice", State: workbranchstore.StateDraft},
-			"wb-del2":   {Name: "wb-del2", Author: "alice", State: workbranchstore.StateDraft},
+			"wb-force2": {Name: "wb-force2", Author: aliceIdentifier, State: workbranchstore.StateDraft},
+			"wb-del2":   {Name: "wb-del2", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 		}
 		env := newStack(t, branches, loamhookBinary, true)
 		forceClone := cloneWithIdentity(t, env, "alice", "1", "author")

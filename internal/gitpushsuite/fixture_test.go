@@ -353,3 +353,24 @@ func pushRef(t *testing.T, clonePath, refName string) (string, error) {
 	t.Helper()
 	return pushRefs(t, clonePath, "HEAD:"+refName)
 }
+
+// aliceIdentifier and bobIdentifier are what work_branches.author actually
+// holds: internal/handler/workbranch's authorIdentifier() stores
+// httpauth.Identity.Identifier() -- "<name>-<id>-<role>" -- at
+// CreateWorkBranch time, and docs/persistence-spec.md calls the column an
+// "agent identifier". They are spelled to match the arguments the tests in
+// this package pass to cloneWithIdentity, so the pushing identity and the
+// stored author agree.
+//
+// Every fixture in this package used to seed the BARE name ("alice"),
+// which matched what internal/refpolicy compared against before loam-ppb
+// was fixed. That agreement between the fixtures and the policy is exactly
+// what hid the bug: the whole suite was self-consistent and disagreed with
+// production, where an author could never push to their own work branch.
+// If a future change makes these constants bare again, the suite will pass
+// while production breaks -- so they are constants, in one place, rather
+// than literals repeated at each fixture.
+const (
+	aliceIdentifier = "alice-1-author"
+	bobIdentifier   = "bob-2-author"
+)

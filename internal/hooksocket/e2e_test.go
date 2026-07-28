@@ -228,7 +228,7 @@ func TestE2E_AllowedPush_RealHookRealSocketRealGit(t *testing.T) {
 	t.Parallel()
 	agent := httpauth.Identity{Name: "alice", ID: "agent-1", Role: "author"}
 	store := fakeWorkBranchStore{
-		"acme/widgets/wb-good": {Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft},
+		"acme/widgets/wb-good": {Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 	}
 	env := setupE2E(t, agent, store)
 	clonePath := cloneAndCommit(t, env, "allowed.txt")
@@ -250,8 +250,8 @@ func TestE2E_RejectedPushes_RealGitClientSeesRemotePrefixedLoamReason(t *testing
 	t.Parallel()
 	agent := httpauth.Identity{Name: "alice", ID: "agent-1", Role: "author"}
 	store := fakeWorkBranchStore{
-		"acme/widgets/wb-owned-by-bob": {Name: "wb-owned-by-bob", Author: "bob", State: workbranchstore.StateDraft},
-		"acme/widgets/wb-closed":       {Name: "wb-closed", Author: "alice", State: workbranchstore.StateClosed},
+		"acme/widgets/wb-owned-by-bob": {Name: "wb-owned-by-bob", Author: bobIdentifier, State: workbranchstore.StateDraft},
+		"acme/widgets/wb-closed":       {Name: "wb-closed", Author: aliceIdentifier, State: workbranchstore.StateClosed},
 	}
 	tests := []struct {
 		name       string
@@ -306,3 +306,22 @@ func TestE2E_PolicySocketDown_PushFailsClosed(t *testing.T) {
 	assert.Contains(t, out, "remote: loam:", "the hook's own fail-closed explanation must still reach the real git client")
 	assert.Contains(t, strings.ToLower(out), "connect", "the hook's fail-closed message should explain that the policy socket could not be reached")
 }
+
+// aliceIdentifier and bobIdentifier mirror the constants in
+// server_test.go, redeclared because this file is the EXTERNAL
+// hooksocket_test package and cannot see them. They are what
+// work_branches.author actually holds -- the "<name>-<id>-<role>"
+// rendering internal/handler/workbranch stores at CreateWorkBranch time --
+// and aliceIdentifier matches the httpauth.Identity these tests push with,
+// so the pushing identity and the stored author agree.
+//
+// bobIdentifier stays identifier-shaped on purpose: a bare "bob" would
+// still be rejected, but on shape rather than on ownership, so the
+// not-the-author case would pass while proving nothing. Before loam-ppb
+// was fixed both were bare names, agreeing with the bare-name comparison
+// refpolicy then made -- which is precisely how the bug stayed invisible
+// to a suite that drives a real git push through the real hook.
+const (
+	aliceIdentifier = "alice-agent-1-author"
+	bobIdentifier   = "bob-agent-2-author"
+)

@@ -30,7 +30,7 @@ import (
 func TestAtomicity_OneBadRefRejectsTheWholePush_GoodRefNeverLands(t *testing.T) {
 	t.Parallel()
 	branches := map[string]workbranchstore.WorkBranch{
-		"wb-good": {Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft},
+		"wb-good": {Name: "wb-good", Author: aliceIdentifier, State: workbranchstore.StateDraft},
 	}
 	env := newStack(t, branches, loamhookBinary, true)
 	clonePath := cloneWithIdentity(t, env, "alice", "1", "author")

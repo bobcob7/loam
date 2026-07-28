@@ -102,11 +102,11 @@ func catchupBranches() (map[string]workbranchstore.WorkBranch, uuid.UUID, uuid.U
 	flagged := uuid.MustParse("018f0000-0000-7000-8000-00000000000b")
 	return map[string]workbranchstore.WorkBranch{
 		"wb-demoted": {
-			ID: demoted, Name: "wb-demoted", Author: "alice", Target: "main",
+			ID: demoted, Name: "wb-demoted", Author: aliceIdentifier, Target: "main",
 			State: workbranchstore.StateDraft, Conflict: workbranchstore.ConflictReset,
 		},
 		"wb-flagged": {
-			ID: flagged, Name: "wb-flagged", Author: "alice", Target: "main",
+			ID: flagged, Name: "wb-flagged", Author: aliceIdentifier, Target: "main",
 			State: workbranchstore.StateDraft, Conflict: workbranchstore.ConflictFlagged,
 		},
 	}, demoted, flagged

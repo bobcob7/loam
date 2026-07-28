@@ -322,7 +322,7 @@ func (h *acceptanceHarness) stepIAmWorkingInsideACloneOf(ctx context.Context, re
 	if world.mirrorDir == "" {
 		return fmt.Errorf("no mirror for %s: this step must follow the step that ingests the indexed branch", repo)
 	}
-	if err := h.insertWorkBranchRow(ctx, world.repoID, world.workBranch, world.targetBranch, "draft", world.agentName); err != nil {
+	if err := h.insertWorkBranchRow(ctx, world.repoID, world.workBranch, world.targetBranch, "draft", world.agentIdentifier()); err != nil {
 		return err
 	}
 	tip, err := mirrorRefSHA(world.mirrorDir, "refs/heads/"+world.targetBranch)
