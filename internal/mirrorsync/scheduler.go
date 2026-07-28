@@ -12,6 +12,15 @@ import (
 // received tick, serialized per repo: a repo never starts a new cycle
 // while its previous one is still in flight, but different repos cycle
 // concurrently. Construct one with New; run it with Run.
+//
+// "Concurrently" above has no ceiling by default: tick spawns one goroutine
+// per enrolled repo on every tick (see tick), and the per-repo tryStart
+// guard only ever stops the SAME repo from starting a second cycle while
+// its first is in flight -- it caps nothing across DIFFERENT repos. A
+// deployment enrolling a few thousand repos would otherwise issue that
+// many concurrent git fetches and forge API calls on a single tick
+// (loam-5v5). WithMaxConcurrentCycles, passed to New, bounds that total,
+// across every repo combined.
 type Scheduler struct {
 	logger       *slog.Logger
 	ticks        <-chan time.Time
@@ -25,14 +34,50 @@ type Scheduler struct {
 	mu           sync.Mutex
 	running      map[RepoID]struct{}
 	wg           sync.WaitGroup
+	sem          chan struct{}
+}
+
+// Option configures optional Scheduler behavior beyond New's required
+// collaborators, mirroring internal/ingest.Pool's own Option pattern
+// (pool.go: WithBackoff, WithPollInterval) for the same reason: a value
+// only some callers need to override from New's default has no other seam
+// -- docs/testing-spec.md's "the components already take their trigger as
+// an input; tests just own it" principle covers the tick channel but not
+// every tunable.
+type Option func(*Scheduler)
+
+// WithMaxConcurrentCycles bounds the number of repo cycles the scheduler
+// runs at once, across every enrolled repo combined -- see Scheduler's own
+// doc comment for why that is a different, previously-uncovered axis from
+// the per-repo tryStart guard. The bound gates entry to cycle itself
+// (acquired first thing, released via a deferred receive), not tick's
+// spawn loop, so tick keeps returning its started list the instant every
+// repo's tryStart guard has been claimed, exactly as before -- only the
+// goroutines' own work (the five Mirror Sync steps and their terminal
+// report) waits for a free slot. docs/testing-spec.md's "Manual
+// scheduler" contract is unaffected by that wait: Scheduler.Tick still
+// blocks, via waitIdle, until every cycle it started -- queued on the
+// bound or not -- has finished reporting.
+//
+// n <= 0 is a no-op: New's default is unbounded, matching this package's
+// behavior before this option existed, so a caller that does not pass
+// WithMaxConcurrentCycles keeps its current fan-out unchanged.
+func WithMaxConcurrentCycles(n int) Option {
+	return func(s *Scheduler) {
+		if n > 0 {
+			s.sem = make(chan struct{}, n)
+		}
+	}
 }
 
 // New builds a Scheduler. ticks is the trigger seam: production passes
 // time.NewTicker(LOAM_SYNC_INTERVAL).C; tests pass a channel they write
 // to explicitly, so cycles run to completion on an explicit tick rather
 // than a wall-clock timer (docs/testing-spec.md -> Manual scheduler).
-func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher Fetcher, advances AdvanceDetector, mergeability MergeabilityChecker, ingest IngestEnqueuer, prPoller PRPoller, state SyncStateReporter) *Scheduler {
-	return &Scheduler{
+// opts applies after every required argument is set; see Option and
+// WithMaxConcurrentCycles.
+func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher Fetcher, advances AdvanceDetector, mergeability MergeabilityChecker, ingest IngestEnqueuer, prPoller PRPoller, state SyncStateReporter, opts ...Option) *Scheduler {
+	s := &Scheduler{
 		logger:       logger,
 		ticks:        ticks,
 		repos:        repos,
@@ -44,6 +89,10 @@ func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher 
 		state:        state,
 		running:      make(map[RepoID]struct{}),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Run blocks, starting one cycle per enrolled repo on every received
@@ -73,7 +122,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 // tick lists the enrolled repos, starts a cycle for each one that is not
-// already running, and returns the repos it actually started this call
+// already running, and returns the repos it STARTED this call -- which,
+// with WithMaxConcurrentCycles in force, means "handed to a cycle
+// goroutine", not "already doing work": a returned repo may still be
+// waiting for a slot. waitIdle and Tick account for it either way, since
+// the WaitGroup is incremented before the goroutine is launched
 // alongside a ListRepos failure, if any. Listing and the per-repo
 // in-flight guard both run synchronously here, before any per-repo
 // goroutine is spawned, so a second tick arriving while a repo's cycle is
@@ -211,8 +264,19 @@ func (s *Scheduler) finish(repo RepoID) {
 // stale idle or error landing on top of a cycle that is, in reality,
 // already running again). Reporting failures are logged but never abort
 // or retry this cycle — retrying is the next tick's job, not a report's.
+//
+// If s.sem is non-nil (WithMaxConcurrentCycles was passed to New), this
+// goroutine blocks here, before doing any work, until a slot is free, and
+// releases it via a deferred receive so the slot frees the instant this
+// cycle's terminal report has been sent — the same "queued, not skipped"
+// property tick's own goroutine-per-repo spawn already gives every
+// enrolled repo, just bounded now across all of them combined.
 func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
 	defer s.wg.Done()
+	if s.sem != nil {
+		s.sem <- struct{}{}
+		defer func() { <-s.sem }()
+	}
 	if err := s.state.ReportSyncing(ctx, repo); err != nil {
 		s.logger.Error("reporting sync syncing", "repo", string(repo), "error", err)
 	}
