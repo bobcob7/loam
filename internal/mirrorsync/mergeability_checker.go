@@ -31,16 +31,16 @@ import (
 // checker holds no clearing seam at all (see workBranchConflictMarker).
 // That is not an oversight and not a latching bug: a flagged branch
 // recovers by PUSH, via catch-up detection on an accepted push
-// (loam-giq.6), because clearing is inseparable from re-opening a review
-// round with requested_by = the server, and from the promise that a
-// conflict-reset branch returns "directly back to reviewable ... the round
-// was interrupted, not abandoned". If a clean re-check cleared the flag
-// here instead, a target advance the branch happens to merge with would
-// silently restore a demoted branch to reviewable with no agent push, no
-// fresh round, and stale verdicts suddenly counting again toward the
-// approval bar. The spec's own words for the neighbouring case are the
-// same shape: "If the target has advanced again since the reset, the flag
-// simply stays until a push catches up."
+// (internal/catchup, loam-giq.6), because clearing is inseparable from
+// re-opening a review round with requested_by = the server whenever the
+// branch was a conflict-RESET one and therefore flips "directly back to
+// reviewable". If a clean re-check cleared the flag here instead, a target
+// advance the branch happens to merge with would silently restore a
+// demoted branch to reviewable with no agent push, no fresh round, and
+// stale verdicts suddenly counting again toward the approval bar. The
+// spec's own words for the neighbouring case are the same shape: "If the
+// target has advanced again since the reset, the flag simply stays until a
+// push catches up."
 //
 // # A failed check is not a conflict
 //

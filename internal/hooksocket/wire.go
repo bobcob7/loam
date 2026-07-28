@@ -31,10 +31,21 @@ type RefUpdateWire struct {
 // one request, is what gives the whole push its atomicity: every ref
 // update in a single push is evaluated together, in the same call to
 // EvaluatePush).
+//
+// QuarantineDir carries receive-pack's GIT_QUARANTINE_PATH (git >= 2.11
+// sets it in every pre-receive hook's environment) so a post-accept
+// consumer on the SERVER side can read the objects this push is proposing,
+// which do not exist in the bare mirror's own object store until the push
+// completes. It is omitted from the wire when empty, so an older git, or a
+// client with nothing to report, produces the same request shape this
+// protocol had before the field existed. See AcceptedPush.QuarantineDir
+// for what reads it and why it is no more trusted than any other field
+// here.
 type Request struct {
-	Repo    string          `json:"repo"`
-	Agent   AgentIdentity   `json:"agent"`
-	Updates []RefUpdateWire `json:"updates"`
+	Repo          string          `json:"repo"`
+	Agent         AgentIdentity   `json:"agent"`
+	Updates       []RefUpdateWire `json:"updates"`
+	QuarantineDir string          `json:"quarantine_dir,omitempty"`
 }
 
 // VerdictWire is one ref's decision, the wire encoding of

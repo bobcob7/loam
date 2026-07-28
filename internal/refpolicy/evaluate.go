@@ -55,15 +55,22 @@ type RefVerdict struct {
 // PostAcceptFunc is invoked once per accepted ref update, AFTER every ref
 // in the push has passed policy (never for a push atomically rejected as a
 // whole), given the WorkBranch row EvaluatePush already fetched from
-// Postgres to make that ref's own decision. This is loam-ofg.18's exposed
-// seam for loam-giq.6's catch-up detection (clearing a work branch's
-// conflict flag when a push brings it up to the current target tip): that
-// future caller needs the accepted push's WorkBranch row to decide whether
-// the new tip merges the target, and reusing the row this function already
-// fetched means loam-giq.6 never needs its own duplicate "look up this
-// work branch" Postgres query. A nil hook is a documented no-op;
-// production wiring passes nil today because loam-giq.6 does not exist yet
-// in this tree.
+// Postgres to make that ref's own decision. Its consumer is catch-up
+// detection (loam-giq.6: clearing a work branch's conflict flag when a
+// push brings it up to the current target tip), which needs exactly that
+// row -- both to decide whether the new tip contains the target and,
+// because the row is this push's PRE-push view of the branch, to tell a
+// demoted branch from a merely flagged one. Reusing the row this function
+// already fetched means that consumer never needs a duplicate "look up
+// this work branch" Postgres query.
+//
+// This is deliberately the NARROW half of the seam: internal/hooksocket
+// wraps it in its own PostAcceptFunc, widening it with the two per-PUSH
+// facts this transport-free package has no business carrying (the repo
+// name and receive-pack's object quarantine directory), and it is that
+// wider seam production wires to internal/catchup. A nil hook here is a
+// documented no-op, which is what hooksocket passes when it has no
+// post-accept consumer of its own.
 type PostAcceptFunc func(ctx context.Context, wb workbranchstore.WorkBranch, update RefUpdate)
 
 // EvaluatePush is docs/git-spec.md "Ref Policy (push)"'s three rules,

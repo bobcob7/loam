@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bobcob7/loam/internal/refpolicy"
+	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
 // defaultConnDeadline bounds how long the SERVER side waits, per
@@ -37,7 +38,7 @@ const defaultConnDeadline = 5 * time.Second
 type Server struct {
 	listener     net.Listener
 	store        WorkBranchStore
-	onAccept     refpolicy.PostAcceptFunc
+	onAccept     PostAcceptFunc
 	logger       *slog.Logger
 	connDeadline time.Duration
 }
@@ -47,9 +48,10 @@ type Server struct {
 // fails "address already in use" against a leftover, unconnectable socket
 // file on disk, since the filesystem entry itself (not a live listener)
 // is what collides. store resolves rule 1/2/3's Postgres lookup (see
-// WorkBranchStore's own doc comment); onAccept is loam-giq.6's exposed
-// catch-up-detection seam, nil until that bead lands.
-func Listen(socketPath string, store WorkBranchStore, onAccept refpolicy.PostAcceptFunc, logger *slog.Logger) (*Server, error) {
+// WorkBranchStore's own doc comment); onAccept runs once per accepted ref
+// update once the whole push has passed policy (production binds it to
+// internal/catchup.Detector.OnAcceptedPush; nil is a documented no-op).
+func Listen(socketPath string, store WorkBranchStore, onAccept PostAcceptFunc, logger *slog.Logger) (*Server, error) {
 	return listen(socketPath, store, onAccept, logger, defaultConnDeadline)
 }
 
@@ -58,7 +60,7 @@ func Listen(socketPath string, store WorkBranchStore, onAccept refpolicy.PostAcc
 // server-side deadline actually fires does not have to wait out
 // defaultConnDeadline's full production duration. Production (Listen)
 // always passes defaultConnDeadline.
-func listen(socketPath string, store WorkBranchStore, onAccept refpolicy.PostAcceptFunc, logger *slog.Logger, connDeadline time.Duration) (*Server, error) {
+func listen(socketPath string, store WorkBranchStore, onAccept PostAcceptFunc, logger *slog.Logger, connDeadline time.Duration) (*Server, error) {
 	if err := os.RemoveAll(socketPath); err != nil {
 		return nil, fmt.Errorf("removing stale policy socket %s: %w", socketPath, err)
 	}
@@ -172,7 +174,7 @@ func (s *Server) evaluate(ctx context.Context, req Request) Response {
 	for i, u := range req.Updates {
 		updates[i] = refpolicy.RefUpdate{OldSHA: u.OldSHA, NewSHA: u.NewSHA, Ref: u.Ref}
 	}
-	verdicts, allAllowed, err := refpolicy.EvaluatePush(ctx, s.store, req.Repo, req.Agent.Name, updates, s.onAccept)
+	verdicts, allAllowed, err := refpolicy.EvaluatePush(ctx, s.store, req.Repo, req.Agent.Name, updates, s.postAccept(req))
 	if err != nil {
 		s.logger.ErrorContext(ctx, "policy socket: evaluating push", "repo", req.Repo, "error", err)
 		return Response{Accepted: false}
@@ -182,4 +184,28 @@ func (s *Server) evaluate(ctx context.Context, req Request) Response {
 		wire[i] = VerdictWire{Ref: v.Ref, Allowed: v.Allowed, Reason: v.Reason}
 	}
 	return Response{Accepted: allAllowed, Verdicts: wire}
+}
+
+// postAccept adapts s.onAccept to the narrower refpolicy.PostAcceptFunc
+// EvaluatePush actually takes, folding in the two per-PUSH facts refpolicy
+// never sees per-REF: the repo name and this push's object quarantine
+// directory (see AcceptedPush's own doc comment for why those two live
+// here rather than in refpolicy).
+//
+// A nil s.onAccept produces a nil refpolicy.PostAcceptFunc rather than a
+// non-nil closure that does nothing: EvaluatePush skips its whole
+// post-accept loop on nil, and returning a live closure would turn a
+// caller's explicit "no hook" into per-ref work on every accepted push.
+func (s *Server) postAccept(req Request) refpolicy.PostAcceptFunc {
+	if s.onAccept == nil {
+		return nil
+	}
+	return func(ctx context.Context, wb workbranchstore.WorkBranch, update refpolicy.RefUpdate) {
+		s.onAccept(ctx, AcceptedPush{
+			Repo:          req.Repo,
+			QuarantineDir: req.QuarantineDir,
+			WorkBranch:    wb,
+			Update:        update,
+		})
+	}
 }

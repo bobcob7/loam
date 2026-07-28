@@ -72,6 +72,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bobcob7/loam/internal/catchup"
 	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/codegraph"
 	"github.com/bobcob7/loam/internal/config"
@@ -83,6 +84,7 @@ import (
 	"github.com/bobcob7/loam/internal/forge"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
+	"github.com/bobcob7/loam/internal/gitancestry"
 	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
@@ -299,13 +301,15 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	// connections before the socket is confirmed live -- it must be
 	// constructed and confirmed serving above this line instead.
 	//
-	// onAccept is nil: loam-giq.6 (catch-up detection, the consumer of
-	// refpolicy.PostAcceptFunc) does not exist anywhere in this tree yet.
-	// A nil hook is EvaluatePush's own documented no-op, not a missing
-	// wiring step here.
-	policyStore := policyStoreAdapter{repos: repoStore, workBranches: workbranchstore.New(gen.New(pool), cfg.Logger)}
+	// onAccept is internal/catchup's detector: docs/git-spec.md -> "Target
+	// Advances & Catch-Up" says a conflict-flagged branch recovers BY
+	// PUSH, and this is the only place in the process that sees an
+	// accepted push.
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	policyStore := policyStoreAdapter{repos: repoStore, workBranches: workBranches}
 	policySocketPath := filepath.Join(cfg.DataDir, "hook.sock")
-	policyServer, err := hooksocket.Listen(policySocketPath, policyStore, nil, cfg.Logger)
+	catchupDetector := catchup.New(cfg.DataDir, gitancestry.New(cfg.Logger), workBranches, reviewstore.NewRoundStore(pool, cfg.Logger), cfg.Logger)
+	policyServer, err := hooksocket.Listen(policySocketPath, policyStore, catchupDetector.OnAcceptedPush, cfg.Logger)
 	if err != nil {
 		pool.Close()
 		return fmt.Errorf("starting policy socket: %w", err)

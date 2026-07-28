@@ -208,3 +208,41 @@ func TestRun_HardEvaluationErrorResponseFailsClosed(t *testing.T) {
 	assert.NotEqual(t, 0, code, "a rejected response with no verdicts (a hard evaluation error on the server side) must still fail closed")
 	assert.Contains(t, stderr.String(), "loam:", "the agent must see SOME loam:-prefixed explanation, not silence, even when the server had no per-ref detail to give")
 }
+
+// TestRun_ForwardsTheObjectQuarantineDirectory proves the hook relays
+// receive-pack's own GIT_QUARANTINE_PATH to the server. It is load-bearing
+// rather than incidental: the pushed objects live ONLY in that directory
+// while pre-receive runs, so without it the server's catch-up check
+// (internal/catchup) cannot resolve the pushed tip at all and no
+// conflict-flagged branch could ever recover by push.
+func TestRun_ForwardsTheObjectQuarantineDirectory(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/wb-good\n")
+	var gotReq hooksocket.Request
+	dial := func(_ string, req hooksocket.Request) (hooksocket.Response, error) {
+		gotReq = req
+		return hooksocket.Response{Accepted: true}, nil
+	}
+	quarantine := "/data/mirrors/acme/widgets.git/objects/tmp_objdir-incoming-Ab12Cd"
+	env := fixedEnv(map[string]string{"LOAM_REPO": "acme/widgets", "GIT_QUARANTINE_PATH": quarantine})
+	code := run(stdin, new(strings.Builder), env, fixedWd("/data/mirrors/acme/widgets.git", nil), dial)
+	require.Equal(t, 0, code)
+	assert.Equal(t, quarantine, gotReq.QuarantineDir)
+}
+
+// TestRun_AbsentQuarantinePathIsForwardedAsEmpty proves an environment
+// without GIT_QUARANTINE_PATH (an older git, or a hook invoked outside a
+// real push) produces an empty field rather than a failure -- the server
+// treats that as "nothing extra to read".
+func TestRun_AbsentQuarantinePathIsForwardedAsEmpty(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/wb-good\n")
+	var gotReq hooksocket.Request
+	dial := func(_ string, req hooksocket.Request) (hooksocket.Response, error) {
+		gotReq = req
+		return hooksocket.Response{Accepted: true}, nil
+	}
+	code := run(stdin, new(strings.Builder), fixedEnv(map[string]string{"LOAM_REPO": "acme/widgets"}), fixedWd("/data/mirrors/acme/widgets.git", nil), dial)
+	require.Equal(t, 0, code)
+	assert.Empty(t, gotReq.QuarantineDir)
+}
