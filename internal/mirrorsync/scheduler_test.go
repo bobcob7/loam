@@ -3,6 +3,7 @@ package mirrorsync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -71,7 +72,11 @@ type harness struct {
 	outcomes  chan repoOutcome
 }
 
-func newHarness(repoIDs ...RepoID) *harness {
+// buildHarness wires every mock a harness needs and its ListRepos answer,
+// but does not construct the Scheduler itself -- newHarness and
+// newHarnessWithOptions each do that over the same mocks, the latter
+// forwarding opts (e.g. WithMaxConcurrentCycles) to New.
+func buildHarness(repoIDs []RepoID) *harness {
 	h := &harness{
 		ticks:    make(chan time.Time),
 		repoList: &RepoListerMock{},
@@ -101,7 +106,21 @@ func newHarness(repoIDs ...RepoID) *harness {
 			return nil
 		},
 	}
+	return h
+}
+
+func newHarness(repoIDs ...RepoID) *harness {
+	h := buildHarness(repoIDs)
 	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state)
+	return h
+}
+
+// newHarnessWithOptions is newHarness plus Scheduler.Option support (e.g.
+// WithMaxConcurrentCycles), for tests that need to override a New default
+// no other harness constructor exposes.
+func newHarnessWithOptions(repoIDs []RepoID, opts ...Option) *harness {
+	h := buildHarness(repoIDs)
+	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state, opts...)
 	return h
 }
 
@@ -559,4 +578,124 @@ func TestScheduler_Shutdown_AbandonsWaitWhenContextExpiresFirst(t *testing.T) {
 
 	close(releaseFetch) // let the still-running cycle finish so it does not leak past the test
 	<-h.outcomes
+}
+
+// TestScheduler_MaxConcurrentCyclesBoundsTotalInFlightCycles is loam-5v5's
+// core claim: WithMaxConcurrentCycles caps concurrent CYCLES ACROSS repos,
+// an axis the per-repo tryStart guard never covered (tryStart only stops
+// the SAME repo starting a second cycle while its first is in flight --
+// see TestScheduler_RepoDoesNotStartSecondCycleWhileFirstInFlight, which
+// covers exactly one repo and proves nothing about N of them at once).
+//
+// n=5 repos, a bound k=2: every Fetch call reports its own entry on
+// started before blocking on release, a handshake instrumented through
+// the Fetcher collaborator seam rather than any sleep. The test reads
+// exactly k values off started (guaranteed to arrive: a bounded pool of
+// size k always eventually runs k workers, however the scheduler happens
+// to be scheduled) and then asserts, via the same bounded-wait idiom this
+// file already uses to prove an absence
+// (TestScheduler_Shutdown_BlocksUntilInFlightCycleFinishes's 200ms
+// select), that a (k+1)th does not arrive before any release. It then
+// drains all n by releasing one slot at a time and confirming a queued
+// cycle proceeds only once room exists, which is the failing half without
+// the bound: an unbounded scheduler starts all n Fetch calls immediately,
+// so this file's own non-vacuity check (temporarily neutering the sem
+// gate in cycle) makes both the initial "no more than k" assertion and
+// the later per-release accounting fail — see this bead's final report
+// for that evidence.
+func TestScheduler_MaxConcurrentCyclesBoundsTotalInFlightCycles(t *testing.T) {
+	t.Parallel()
+	const n, k = 5, 2
+	repoIDs := make([]RepoID, n)
+	for i := range repoIDs {
+		repoIDs[i] = RepoID(fmt.Sprintf("repo%d", i))
+	}
+	h := newHarnessWithOptions(repoIDs, WithMaxConcurrentCycles(k))
+	started := make(chan struct{}, n)
+	release := make(chan struct{})
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		started <- struct{}{}
+		<-release
+		return FetchResult{}, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	for i := range k {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of the expected %d concurrent cycles started", i, k)
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("a cycle beyond the bound started before any of the first k released -- the bound did not hold")
+	case <-time.After(200 * time.Millisecond):
+	}
+	for i := range n {
+		release <- struct{}{}
+		if i < n-k {
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("releasing a slot (release %d) did not let a queued cycle proceed -- the freed slot was not reused", i)
+			}
+		}
+	}
+	for range n {
+		<-h.outcomes
+	}
+}
+
+// tickResult carries Scheduler.Tick's two return values across a
+// goroutine boundary; TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes
+// uses it rather than asserting inside the goroutine that calls Tick,
+// since a testify require/assert failure there would not fail this test
+// the way a failure on the test's own goroutine does.
+type tickResult struct {
+	started []RepoID
+	err     error
+}
+
+// TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes is the
+// acceptance criteria's second claim: bounding concurrency must not weaken
+// Tick's contract ("blocks until every cycle it started has finished
+// reporting", loam-f75). n=3 repos, bound k=1, so every cycle is
+// serialized behind the bound; Tick must still not return until all three
+// have reported, not just the first one the bound let through.
+func TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes(t *testing.T) {
+	t.Parallel()
+	const n, k = 3, 1
+	repoIDs := []RepoID{"repoA", "repoB", "repoC"}
+	h := newHarnessWithOptions(repoIDs, WithMaxConcurrentCycles(k))
+	release := make(chan struct{})
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		<-release
+		return FetchResult{}, nil
+	}
+	tickDone := make(chan tickResult, 1)
+	go func() {
+		started, err := h.scheduler.Tick(t.Context())
+		tickDone <- tickResult{started: started, err: err}
+	}()
+	select {
+	case <-tickDone:
+		t.Fatal("Tick returned before any bounded cycle was released -- it is not actually waiting for them")
+	case <-time.After(200 * time.Millisecond):
+	}
+	for range n {
+		release <- struct{}{}
+	}
+	select {
+	case result := <-tickDone:
+		require.NoError(t, result.err)
+		assert.ElementsMatch(t, repoIDs, result.started)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Tick did not return after every bounded cycle finished")
+	}
+	for range n {
+		<-h.outcomes
+	}
 }
