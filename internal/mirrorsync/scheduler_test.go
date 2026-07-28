@@ -601,8 +601,11 @@ func TestScheduler_Shutdown_AbandonsWaitWhenContextExpiresFirst(t *testing.T) {
 // the bound: an unbounded scheduler starts all n Fetch calls immediately,
 // so this file's own non-vacuity check (temporarily neutering the sem
 // gate in cycle) makes both the initial "no more than k" assertion and
-// the later per-release accounting fail — see this bead's final report
-// for that evidence.
+// the later per-release accounting fail. Verified concretely: removing the
+// sem acquire/release block from cycle, and separately widening the buffer
+// to n+1 (an off-by-one), each fail this test at its "beyond the bound"
+// assertion. Its sibling below passes under both, by design -- that one
+// pins loam-f75's blocking contract, not this bound.
 func TestScheduler_MaxConcurrentCyclesBoundsTotalInFlightCycles(t *testing.T) {
 	t.Parallel()
 	const n, k = 5, 2
@@ -697,5 +700,18 @@ func TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes(t *testing.T) 
 	}
 	for range n {
 		<-h.outcomes
+	}
+}
+
+// TestScheduler_WithMaxConcurrentCyclesNonPositiveIsANoOp pins the
+// documented contract on WithMaxConcurrentCycles that n <= 0 leaves the
+// scheduler unbounded rather than, say, creating a zero-capacity channel
+// that would deadlock every cycle forever. Nothing else asserted it, so
+// the guard could have been dropped silently.
+func TestScheduler_WithMaxConcurrentCyclesNonPositiveIsANoOp(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{0, -1} {
+		s := New(testLogger(), nil, nil, nil, nil, nil, nil, nil, nil, WithMaxConcurrentCycles(n))
+		assert.Nil(t, s.sem, "WithMaxConcurrentCycles(%d) must leave the scheduler unbounded, not install a zero-capacity gate", n)
 	}
 }

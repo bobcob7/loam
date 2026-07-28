@@ -122,7 +122,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 // tick lists the enrolled repos, starts a cycle for each one that is not
-// already running, and returns the repos it actually started this call
+// already running, and returns the repos it STARTED this call -- which,
+// with WithMaxConcurrentCycles in force, means "handed to a cycle
+// goroutine", not "already doing work": a returned repo may still be
+// waiting for a slot. waitIdle and Tick account for it either way, since
+// the WaitGroup is incremented before the goroutine is launched
 // alongside a ListRepos failure, if any. Listing and the per-repo
 // in-flight guard both run synchronously here, before any per-repo
 // goroutine is spawned, so a second tick arriving while a repo's cycle is
