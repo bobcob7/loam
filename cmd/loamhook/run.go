@@ -61,6 +61,17 @@ func run(stdin io.Reader, stderr io.Writer, getenv func(string) string, getwd fu
 			Role: getenv("LOAM_AGENT_ROLE"),
 		},
 		Updates: updates,
+		// GIT_QUARANTINE_PATH is set by receive-pack itself (git >= 2.11),
+		// not by internal/handler/git's explicit subprocess environment,
+		// and it names the temporary object directory holding every object
+		// this push is proposing. Forwarding it is what lets the SERVER
+		// side inspect the pushed history at all: the objects are not in
+		// the bare mirror's own object store yet, so a `git
+		// --git-dir=<mirror>` process there cannot resolve the new tip
+		// (measured against git 2.50.1 -- see internal/gitancestry's
+		// package doc comment). Empty when git did not set it, which the
+		// server treats as "nothing extra to read", never as an error.
+		QuarantineDir: getenv("GIT_QUARANTINE_PATH"),
 	}
 	resp, err := dial(socketPath, req)
 	if err != nil {

@@ -292,3 +292,88 @@ func TestCall_RPCTimeoutFiresWhenServerNeverResponds(t *testing.T) {
 	assert.Error(t, callErr, "a server that never responds must fail Call closed, not hang")
 	assert.Less(t, elapsed, 2*time.Second, "the rpcTimeout deadline must actually bound the wait")
 }
+
+// startTestServerWithAccept is startTestServer with a post-accept hook
+// wired, for the tests below that prove what the seam actually delivers.
+func startTestServerWithAccept(t *testing.T, store WorkBranchStore, onAccept PostAcceptFunc) string {
+	t.Helper()
+	socketPath := filepath.Join(shortTempDir(t), "hook.sock")
+	srv, err := listen(socketPath, store, onAccept, testLogger(), defaultConnDeadline)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("policy socket server did not shut down within 5s of cancellation")
+		}
+	})
+	return socketPath
+}
+
+// TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow proves the
+// seam internal/catchup consumes delivers all four things it needs across
+// a REAL socket round trip: the repo name and the object quarantine
+// directory (both per-push facts refpolicy never sees), plus the ref
+// update and the WorkBranch row EvaluatePush already fetched -- the row
+// being pre-push, which is what catchup's demoted-versus-merely-flagged
+// rule is decided on.
+func TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow(t *testing.T) {
+	t.Parallel()
+	wb := workbranchstore.WorkBranch{
+		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+		Target: "main", Conflict: workbranchstore.ConflictReset,
+	}
+	store := registeredBranchStore("acme/widgets", "wb-good", wb)
+	accepted := make(chan AcceptedPush, 4)
+	socketPath := startTestServerWithAccept(t, store, func(_ context.Context, a AcceptedPush) { accepted <- a })
+	req := Request{
+		Repo:          "acme/widgets",
+		Agent:         AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
+		Updates:       []RefUpdateWire{{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-good"}},
+		QuarantineDir: "/data/mirrors/acme/widgets.git/objects/tmp_objdir-incoming-Ab12Cd",
+	}
+	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
+	require.NoError(t, err)
+	require.True(t, resp.Accepted)
+	var got AcceptedPush
+	select {
+	case got = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-accept hook never fired for an accepted push")
+	}
+	assert.Equal(t, "acme/widgets", got.Repo)
+	assert.Equal(t, req.QuarantineDir, got.QuarantineDir, "the quarantine directory must survive the wire; without it the server cannot read the pushed objects at all")
+	assert.Equal(t, wb, got.WorkBranch, "the pre-push row EvaluatePush already fetched must be handed through, not re-queried")
+	assert.Equal(t, "refs/heads/wb-good", got.Update.Ref)
+	assert.Equal(t, req.Updates[0].NewSHA, got.Update.NewSHA)
+}
+
+// TestServer_RejectedPush_PostAcceptNeverFires proves the seam inherits
+// EvaluatePush's atomicity: a push containing one bad ref triggers no
+// post-accept bookkeeping for the ref that individually looked fine.
+func TestServer_RejectedPush_PostAcceptNeverFires(t *testing.T) {
+	t.Parallel()
+	store := registeredBranchStore("acme/widgets", "wb-good", workbranchstore.WorkBranch{
+		Name: "wb-good", Author: "alice", State: workbranchstore.StateDraft,
+	})
+	fired := make(chan AcceptedPush, 4)
+	socketPath := startTestServerWithAccept(t, store, func(_ context.Context, a AcceptedPush) { fired <- a })
+	resp, err := Call(socketPath, Request{
+		Repo:  "acme/widgets",
+		Agent: AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
+		Updates: []RefUpdateWire{
+			{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-good"},
+			{OldSHA: "0000000000000000000000000000000000000000", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-unregistered"},
+		},
+	}, DialTimeout, RPCTimeout)
+	require.NoError(t, err)
+	require.False(t, resp.Accepted)
+	assert.Empty(t, fired, "an atomically rejected push must trigger no post-accept bookkeeping at all")
+}

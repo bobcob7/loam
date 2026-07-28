@@ -192,6 +192,7 @@ func (stubRoleStore) RoleCapabilities(_ context.Context, role string) ([]handler
 // actually reach.
 type stackEnv struct {
 	srv       *httptest.Server
+	dataDir   string
 	mirrorDir string
 	tracker   *callTracker
 }
@@ -211,6 +212,20 @@ type stackEnv struct {
 // than sending real Loam-Agent-* headers over HTTP.
 func newStack(t *testing.T, branches map[string]workbranchstore.WorkBranch, hookBinaryPath string, startSocket bool) stackEnv {
 	t.Helper()
+	return newStackWithAccept(t, branches, hookBinaryPath, startSocket, nil)
+}
+
+// newStackWithAccept is newStack with the policy socket's post-accept seam
+// wired (hooksocket.PostAcceptFunc; nil is the documented no-op every
+// rejection-matrix test passes). catchup_test.go is its only non-nil
+// caller: an accepted push is the ONLY way to reach that seam, and this
+// suite is the only place in the tree where a real git client, a real
+// compiled hook binary, a real unix socket, and a real bare mirror are all
+// present at once -- which is exactly what a catch-up check needs, since
+// the objects it must read are still in receive-pack's quarantine while
+// the hook runs.
+func newStackWithAccept(t *testing.T, branches map[string]workbranchstore.WorkBranch, hookBinaryPath string, startSocket bool, onAccept hooksocket.PostAcceptFunc) stackEnv {
+	t.Helper()
 	dataDir := shortTempDir(t)
 	mirrorDir := mirrorpath.Dir(dataDir, repoName)
 	seedBareMirror(t, mirrorDir)
@@ -219,7 +234,7 @@ func newStack(t *testing.T, branches map[string]workbranchstore.WorkBranch, hook
 	if startSocket {
 		store := trackingWorkBranchStore{branches: branches, tracker: tracker}
 		socketPath := filepath.Join(dataDir, "hook.sock")
-		policyServer, err := hooksocket.Listen(socketPath, store, nil, testLogger())
+		policyServer, err := hooksocket.Listen(socketPath, store, onAccept, testLogger())
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -251,7 +266,7 @@ func newStack(t *testing.T, branches map[string]workbranchstore.WorkBranch, hook
 	router.RegisterGit("/git/", gate.Middleware(gitHandler))
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
-	return stackEnv{srv: srv, mirrorDir: mirrorDir, tracker: tracker}
+	return stackEnv{srv: srv, dataDir: dataDir, mirrorDir: mirrorDir, tracker: tracker}
 }
 
 // cloneWithIdentity clones env's repo, and -- unless agentName is empty,
