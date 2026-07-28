@@ -75,6 +75,34 @@ type acceptanceWorld struct {
 	// suppression can never be reached by a scenario that merely happened
 	// to error.
 	expectSyncError bool
+	// The review-scenario state (acceptance_review_test.go). author,
+	// reviewer, and otherReviewer are the three agent identities
+	// reviewing.feature and replies.feature act as; every one of their
+	// driver calls names one explicitly, rather than using the single
+	// agentName/agentID/agentRole triple above, because the whole point of
+	// several of those scenarios is that different agents see different
+	// things.
+	author        acceptanceActor
+	reviewer      acceptanceActor
+	otherReviewer acceptanceActor
+	// staged is the staged items the comment steps created, in staging
+	// order; secondWorkBranch is the additional, roundless branch the
+	// "a work branch in state ..." Given seeds; myThreadID/otherThreadID are
+	// the two published threads the resolve and reply steps address.
+	staged           []acceptanceStagedComment
+	secondWorkBranch string
+	myThreadID       string
+	otherThreadID    string
+	// latestOutcome records, per reviewer identifier, the outcome that
+	// reviewer most recently submitted in this scenario -- what "each
+	// reviewer appears once with their latest outcome" is checked against.
+	latestOutcome map[string]string
+	// lastList/lastVerdicts/verdictsBefore/expectedRound carry one step's
+	// observation forward to the Then that asserts on it.
+	lastList       acceptanceWorkList
+	lastVerdicts   []acceptanceVerdict
+	verdictsBefore []acceptanceVerdict
+	expectedRound  uint32
 	// upstreamPRNumber is the PR number the forge allocated for this
 	// scenario's proposal, read back out of
 	// work_branches.upstream_pr_number AFTER the production accept engine
@@ -135,15 +163,30 @@ func (w *acceptanceWorld) writeCommitAndPush(filename, content, message, refspec
 func newAcceptanceWorld(t *testing.T) *acceptanceWorld {
 	n := acceptanceScenarioCounter.Add(1)
 	return &acceptanceWorld{
-		workspace:    t.TempDir(),
-		repoGroup:    "acceptance",
-		repoName:     fmt.Sprintf("repo-%d", n),
-		targetBranch: "main",
-		workBranch:   fmt.Sprintf("wb-%d", n),
-		agentName:    fmt.Sprintf("acceptance-author-%d", n),
-		agentID:      fmt.Sprintf("%d", n),
-		agentRole:    "author",
+		workspace:     t.TempDir(),
+		repoGroup:     "acceptance",
+		repoName:      fmt.Sprintf("repo-%d", n),
+		targetBranch:  "main",
+		workBranch:    fmt.Sprintf("wb-%d", n),
+		agentName:     fmt.Sprintf("acceptance-author-%d", n),
+		agentID:       fmt.Sprintf("%d", n),
+		agentRole:     "author",
+		author:        acceptanceActor{name: "acceptance-author", id: fmt.Sprintf("%d", n), role: "author"},
+		otherReviewer: mustAcceptanceActor(acceptanceOtherReviewerID),
+		latestOutcome: map[string]string{},
 	}
+}
+
+// mustAcceptanceActor parses a compile-time-constant agent identifier,
+// panicking on a malformed one: the only inputs are this package's own
+// constants, so a failure here is a typo in the harness, not a runtime
+// condition any scenario could reach.
+func mustAcceptanceActor(identifier string) acceptanceActor {
+	actor, err := parseAcceptanceActor(identifier)
+	if err != nil {
+		panic("acceptance harness: " + err.Error())
+	}
+	return actor
 }
 
 // worldFrom retrieves the current scenario's *acceptanceWorld from ctx,
