@@ -9,25 +9,21 @@ Feature: Replying to review threads
     And it has a thread opened by the reviewer "ada-lovelace-7-reviewer"
     And I am the author agent "grace-hopper-3-author"
 
-  @wip
   Scenario: An author replies to a thread immediately
     When I reply to the thread
     Then my reply is visible on the thread right away
     And it was not staged
 
-  @wip
   Scenario: Replying does not change the work branch state
     When I reply to the thread
     Then the work branch stays in state "reviewed"
 
-  @wip
   Scenario: Replying does not affect verdicts
     Given the work branch has one "approve" verdict
     When I reply to the thread
     Then the verdicts are unchanged
     And none are marked stale
 
-  @wip
   Scenario: A reply records the round it was made in
     Given the work branch is on its second review round
     And the thread was raised in the first round
@@ -35,13 +31,11 @@ Feature: Replying to review threads
     Then my reply is recorded against the second round
     And the thread still shows it was raised in the first round
 
-  @wip
   Scenario: Replying on a completed work branch is rejected
-    Given the work branch is in state "complete"
+    Given the work branch "wb-9c2f1a" is in state "complete"
     When I reply to the thread
     Then the reply is rejected as a failed precondition
 
-  @wip
   Scenario: Replying to a missing thread is rejected
     When I reply to a thread that does not exist
     Then the reply is rejected as not found

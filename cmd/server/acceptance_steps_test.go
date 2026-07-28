@@ -85,9 +85,26 @@ func (h *acceptanceHarness) stepRepoIsEnrolled(ctx context.Context, repo, branch
 // names (e.g. "grace-hopper-3-author"), overriding newAcceptanceWorld's
 // generated default so later steps' assertions can match the scenario's
 // own literal text.
+//
+// It ALSO splits that literal back into the LOAM_AGENT_* triple that
+// produces it, for replies.feature's author-side steps
+// (acceptance_review_test.go), which drive the CLI as an explicit actor
+// rather than as world's single agent identity. world.agentName/agentID/
+// agentRole are left exactly as they were: clone-and-push.feature's
+// identity-header and git-author assertions read those three fields
+// against themselves, and re-deriving them here would change what those
+// scenarios compare.
 func (h *acceptanceHarness) stepIAmTheAuthorAgent(ctx context.Context, agentName string) error {
 	world := worldFrom(ctx)
 	world.agentName = agentName
+	author, err := parseAcceptanceActor(agentName)
+	if err != nil {
+		return err
+	}
+	if author.role != "author" {
+		return fmt.Errorf("agent %q has role %q, but this step names an AUTHOR", agentName, author.role)
+	}
+	world.author = author
 	return nil
 }
 
