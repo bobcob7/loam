@@ -10,3 +10,13 @@
 # binaries built side by side so cmd/server's sibling-of-executable lookup
 # for loamhook resolves.
 /bin/
+
+# Stray `go build` output at the repo root. demo:m5 (loam-rle) built
+# cmd/demoenv without -o and committed the 16MB arm64 binary that landed
+# here; /bin/ above did not catch it because the target had no output path.
+# These names are the repo's own main packages, so an unqualified
+# `go build ./cmd/<name>` drops the artifact at the root under that name.
+/demoenv
+/server
+/loam
+/loamhook
