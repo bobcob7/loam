@@ -246,3 +246,39 @@ func TestRemoveRepoUnknownRepoIsNotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 	assert.ErrorIs(t, srv.RemoveRepo(t.Context(), "acme/nope"), forge.ErrRepoNotFound)
 }
+
+// TestPullRequestsReportsWhatTheCallerSent covers the read accessor the
+// acceptance suite's proposal scenarios assert through: it must report the
+// head, base, title and body a real CreatePR supplied (not a placeholder,
+// and not merely the url/number that call echoes back), it must keep
+// reporting a pull request after it leaves the open state, and its length
+// must be the repo's whole PR history -- that length is what "two accepts
+// opened only ONE pull request" is asserted on.
+func TestPullRequestsReportsWhatTheCallerSent(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"README.md": []byte("hi\n")}, SeedOptions{}))
+	require.NoError(t, srv.CreateCollidingBranch(ctx, "acme/widgets", "wb-feature", ""))
+	assert.Empty(t, srv.PullRequests("acme/widgets"), "a repo with no PR must list none")
+	srv.AddToken("t0k")
+	client := NewClient(ts.URL, "t0k")
+	_, number, err := client.CreatePR(ctx, "acme/widgets", "wb-feature", "main", "the title", "the body")
+	require.NoError(t, err)
+	prs := srv.PullRequests("acme/widgets")
+	require.Len(t, prs, 1)
+	assert.Equal(t, PullRequest{
+		Number:       number,
+		HeadBranch:   "wb-feature",
+		TargetBranch: "main",
+		Title:        "the title",
+		Description:  "the body",
+		State:        "open",
+	}, prs[0])
+	require.NoError(t, srv.ClosePR(ctx, "acme/widgets", number))
+	closed := srv.PullRequests("acme/widgets")
+	require.Len(t, closed, 1, "a closed pull request stays in the history")
+	assert.Equal(t, "closed", closed[0].State)
+	assert.Empty(t, srv.PullRequests("acme/other"), "an unknown repo lists none")
+}

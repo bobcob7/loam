@@ -278,6 +278,43 @@ func (s *Server) RemoveRepo(_ context.Context, repoName string) (err error) {
 	return nil
 }
 
+// PullRequest is a read-only view of one pull request the fake forge has
+// recorded, exposing the four fields a CALLER supplied (head, base, title,
+// body) alongside the two the forge itself owns (number, state).
+//
+// It exists because neither of the fake's two REST surfaces can answer
+// "what did Loam actually send?": /provider/create-pr echoes a url and a
+// number and nothing else, /provider/pr-state answers a state, and
+// FindOpenPR answers an identity. A test asserting that an accepted
+// proposal's PR carries the WORK BRANCH's own title and description, or
+// that a second accept opened no second pull request, has to read the
+// record itself. Real Forgejo answers both questions with GET
+// .../pulls?state=all, which cmd/demoenv's translator serves for demo:m5;
+// this is that same read for callers holding the Server in-process.
+type PullRequest struct {
+	Number       int
+	HeadBranch   string
+	TargetBranch string
+	Title        string
+	Description  string
+	State        string
+}
+
+// PullRequests returns every pull request recorded against repo, ordered
+// by number ascending, or nil if repo has none. The slice is a copy: the
+// registry's own records stay behind its mutex and cannot be mutated
+// through the returned values.
+//
+// It is deliberately the whole list rather than a lookup by number, and it
+// includes closed and merged pull requests as well as open ones. Both
+// choices serve the same assertion -- "exactly one pull request was ever
+// created for this repo" -- which a per-number lookup cannot express at
+// all and which an open-only list would answer wrongly the moment that one
+// pull request merged.
+func (s *Server) PullRequests(repo string) []PullRequest {
+	return s.prs.list(repo)
+}
+
 func (s *Server) lookupPR(repo string, number int) (*prRecord, error) {
 	pr, ok := s.prs.get(repo, number)
 	if !ok {

@@ -115,7 +115,7 @@ func (h *acceptanceHarness) stepIAmTheAuthorAgent(ctx context.Context, agentName
 // acceptanceHarness.reconcileSeededMirror.
 func (h *acceptanceHarness) stepIHaveStartedTheWorkBranch(ctx context.Context, workBranch string) error {
 	world := worldFrom(ctx)
-	world.workBranch = workBranch
+	world.setPrimaryWorkBranch(workBranch)
 	if err := h.insertWorkBranchRow(ctx, world.repoID, workBranch, world.targetBranch, "draft", world.agentIdentifier()); err != nil {
 		return err
 	}
@@ -489,11 +489,21 @@ func (h *acceptanceHarness) stepAfterIngestion(ctx context.Context) error {
 // to the production *mirrorsync.StoreProposalAccepter. An earlier version
 // of this comment said the call failed at the transport layer with "no
 // such service registered"; that stopped being true when that bead landed.
+//
+// It does NOT go through that handler in this suite, though. The RPC's
+// preconditions are exercised for real by "When I try to accept it"; its
+// engine leg binds a real *forge.Forgejo the fake forge cannot answer, so
+// the accept itself is run through the same production
+// *mirrorsync.StoreProposalAccepter the handler delegates to. See
+// acceptProposalForReal (acceptance_proposal_test.go) for the whole
+// argument, including what that costs and which scenario stays @wip
+// because of it.
+//
+// This step fails on a refused accept -- it is the SUCCESSFUL "When I
+// accept it"; the refusals are "When I try to accept it", a different
+// sentence with its own step.
 func (h *acceptanceHarness) stepIAcceptIt(ctx context.Context) error {
-	world := worldFrom(ctx)
-	client := h.newProposalServiceClient()
-	_, err := acceptProposal(ctx, client, world.repo(), world.workBranch)
-	return err
+	return h.acceptProposalForReal(ctx, worldFrom(ctx))
 }
 
 // assertDirExists asserts path exists and is a directory.

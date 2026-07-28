@@ -63,6 +63,36 @@ func (r *prRegistry) findOpen(repo, headBranch, targetBranch string) (*prRecord,
 	return nil, false
 }
 
+// list snapshots every PR recorded for repo as a caller-owned slice,
+// ordered by number ascending. Numbers are allocated densely from 1 by
+// create, so iterating 1..next is a total ordering with no gaps and no
+// sort; a number the map does not hold would mean an allocation that never
+// recorded, which cannot happen under the same mutex.
+func (r *prRegistry) list(repo string) []PullRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	byNo := r.byNo[repo]
+	if len(byNo) == 0 {
+		return nil
+	}
+	out := make([]PullRequest, 0, len(byNo))
+	for number := 1; number <= r.next[repo]; number++ {
+		pr, ok := byNo[number]
+		if !ok {
+			continue
+		}
+		out = append(out, PullRequest{
+			Number:       pr.number,
+			HeadBranch:   pr.headBranch,
+			TargetBranch: pr.targetBranch,
+			Title:        pr.title,
+			Description:  pr.description,
+			State:        pr.state,
+		})
+	}
+	return out
+}
+
 // forget drops every PR recorded for repo, including its number
 // allocator, so a later repo of the same name starts from #1 with an
 // empty registry. It exists for Server.RemoveRepo: leaving the records

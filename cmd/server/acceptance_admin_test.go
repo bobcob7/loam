@@ -45,13 +45,21 @@ func (h *acceptanceHarness) newProposalServiceClient() adminv1connect.ProposalSe
 }
 
 // acceptProposal calls ProposalService.AcceptProposal for (repo,
-// workBranch) and returns the accepted PR's URL.
-func acceptProposal(ctx context.Context, client adminv1connect.ProposalServiceClient, repo, workBranch string) (string, error) {
+// workBranch) and returns the whole response -- the accepted PR's URL and
+// the upstream branch the accept pushed -- so a caller can assert on both
+// halves of what the accept engine reported doing.
+//
+// The error is returned UNWRAPPED. Callers that mean to observe a REFUSED
+// accept classify it with connect.CodeOf (requireRPCRejected,
+// acceptance_proposal_test.go), and wrapping would not break that -- but
+// the wrap adds nothing the caller does not already know, since every call
+// site names the repo and work branch itself.
+func acceptProposal(ctx context.Context, client adminv1connect.ProposalServiceClient, repo, workBranch string) (*adminv1.AcceptProposalResponse, error) {
 	resp, err := client.AcceptProposal(ctx, connect.NewRequest(&adminv1.AcceptProposalRequest{Repo: repo, WorkBranch: workBranch}))
 	if err != nil {
-		return "", fmt.Errorf("accepting proposal for %s/%s: %w", repo, workBranch, err)
+		return nil, err
 	}
-	return resp.Msg.PrUrl, nil
+	return resp.Msg, nil
 }
 
 // newRepoAdminServiceClient builds the Admin actor's connect-go client for

@@ -39,12 +39,10 @@ Feature: Work branch lifecycle
     When the reviewer "ada-lovelace-7-reviewer" submits an "approve" verdict
     Then the work branch is in state "reviewed"
 
-  @wip
   Scenario: A reviewed work branch with an approval becomes a proposal
     Given a work branch in state "reviewed" with one "approve" verdict
     Then it appears in the admin's proposal queue
 
-  @wip
   Scenario: Requesting review again starts a fresh round and marks prior verdicts stale
     Given a work branch in state "reviewed" with one "approve" verdict
     When I request review again
@@ -52,7 +50,6 @@ Feature: Work branch lifecycle
     And the prior verdicts are marked stale
     And it no longer appears in the admin's proposal queue
 
-  @wip
   Scenario: Completion happens only when the upstream PR merges
     Given a work branch in state "reviewed" whose upstream PR has been created
     When the upstream PR merges
@@ -84,7 +81,6 @@ Feature: Work branch lifecycle
     And it is flagged as conflicted
     And the prior verdicts are marked stale
 
-  @wip
   Scenario: Catching up returns a conflict-reset work branch to review
     Given a work branch reset to "draft" by a conflicting target advance
     When I push commits that bring it up to date with its target
