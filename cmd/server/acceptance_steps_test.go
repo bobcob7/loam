@@ -480,11 +480,15 @@ func (h *acceptanceHarness) stepAfterIngestion(ctx context.Context) error {
 // stepIAcceptIt is the core vocabulary row "I accept it": one
 // ProposalService.AcceptProposal call as the Admin actor (connect-go
 // client, HTTP basic auth). See acceptance_admin_test.go's
-// acceptanceAdminHTTPClient for the basic-auth driver construction;
-// ProposalService itself has no handler registered in buildRouter yet
-// (no un-@wip scenario needs it today), so this call currently fails at
-// the transport layer with "no such service registered" until that
-// handler lands -- still the correct, resolvable driver call for the step.
+// acceptanceAdminHTTPClient for the basic-auth driver construction.
+//
+// ProposalService IS registered in buildRouter as of loam-ofg.14
+// (registerProposalService), so this step now reaches a real handler
+// against the live pool: it resolves the branch, checks the reviewed /
+// unconflicted / >= 1 current-round-approve preconditions, and delegates
+// to the production *mirrorsync.StoreProposalAccepter. An earlier version
+// of this comment said the call failed at the transport layer with "no
+// such service registered"; that stopped being true when that bead landed.
 func (h *acceptanceHarness) stepIAcceptIt(ctx context.Context) error {
 	world := worldFrom(ctx)
 	client := h.newProposalServiceClient()

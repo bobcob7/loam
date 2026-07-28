@@ -200,11 +200,11 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 // admin-triggered (docs/sync-spec.md: "The RPC is synchronous and
 // idempotent by construction"), so nothing in serve's background tier
 // starts it. Its caller is the AcceptProposal RPC handler --
-// ProposalService, loam-ofg.14 -- which does not exist yet; this function
-// is what that bead constructs its handler over, and what keeps the
-// production wiring (per-repo forge binding, attribution from config,
-// mirror root from LOAM_DATA_DIR) in one place next to the sync graph it
-// mirrors rather than re-derived inside a handler.
+// ProposalService (loam-ofg.14), registered by main.go's
+// registerProposalService -- and it keeps the production wiring (per-repo
+// forge binding, attribution from config, mirror root from LOAM_DATA_DIR)
+// in one place next to the sync graph it mirrors rather than re-derived
+// inside a handler.
 func buildProposalAccepter(cfg config.Config, pool *pgxpool.Pool, httpClient *http.Client) (*mirrorsync.StoreProposalAccepter, error) {
 	encryptor, err := crypto.NewEncryptor(cfg.EncryptionKey)
 	if err != nil {
@@ -216,6 +216,36 @@ func buildProposalAccepter(cfg config.Config, pool *pgxpool.Pool, httpClient *ht
 	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
 	return mirrorsync.NewStoreProposalAccepter(cfg.DataDir, cfg.Logger, cfg.PRAttribution, repos, workBranches, workBranches, tracker, transport), nil
+}
+
+// buildUpstreamPRCloser constructs the *mirrorsync.StorePRPoller the admin
+// CloseWorkBranch path reaches for ClosePRAndCleanup -- the "Loam opened
+// it, Loam closes it" half of docs/web-spec.md -> ProposalService -- over
+// the same collaborators buildSyncScheduler wires its own poller over.
+//
+// It is a SECOND StorePRPoller instance, not the scheduler's, and that is
+// safe by the type's own construction: StorePRPoller holds no mutable
+// state of its own (dataDir, logger, and five seams, all set once at
+// construction), so two instances over the same stores are
+// indistinguishable from one. Returning the scheduler's instance instead
+// would mean buildSyncScheduler handing out a reference to an object whose
+// Run/Tick discipline it currently guarantees by never letting the
+// Scheduler value escape (see syncRunner's doc comment); a separate
+// instance keeps that property untouched.
+//
+// Only ClosePRAndCleanup is called through it. PollPRs on this instance is
+// never invoked -- the scheduler's own poller owns the cycle.
+func buildUpstreamPRCloser(cfg config.Config, pool *pgxpool.Pool, httpClient *http.Client) (*mirrorsync.StorePRPoller, error) {
+	encryptor, err := crypto.NewEncryptor(cfg.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("building encryptor: %w", err)
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
+	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
+	return mirrorsync.NewStorePRPoller(cfg.DataDir, cfg.Logger, repos, workBranches, workBranches, tracker, transport), nil
 }
 
 // forgePRTracker is the production forge REST surface Mirror Sync step 5
