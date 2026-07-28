@@ -970,16 +970,28 @@ func TestGetWorkBranchDiff_RefMissing_MessageNamesMissingRef(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	// The stub names the TARGET ref, not the work branch, and that choice
+	// is what lets this test fail at all: "wb-9c2f1a" already appears in
+	// the handler's own context prefix ("computing diff for work branch
+	// bobcob7/doc-server/wb-9c2f1a"), so a stub naming it cannot separate
+	// "err was preserved" from "only the bare sentinel was wrapped" --
+	// both render a message containing wb-9c2f1a. "main" appears nowhere
+	// in that prefix.
+	//
+	// It is also the realistic failure: internal/gitdiff produces
+	// "verifying target branch main: main: gitdiff: ref not found in
+	// mirror" (diff.go:172,202), and naming WHICH ref is missing is the
+	// entire point of loam-blc.
 	diff.DiffFunc = func(context.Context, workbranchstore.WorkBranch) (string, error) {
-		return "", fmt.Errorf("wb-9c2f1a: %w", gitdiff.ErrRefMissing)
+		return "", fmt.Errorf("verifying target branch main: main: %w", gitdiff.ErrRefMissing)
 	}
 	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	var connectErr *connect.Error
 	require.ErrorAs(t, err, &connectErr)
-	assert.Contains(t, connectErr.Message(), gitdiff.ErrRefMissing.Error(), "the message must name the missing ref, not just terminate in the generic \"handler: failed precondition\"")
-	assert.NotEqual(t, "computing diff for work branch bobcob7/doc-server/wb-9c2f1a: handler: failed precondition", connectErr.Message())
+	assert.Contains(t, connectErr.Message(), "verifying target branch main", "the message must name WHICH ref is missing -- the target ref's name appears nowhere in the handler's own context prefix, so only preserving err can put it there")
+	assert.Contains(t, connectErr.Message(), gitdiff.ErrRefMissing.Error(), "and the sentinel's own text must survive, not just terminate in the generic \"handler: failed precondition\"")
 	assert.ErrorIs(t, err, gitdiff.ErrRefMissing)
 	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
 }
@@ -998,6 +1010,11 @@ func TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition(t *testing.T) {
 	_, err := h.GetWorkBranchDiff(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
+	// mapDiffComputerErr's doc comment claims BOTH precondition branches
+	// preserve err; without this the ErrNoMergeBase branch had nothing
+	// proving it, so a revert to the old single-%w wrap would have been
+	// caught only on the ErrRefMissing side.
+	assert.ErrorIs(t, err, gitdiff.ErrNoMergeBase, "the sentinel must survive the mapping, not just the Connect code")
 }
 
 func strPtr(s string) *string { return &s }
