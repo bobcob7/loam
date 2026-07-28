@@ -698,9 +698,19 @@ tasks:
           installation via mirrorreconcile, and the FULL ingest job
           enrollment enqueues. The one row still seeded out of band is the
           encrypted forge credential -- see cmd/demoenv's seed-credential
-          comment for why that is currently unavoidable (the token is
-          AES-GCM encrypted, and CredentialService.SetUpstreamToken has no
-          registered handler in cmd/server yet).
+          comment for the full reasoning. In short: the token is AES-GCM
+          encrypted so a psql INSERT cannot write it, and
+          CredentialService.SetUpstreamToken -- which HAS been registered
+          since loam-ofg.15, so the old note here claiming a 404 is stale
+          -- validates through the real forge.Forgejo before it writes.
+          That client prepends "https://" to any scheme-less host, while
+          EnrollRepo resolves credentials by deriveRepoIdentity's BARE
+          u.Host, so for this demo's plaintext-HTTP fake forge no single
+          host string can both validate and be found again at enrollment
+          (loam-4kz). The forge half of that RPC is otherwise ready:
+          internal/fakeforge answers the Forgejo-shaped scope probe
+          ValidateToken issues (loam-7d2, internal/fakeforge/forgejoapi.go),
+          proven by the real *forge.Forgejo in that package's own tests.
         - THE REPO IS NAMED git/fixture-polyglot, which looks odd and is
           not a typo. fakeforge mounts every repo under its own "/git/"
           smart-HTTP prefix, and deriveRepoIdentity
@@ -900,6 +910,13 @@ tasks:
             -H 'Content-Type: application/json' -d "$2" \
             "http://$http_addr/loam.admin.v1.RepoAdminService/$1"
         }
+        # credential_rpc is admin_rpc against the OTHER admin service this
+        # target touches, loam.admin.v1.CredentialService (loam-ofg.15).
+        credential_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$http_addr/loam.admin.v1.CredentialService/$1"
+        }
         # agent_cli runs the real compiled loam CLI as an agent, with the
         # same identity headers a real agent's environment supplies.
         agent_cli() {
@@ -963,9 +980,32 @@ tasks:
           "$server_bin" >"$server_log" 2>&1 &
         wait_for_http_ok "http://$http_addr/healthz" "$server_log" "server" 60
         echo ""
-        echo "=== step 5/12: store the encrypted forge credential EnrollRepo resolves by host ==="
+        echo "=== step 5/12: store the encrypted forge credential EnrollRepo resolves by host, then confirm CredentialService can see it ==="
         "$demoenv_bin" seed-credential -database-url "$database_url" \
           -host "$forge_addr" -token "$forge_token" -encryption-key "$encryption_key"
+        # The write above is out of band only because SetUpstreamToken
+        # cannot validate a plaintext-HTTP forge under the bare host:port
+        # EnrollRepo resolves by (loam-4kz; see the desc above and
+        # cmd/demoenv/credential.go). The READ is not: this asks the real,
+        # registered CredentialService what it holds for that host, so the
+        # seeded row is proven to be the row the shipped service reports --
+        # not merely bytes demoenv believes it wrote. It also proves the
+        # service is genuinely wired in cmd/server, since the group-level
+        # 404 fallback could not produce this body.
+        cred_out="$(credential_rpc GetCredentialStatus "{\"host\":\"$forge_addr\"}")" || {
+          echo "FAIL: GetCredentialStatus was rejected: $cred_out" >&2
+          cat "$server_log" >&2
+          exit 1
+        }
+        echo "$cred_out"
+        case "$cred_out" in
+          *'"hasToken":true'*) echo "PASS: CredentialService reports a token present for $forge_addr" ;;
+          *) echo "FAIL: CredentialService does not report a token for $forge_addr: $cred_out" >&2; exit 1 ;;
+        esac
+        case "$cred_out" in
+          *"$forge_token"*) echo "FAIL: CredentialService echoed the token back: $cred_out" >&2; exit 1 ;;
+          *) echo "PASS: the response carries no token material" ;;
+        esac
         echo ""
         echo "=== step 6/12: enroll through the REAL RepoAdminService.EnrollRepo RPC ==="
         enroll_out="$(admin_rpc EnrollRepo "{\"upstream_url\":\"$upstream_url\",\"target_branches\":[\"$target_branch\"],\"indexed_branch\":\"$target_branch\"}")" || {

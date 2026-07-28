@@ -1,11 +1,13 @@
 // Package fakeforge is an in-process test double for an upstream git forge
 // (per docs/testing-spec.md "The Three Test Doubles" and docs/sync-spec.md
 // "Provider Interface"/"Upstream Transport"). A Server is a single
-// net/http.Handler exposing three surfaces: bare repos over token-
+// net/http.Handler exposing four surfaces: bare repos over token-
 // authenticated smart HTTP, a small provider REST API mirroring the real
-// forge's six operations, and a test-only control API for scripting
-// upstream events. Each Server owns its own temp storage; nothing is shared
-// between instances.
+// forge's six operations, one Forgejo-REST-shaped route for the single
+// production caller that holds a real *forge.Forgejo rather than a
+// forge.Provider (forgejoapi.go), and a test-only control API for
+// scripting upstream events. Each Server owns its own temp storage;
+// nothing is shared between instances.
 package fakeforge
 
 import (
@@ -28,8 +30,8 @@ const (
 )
 
 // Server is the fake forge: an http.Handler serving bare repos over smart
-// HTTP, the provider REST surface, and the test control API. Construct with
-// New and release resources with Close.
+// HTTP, the provider REST surface, the Forgejo-shaped scope probe, and the
+// test control API. Construct with New and release resources with Close.
 type Server struct {
 	logger  *slog.Logger
 	root    string
@@ -169,6 +171,11 @@ func (s *Server) tokenHasPRScope(token string) bool {
 func (s *Server) newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle(gitPathPrefix+"/", s.authenticatedGitHandler())
+	// The one Forgejo-REST-shaped route, consumed by the REAL
+	// *forge.Forgejo rather than by *fakeforge.Client — see forgejoapi.go
+	// for why both surfaces exist and why this one stops at the scope
+	// probe.
+	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls", s.handleForgejoCreatePull)
 	mux.HandleFunc("POST /provider/validate-token", s.handleValidateToken)
 	mux.HandleFunc("POST /provider/create-pr", s.handleCreatePR)
 	mux.HandleFunc("POST /provider/pr-state", s.handleGetPRState)
