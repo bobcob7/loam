@@ -209,6 +209,18 @@ type workShowOutput struct {
 	Description string `json:"description"`
 	State       string `json:"state"`
 	Author      string `json:"author"`
+	// UpstreamPRURL is omitted entirely until the admin has accepted the
+	// proposal and Loam has opened the pull request, matching the proto's
+	// `optional string upstream_pr_url = 8`. It is a pointer rather than a
+	// string with omitempty so that "not yet accepted" and "accepted, but
+	// the server sent an empty URL" stay distinguishable -- the latter
+	// would be a server bug, and collapsing the two would hide it.
+	//
+	// Before this field existed an agent whose proposal had been accepted
+	// had no CLI route to its own pull request at all: the URL was
+	// reachable only through the admin ProposalService queue, which agents
+	// cannot call (loam-ls7u).
+	UpstreamPRURL *string `json:"upstream_pr_url,omitempty"`
 }
 
 // runWorkShow implements `loam work show [repo] [work-branch]`
@@ -233,7 +245,7 @@ func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 		return fmt.Errorf("fetching work branch %s/%s: %w", repo, workBranch, err)
 	}
 	wb := resp.Msg.GetWorkBranch()
-	return deps.encoder.Encode(workShowOutput{
+	out := workShowOutput{
 		Repo:        wb.GetRepo(),
 		Name:        wb.GetName(),
 		Target:      wb.GetTarget(),
@@ -241,7 +253,15 @@ func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 		Description: wb.GetDescription(),
 		State:       workBranchStateString(wb.GetState()),
 		Author:      wb.GetAuthor(),
-	})
+	}
+	// Presence is read off the proto's optional field directly rather than
+	// through GetUpstreamPrUrl(), whose zero value cannot distinguish
+	// "absent" from "present and empty".
+	if wb.UpstreamPrUrl != nil {
+		url := wb.GetUpstreamPrUrl()
+		out.UpstreamPRURL = &url
+	}
+	return deps.encoder.Encode(out)
 }
 
 // --- work diff ---

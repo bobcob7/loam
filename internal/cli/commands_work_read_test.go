@@ -247,6 +247,60 @@ func TestRunWorkShow_Success_EncodesFullMetadata(t *testing.T) {
 		"description":"adds a login form","state":"reviewable","author":"grace-hopper-3-author"}`, jsonOf(t, encoded))
 }
 
+// TestRunWorkShow_AcceptedProposal_ReportsItsUpstreamPRURL proves an agent
+// whose proposal has been accepted can reach its own pull request from the
+// CLI. Before loam-ls7u the URL was on the wire (the handler populates
+// WorkBranch.upstream_pr_url) but workShowOutput had no field for it, so
+// the only route to it was the admin ProposalService queue -- which agents
+// cannot call at all.
+func TestRunWorkShow_AcceptedProposal_ReportsItsUpstreamPRURL(t *testing.T) {
+	t.Parallel()
+	prURL := "https://forge.example/loam-demo/doc-server/pulls/1"
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, _ *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+				Description: "adds a login form", Author: "grace-hopper-3-author",
+				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED, UpstreamPrUrl: &prURL,
+			}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
+		"description":"adds a login form","state":"reviewed","author":"grace-hopper-3-author",
+		"upstream_pr_url":"https://forge.example/loam-demo/doc-server/pulls/1"}`, jsonOf(t, encoded))
+}
+
+// TestRunWorkShow_ServerSendsAnEmptyPRURL_IsNotTreatedAsAbsent is why the
+// field is a *string rather than a string with omitempty. An unaccepted
+// branch and one whose server reported an EMPTY url must stay
+// distinguishable: the first is the normal case, the second is a server
+// bug, and a plain omitempty would render them identically and hide it.
+//
+// Verified by mutation -- changing the field to `string` with omitempty
+// leaves TestRunWorkShow_AcceptedProposal_ReportsItsUpstreamPRURL and
+// TestRunWorkShow_Success_EncodesFullMetadata green and turns only this
+// one red.
+func TestRunWorkShow_ServerSendsAnEmptyPRURL_IsNotTreatedAsAbsent(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, _ *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+				Description: "adds a login form", Author: "grace-hopper-3-author",
+				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED, UpstreamPrUrl: &empty,
+			}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.Contains(t, jsonOf(t, encoded), `"upstream_pr_url":""`, "a present-but-empty url must be reported, not silently dropped like an absent one")
+}
+
 // TestRunWorkShow_OmittedPositionals_InferFromWorkspace proves the
 // [repo] [work-branch] convention: with neither given, both come from the
 // enclosing clone.
