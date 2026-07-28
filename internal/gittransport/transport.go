@@ -3,13 +3,40 @@ package gittransport
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// errUpstreamURLHasUserinfo is returned when an upstream URL carries
+// embedded credentials (user:token@host), rejected by validateUpstreamURL.
+var errUpstreamURLHasUserinfo = errors.New("upstream URL must not carry userinfo")
+
+// validateUpstreamURL rejects an upstreamURL carrying userinfo
+// (user:token@host) before it ever reaches exec.Command args. A credential
+// embedded this way would land in `ps` output on every scheduler tick, and
+// scrubSecrets cannot redact it -- it is not the credential this package
+// itself resolves from credStore and injects via gitEnv's header, so
+// scrubSecrets never learns it. forge.CheckRepo parses the URL and checks
+// the host but does not reject u.User; Transport is the natural choke
+// point, since every exported method (Fetch, Push, DeleteRemoteRef, Clone,
+// LsRemote) takes upstreamURL as an explicit parameter and funnels it
+// toward runRaw.
+func validateUpstreamURL(upstreamURL string) error {
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		return fmt.Errorf("parsing upstream URL: %w", err)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: %s", errUpstreamURLHasUserinfo, u.Redacted())
+	}
+	return nil
+}
 
 // Transport runs upstream git subprocesses (fetch, push, branch delete)
 // with a forge host's token injected per invocation, per
@@ -39,6 +66,9 @@ func New(credStore credentialSource, gitCreds gitCredentialConverter, logger *sl
 // --porcelain output with any secret scrubbed (see run), for a caller
 // that wants to derive ref SHA transitions itself.
 func (t *Transport) Fetch(ctx context.Context, host, mirrorDir, upstreamURL string, refspecs []string) ([]byte, error) {
+	if err := validateUpstreamURL(upstreamURL); err != nil {
+		return nil, fmt.Errorf("fetching into %s: %w", mirrorDir, err)
+	}
 	args := append([]string{"fetch", "--prune", "--force", "--porcelain", upstreamURL}, refspecs...)
 	out, err := t.run(ctx, host, mirrorDir, args...)
 	if err != nil {
@@ -54,6 +84,9 @@ func (t *Transport) Fetch(ctx context.Context, host, mirrorDir, upstreamURL stri
 // --force, so a non-fast-forward push is rejected by the upstream, not
 // silently forced.
 func (t *Transport) Push(ctx context.Context, host, mirrorDir, upstreamURL, refspec string) ([]byte, error) {
+	if err := validateUpstreamURL(upstreamURL); err != nil {
+		return nil, fmt.Errorf("pushing %s: %w", refspec, err)
+	}
 	out, err := t.run(ctx, host, mirrorDir, "push", upstreamURL, refspec)
 	if err != nil {
 		return nil, fmt.Errorf("pushing %s to %s: %w", refspec, upstreamURL, err)
@@ -66,6 +99,9 @@ func (t *Transport) Push(ctx context.Context, host, mirrorDir, upstreamURL, refs
 // injected per invocation -- used for upstream branch cleanup
 // (loam-giq.8) once a proposal's PR reaches a terminal state.
 func (t *Transport) DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstreamURL, ref string) ([]byte, error) {
+	if err := validateUpstreamURL(upstreamURL); err != nil {
+		return nil, fmt.Errorf("deleting %s: %w", ref, err)
+	}
 	out, err := t.run(ctx, host, mirrorDir, "push", upstreamURL, ":"+ref)
 	if err != nil {
 		return nil, fmt.Errorf("deleting %s on %s: %w", ref, upstreamURL, err)
@@ -94,6 +130,9 @@ func (t *Transport) DeleteRemoteRef(ctx context.Context, host, mirrorDir, upstre
 // credential helper, output/error/log scrubbing) with no separate
 // implementation to keep in sync.
 func (t *Transport) Clone(ctx context.Context, host, mirrorDir, upstreamURL string) ([]byte, error) {
+	if err := validateUpstreamURL(upstreamURL); err != nil {
+		return nil, fmt.Errorf("cloning into %s: %w", mirrorDir, err)
+	}
 	if err := os.RemoveAll(mirrorDir); err != nil {
 		return nil, fmt.Errorf("clearing stale mirror path %s before clone: %w", mirrorDir, err)
 	}
@@ -114,6 +153,9 @@ func (t *Transport) Clone(ctx context.Context, host, mirrorDir, upstreamURL stri
 // every other method here, for the same isolation-inheritance reason
 // Clone's doc comment explains.
 func (t *Transport) LsRemote(ctx context.Context, host, upstreamURL string) ([]byte, error) {
+	if err := validateUpstreamURL(upstreamURL); err != nil {
+		return nil, fmt.Errorf("listing refs: %w", err)
+	}
 	out, err := t.runRaw(ctx, host, "ls-remote", "--symref", upstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("listing refs for %s: %w", upstreamURL, err)
@@ -239,7 +281,17 @@ func gitEnv(home, authHeaderValue string) []string {
 		"GIT_TRACE_SETUP=0",
 	)
 	if authHeaderValue == "" {
-		return env
+		// GIT_CONFIG_COUNT=0 must be set explicitly here, not simply
+		// omitted: os.Environ() above already carries whatever
+		// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n the parent
+		// process happened to have set ambiently, and exec.Cmd resolves
+		// duplicate env keys by last-value-wins -- so appending this
+		// override here, after os.Environ(), is what actually neutralises
+		// an inherited GIT_CONFIG_COUNT (including a hostile
+		// http.extraHeader) on the anonymous path, exactly the way the
+		// header branch below neutralises it by overwriting the same keys
+		// with its own values.
+		return append(env, "GIT_CONFIG_COUNT=0")
 	}
 	return append(env,
 		"GIT_CONFIG_COUNT=1",
