@@ -88,5 +88,35 @@ func TestTransport_NeutralizesHostileAmbientGitConfigCountOnAnonymousCall(t *tes
 	mirrorDir := newBareMirror(t)
 	_, err := transport.Fetch(t.Context(), "", mirrorDir, upstreamURL, []string{"+refs/heads/*:refs/heads/*"})
 	require.Error(t, err, "an anonymous fetch against a token-gated repo must fail -- it must NEVER be rescued by a hostile ambient GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0 the parent process happens to have set")
-	require.Equal(t, 0, credStore.calls, "no credential was resolved for this deliberately anonymous call, so the store must never have been consulted")
+	// Deliberately NOT asserting credStore.calls == 0. runRaw consults
+	// the store only when host != "", and this call passes host == "",
+	// so that assertion can never be non-zero whether or not the
+	// neutralisation works -- it reads as evidence while proving
+	// nothing. The require.Error above is the whole test.
+}
+
+// TestTransport_NeutralizesAmbientGitConfigParametersOnAnonymousCall is the
+// same guard for the OTHER ambient config channel. GIT_CONFIG_PARAMETERS is
+// how git itself propagates `-c` to subprocesses, so an inherited value is
+// ordinary rather than exotic, and git honours it ALONGSIDE
+// GIT_CONFIG_COUNT -- so clearing only the latter left this route wide
+// open. Before gitEnv cleared it, this fetch SUCCEEDED: the hostile ambient
+// header authenticated a call that deliberately resolved no credential of
+// its own, defeating the sibling test above by a different door.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_NeutralizesAmbientGitConfigParametersOnAnonymousCall(t *testing.T) {
+	requireGit(t)
+	const correctToken = "correct-token-the-ambient-parameters-know"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(correctToken)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	encoded := basicAuthValue(t, correctToken)
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.extraHeader'='Authorization: Basic "+encoded+"'")
+	transport := New(&staticCredentialSource{}, newGitCredsConverter(), testLogger())
+	mirrorDir := newBareMirror(t)
+	_, err := transport.Fetch(t.Context(), "", mirrorDir, upstreamURL, []string{"+refs/heads/*:refs/heads/*"})
+	require.Error(t, err, "an anonymous fetch against a token-gated repo must fail -- it must NEVER be rescued by a hostile ambient GIT_CONFIG_PARAMETERS the parent process happens to have set")
 }
