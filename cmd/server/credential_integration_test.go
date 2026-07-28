@@ -307,11 +307,25 @@ func TestServer_SetUpstreamToken_ForgeEchoingTheTokenLeaksItNowhere(t *testing.T
 	require.ErrorAs(t, err, &connectErr)
 	assert.Equal(t, connect.CodeInternal, connectErr.Code())
 	assert.NotContains(t, connectErr.Message(), credEchoToken)
-	logged := rs.serverLog()
-	require.Contains(t, logged, "unmapped handler error",
-		"positive control: handler.ErrorMapper must really have logged this failure, so the absence assertion below is reading the line that would have carried a leak")
-	require.Contains(t, logged, forgeStub.URL,
-		"positive control: and that line must be the one about THIS request, not some unrelated startup error")
+	// The positive control is WAITED for, not sampled. handler.ErrorMapper
+	// logs inside the child process, and the parent only sees it once the
+	// child has flushed and this process has drained the stdout pipe --
+	// neither of which is ordered against the RPC response arriving here.
+	// Reading once immediately after the call turned CI red (run
+	// 30374800718) with the captured log ending at "starting background
+	// components": the assertion was racing the pipe, not observing a
+	// missing line. This is loam-4q2's shape -- a single sample of
+	// something that becomes true asynchronously.
+	//
+	// The absence assertions below then run against `logged`, the exact
+	// content that satisfied the control, so they can never read a
+	// narrower buffer than the one proven to contain the line.
+	var logged string
+	require.Eventuallyf(t, func() bool {
+		logged = rs.serverLog()
+		return strings.Contains(logged, "unmapped handler error") && strings.Contains(logged, forgeStub.URL)
+	}, 30*time.Second, 50*time.Millisecond,
+		"positive control: handler.ErrorMapper must really log this failure, and that line must be about THIS request -- otherwise the absence assertions below prove nothing. Last captured log: %s", logged)
 	assert.NotContains(t, logged, credEchoToken, "a forge that echoes the submitted token must not put it in this server's log")
 	assert.NotContains(t, logged, "internal server error while handling token",
 		"no part of the forge's response body may reach the log -- the echoed token is only the worst thing it could contain")
