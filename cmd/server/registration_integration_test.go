@@ -135,6 +135,57 @@ func TestServer_RepoAdminServiceIsRegistered_NotGroupFallback(t *testing.T) {
 		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
 }
 
+// TestServer_ProposalServiceIsRegistered_NotGroupFallback is loam-ofg.14's
+// central acceptance proof, and the one this bead most needs: for its whole
+// life before this bead, loam.admin.v1.ProposalService was declared in the
+// proto and generated into internal/gen with NO handler package and NO
+// registration anywhere, so every AcceptProposal fell through to
+// internal/server's group-level 404 fallback. That is not a cosmetic gap --
+// *mirrorsync.StoreProposalAccepter is the only writer of
+// work_branches.upstream_pr_number tree-wide, and that column is the entire
+// poll set of mirrorsync.StorePRPoller, so the running binary's sync cycle
+// polled an empty set on every tick. Nothing short of driving the REAL,
+// booted binary catches that class of bug: the unit tests of both halves
+// passed throughout.
+//
+// A repo that was never enrolled answers CodeNotFound from the real handler
+// AND from the fallback, so as in every sibling proof above it is the
+// MESSAGE that discriminates: the fallback's is a fixed string that never
+// names the request, the handler's names the repo it could not resolve.
+func TestServer_ProposalServiceIsRegistered_NotGroupFallback(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := adminv1connect.NewProposalServiceClient(&http.Client{Transport: adminRoundTripper{user: testAdminUser, password: testAdminPassword, base: newIsolatedTransport(t)}}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.AcceptProposal(ctx, connect.NewRequest(&adminv1.AcceptProposalRequest{Repo: "bobcob7/never-enrolled", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err, "bobcob7/never-enrolled is genuinely not enrolled in this freshly migrated, empty database")
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeNotFound, connectErr.Code(),
+		"a genuinely unenrolled repo must be CodeNotFound -- the same code the fallback would also have produced, which is exactly why the message below, not this code, is the discriminating assertion")
+	assert.NotContains(t, connectErr.Message(), "service registered",
+		"the request must reach the real ProposalServiceHandler registerProposalService wires in cmd/server/main.go's buildRouter, never internal/server's group-level fallback for an unregistered /loam.admin.v1.* service")
+	assert.Contains(t, connectErr.Message(), "bobcob7/never-enrolled",
+		"the real handler's not-found message names the requested repo; the fallback's fixed message never does")
+}
+
+// TestServer_ProposalServiceRequiresAdmin proves the queue and the two
+// decisions are unreachable without admin basic auth against the REAL
+// binary: httpauth.Auth.AdminOnly answers 401 before any handler runs, so
+// this never even reaches proposal.requireAdmin (which is the handler-local
+// defence in depth behind it).
+func TestServer_ProposalServiceRequiresAdmin(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	client := adminv1connect.NewProposalServiceClient(&http.Client{Transport: newIsolatedTransport(t)}, "http://"+rs.addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := client.ListProposals(ctx, connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeUnauthenticated, connectErr.Code())
+}
+
 // TestServer_GraphServiceIsRegistered_NotGroupFallback is loam-ofg.10's
 // central acceptance proof for GraphService, against the REAL, booted
 // binary with a REAL migrated Postgres -- the exact trap this bead's own

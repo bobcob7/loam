@@ -1,0 +1,556 @@
+package proposal
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
+
+	"github.com/bobcob7/loam/internal/forge"
+	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
+	"github.com/bobcob7/loam/internal/workbranchstore"
+)
+
+// defaultListLimit is the page size ListProposals uses when the request's
+// Page.limit is unset (0), matching every other paginated list surface in
+// this tree (docs/cli-spec.md -> "list": "--limit <n> ... defaults to 100").
+const defaultListLimit = 100
+
+// candidateScanPageSize is how many work_branches rows ListProposals pulls
+// per store round trip while scanning for proposals. It is NOT the response
+// page size: the proposal predicate spans three tables (state and conflict
+// on work_branches, the approve count on verdicts joined to the branch's
+// current review_rounds row) and no single store query expresses it, so the
+// candidate set -- state=reviewed, every repo -- is scanned in full and the
+// caller's limit/offset is applied to the FILTERED result.
+//
+// Applying limit/offset to the unfiltered scan instead would be materially
+// wrong, not merely approximate: a page of 100 reviewed branches of which 3
+// are proposals would return 3 rows and a next-page offset of 100, so the
+// admin would page through mostly-empty pages and PageInfo.total would
+// report reviewed branches rather than proposals. Scanning is affordable
+// because the candidate set is bounded by "reviewed and not yet decided",
+// which is exactly the queue the admin is looking at; the same page-
+// everything-then-filter shape mirrorsync.StorePRPoller's pollSet uses, and
+// for the same reason.
+const candidateScanPageSize = 200
+
+// Handler implements adminv1connect.ProposalServiceHandler.
+type Handler struct {
+	workBranches workBranchStore
+	repos        repoStore
+	verdicts     verdictStore
+	accepter     proposalAccepter
+	prCloser     upstreamPRCloser
+	errors       *handler.ErrorMapper
+	logger       *slog.Logger
+}
+
+// compile-time assertion that Handler satisfies the generated interface.
+var _ adminv1connect.ProposalServiceHandler = (*Handler)(nil)
+
+// New builds a Handler over the given seams. accepter is the proposal
+// acceptance engine (in production *mirrorsync.StoreProposalAccepter) and
+// prCloser the upstream PR close + branch cleanup (in production
+// *mirrorsync.StorePRPoller); both are constructed at the composition root,
+// where the per-repo forge binding and the mirror root live.
+func New(
+	workBranches workBranchStore,
+	repos repoStore,
+	verdicts verdictStore,
+	accepter proposalAccepter,
+	prCloser upstreamPRCloser,
+	errors *handler.ErrorMapper,
+	logger *slog.Logger,
+) *Handler {
+	return &Handler{
+		workBranches: workBranches,
+		repos:        repos,
+		verdicts:     verdicts,
+		accepter:     accepter,
+		prCloser:     prCloser,
+		errors:       errors,
+		logger:       logger,
+	}
+}
+
+// ListProposals returns the proposal queue: every REVIEWED work branch,
+// across every enrolled repo, that carries at least one non-stale approve
+// verdict and no conflict flag, each with that round's verdicts so the
+// admin sees who approved without a second call (docs/web-spec.md ->
+// ProposalService).
+//
+// # The predicate, and the one clause it cannot evaluate
+//
+// docs/web-spec.md defines a proposal as a reviewed branch with >= 1
+// non-stale approve "awaiting an admin decision -- either it has no
+// upstream PR yet, or its existing PR's branch is behind the work branch (a
+// conflict catch-up that has been re-reviewed)". The first three conditions
+// are evaluated here exactly. The final disjunction is NOT, and cannot be
+// from database state alone: nothing records what commit a previous accept
+// pushed, so "the PR's branch is behind the work branch" is answerable only
+// by comparing refs (the mirror's refs/heads/<name> against the upstream
+// loam/<name> the mirror fetch does bring back), which would put a git
+// subprocess per candidate row inside a cross-repo list RPC and still be
+// one sync tick stale.
+//
+// So this query includes reviewed+approved+unconflicted branches REGARDLESS
+// of whether a PR is already recorded, and the deliberate error is
+// over-inclusion: a branch accepted a moment ago stays listed until its PR
+// merges or closes (at which point sync flips it to complete/closed and it
+// leaves the queue for good). The alternative -- excluding every branch with
+// a recorded PR -- was rejected because it under-includes exactly the case
+// the spec calls out by name: a branch reset to draft by a conflicting
+// target advance, caught up, and re-reviewed still carries the original
+// PR's number, so it would never reappear in the queue and the admin would
+// have no surface from which to re-accept it. Over-inclusion costs a
+// redundant row the admin can ignore, or an accept that idempotently
+// fast-forwards; under-inclusion costs a documented workflow. Filed as a
+// follow-up (loam-cgg) for the comparison that makes the clause exact.
+//
+// Pagination applies to the filtered result; see candidateScanPageSize.
+func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv1.ListProposalsRequest]) (*connect.Response[adminv1.ListProposalsResponse], error) {
+	if err := requireAdmin(ctx, "listing proposals"); err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	candidates, err := h.reviewedBranches(ctx)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	repoNames := make(map[uuid.UUID]string, len(candidates))
+	proposals := make([]*adminv1.Proposal, 0, len(candidates))
+	for _, wb := range candidates {
+		if wb.Conflict != workbranchstore.ConflictNone {
+			continue
+		}
+		approvals, err := h.verdicts.CurrentRoundApproveCount(ctx, wb.ID)
+		if err != nil {
+			return nil, h.errors.ToConnectErr(fmt.Errorf("counting current-round approvals for work branch %s: %w", wb.Name, err))
+		}
+		if approvals < 1 {
+			continue
+		}
+		records, err := h.verdicts.List(ctx, wb.ID)
+		if err != nil {
+			return nil, h.errors.ToConnectErr(fmt.Errorf("listing verdicts for work branch %s: %w", wb.Name, err))
+		}
+		repoName, err := h.repoNameFor(ctx, wb.RepoID, repoNames)
+		if err != nil {
+			return nil, h.errors.ToConnectErr(err)
+		}
+		proposals = append(proposals, &adminv1.Proposal{
+			WorkBranch: workBranchToProto(repoName, wb),
+			Verdicts:   currentRoundVerdicts(records),
+		})
+	}
+	limit, offset := pageLimitOffset(req.Msg.GetPage())
+	page := paginate(proposals, limit, offset)
+	return connect.NewResponse(&adminv1.ListProposalsResponse{
+		Proposals: page,
+		PageInfo:  &loamv1.PageInfo{Total: uint32(len(proposals))},
+	}), nil
+}
+
+// AcceptProposal pushes the work branch upstream as loam/<name> and opens
+// (or, on a re-accept, fast-forwards) its upstream pull request, recording
+// the PR on the work_branches row. The branch STAYS REVIEWED: only sync's
+// PR poller flips it to complete on merge or closed on an upstream close
+// (docs/web-spec.md -> ProposalService, and the bead's own CRITICAL RULE).
+//
+// # The approve precondition -- this handler's, and exactly what it means
+//
+// docs/sync-spec.md -> Proposal Acceptance requires ">= 1 non-stale approve
+// verdict", and that is implemented literally: at least one verdict with
+// outcome 'approve' cast in the branch's CURRENT review round, where
+// "current" is MAX(review_rounds.number) for the branch and staleness is
+// that comparison's negation -- derived, never stored (docs/web-spec.md ->
+// ProposalService: "`stale` is derived"). Three consequences are worth
+// stating because each is a rule someone could reasonably assume instead:
+//
+//   - An approve from an EARLIER round does not count. Requesting a
+//     re-review opens a new round, which is precisely how prior verdicts go
+//     stale (features/admin-proposals.feature -> "Requesting a re-review
+//     sends the work branch back": "the prior verdicts are marked stale").
+//   - A disapprove does NOT veto. Nothing in docs/web-spec.md,
+//     docs/sync-spec.md, docs/cli-spec.md, or the feature file expresses a
+//     "no outstanding disapprove" rule; the queue scenario excludes a branch
+//     with ONLY a disapprove, which the >= 1 approve rule already excludes
+//     on its own. A branch with one approve and one disapprove is therefore
+//     a proposal and is acceptable -- the admin is the decision-maker and
+//     can see both verdicts in the queue. Adding a veto here would be
+//     inventing policy the specs do not state.
+//   - A neutral verdict is not an approve, so a branch with only neutrals is
+//     refused ("Accepting requires an approval").
+//
+// The count comes from reviewstore.VerdictStore.CurrentRoundApproveCount --
+// a query built for this ("backs the proposal queue / approval bar") whose
+// current-round join is the same MAX(number) subquery every other staleness
+// derivation in this system uses -- rather than from anything counted in Go
+// here, so the accept gate and the queue predicate cannot drift apart.
+//
+// # Idempotency
+//
+// This handler deliberately does NOT refuse a branch that already has a
+// recorded upstream_pr_number. Re-accepting after a conflict catch-up is
+// the documented flow ("Re-accepting a caught-up work branch updates the
+// existing PR"), and the accepter's two-layer guard -- the null check on
+// the row it reads, plus the guarded UPDATE in
+// workbranchstore.RecordUpstreamPR -- is what keeps it from opening a
+// second PR. A pre-check here would not add safety; it would DEFEAT that
+// flow by rejecting the second accept outright.
+//
+// # Preconditions checked here versus in the accepter
+//
+// State and conflict are re-checked here, ahead of the delegation, even
+// though the accepter checks them too. That is not redundancy for its own
+// sake: the accepter's sentinels are unexported, so an error surfacing from
+// there cannot be classified at this boundary and would collapse to
+// CodeInternal, whereas "this branch is not reviewed" and "this branch is
+// conflicted" are failed preconditions the admin can act on. Checking here
+// is what makes the RPC answer correctly; the accepter's own check remains
+// the authority against a concurrent transition between these two reads.
+func (h *Handler) AcceptProposal(ctx context.Context, req *connect.Request[adminv1.AcceptProposalRequest]) (*connect.Response[adminv1.AcceptProposalResponse], error) {
+	if err := requireAdmin(ctx, "accepting a proposal"); err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	repo, name := req.Msg.GetRepo(), req.Msg.GetWorkBranch()
+	repoRow, wb, err := h.resolveWorkBranch(ctx, repo, name)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	if wb.State != workbranchstore.StateReviewed {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("work branch %s/%s is %s, not reviewed -- only a reviewed branch can be accepted: %w", repo, name, wb.State, handler.ErrFailedPrecondition))
+	}
+	if wb.Conflict != workbranchstore.ConflictNone {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("work branch %s/%s is flagged %s against its target -- it must be caught up and re-reviewed before it can be accepted: %w", repo, name, wb.Conflict, handler.ErrFailedPrecondition))
+	}
+	approvals, err := h.verdicts.CurrentRoundApproveCount(ctx, wb.ID)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("counting current-round approvals for work branch %s/%s: %w", repo, name, err))
+	}
+	if approvals < 1 {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("work branch %s/%s has no approve verdict in its current review round: %w", repo, name, handler.ErrFailedPrecondition))
+	}
+	result, err := h.accepter.AcceptProposal(ctx, mirrorsync.RepoID(repoRow.Name), wb.Name)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(mapAcceptErr(err, fmt.Sprintf("accepting work branch %s/%s", repo, name)))
+	}
+	h.logger.InfoContext(ctx, "admin accepted proposal", "repo", repoRow.Name, "work_branch", wb.Name, "upstream_branch", result.UpstreamBranch, "pr_url", result.PRURL, "created_pr", result.CreatedPR)
+	return connect.NewResponse(&adminv1.AcceptProposalResponse{
+		PrUrl:          result.PRURL,
+		UpstreamBranch: result.UpstreamBranch,
+	}), nil
+}
+
+// CloseWorkBranch closes a work branch (-> CLOSED), recording body as its
+// close reason, and -- if Loam ever opened one for it -- best-effort closes
+// the upstream pull request and deletes the loam/ branch behind it
+// (docs/web-spec.md -> ProposalService: "Loam opened it, Loam closes it").
+//
+// The order is deliberate and is the one mirrorsync.ClosePRAndCleanup's
+// contract assumes: the work_branches row is closed FIRST, by a guarded
+// single-statement UPDATE, and only then is the forge touched. A close that
+// succeeded locally is therefore never reported as a failure because the
+// forge was unreachable, and the closed row immediately leaves
+// StorePRPoller's poll set, so the poller does not race this call to
+// re-close the same PR.
+//
+// The upstream half is best-effort BY SPECIFICATION, so its failure is
+// logged and the RPC still succeeds -- returning an error here would tell
+// the admin the branch is not closed when it is, and invite a retry that
+// would answer ErrIllegalTransition on the already-closed row. An upstream
+// PR that is already merged is not a failure at all and is swallowed inside
+// ClosePRAndCleanup (a forge refuses PATCH state=closed on a merged PR).
+//
+// Nothing upstream is touched when no PR was ever recorded. That leaves one
+// known, narrow gap: an accept whose push succeeded and whose CreatePR then
+// failed leaves a loam/<name> branch upstream with no recorded PR, and
+// closing the branch will not reap it. Reaping it would mean a remote
+// delete on EVERY close, including the overwhelmingly common case of a
+// draft branch that was never accepted at all -- a network round trip and a
+// warn-level log line per close, to clean up after a failure mode whose own
+// retry (re-running accept) already resolves it.
+func (h *Handler) CloseWorkBranch(ctx context.Context, req *connect.Request[adminv1.CloseWorkBranchRequest]) (*connect.Response[adminv1.CloseWorkBranchResponse], error) {
+	if err := requireAdmin(ctx, "closing a work branch"); err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	repo, name := req.Msg.GetRepo(), req.Msg.GetWorkBranch()
+	repoRow, wb, err := h.resolveWorkBranch(ctx, repo, name)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
+	body := req.Msg.GetBody()
+	if body == "" {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("a close reason is required: %w", handler.ErrInvalidArgument))
+	}
+	closed, err := h.workBranches.Close(ctx, wb.ID, body)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(mapWorkBranchStoreErr(err, fmt.Sprintf("closing work branch %s/%s", repo, name)))
+	}
+	h.logger.InfoContext(ctx, "admin closed work branch", "repo", repoRow.Name, "work_branch", wb.Name)
+	if wb.UpstreamPRNumber != nil {
+		if err := h.prCloser.ClosePRAndCleanup(ctx, mirrorsync.RepoID(repoRow.Name), wb.Name, int(*wb.UpstreamPRNumber)); err != nil {
+			h.logger.WarnContext(ctx, "work branch closed, but its upstream PR could not be closed", "repo", repoRow.Name, "work_branch", wb.Name, "pr_number", *wb.UpstreamPRNumber, "error", err)
+		}
+	}
+	return connect.NewResponse(&adminv1.CloseWorkBranchResponse{
+		WorkBranch: workBranchToProto(repoRow.Name, closed),
+	}), nil
+}
+
+// reviewedBranches pages the whole state=reviewed candidate set across every
+// enrolled repo. It stops on an empty page as well as on the total, so a
+// store whose total and page contents ever disagree cannot spin here
+// forever -- the same two-condition loop guard mirrorsync's pollSet uses.
+func (h *Handler) reviewedBranches(ctx context.Context) ([]workbranchstore.WorkBranch, error) {
+	var all []workbranchstore.WorkBranch
+	var offset int32
+	for {
+		page, total, err := h.workBranches.List(ctx, workbranchstore.ListFilter{State: workbranchstore.StateReviewed}, candidateScanPageSize, offset)
+		if err != nil {
+			return nil, fmt.Errorf("listing reviewed work branches for the proposal queue: %w", err)
+		}
+		all = append(all, page...)
+		offset += int32(len(page))
+		if len(page) == 0 || int64(offset) >= total {
+			return all, nil
+		}
+	}
+}
+
+// repoNameFor resolves a work branch's repo name, memoized in cache: the
+// queue spans every enrolled repo, so an uncached lookup would be one store
+// round trip per row rather than one per distinct repo.
+func (h *Handler) repoNameFor(ctx context.Context, repoID uuid.UUID, cache map[uuid.UUID]string) (string, error) {
+	if name, ok := cache[repoID]; ok {
+		return name, nil
+	}
+	row, err := h.repos.GetRepoByID(ctx, repoID)
+	if err != nil {
+		return "", fmt.Errorf("resolving repo %s for the proposal queue: %w", repoID, err)
+	}
+	cache[repoID] = row.Name
+	return row.Name, nil
+}
+
+// resolveWorkBranch resolves the (repo, work branch) name pair every
+// decision RPC is keyed on, mapping a missing repo or branch to
+// handler.ErrNotFound and a missing field to handler.ErrInvalidArgument.
+func (h *Handler) resolveWorkBranch(ctx context.Context, repo, name string) (reposstore.Repo, workbranchstore.WorkBranch, error) {
+	if repo == "" || name == "" {
+		return reposstore.Repo{}, workbranchstore.WorkBranch{}, fmt.Errorf("repo and work branch are required: %w", handler.ErrInvalidArgument)
+	}
+	repoRow, err := h.repos.GetRepoByName(ctx, repo)
+	if err != nil {
+		return reposstore.Repo{}, workbranchstore.WorkBranch{}, mapRepoStoreErr(err, fmt.Sprintf("repo %s", repo))
+	}
+	wb, err := h.workBranches.GetByName(ctx, repoRow.ID, name)
+	if err != nil {
+		return reposstore.Repo{}, workbranchstore.WorkBranch{}, mapWorkBranchStoreErr(err, fmt.Sprintf("work branch %s/%s", repo, name))
+	}
+	return repoRow, wb, nil
+}
+
+// requireAdmin is defence in depth on top of the routing-level gate, not a
+// replacement for it: the whole /loam.admin.v1.* path group is already
+// wrapped in httpauth.Auth.AdminOnly before any request reaches a handler
+// (docs/web-spec.md -> Auth), which is exactly why internal/handler/repoadmin
+// documents having no per-RPC gate of its own.
+//
+// This package differs from that sibling on purpose. Its two mutating RPCs
+// are the only ones in the system that push Loam's own name onto a third-
+// party forge and that terminate a work branch, and both are irreversible
+// from Loam's side. httpauth.IsAdmin reads the flag AdminOnly itself sets,
+// so this costs one context read and makes "only an admin can accept or
+// close" a property asserted by this package's own tests rather than one
+// inherited from a wiring line in cmd/server that no test in this package
+// can see.
+func requireAdmin(ctx context.Context, operation string) error {
+	if httpauth.IsAdmin(ctx) {
+		return nil
+	}
+	return fmt.Errorf("%s requires the admin superuser: %w", operation, handler.ErrPermissionDenied)
+}
+
+// currentRoundVerdicts renders the branch's CURRENT-round verdicts as
+// proto, dropping every stale one. The proto field's own comment is the
+// contract ("This round's verdicts (unique reviewer + outcome), so the
+// admin sees who approved"), and the verdicts_round_id_reviewer_key unique
+// constraint means current-round records are already one per reviewer, so
+// no de-duplication step is needed or performed.
+//
+// This is a narrower answer than WorkBranchService.ListVerdicts, which
+// returns each reviewer's LATEST verdict across all rounds with a stale
+// flag: that is a history view, this is a decision view. Stale is set
+// anyway, from the record and not from a literal, so a record that ever
+// reached here mislabelled would show as such rather than being silently
+// rewritten to false.
+func currentRoundVerdicts(records []reviewstore.VerdictRecord) []*loamv1.VerdictSummary {
+	summaries := make([]*loamv1.VerdictSummary, 0, len(records))
+	for _, record := range records {
+		if !record.Current {
+			continue
+		}
+		summaries = append(summaries, &loamv1.VerdictSummary{
+			Reviewer: record.Reviewer,
+			Outcome:  outcomeToProto(record.Outcome),
+			Stale:    !record.Current,
+			Round:    uint32(record.RoundNumber),
+		})
+	}
+	return summaries
+}
+
+// paginate applies the request's limit/offset to the already-filtered
+// proposal list. An offset past the end yields an empty page rather than an
+// error -- the same thing a store-side OFFSET past the last row does.
+func paginate(proposals []*adminv1.Proposal, limit, offset int32) []*adminv1.Proposal {
+	if offset >= int32(len(proposals)) {
+		return nil
+	}
+	end := offset + limit
+	if end > int32(len(proposals)) {
+		end = int32(len(proposals))
+	}
+	return proposals[offset:end]
+}
+
+// pageLimitOffset reads a request Page into the (limit, offset) pair, with
+// defaultListLimit for an unset or non-positive limit. page may be nil;
+// protoc-gen-go's getters are nil-safe, so no separate branch is needed.
+func pageLimitOffset(page *loamv1.Page) (int32, int32) {
+	limit := int32(defaultListLimit)
+	if page.GetLimit() > 0 {
+		limit = int32(page.GetLimit())
+	}
+	offset := int32(page.GetOffset())
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+// mapAcceptErr classifies a failure from the acceptance engine.
+//
+// The distinction it draws is "the forge REFUSED" versus "the call FAILED",
+// a conflation this repo has already paid for twice (parsePorcelainFetch
+// fabricating RefUpdates out of interleaved stderr; git merge-tree
+// reporting a missing ref with the same exit status as a real conflict). A
+// refusal the forge is entitled to make -- an invalid or under-scoped
+// token, a token with no git write access, a repo the forge does not have
+// -- is a failed precondition the admin can fix from the Credentials or
+// Repos screen, and it is reported as one. Everything else, including a
+// transport failure, a cancelled context, and the accepter's own
+// unexported refusals (a state or conflict change that raced the checks in
+// AcceptProposal above), falls through to CodeInternal-and-log: an
+// unrecognized failure must be loud, never quietly recast as the admin's
+// fault.
+func mapAcceptErr(err error, context string) error {
+	switch {
+	case errors.Is(err, forge.ErrInvalidToken), errors.Is(err, forge.ErrInsufficientScope),
+		errors.Is(err, forge.ErrNoWriteAccess), errors.Is(err, forge.ErrRepoNotFound):
+		return fmt.Errorf("%s: the forge refused the request (%v): %w", context, err, handler.ErrFailedPrecondition)
+	case errors.Is(err, workbranchstore.ErrNotFound):
+		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
+	default:
+		return fmt.Errorf("%s: %w", context, err)
+	}
+}
+
+// mapRepoStoreErr maps a repo lookup failure: an unknown repo name is a
+// not-found, anything else is unclassified.
+func mapRepoStoreErr(err error, context string) error {
+	if errors.Is(err, reposstore.ErrNotFound) {
+		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
+// mapWorkBranchStoreErr maps a work-branch lookup or transition failure.
+// ErrIllegalTransition on the close path means the branch is already
+// terminal (complete or closed) -- a failed precondition, not an internal
+// fault: the admin asked to close something that can no longer be closed.
+func mapWorkBranchStoreErr(err error, context string) error {
+	switch {
+	case errors.Is(err, workbranchstore.ErrNotFound):
+		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
+	case errors.Is(err, workbranchstore.ErrIllegalTransition):
+		return fmt.Errorf("%s: the work branch has already reached a terminal state: %w", context, handler.ErrFailedPrecondition)
+	default:
+		return fmt.Errorf("%s: %w", context, err)
+	}
+}
+
+// outcomeToProto maps a reviewstore.Outcome to its proto enum value. This
+// is a second copy of internal/handler/workbranch's identical function
+// rather than a shared import, for the reason that package's own
+// repoSegmentPattern duplication documents: the function is unexported
+// there and exporting a proto-conversion helper purely to share three
+// switch arms would widen that package's surface for no caller other than
+// this one.
+func outcomeToProto(o reviewstore.Outcome) loamv1.VerdictOutcome {
+	switch o {
+	case reviewstore.OutcomeApprove:
+		return loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE
+	case reviewstore.OutcomeDisapprove:
+		return loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE
+	case reviewstore.OutcomeNeutral:
+		return loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL
+	default:
+		return loamv1.VerdictOutcome_VERDICT_OUTCOME_UNSPECIFIED
+	}
+}
+
+// stateToProto maps a workbranchstore.State to its proto enum value, a
+// second copy for the same reason as outcomeToProto.
+func stateToProto(s workbranchstore.State) loamv1.WorkBranchState {
+	switch s {
+	case workbranchstore.StateDraft:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT
+	case workbranchstore.StateReviewable:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE
+	case workbranchstore.StateReviewed:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED
+	case workbranchstore.StateComplete:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_COMPLETE
+	case workbranchstore.StateClosed:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_CLOSED
+	default:
+		return loamv1.WorkBranchState_WORK_BRANCH_STATE_UNSPECIFIED
+	}
+}
+
+// workBranchToProto renders a work_branches row as the shared loam.v1
+// WorkBranch the admin protos reuse (docs/web-spec.md: "Admin protos reuse
+// WorkBranch, Page, and PageInfo from loam.v1").
+func workBranchToProto(repoName string, wb workbranchstore.WorkBranch) *loamv1.WorkBranch {
+	return &loamv1.WorkBranch{
+		Repo:          repoName,
+		Name:          wb.Name,
+		Target:        wb.Target,
+		Title:         derefOr(wb.Title),
+		Description:   derefOr(wb.Description),
+		State:         stateToProto(wb.State),
+		Author:        wb.Author,
+		UpstreamPrUrl: wb.UpstreamPRURL,
+	}
+}
+
+// derefOr reads a nullable text column into a plain string, treating SQL
+// NULL as empty.
+func derefOr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}

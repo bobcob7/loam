@@ -89,6 +89,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler/git"
 	"github.com/bobcob7/loam/internal/handler/graph"
 	"github.com/bobcob7/loam/internal/handler/meta"
+	"github.com/bobcob7/loam/internal/handler/proposal"
 	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/handler/repoadmin"
 	"github.com/bobcob7/loam/internal/handler/search"
@@ -392,6 +393,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool,
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
 	registerRepoAdminService(router, cfg, pool, ingestPool, hookBinaryPath)
+	registerProposalService(router, cfg, pool)
 	registerGraphService(router, cfg, pool)
 	registerSearchService(router, cfg, pool)
 	return router
@@ -542,6 +544,48 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
 		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
+	))
+}
+
+// registerProposalService wires loam.admin.v1.ProposalService
+// (loam-ofg.14) over pool: the admin's proposal queue and the accept/close
+// decisions. Like registerRepoAdminService it needs no
+// handler.CapabilityChecker -- the whole /loam.admin.v1.* group is already
+// behind httpauth.Auth.AdminOnly -- though the handler itself re-asserts
+// admin status per RPC as defence in depth (see proposal.requireAdmin).
+//
+// This registration is what makes work_branches.upstream_pr_number a
+// column anything in a RUNNING server ever writes. *mirrorsync
+// .StoreProposalAccepter is its only writer tree-wide, and that column is
+// the entire poll set of mirrorsync.StorePRPoller (Mirror Sync step 5),
+// which buildSyncScheduler has been starting since loam-0do with nothing
+// able to put a row into its poll set. Until this line existed the sync
+// cycle's PR-tracking step polled an empty set on every tick in production.
+//
+// pool == nil is the only guard, for the same reason and exercised the same
+// way as registerMetadataServices' own; a failure to build either
+// mirrorsync collaborator logs and skips just this service, the same choice
+// registerRepoAdminService makes for its encryptor.
+func registerProposalService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	httpClient := &http.Client{}
+	accepter, err := buildProposalAccepter(cfg, pool, httpClient)
+	if err != nil {
+		cfg.Logger.Error("proposal service: building the acceptance engine, not registering", "error", err)
+		return
+	}
+	prCloser, err := buildUpstreamPRCloser(cfg, pool, httpClient)
+	if err != nil {
+		cfg.Logger.Error("proposal service: building the upstream PR closer, not registering", "error", err)
+		return
+	}
+	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
+	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
+	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
+	router.RegisterAdmin(adminv1connect.NewProposalServiceHandler(
+		proposal.New(workBranches, repos, verdicts, accepter, prCloser, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 	))
 }
 

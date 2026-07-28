@@ -420,8 +420,8 @@ func TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed(t *test
 }
 
 // TestBuildProposalAccepter_WiresTheProductionGraph proves the
-// composition-root constructor loam-ofg.14's AcceptProposal handler will
-// build its engine from actually assembles -- and, by compiling at all,
+// composition-root constructor registerProposalService builds
+// AcceptProposal's engine from actually assembles -- and, by compiling at all,
 // that forgePRTracker satisfies mirrorsync's pullRequestOpener seam and
 // *gittransport.Transport its upstreamRefPusher seam.
 //
