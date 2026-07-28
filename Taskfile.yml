@@ -91,6 +91,33 @@ tasks:
       # this thinking it's redundant.
       - go test -tags=integration -count=1 ./...
 
+  test:contract:forgejo:
+    desc: >-
+      Run the NIGHTLY half of the Provider contract suite (loam-li0.9,
+      internal/forgesuite, docs/testing-spec.md Layer 2 "Provider
+      contract"): the same assertions `task test` already runs against
+      internal/fakeforge, re-run against a REAL Forgejo 9.0.3 in a
+      container. Needs a Docker (or Docker-API-compatible) daemon; on
+      podman also export TESTCONTAINERS_RYUK_DISABLED=true, exactly as
+      test:integration documents.
+
+      LOAM_TEST_FORGEJO=1 is what turns this leg on, and the build tag
+      alone is deliberately NOT enough: everything else behind
+      `-tags=integration` runs per-PR, while testing-spec's CI Stages table
+      puts the real-Forgejo comparison in the nightly stage. Without the
+      var the leg SKIPS and prints a banner to stderr saying so -- a
+      contract suite that quietly ran only the fake would license the fake
+      on a comparison that never happened, which is the exact failure this
+      suite exists to prevent.
+
+      The fake half is NOT here on purpose: it needs no container and no
+      opt-in, so it runs in the ordinary `task test`.
+    cmds:
+      # -count=1 for the same reason test:integration's own comment gives:
+      # the container boot IS the thing under test, and Go's test cache
+      # cannot tell a replayed "ok" apart from a genuine rerun.
+      - LOAM_TEST_FORGEJO=1 go test -tags=integration -count=1 ./internal/forgesuite/... -v
+
   test:goldens:update:
     desc: >-
       Re-baseline the ingest goldens (loam-li0.8, docs/testing-spec.md
