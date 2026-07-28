@@ -118,9 +118,19 @@ func newPostgres(t *testing.T) string {
 }
 
 // runningServer is one started, listening instance of the compiled binary.
+//
+// Both of the child's output streams are captured, and which one a test
+// wants is not interchangeable: internal/config builds cfg.Logger over
+// os.STDOUT (config.go), so every structured log line the server emits --
+// including handler.ErrorMapper's record of an unmapped error -- lands in
+// stdout, while stderr carries only what the runtime and a fatal startup
+// path write. A test asserting on log CONTENT (e.g. that a secret never
+// reaches a log line, credential_integration_test.go) must read stdout;
+// reading stderr would find it empty and pass vacuously.
 type runningServer struct {
 	cmd    *exec.Cmd
 	addr   string
+	stdout *bytes.Buffer
 	stderr *bytes.Buffer
 }
 
@@ -186,7 +196,8 @@ func startServerWithEnv(t *testing.T, databaseURL string, extraEnv ...string) *r
 	cmd := exec.Command(serverBinary)
 	cmd.Env = env
 	cmd.ExtraFiles = []*os.File{listenerFile}
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	require.NoError(t, cmd.Start())
 	require.NoError(t, listenerFile.Close()) // the child has its own dup from ExtraFiles
@@ -197,7 +208,7 @@ func startServerWithEnv(t *testing.T, databaseURL string, extraEnv ...string) *r
 		}
 	})
 	waitForReady(t, addr, &stderr)
-	return &runningServer{cmd: cmd, addr: addr, stderr: &stderr}
+	return &runningServer{cmd: cmd, addr: addr, stdout: &stdout, stderr: &stderr}
 }
 
 // waitForReady polls GET /healthz until it returns 200 or the deadline

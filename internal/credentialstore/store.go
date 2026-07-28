@@ -15,19 +15,6 @@ import (
 	"github.com/bobcob7/loam/internal/db/gen"
 )
 
-// errNotFound means host has no credentials row at all -- distinguishable
-// from a transport failure so a caller (e.g.
-// CredentialService.GetCredentialStatus) can tell "never enrolled" apart
-// from "the database is unreachable".
-var errNotFound = errors.New("credentials: host not found")
-
-// errNoToken means host has a credentials row but token_ciphertext is
-// null -- a row can exist with no token yet (docs/persistence-spec.md
-// "credentials": "token_ciphertext (bytea, null)"), and GetByHost has
-// nothing to decrypt in that case. Distinct from errNotFound so a caller
-// can tell "no row at all" apart from "row exists, no token set".
-var errNoToken = errors.New("credentials: host has no token set")
-
 // CredentialStatus is a host's presence and validation state, backing
 // CredentialService.GetCredentialStatus/ListCredentials (docs/web-spec.md
 // "CredentialService"): { host, has_token, validated }. HasToken is
@@ -118,18 +105,18 @@ func (s *Store) UpsertToken(ctx context.Context, host, token string) (Credential
 // GetByHost returns host's credential with Token already decrypted via the
 // injected AES-GCM encryptor, for callers that need the plaintext: git
 // credential injection or a forge REST call (docs/sync-spec.md "Upstream
-// Transport"). It returns errNotFound if host has no credentials row, and
-// errNoToken if the row exists but token_ciphertext is null.
+// Transport"). It returns ErrNotFound if host has no credentials row, and
+// ErrNoToken if the row exists but token_ciphertext is null.
 func (s *Store) GetByHost(ctx context.Context, host string) (Credential, error) {
 	row, err := s.q.GetCredentialByHost(ctx, host)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Credential{}, fmt.Errorf("getting credential for host %s: %w", host, errNotFound)
+			return Credential{}, fmt.Errorf("getting credential for host %s: %w", host, ErrNotFound)
 		}
 		return Credential{}, fmt.Errorf("getting credential for host %s: %w", host, err)
 	}
 	if row.TokenCiphertext == nil {
-		return Credential{}, fmt.Errorf("getting credential for host %s: %w", host, errNoToken)
+		return Credential{}, fmt.Errorf("getting credential for host %s: %w", host, ErrNoToken)
 	}
 	plaintext, err := s.enc.Decrypt(row.TokenCiphertext)
 	if err != nil {
@@ -145,7 +132,7 @@ func (s *Store) GetStatus(ctx context.Context, host string) (CredentialStatus, e
 	row, err := s.q.GetCredentialStatus(ctx, host)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return CredentialStatus{}, fmt.Errorf("getting credential status for host %s: %w", host, errNotFound)
+			return CredentialStatus{}, fmt.Errorf("getting credential status for host %s: %w", host, ErrNotFound)
 		}
 		return CredentialStatus{}, fmt.Errorf("getting credential status for host %s: %w", host, err)
 	}
@@ -175,7 +162,7 @@ func (s *Store) SetValidated(ctx context.Context, host string, validated bool) (
 	row, err := s.q.SetCredentialValidated(ctx, gen.SetCredentialValidatedParams{Host: host, Validated: validated})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return CredentialStatus{}, fmt.Errorf("setting validated for host %s: %w", host, errNotFound)
+			return CredentialStatus{}, fmt.Errorf("setting validated for host %s: %w", host, ErrNotFound)
 		}
 		return CredentialStatus{}, fmt.Errorf("setting validated for host %s: %w", host, err)
 	}

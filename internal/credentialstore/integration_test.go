@@ -315,7 +315,7 @@ func TestReupsert_ResetsValidated_RealDB(t *testing.T) {
 }
 
 // TestGetByHost_UnknownHost_ReturnsErrNotFound proves the distinguishable
-// errNotFound surfaces against the real schema, not a bare pgx.ErrNoRows.
+// ErrNotFound surfaces against the real schema, not a bare pgx.ErrNoRows.
 func TestGetByHost_UnknownHost_ReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -324,7 +324,7 @@ func TestGetByHost_UnknownHost_ReturnsErrNotFound(t *testing.T) {
 	s := New(pool, enc, testLogger())
 	_, err := s.GetByHost(ctx, "never-enrolled.example.com")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 // TestCredentialsHostUniqueConstraint_EnforcedByRealSchema bypasses the

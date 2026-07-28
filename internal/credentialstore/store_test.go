@@ -173,7 +173,7 @@ func TestGetByHost_NoRows_ReturnsErrNotFound(t *testing.T) {
 	s := newStore(q, enc, testLogger())
 	_, err := s.GetByHost(t.Context(), "unknown.example.com")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestGetByHost_NullTokenCiphertext_ReturnsErrNoTokenWithoutCallingDecrypt(t *testing.T) {
@@ -200,7 +200,7 @@ func TestGetByHost_NullTokenCiphertext_ReturnsErrNoTokenWithoutCallingDecrypt(t 
 	s := newStore(q, enc, testLogger())
 	_, err := s.GetByHost(t.Context(), "host-with-no-token.example.com")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNoToken)
+	assert.ErrorIs(t, err, ErrNoToken)
 }
 
 func TestGetStatus_NeverCallsEncryptor(t *testing.T) {
@@ -231,7 +231,7 @@ func TestGetStatus_NoRows_ReturnsErrNotFound(t *testing.T) {
 	s := newStore(q, enc, testLogger())
 	_, err := s.GetStatus(t.Context(), "unknown.example.com")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestListStatuses_NeverCallsEncryptor_ReturnsEveryHost(t *testing.T) {
@@ -301,5 +301,5 @@ func TestSetValidated_NoRows_ReturnsErrNotFound(t *testing.T) {
 	s := newStore(q, enc, testLogger())
 	_, err := s.SetValidated(t.Context(), "unknown.example.com", true)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errNotFound)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
