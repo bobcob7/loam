@@ -9,18 +9,23 @@ npm-debug.log*
 
 # NOT ignored, deliberately, and both are easy to get wrong:
 #
-#   dist/     docs/web-frontend-spec.md says "web/dist is gitignored". That
-#             is now obsolete: web/embed.go embeds it with `//go:embed
-#             all:dist`, and a missing embed target is a hard *compile*
-#             error, so an ignored (and therefore absent) dist/ breaks
-#             `go build ./...` on any clean checkout without Node. dist/
-#             instead ships committed placeholders, per the rationale in
-#             web/embed.go. `npm run build` overwrites those placeholders
+#   dist/     web/embed.go embeds it with `//go:embed all:dist`, and a
+#             missing embed target is a hard *compile* error, so an ignored
+#             (and therefore absent) dist/ breaks `go build ./...` on any
+#             clean checkout without Node. dist/ instead ships committed
+#             placeholders, per the rationale in web/embed.go. `npm run
+#             build` (i.e. `task web:build`) overwrites those placeholders
 #             with real Vite output -- that shows up as a dirty tree, and
-#             the build artefacts are not meant to be committed. Restore
-#             with `git checkout -- dist && git clean -fd dist`.
-#             loam-nvb.15 owns the build/embed wiring and the final call on
-#             whether real output ever gets committed.
+#             the build artefacts (unstably hash-named on every rebuild)
+#             are not meant to be committed. Restore by hand with
+#             `git checkout -- dist && git clean -fd dist`. loam-nvb.15
+#             settled this: the top-level `task build` (Taskfile.yml) runs
+#             `web:build` (real output, for the Go embed step to pick up),
+#             then `go build ./...`, then restores the placeholders on an
+#             EXIT trap -- so routine builds leave a clean tree, while
+#             `task web:build` run on its own (e.g. loam-nvb.16, or to
+#             inspect the real output) leaves it in place. See
+#             docs/web-frontend-spec.md -> Build & Embed.
 #
 #   src/gen/  Generated TypeScript (protoc-gen-es + protoc-gen-connect-query,
 #             landing in loam-nvb.2) is committed, mirroring the Go side:
@@ -29,4 +34,6 @@ npm-debug.log*
 #             keeps `npm run build` and `npm test` working without a
 #             codegen step, exactly as docs/web-frontend-spec.md -> Codegen
 #             specifies, and lets the same drift check cover the web side
-#             once `task web:generate` exists.
+#             now that `task web:generate` exists (loam-nvb.15) -- CI's
+#             generated-code drift check regenerates this too and fails on
+#             a diff, the same as internal/gen.

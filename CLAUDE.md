@@ -74,17 +74,26 @@ first build fails on this.
 
 ```bash
 task generate   # regenerate proto (buf) + moq mocks — do this after editing proto/*.proto or an Iface
-task build      # go build ./...
+task build      # web:build (real SPA -> web/dist) + go build ./... + restore web/dist placeholders (loam-nvb.15)
 task build:bin  # build server, loam, and loamhook binaries side by side into bin/ (loam-mce)
 task test       # go test ./... -race
 task lint       # gofmt -l . (must be empty) + go tool buf lint
 task proto:breaking  # pre-1.0 breaking-change check against the pinned baseline (see Taskfile.yml)
+
+task web:install   # npm ci in web/
+task web:generate  # go tool buf generate --template web/buf.gen.yaml -- refresh web/src/gen after a proto/ change
+task web:build     # tsc --noEmit + vite build -> web/dist (real output; see task build above for what happens to it there)
+task web:test      # npm test (vitest run) in web/
 ```
 
 CI (`.github/workflows/ci.yml`) runs gofmt, build, vet, test -race, and buf
 lint on every push/PR, on both ubuntu-latest and macos-latest, plus a
 generated-code drift check (fails if `buf generate`/`go generate` produce
-an uncommitted diff).
+an uncommitted diff, now also covering `web/src/gen` via `go tool buf
+generate --template web/buf.gen.yaml`). A separate `web` job (also both
+ubuntu-latest and macos-latest) runs the admin SPA's own gates — `npm ci`,
+`tsc --noEmit`, `npm test` (vitest), `npm run build` — under `web/`; see
+`docs/web-frontend-spec.md` for the dev-proxy workflow.
 
 ## Architecture Overview
 

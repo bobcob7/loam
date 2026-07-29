@@ -79,17 +79,95 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: go tool buf lint
 
-      - name: Verify generated code has no drift (buf generate + go generate)
+      # web/src/gen (TypeScript codegen: protoc-gen-es + connect-query) is
+      # covered by the SAME drift check below as internal/gen and
+      # moq_test.go, per web/.gitignore's own rationale for committing it.
+      # `go tool buf generate --template web/buf.gen.yaml` needs its plugin
+      # binaries under web/node_modules/.bin (web/buf.gen.yaml's `local:`
+      # entries), so Node + `npm ci` have to run first, on this ubuntu-only
+      # leg, before the drift check step below. This does not overlap with
+      # the `web` job's own npm ci: that job never touches internal/gen or
+      # web/src/gen, and this job never runs `vite build`, so the two never
+      # fight over the same output.
+      - name: Set up Node (web codegen drift check only)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web npm ci (protoc-gen-es / protoc-gen-connect-query plugins for the drift check)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: web
+        run: npm ci
+
+      - name: Verify generated code has no drift (buf generate + go generate + web codegen)
         if: matrix.os == 'ubuntu-latest'
         run: |
           go tool buf generate
           go generate ./...
+          go tool buf generate --template web/buf.gen.yaml
           if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::go tool buf generate / go generate ./... produced a diff — commit the regenerated code (proto in internal/gen, mocks in moq_test.go)."
+            echo "::error::generated code drifted from what's committed — commit the regenerated code (Go: internal/gen via 'go tool buf generate', mocks via 'go generate ./...' into moq_test.go; TypeScript: web/src/gen via 'go tool buf generate --template web/buf.gen.yaml')."
             git status --porcelain
             git diff
             exit 1
           fi
+
+  web:
+    name: web install/typecheck/test/build (${{ matrix.os }})
+    # Admin SPA (docs/web-frontend-spec.md, loam-nvb epic): pure Node/npm,
+    # no CGO and no Go toolchain involved, so this is a separate job from
+    # `ci` above rather than more steps bolted onto it. Runs on both
+    # ubuntu-latest and macos-latest, matching `ci`'s own matrix (loam-
+    # nvb.15): nothing here is platform-specific, but the vitest/jsdom/vite
+    # toolchain is exactly the kind of thing that has surprised this repo
+    # before (loam-sik, for the Go side) by behaving differently on macOS,
+    # and this job is cheap enough (no containers, no CGO compile) that
+    # running it twice is not a real cost. This is the CI job the 182 web
+    # tests across 15 files (web/src/**/*.test.ts(x), as of loam-nvb.4
+    # through loam-nvb.6) ran nowhere but a developer's own terminal before
+    # this bead — every future web bead's tests are enforced from here on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+
+      - name: typecheck (tsc --noEmit)
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: test (vitest run)
+        working-directory: web
+        run: npm test
+
+      - name: build (vite build)
+        # web/dist is committed with placeholders (loam-68os); this step
+        # overwrites them with real Vite output on the runner's own
+        # checkout, which is fine here -- CI never commits back, so the
+        # dirty tree that would matter on a developer's machine is a
+        # non-issue in a throwaway CI workspace. This step only proves
+        # `npm run build` (tsc --noEmit + vite build) succeeds; it does not
+        # feed the Go build in this job, since this job never runs `go
+        # build` (see the `ci` job above for that).
+        working-directory: web
+        run: npm run build
 
   integration:
     name: integration tests (real Postgres via testcontainers)

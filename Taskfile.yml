@@ -30,9 +30,35 @@ tasks:
       - go generate ./...
 
   build:
-    desc: Build all packages (needs CGO_ENABLED=1 + a C toolchain — see loam-sik)
+    desc: >-
+      Build all packages (needs CGO_ENABLED=1 + a C toolchain — see
+      loam-sik). Depends on web:build so web/dist holds the REAL admin SPA
+      build (not the committed placeholders, loam-68os) before the `go
+      build` step below embeds it via web/embed.go's `//go:embed all:dist`
+      (loam-nvb.15) — go:embed reads whatever is on disk at compile time,
+      so skipping web:build here would silently ship the placeholder
+      index.html instead of the SPA. Restores the committed placeholders in
+      web/dist immediately after `go build` finishes: by then the real
+      output is already baked into the compiled binary via go:embed, so
+      leaving it on disk any longer only costs a permanently dirty tree of
+      hashed filenames that change on every rebuild and were never meant to
+      be committed (loam-68os). The restore (`git checkout -- web/dist &&
+      git clean -fd web/dist`) runs on an EXIT trap, so it still fires if
+      `go build` fails, and the script's own exit status still reflects
+      `go build`'s, since the trap doesn't run any further command after it.
+      A bare `go build ./...`, run directly and not through this task, is
+      completely unaffected and needs no Node at all: it only ever sees
+      whatever already happens to be on disk at web/dist — the committed
+      placeholders on a clean checkout, or leftover real output from a
+      previous `task web:build` — which satisfies go:embed's one hard
+      requirement, that SOMETHING exists there.
     cmds:
-      - go build ./...
+      - task: web:build
+      - |
+        set -u
+        set -o pipefail
+        trap 'git checkout -- web/dist && git clean -fd web/dist' EXIT
+        go build ./...
 
   build:bin:
     desc: >-
@@ -59,6 +85,67 @@ tasks:
       - go build -o bin/server ./cmd/server
       - go build -o bin/loam ./cmd/loam
       - go build -o bin/loamhook ./cmd/loamhook
+
+  web:install:
+    desc: >-
+      Install the admin SPA's pinned npm dependencies (web/package.json +
+      web/package-lock.json) via `npm ci`, never `npm install` — `ci`
+      installs the exact locked versions and fails loudly if the lockfile
+      and package.json have drifted apart, instead of silently rewriting
+      the lockfile the way `npm install` would.
+    dir: web
+    cmds:
+      - npm ci
+
+  web:generate:
+    desc: >-
+      Regenerate the TypeScript codegen (protoc-gen-es + connect-query) that
+      web/src/gen ships committed, from the SAME proto/ schema the Go side
+      generates from into internal/gen (loam-nvb.2) — re-homing the exact
+      command web/buf.gen.yaml's own header comment already documents. Run
+      this after any proto/ change. Deliberately has no `dir:` here:
+      web/buf.gen.yaml's `out` path and its plugin paths
+      (web/node_modules/.bin/...) are resolved relative to the process's
+      working directory, and a task with no `dir:` runs from the Taskfile's
+      own directory (the repo root) — exactly what that file requires.
+      Running the same command from inside web/ would write to
+      web/web/src/gen and fail to find the plugins. Needs the plugin
+      binaries under web/node_modules/.bin, i.e. `task web:install` first.
+    cmds:
+      - go tool buf generate --template web/buf.gen.yaml
+
+  web:build:
+    desc: >-
+      Type-check and build the admin SPA (`npm run build`: `tsc --noEmit`
+      then `vite build`) to web/dist — the real hashed assets + index.html
+      that web/embed.go's `//go:embed all:dist` picks up. Depends on
+      web:install so a clean checkout has node_modules before `npm run
+      build` runs. This OVERWRITES the two placeholders committed at
+      web/dist/index.html and web/dist/assets/placeholder.txt — that is
+      expected, and is the whole point of this task; those placeholders
+      exist ONLY so a bare `go build ./...`, run with no Node and without
+      this task, still compiles (a missing go:embed target is a hard build
+      error, see web/embed.go and web/.gitignore). Calling `task web:build`
+      directly (as this bead's own gates, and as loam-nvb.16, do) leaves the
+      real build sitting in web/dist; only the top-level `build` task
+      restores the placeholders afterward (loam-68os), so routine `task
+      build` runs do not leave a permanently dirty tree of unstably-hashed
+      filenames that were never meant to be committed.
+    dir: web
+    cmds:
+      - task: web:install
+      - npm run build
+
+  web:test:
+    desc: >-
+      Run the admin SPA's Vitest suite (`npm test` / `vitest run`) — the 182
+      tests across 15 files under web/src that CI's `web` job also runs
+      (loam-nvb.15). Depends on web:install so a clean checkout has
+      node_modules first.
+    dir: web
+    cmds:
+      - task: web:install
+      - npm test
 
   test:
     desc: Run the test suite with the race detector
