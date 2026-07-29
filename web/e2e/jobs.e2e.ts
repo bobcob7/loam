@@ -73,28 +73,66 @@ test.describe("jobs journey", () => {
     await expect(row).toBeVisible();
     await expect(row.getByRole("cell", { name: "Full", exact: true })).toBeVisible();
 
-    // "and runs": wait for the real worker to carry it to a terminal status
-    // purely via Jobs.tsx's own data-driven refetchInterval -- no reload, no
-    // waitForTimeout. The 45s budget here is CI-host slack, not a guess at
-    // ingest's own wall-clock cost (a couple hundred small, unparsed files):
-    // comfortably more than one poll cycle (5s) plus this suite's own
-    // per-assertion default (10s) would allow, so a slow poll response
-    // doesn't read as a false red.
-    await expect(row.getByRole("cell", { name: /^(Succeeded|Failed)$/ })).toBeVisible({
-      timeout: 45_000,
-    });
-
-    // Proof the job actually RAN rather than a UI artifact rendering a
-    // terminal label over stale/default data: Started/Finished only ever
-    // stop being formatTimestamp's "—" placeholder once ingest.Pool's real
-    // claim (sets started_at) and terminal UPDATE (sets finished_at) have
-    // each committed (internal/ingest/pool.go) -- both are set in the same
-    // transaction as the very status this assertion already waited for, so
-    // this is confirming the UI reflects that, not re-timing it. Column
-    // order is Jobs.tsx's own `columns` array: Repo(0) Branch(1) Kind(2)
-    // Status(3) Attempts(4) Queued(5) Started(6) Finished(7) Error(8).
-    const cells = row.locator("td, th");
-    await expect(cells.nth(6)).not.toHaveText("—");
-    await expect(cells.nth(7)).not.toHaveText("—");
+    // "and runs": wait for the real worker to carry SOME row for this repo
+    // to a terminal status with real Started/Finished timestamps, purely
+    // via Jobs.tsx's own data-driven refetchInterval (5s while any row on
+    // the page is QUEUED/RUNNING, false once all are terminal --
+    // jobsRefetchInterval) -- no reload, no waitForTimeout.
+    //
+    // This environment's server (task test:e2e, Taskfile.yml) has no
+    // reachable embedder: no Ollama container in
+    // deploy/docker-compose.e2e.yml, no LOAM_EMBEDDER_URL override in that
+    // task. So the job's real path here is QUEUED -> RUNNING -> FAILED once
+    // ingestion reaches the embed step and
+    // internal/ingest/embed/ollama.Embedder.Embed's real HTTP call to
+    // http://localhost:11434 refuses the connection -- and internal/ingest/
+    // pool.go's fail() then schedules a retry after ~1s exponential backoff
+    // (scheduleRetry), reclaiming the SAME row and cycling it back through
+    // RUNNING indefinitely, since nothing in this stack ever makes the
+    // embedder reachable. A terminal FAILED is exactly as valid a proof of
+    // "the job ran" as a terminal SUCCEEDED would be, so this checks for
+    // either -- but it must read status and both timestamps from ONE
+    // snapshot of the row (`allInnerTexts`, a single round trip), not as
+    // separate sequential `expect()` calls: internal/ingest/pool.go's
+    // fail()/succeed() always write a job's terminal status and its
+    // finished_at in the same transaction, so any single ListIngestJobs
+    // response that shows one is terminal always shows the other too, but
+    // an earlier version of this spec split that across three independent
+    // `expect()` calls, each re-resolving the row on its own -- between
+    // them, this stack's own retry had already reclaimed the row (resetting
+    // started_at, clearing the terminal-ness the first `expect()` had just
+    // caught), so the later checks observed a fresh, still-running attempt
+    // instead of the one just proven terminal. That was a reproducible
+    // flake in this spec's own design (confirmed directly: 3 consecutive
+    // `task test:e2e` runs, this test failed on the 3rd with exactly that
+    // shape), fixed here structurally by making the whole check atomic,
+    // not by widening a timeout.
+    await expect
+      .poll(
+        async () => {
+          const candidate = page
+            .getByRole("row")
+            .filter({ has: page.getByRole("link", { name: e2eEnv.repoIdentifier, exact: true }) })
+            .first();
+          if ((await candidate.count()) === 0) return false;
+          // Column order is Jobs.tsx's own `columns` array: Repo(0)
+          // Branch(1) Kind(2) Status(3) Attempts(4) Queued(5) Started(6)
+          // Finished(7) Error(8).
+          const texts = await candidate.locator("td, th").allInnerTexts();
+          if (texts.length < 8) return false;
+          const kind = texts[2];
+          const status = texts[3];
+          const started = texts[6];
+          const finished = texts[7];
+          return (
+            kind === "Full" &&
+            (status === "Succeeded" || status === "Failed") &&
+            started !== "—" &&
+            finished !== "—"
+          );
+        },
+        { timeout: 45_000, intervals: [250, 250, 500, 500, 1_000, 1_000, 2_000] },
+      )
+      .toBe(true);
   });
 });
