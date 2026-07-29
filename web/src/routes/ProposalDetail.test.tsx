@@ -139,7 +139,9 @@ describe("ProposalDetail: loading, not-found, error", () => {
   it("shows a loading state before the work branch query settles", () => {
     stubFetch(baseRoutes());
     renderScreen();
-    expect(screen.getByText("Loading proposal…")).toBeInTheDocument();
+    expect(screen.getByText(/loading proposal/i)).toBeInTheDocument();
+    // The route-derived identifiers render before the fetch settles.
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("wb-9c2f1a");
   });
 
   it("renders a not-found state via ErrorBanner when GetWorkBranch reports not_found", async () => {

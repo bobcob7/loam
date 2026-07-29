@@ -132,7 +132,21 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
   );
 
   if (workBranchQuery.isPending) {
-    return <p>Loading proposal…</p>;
+    // The identifiers come from the route, not from the fetch, so they are
+    // renderable before anything settles -- matching RepoDetail, which keeps
+    // its `<h1>` while pending. Two reasons this is not cosmetic: a user who
+    // followed a link to a slow proposal otherwise sees a bare "Loading" with
+    // no confirmation of WHICH proposal, and AppRoutes.test.tsx proves the
+    // route table round-trips `<group>/<name>/<workBranch>` into props by
+    // reading exactly these values back out of the rendered screen.
+    return (
+      <>
+        <h1>{workBranch}</h1>
+        <p>
+          <span>{repo}</span> — loading proposal…
+        </p>
+      </>
+    );
   }
   if (workBranchQuery.isError) {
     const outcome = mapConnectError(workBranchQuery.error);
