@@ -21,13 +21,19 @@ import { proposalDetailPath, repoDetailPath } from "./paths";
  * Mounts the shell at `path`, and hands back the recording location hook.
  *
  * Wrapped in a real `QueryClient` and a stub `TransportProvider`: a screen
- * mounted here (e.g. Proposals, loam-nvb.12) may call connect-query's
- * `useQuery` unconditionally on render, which throws synchronously without a
- * `QueryClientProvider` above it (`useQueryClient` has no fallback the way
- * `useTransport` does -- see src/App.test.tsx). The router transport is an
- * empty stub, not a mock of any one screen's RPC: every case below asserts
- * on the routing/nav chrome, not on fetched data, so an unimplemented-RPC
- * error settling after the assertions have already run is fine.
+ * mounted here may call connect-query's `useQuery`/`useMutation`
+ * unconditionally on render, which throws IMMEDIATELY without a
+ * `QueryClientProvider` above it -- regardless of whether the test ever
+ * waits on the query settling -- because `useQueryClient` has no fallback
+ * the way `useTransport` does (see src/App.test.tsx). Proposals
+ * (loam-nvb.12), Credentials (loam-nvb.10), RepoDetail (loam-nvb.9) and
+ * ProposalDetail (loam-nvb.13) each independently hit this.
+ *
+ * The transport is deliberately an EMPTY STUB rather than `AppProviders`:
+ * `AppProviders` carries the real transport (baseUrl "/"), which would send
+ * these routing tests at a nonexistent origin under jsdom. Every case below
+ * asserts on the routing/nav chrome, not on fetched data, so an
+ * unimplemented-RPC error settling after the assertions have run is fine.
  */
 const renderAt = (path: string) => {
   const location = memoryLocation({ path, record: true });
