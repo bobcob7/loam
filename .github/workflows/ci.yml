@@ -115,6 +115,29 @@ jobs:
             exit 1
           fi
 
+      # loam-nvb.16. Everything else that touches the SPA handler builds a
+      # synthetic fstest.MapFS; this is the only check that serves the REAL
+      # embedded web.Dist(). It must run AFTER the drift check above, because
+      # `npm run build` overwrites the committed web/dist placeholders and
+      # would otherwise register as generated-code drift.
+      #
+      # Why it needs a real build at all: the placeholder index.html
+      # references no assets, so the test skips (loudly) against it and would
+      # otherwise be permanently vacuous in CI. The failure it exists to catch
+      # — index.html pointing at asset URLs the server does not serve, from a
+      # Vite `base` change or a file `//go:embed all:dist` missed — compiles,
+      # embeds, and loads fine, then 404s every asset at runtime.
+      #
+      # Not `task test:spa` (the Taskfile equivalent): go-task is not
+      # installed on these runners, which invoke Go directly throughout.
+      - name: Embedded SPA serves its own assets (real Vite build)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- web/dist && git clean -fd web/dist' EXIT
+          (cd web && npm run build)
+          go test ./internal/server/ -run TestSPA_Embedded -count=1 -v
+
   web:
     name: web install/typecheck/test/build (${{ matrix.os }})
     # Admin SPA (docs/web-frontend-spec.md, loam-nvb epic): pure Node/npm,

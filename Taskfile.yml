@@ -147,6 +147,31 @@ tasks:
       - task: web:install
       - npm test
 
+  test:spa:
+    desc: >-
+      Verify the EMBEDDED admin SPA serves correctly — the one check that
+      exercises web.Dist() itself rather than an fstest.MapFS stand-in
+      (loam-nvb.16). Builds the real SPA first, because the failure this
+      catches is invisible against the committed placeholders: their
+      index.html references no assets at all, so
+      internal/server/spa_embed_test.go SKIPS (loudly, never silently
+      passing) unless real Vite output is on disk. The bug it exists for is
+      the one that compiles, embeds, and loads — then 404s every asset at
+      runtime because index.html points somewhere the server does not serve
+      (a Vite `base` other than "/", or a file `//go:embed all:dist` never
+      picked up); in a browser that surfaces as "unexpected token '<'" when
+      the JS bundle comes back as index.html. Restores the committed
+      placeholders on an EXIT trap, so a failing test still leaves a clean
+      tree (loam-68os), while the task's own exit status still reflects the
+      test result.
+    cmds:
+      - task: web:build
+      - |
+        set -u
+        set -o pipefail
+        trap 'git checkout -- web/dist && git clean -fd web/dist' EXIT
+        go test ./internal/server/ -run TestSPA_Embedded -count=1 -v
+
   test:
     desc: Run the test suite with the race detector
     cmds:
