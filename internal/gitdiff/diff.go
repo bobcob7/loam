@@ -125,14 +125,14 @@ const diffTruncatedMarkerFormat = "\n... diff truncated at %d bytes; git produce
 var ErrMirrorMissing = errors.New("gitdiff: bare mirror missing or invalid on disk")
 
 // ErrRefMissing indicates a ref this diff needs -- the work branch's
-// target, or its own name -- does not exist in the mirror. Both refs are
-// expected to exist once a work branch is genuinely created and pushed to
-// (docs/git-spec.md -> "Ref Policy": work-branch refs are created
-// server-side by `work start`; target branches are mirrored refs kept
-// current by upstream sync), so this signals the mirror has fallen out of
-// sync with the work-branch registry, not that the caller named something
-// invalid -- resolveWorkBranch (workbranch.go) already rejects an unknown
-// work branch before Computer.Diff is ever called.
+// target, or its own name -- does not exist in the mirror. Both refs exist
+// for any genuinely created work branch (docs/git-spec.md -> "Ref Policy":
+// work-branch refs are created server-side by `work start`, which since
+// loam-5iu it really does; target branches are mirrored refs kept current
+// by upstream sync), so this signals the mirror has fallen out of sync with
+// the work-branch registry, not that the caller named something invalid --
+// resolveWorkBranch (workbranch.go) already rejects an unknown work branch
+// before Computer.Diff is ever called.
 var ErrRefMissing = errors.New("gitdiff: ref not found in mirror")
 
 // ErrNoMergeBase indicates target and name share no common ancestor --

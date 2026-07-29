@@ -17,7 +17,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundStore DiffComputer ThreadStore VerdictStore VerdictPublisher
+//go:generate go tool moq -out moq_test.go . WorkBranchStore RepoStore RoundStore DiffComputer WorkBranchRefWriter ThreadStore VerdictStore VerdictPublisher
 
 // WorkBranchStore is the internal/workbranchstore.Store surface this
 // package's lifecycle RPCs need, defined here at the consumer per repo
@@ -122,6 +122,33 @@ type RoundStore interface {
 // DESCRIPTION; it never covered diff computation).
 type DiffComputer interface {
 	Diff(ctx context.Context, workBranch workbranchstore.WorkBranch) (string, error)
+}
+
+// WorkBranchRefWriter creates the server-side git ref a work branch OWES
+// its existence to. docs/git-spec.md -> Ref Policy: work-branch refs are
+// "created server-side by `work start` only, never by push", and the
+// pre-receive hook enforces the other half by rejecting a push that tries
+// to create one. Defined here at the consumer; implemented by
+// internal/gitref.Creator, wired in cmd/server/main.go.
+//
+// Before loam-5iu this seam did not exist and neither did the ref:
+// CreateWorkBranch inserted the work_branches row and stopped, so
+// GetWorkBranchDiff answered gitdiff.ErrRefMissing -> FailedPrecondition
+// for essentially every work branch (the error path was the common case,
+// not an edge case) and `loam clone` of a freshly started branch had no
+// ref to fetch.
+//
+// Delete exists for exactly one caller -- CreateWorkBranch's compensating
+// rollback -- and its contract is that an already-absent ref is not an
+// error. See CreateWorkBranch for why the ref is written BEFORE the row.
+type WorkBranchRefWriter interface {
+	// CreateWorkBranchRef creates the work branch's ref in repoName's bare
+	// mirror at whatever the target branch `from` currently resolves to.
+	// It must refuse to move an existing ref rather than overwrite one.
+	CreateWorkBranchRef(ctx context.Context, repoName, name, from string) error
+	// DeleteWorkBranchRef removes the work branch's ref. Absent is not an
+	// error.
+	DeleteWorkBranchRef(ctx context.Context, repoName, name string) error
 }
 
 // ThreadStore is the internal/reviewstore.ThreadStore surface the review

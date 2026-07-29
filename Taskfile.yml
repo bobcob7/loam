@@ -1319,15 +1319,16 @@ tasks:
           in the same change, and the fixture `git fetch` this target used
           to need as a stand-in for the blocked push is gone -- the commit
           now reaches the mirror by being pushed.
-        - KNOWN DEFECT (loam-5iu): `loam work diff` on a freshly started
-          work branch exits 2 with precondition_failed, because nothing
-          creates refs/heads/<name> in the mirror at CreateWorkBranch time.
-          The demo shows that honest failure at the exact moment it bites
-          and asserts the exit code and the reason. It runs `work diff`
-          again after the commit has reached the mirror, where it produces
-          a real unified diff -- that second call is not a workaround for
-          loam-5iu, it is what proves internal/gitdiff itself is sound and
-          that loam-5iu is precisely and only about the missing ref.
+        - `loam work diff` on a FRESHLY STARTED work branch succeeds and
+          reports an EMPTY diff, which is the correct answer for a branch
+          that is exactly its target. This step used to assert the opposite:
+          loam-5iu meant nothing created the branch's ref in the mirror at
+          `work start` time, so diff exited 2 with precondition_failed for
+          essentially every work branch. `work start` now creates that ref
+          server-side (docs/git-spec.md -> Ref Policy), and this demo
+          asserts both halves -- empty before the commit, a real unified
+          diff after it -- so a regression that stopped creating the ref
+          fails here as well as in the test suite.
         - THREADS ARE ADDRESSED BY ANCHOR, NEVER BY INDEX. SubmitVerdict
           publishes the whole staged batch in ONE transaction, so every
           thread in it shares a single `now()` and
@@ -1574,20 +1575,31 @@ tasks:
         printf '%s' "Demotes the README heading and documents main(). Raised so the reviewer has something anchored to comment on." \
           | author_cli work set "$repo_name" "$work_branch" --title "Tidy the README heading and document main()"
         echo ""
-        echo "=== step 8/14: KNOWN DEFECT (loam-5iu) -- loam work diff on a freshly started work branch ==="
-        echo "    Nothing creates refs/heads/$work_branch in the mirror at CreateWorkBranch time, so"
-        echo "    GetWorkBranchDiff has no ref to diff and answers FailedPrecondition. This is the honest"
-        echo "    failure, printed and asserted rather than skipped: if loam-5iu is fixed, this step FAILS"
-        echo "    and this target must be updated. A fabricated empty diff would read as \"no changes\"."
-        if diff_out="$(author_cli work diff "$repo_name" "$work_branch" 2>&1)"; then
+        echo "=== step 8/14: loam work diff on a FRESHLY STARTED work branch -- succeeds, and is empty ==="
+        echo "    work start created the branch's ref in the mirror at the target tip (loam-5iu), so"
+        echo "    GetWorkBranchDiff has a ref to diff. The branch is exactly its target, so the correct"
+        echo "    answer is an EMPTY diff -- meaningful only because step 9 runs the same command again"
+        echo "    after a commit and gets a real one."
+        wb_ref_at_start="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")"
+        target_tip="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$target_branch")"
+        if [ "$wb_ref_at_start" != "$target_tip" ]; then
+          echo "FAIL: work start put refs/heads/loam-reserved/$work_branch at $wb_ref_at_start, want the target tip $target_tip" >&2
+          exit 1
+        fi
+        if [ -n "$(git --git-dir="$mirror_dir" for-each-ref "refs/heads/$work_branch" --format='%(objectname)')" ]; then
+          echo "FAIL: a ref was created at the UNRESERVED refs/heads/$work_branch, which a mirror fetch could prune" >&2
+          exit 1
+        fi
+        echo "work start created refs/heads/loam-reserved/$work_branch at $wb_ref_at_start (== $target_branch tip)"
+        if ! diff_out="$(author_cli work diff "$repo_name" "$work_branch" 2>&1)"; then
           echo "$diff_out"
-          echo "FAIL: work diff succeeded on a work branch with no mirror ref -- loam-5iu may be fixed; update demo:m4" >&2
+          echo "FAIL: work diff on a freshly started work branch was rejected -- loam-5iu has regressed" >&2
           exit 1
         fi
         echo "$diff_out"
         case "$diff_out" in
-          *precondition_failed*) echo "KNOWN DEFECT CONFIRMED (loam-5iu): exit 2, precondition_failed, no ref in the mirror" ;;
-          *) echo "FAIL: expected a precondition_failed error from work diff, got the above" >&2; exit 1 ;;
+          *precondition_failed*) echo "FAIL: work diff still reports precondition_failed -- loam-5iu has regressed" >&2; exit 1 ;;
+          *) echo "PASS: work diff succeeds on a freshly started work branch, reporting an empty diff" ;;
         esac
         echo ""
         echo "=== step 9/14: AUTHOR -- commit on the work branch and push it with plain git ==="
@@ -1614,7 +1626,7 @@ tasks:
         fi
         echo "mirror now carries refs/heads/loam-reserved/$work_branch at $mirror_wb_sha (landed by the push, not by fixture plumbing)"
         echo ""
-        echo "--- loam work diff again, now that the ref exists: gitdiff itself is sound, loam-5iu is only the missing ref ---"
+        echo "--- loam work diff again, now that the branch has a commit: the same command now reports a real diff ---"
         author_cwd="$author_clone"
         author_cli work diff
         echo ""
@@ -1746,7 +1758,6 @@ tasks:
         echo "  - the prior round's verdict went stale            $reviewer_identifier approve round 1: false -> true"
         echo "  - the branch re-queued for review                 --awaiting-review: listed, empty, listed"
         echo "Known defects shown honestly, never worked around silently:"
-        echo "  - loam-5iu   work diff on a freshly started work branch: precondition_failed"
         echo "  - loam-ppb   the author cannot push to their own work branch (found by this demo)"
         echo "  - loam-8d2   work show reports no round, because the proto carries none"
         echo "=== demo:m4 complete ==="
@@ -1931,10 +1942,6 @@ tasks:
           `work verdicts`, and the recorded PR from the ADMIN queue
           (ListProposals, whose Proposal.work_branch does carry
           upstream_pr_url) and from the forge itself.
-        - KNOWN DEFECT (loam-5iu): `loam work diff` is precondition_failed
-          until a ref exists in the mirror. demo:m4 shows that failure at
-          the moment it bites; this demo simply never calls work diff
-          before its first push, so the defect does not arise here.
         - A CONFLICTED BRANCH'S REJECTION IS SHOWN AS THE STATE ONE. The
           demo asserts AcceptProposal refuses the reset branch, and the
           refusal names its STATE ("is draft, not reviewed"), not its

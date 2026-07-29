@@ -278,13 +278,15 @@ type workDiffOutput struct {
 // (docs/cli-spec.md -> diff).
 //
 // Beyond the documented exit 3 (no such work branch) and exit 2
-// (unresolvable identifier), this command has a third failure that is
-// currently the COMMON case, not an edge case: GetWorkBranchDiff needs the
-// work branch's ref to exist in the server's mirror, and nothing creates it
-// at `work start` time yet (loam-5iu). The server answers FailedPrecondition,
-// which classifyConnectError maps to precondition_failed / exit 2 carrying
-// the server's own message. That is reported honestly rather than
-// suppressed: a fabricated empty diff would read as "no changes".
+// (unresolvable identifier), GetWorkBranchDiff can answer
+// FailedPrecondition when the mirror cannot support the range: the work
+// branch's ref or its target's is missing, or the two share no merge base.
+// Since loam-5iu that is a genuine edge case rather than the common one --
+// `work start` now creates the ref server-side, so a freshly started
+// branch diffs cleanly (empty) instead of failing. classifyConnectError
+// maps it to precondition_failed / exit 2 carrying the server's own
+// message, reported honestly rather than suppressed: a fabricated empty
+// diff would read as "no changes".
 func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("work diff")
 	positional, err := parseCommandArgs(fs, args)

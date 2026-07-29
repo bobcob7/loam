@@ -86,6 +86,7 @@ import (
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/gitancestry"
 	"github.com/bobcob7/loam/internal/gitdiff"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/credential"
@@ -465,8 +466,13 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
 	publisher := reviewpublish.New(pool, cfg.Logger)
 	diff := gitdiff.New(cfg.DataDir, repos)
+	// The work-branch ref writer: docs/git-spec.md -> Ref Policy makes the
+	// server the ONLY creator of a work-branch ref (loam-5iu), and the
+	// pre-receive hook enforces the other half by rejecting a push that
+	// tries to create one.
+	refs := gitref.New(cfg.DataDir)
 	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
-		workbranch.New(workBranches, repos, rounds, diff, threads, verdicts, publisher, capabilities, errorMapper, cfg.Logger),
+		workbranch.New(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, capabilities, errorMapper, cfg.Logger),
 	))
 }
 

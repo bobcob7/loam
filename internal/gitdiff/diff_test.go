@@ -184,10 +184,11 @@ func TestDiff_TargetRefMissing_ReturnsErrRefMissing(t *testing.T) {
 
 // TestDiff_WorkBranchRefMissing_ReturnsErrRefMissing is
 // TestDiff_TargetRefMissing_ReturnsErrRefMissing's sibling for the work
-// branch's own ref: today nothing in this tree creates a work branch's
-// refs/heads/<name> ref in the mirror at CreateWorkBranch time (a separate,
-// tracked gap), so this is the realistic, commonly-reachable shape of
-// ErrRefMissing, not merely a hypothetical.
+// branch's own ref. Since loam-5iu `work start` creates that ref
+// server-side, so this is no longer the commonly-reachable shape of
+// ErrRefMissing it once was -- it now means the mirror has fallen out of
+// step with the work-branch registry, which is exactly what ErrRefMissing
+// is documented to signal.
 func TestDiff_WorkBranchRefMissing_ReturnsErrRefMissing(t *testing.T) {
 	t.Parallel()
 	src := t.TempDir()

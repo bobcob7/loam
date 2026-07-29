@@ -711,6 +711,146 @@ func (mock *DiffComputerMock) DiffCalls() []struct {
 	return calls
 }
 
+// Ensure, that WorkBranchRefWriterMock does implement WorkBranchRefWriter.
+// If this is not the case, regenerate this file with moq.
+var _ WorkBranchRefWriter = &WorkBranchRefWriterMock{}
+
+// WorkBranchRefWriterMock is a mock implementation of WorkBranchRefWriter.
+//
+//	func TestSomethingThatUsesWorkBranchRefWriter(t *testing.T) {
+//
+//		// make and configure a mocked WorkBranchRefWriter
+//		mockedWorkBranchRefWriter := &WorkBranchRefWriterMock{
+//			CreateWorkBranchRefFunc: func(ctx context.Context, repoName string, name string, from string) error {
+//				panic("mock out the CreateWorkBranchRef method")
+//			},
+//			DeleteWorkBranchRefFunc: func(ctx context.Context, repoName string, name string) error {
+//				panic("mock out the DeleteWorkBranchRef method")
+//			},
+//		}
+//
+//		// use mockedWorkBranchRefWriter in code that requires WorkBranchRefWriter
+//		// and then make assertions.
+//
+//	}
+type WorkBranchRefWriterMock struct {
+	// CreateWorkBranchRefFunc mocks the CreateWorkBranchRef method.
+	CreateWorkBranchRefFunc func(ctx context.Context, repoName string, name string, from string) error
+
+	// DeleteWorkBranchRefFunc mocks the DeleteWorkBranchRef method.
+	DeleteWorkBranchRefFunc func(ctx context.Context, repoName string, name string) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// CreateWorkBranchRef holds details about calls to the CreateWorkBranchRef method.
+		CreateWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoName is the repoName argument value.
+			RepoName string
+			// Name is the name argument value.
+			Name string
+			// From is the from argument value.
+			From string
+		}
+		// DeleteWorkBranchRef holds details about calls to the DeleteWorkBranchRef method.
+		DeleteWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoName is the repoName argument value.
+			RepoName string
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockCreateWorkBranchRef sync.RWMutex
+	lockDeleteWorkBranchRef sync.RWMutex
+}
+
+// CreateWorkBranchRef calls CreateWorkBranchRefFunc.
+func (mock *WorkBranchRefWriterMock) CreateWorkBranchRef(ctx context.Context, repoName string, name string, from string) error {
+	if mock.CreateWorkBranchRefFunc == nil {
+		panic("WorkBranchRefWriterMock.CreateWorkBranchRefFunc: method is nil but WorkBranchRefWriter.CreateWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		RepoName string
+		Name     string
+		From     string
+	}{
+		Ctx:      ctx,
+		RepoName: repoName,
+		Name:     name,
+		From:     from,
+	}
+	mock.lockCreateWorkBranchRef.Lock()
+	mock.calls.CreateWorkBranchRef = append(mock.calls.CreateWorkBranchRef, callInfo)
+	mock.lockCreateWorkBranchRef.Unlock()
+	return mock.CreateWorkBranchRefFunc(ctx, repoName, name, from)
+}
+
+// CreateWorkBranchRefCalls gets all the calls that were made to CreateWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedWorkBranchRefWriter.CreateWorkBranchRefCalls())
+func (mock *WorkBranchRefWriterMock) CreateWorkBranchRefCalls() []struct {
+	Ctx      context.Context
+	RepoName string
+	Name     string
+	From     string
+} {
+	var calls []struct {
+		Ctx      context.Context
+		RepoName string
+		Name     string
+		From     string
+	}
+	mock.lockCreateWorkBranchRef.RLock()
+	calls = mock.calls.CreateWorkBranchRef
+	mock.lockCreateWorkBranchRef.RUnlock()
+	return calls
+}
+
+// DeleteWorkBranchRef calls DeleteWorkBranchRefFunc.
+func (mock *WorkBranchRefWriterMock) DeleteWorkBranchRef(ctx context.Context, repoName string, name string) error {
+	if mock.DeleteWorkBranchRefFunc == nil {
+		panic("WorkBranchRefWriterMock.DeleteWorkBranchRefFunc: method is nil but WorkBranchRefWriter.DeleteWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		RepoName string
+		Name     string
+	}{
+		Ctx:      ctx,
+		RepoName: repoName,
+		Name:     name,
+	}
+	mock.lockDeleteWorkBranchRef.Lock()
+	mock.calls.DeleteWorkBranchRef = append(mock.calls.DeleteWorkBranchRef, callInfo)
+	mock.lockDeleteWorkBranchRef.Unlock()
+	return mock.DeleteWorkBranchRefFunc(ctx, repoName, name)
+}
+
+// DeleteWorkBranchRefCalls gets all the calls that were made to DeleteWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedWorkBranchRefWriter.DeleteWorkBranchRefCalls())
+func (mock *WorkBranchRefWriterMock) DeleteWorkBranchRefCalls() []struct {
+	Ctx      context.Context
+	RepoName string
+	Name     string
+} {
+	var calls []struct {
+		Ctx      context.Context
+		RepoName string
+		Name     string
+	}
+	mock.lockDeleteWorkBranchRef.RLock()
+	calls = mock.calls.DeleteWorkBranchRef
+	mock.lockDeleteWorkBranchRef.RUnlock()
+	return calls
+}
+
 // Ensure, that ThreadStoreMock does implement ThreadStore.
 // If this is not the case, regenerate this file with moq.
 var _ ThreadStore = &ThreadStoreMock{}

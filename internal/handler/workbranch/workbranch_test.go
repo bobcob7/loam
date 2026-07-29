@@ -16,6 +16,7 @@ import (
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gitdiff"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/httpauth"
@@ -187,13 +188,32 @@ func sampleThread() reviewstore.ThreadWithComments {
 	}
 }
 
-// newHandler wires a workbranch.Handler over the seven given seams with a
-// capability checker backed by roleCaps and an ErrorMapper that logs to buf
-// so tests can assert on the logged line for unmapped errors.
+// okRefWriter is a WorkBranchRefWriter whose every method succeeds -- the
+// benign default newHandler supplies for the great majority of tests, which
+// are not about ref writing at all. Its calls are still RECORDED, so a test
+// that cares can assert on them without wiring its own mock.
+func okRefWriter() *workbranch.WorkBranchRefWriterMock {
+	return &workbranch.WorkBranchRefWriterMock{
+		CreateWorkBranchRefFunc: func(context.Context, string, string, string) error { return nil },
+		DeleteWorkBranchRefFunc: func(context.Context, string, string) error { return nil },
+	}
+}
+
+// newHandler wires a workbranch.Handler over the seven given seams plus a
+// benign okRefWriter, with a capability checker backed by roleCaps and an
+// ErrorMapper that logs to buf so tests can assert on the logged line for
+// unmapped errors. Tests that need to observe or fail the ref writer use
+// newHandlerWithRefs.
 func newHandler(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundStore, diff workbranch.DiffComputer, threads workbranch.ThreadStore, verdicts workbranch.VerdictStore, publisher workbranch.VerdictPublisher, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
+	return newHandlerWithRefs(workBranches, repos, rounds, diff, okRefWriter(), threads, verdicts, publisher, roleCaps, buf)
+}
+
+// newHandlerWithRefs is newHandler with the WorkBranchRefWriter seam
+// supplied by the caller.
+func newHandlerWithRefs(workBranches workbranch.WorkBranchStore, repos workbranch.RepoStore, rounds workbranch.RoundStore, diff workbranch.DiffComputer, refs workbranch.WorkBranchRefWriter, threads workbranch.ThreadStore, verdicts workbranch.VerdictStore, publisher workbranch.VerdictPublisher, roleCaps []handler.Capability, buf *bytes.Buffer) *workbranch.Handler {
 	checker := handler.NewCapabilityChecker(fixedRoleStore{capabilities: roleCaps})
 	mapper := handler.NewErrorMapper(slog.New(slog.NewJSONHandler(buf, nil)))
-	return workbranch.New(workBranches, repos, rounds, diff, threads, verdicts, publisher, checker, mapper, testLogger())
+	return workbranch.New(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, checker, mapper, testLogger())
 }
 
 func connectCode(t *testing.T, err error) connect.Code {
@@ -306,6 +326,119 @@ func TestCreateWorkBranch_Success_ReturnsDraftWorkBranch(t *testing.T) {
 	assert.Equal(t, "grace-hopper-3-author", resp.Msg.GetWorkBranch().GetAuthor())
 	require.Len(t, workBranches.CreateCalls(), 1)
 	assert.Regexp(t, `^wb-[0-9a-f]{6}$`, workBranches.CreateCalls()[0].Name)
+}
+
+// TestCreateWorkBranch_CreatesTheMirrorRef_BeforeTheRow is loam-5iu: the
+// server OWES a work branch its ref (docs/git-spec.md -> Ref Policy,
+// "created server-side by `work start` only"), and before this it created
+// only the row -- so GetWorkBranchDiff answered FailedPrecondition for
+// essentially every work branch.
+//
+// The ORDER is asserted, not just the fact of the call, because the two
+// half-states are not equally bad: a ref with no row is inert, a row with
+// no ref is the defect this exists to remove. The name and target the ref
+// is created with must be the same ones the row gets, or the two halves
+// would describe different branches.
+func TestCreateWorkBranch_CreatesTheMirrorRef_BeforeTheRow(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	var order []string
+	refs := okRefWriter()
+	refs.CreateWorkBranchRefFunc = func(context.Context, string, string, string) error {
+		order = append(order, "ref")
+		return nil
+	}
+	inner := workBranches.CreateFunc
+	workBranches.CreateFunc = func(ctx context.Context, repoID uuid.UUID, name, target, author string) (workbranchstore.WorkBranch, error) {
+		order = append(order, "row")
+		return inner(ctx, repoID, name, target, author)
+	}
+	h := newHandlerWithRefs(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+
+	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ref", "row"}, order, "the mirror ref must be written before the row: a ref with no row is inert, a row with no ref is loam-5iu")
+	require.Len(t, refs.CreateWorkBranchRefCalls(), 1)
+	require.Len(t, workBranches.CreateCalls(), 1)
+	assert.Equal(t, "bobcob7/doc-server", refs.CreateWorkBranchRefCalls()[0].RepoName)
+	assert.Equal(t, workBranches.CreateCalls()[0].Name, refs.CreateWorkBranchRefCalls()[0].Name, "the ref and the row must name the same branch")
+	assert.Equal(t, "main", refs.CreateWorkBranchRefCalls()[0].From)
+	assert.Empty(t, refs.DeleteWorkBranchRefCalls(), "nothing was rolled back on the happy path")
+}
+
+// TestCreateWorkBranch_RefWriteFails_NoRowIsInserted proves the ref failure
+// is fatal to the whole operation rather than logged and shrugged off. A
+// handler that carried on would recreate loam-5iu exactly: a row with no
+// ref, indistinguishable to the agent from a healthy branch until `work
+// diff` or `loam clone` failed.
+func TestCreateWorkBranch_RefWriteFails_NoRowIsInserted(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	refs := okRefWriter()
+	refs.CreateWorkBranchRefFunc = func(context.Context, string, string, string) error {
+		return fmt.Errorf("creating ref: %w", gitref.ErrTargetMissing)
+	}
+	h := newHandlerWithRefs(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+
+	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
+
+	require.Error(t, err)
+	// A target branch registered in repo_target_branches but not yet in
+	// the mirror is a precondition the caller can act on (retry once the
+	// repo has synced), not an internal fault.
+	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
+	assert.Empty(t, workBranches.CreateCalls(), "no row may be inserted for a work branch whose ref could not be created")
+}
+
+// TestCreateWorkBranch_RowInsertFails_RollsBackTheRef proves the
+// compensating delete: with the ref written first, a failed insert would
+// otherwise leave an orphan ref in the mirror forever -- protected from
+// the mirror fetch by the reserved namespace, and so never cleaned up by
+// anything.
+func TestCreateWorkBranch_RowInsertFails_RollsBackTheRef(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	workBranches.CreateFunc = func(context.Context, uuid.UUID, string, string, string) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, errors.New("insert failed")
+	}
+	refs := okRefWriter()
+	h := newHandlerWithRefs(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+
+	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
+
+	require.Error(t, err)
+	require.Len(t, refs.CreateWorkBranchRefCalls(), 1)
+	require.Len(t, refs.DeleteWorkBranchRefCalls(), 1, "the ref written before the failed insert must be rolled back")
+	assert.Equal(t, refs.CreateWorkBranchRefCalls()[0].Name, refs.DeleteWorkBranchRefCalls()[0].Name)
+	assert.Equal(t, "bobcob7/doc-server", refs.DeleteWorkBranchRefCalls()[0].RepoName)
+}
+
+// TestCreateWorkBranch_RollbackFails_StillReportsTheInsertError proves the
+// error the AGENT sees is the one that actually went wrong. A rollback
+// failure is an operator concern -- it leaves an inert orphan ref -- and
+// reporting it instead would tell the agent to fix the wrong thing.
+func TestCreateWorkBranch_RollbackFails_StillReportsTheInsertError(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	workBranches.CreateFunc = func(context.Context, uuid.UUID, string, string, string) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, errors.New("the insert error the agent must see")
+	}
+	refs := okRefWriter()
+	refs.DeleteWorkBranchRefFunc = func(context.Context, string, string) error {
+		return errors.New("the rollback error the agent must NOT see")
+	}
+	h := newHandlerWithRefs(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkStart}, &buf)
+
+	_, err := h.CreateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.CreateWorkBranchRequest{Repo: "bobcob7/doc-server", From: "main"}))
+
+	require.Error(t, err)
+	assert.Contains(t, buf.String(), "the insert error the agent must see", "the mapped error is the insert's")
+	assert.NotContains(t, buf.String(), "the rollback error the agent must NOT see")
 }
 
 // --- UpdateWorkBranch ---

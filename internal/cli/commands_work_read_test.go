@@ -449,13 +449,14 @@ func TestRunWorkDiff_NotFound_ExitsThree(t *testing.T) {
 	assert.Nil(t, encoded)
 }
 
-// TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed pins the
-// failure a user actually hits today: nothing creates a work branch's
-// refs/heads/<name> in the mirror at `work start` time (loam-5iu), so
-// GetWorkBranchDiff answers FailedPrecondition for essentially every work
-// branch. That must surface as exit 2 / precondition_failed carrying the
-// server's own message -- NOT as a fabricated empty diff, which an agent
-// would read as "no changes yet".
+// TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed pins how
+// this command reports a server-side FailedPrecondition: exit 2 /
+// precondition_failed carrying the server's own message -- NOT a fabricated
+// empty diff, which an agent would read as "no changes yet". Since loam-5iu
+// created the ref at `work start` time this is an edge case (a mirror out
+// of step with the registry, or two histories with no merge base) rather
+// than the common path it used to be, but the reporting contract is
+// unchanged and is what this pins.
 func TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed(t *testing.T) {
 	t.Parallel()
 	const message = "computing diff for work branch bobcob7/doc-server/wb-9c2f1a: ref missing"
