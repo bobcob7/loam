@@ -37,3 +37,17 @@ npm-debug.log*
 #             now that `task web:generate` exists (loam-nvb.15) -- CI's
 #             generated-code drift check regenerates this too and fails on
 #             a diff, the same as internal/gen.
+
+# Playwright output (loam-li0.11.1). Both are runtime artefacts of `task
+# test:e2e`, never committed:
+#
+#   test-results/      per-test traces, screenshots and videos on failure
+#   playwright-report/ the HTML reporter's output, produced when CI is set
+#
+# These must be ignored, not merely uncommitted: CI's generated-code drift
+# check fails on ANY `git status --porcelain` output, and porcelain lists
+# untracked files too -- so an unignored artefact directory turns a passing
+# e2e run into a spurious "generated code drifted" failure the moment the
+# two ever run in the same job. Locally it just leaves a dirty tree.
+test-results/
+playwright-report/

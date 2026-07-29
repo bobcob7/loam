@@ -176,6 +176,20 @@ jobs:
         working-directory: web
         run: npx tsc --noEmit
 
+      # web/tsconfig.json's "include" is deliberately just ["src",
+      # "vite.config.ts"], so the step above does NOT cover web/e2e — the
+      # Playwright suite is a separate TS project with its own tsconfig
+      # (different lib/types: node, and no vitest/globals, whose ambient
+      # test/expect would shadow the ones @playwright/test exports). Without
+      # this second invocation the entire e2e suite type-checks nowhere and a
+      # type error in it ships silently (loam-li0.11.1 noted the gap; this
+      # closes it). Type-checking is cheap and needs no browser or stack, so
+      # it belongs in the per-PR gate even though RUNNING the e2e suite is a
+      # nightly-only stage per docs/testing-spec.md → CI Stages.
+      - name: typecheck e2e (tsc -p e2e --noEmit)
+        working-directory: web
+        run: npx tsc -p e2e --noEmit
+
       - name: test (vitest run)
         working-directory: web
         run: npm test
