@@ -20,6 +20,9 @@ var _ querier = &querierMock{}
 //
 //		// make and configure a mocked querier
 //		mockedquerier := &querierMock{
+//			BeginFunc: func(ctx context.Context) (pgx.Tx, error) {
+//				panic("mock out the Begin method")
+//			},
 //			CopyFromFunc: func(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
 //				panic("mock out the CopyFrom method")
 //			},
@@ -39,6 +42,9 @@ var _ querier = &querierMock{}
 //
 //	}
 type querierMock struct {
+	// BeginFunc mocks the Begin method.
+	BeginFunc func(ctx context.Context) (pgx.Tx, error)
+
 	// CopyFromFunc mocks the CopyFrom method.
 	CopyFromFunc func(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 
@@ -53,6 +59,11 @@ type querierMock struct {
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// Begin holds details about calls to the Begin method.
+		Begin []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+		}
 		// CopyFrom holds details about calls to the CopyFrom method.
 		CopyFrom []struct {
 			// Ctx is the ctx argument value.
@@ -92,10 +103,43 @@ type querierMock struct {
 			IfaceVals []interface{}
 		}
 	}
+	lockBegin    sync.RWMutex
 	lockCopyFrom sync.RWMutex
 	lockExec     sync.RWMutex
 	lockQuery    sync.RWMutex
 	lockQueryRow sync.RWMutex
+}
+
+// Begin calls BeginFunc.
+func (mock *querierMock) Begin(ctx context.Context) (pgx.Tx, error) {
+	if mock.BeginFunc == nil {
+		panic("querierMock.BeginFunc: method is nil but querier.Begin was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+	}{
+		Ctx: ctx,
+	}
+	mock.lockBegin.Lock()
+	mock.calls.Begin = append(mock.calls.Begin, callInfo)
+	mock.lockBegin.Unlock()
+	return mock.BeginFunc(ctx)
+}
+
+// BeginCalls gets all the calls that were made to Begin.
+// Check the length with:
+//
+//	len(mockedquerier.BeginCalls())
+func (mock *querierMock) BeginCalls() []struct {
+	Ctx context.Context
+} {
+	var calls []struct {
+		Ctx context.Context
+	}
+	mock.lockBegin.RLock()
+	calls = mock.calls.Begin
+	mock.lockBegin.RUnlock()
+	return calls
 }
 
 // CopyFrom calls CopyFromFunc.

@@ -77,7 +77,15 @@ func (h *Handler) GetInstructions(ctx context.Context, req *connect.Request[loam
 // silently.
 func (h *Handler) resolveCaller(ctx context.Context) (granted []handler.Capability, instructions string, err error) {
 	if httpauth.IsAdmin(ctx) {
-		return allCapabilities, "", nil
+		// The fixed vocabulary in its entirety, read from its single
+		// source of truth in internal/handler rather than restated here:
+		// RequireCapability's own admin bypass means an admin's role is
+		// never gated on any single RPC, so GetInstructions reports every
+		// gated command as available to them too, rather than resolving a
+		// role that does not exist for an admin
+		// (internal/httpauth.IdentityFromContext: "ok is false ... for
+		// every request on a path group the admin reached as superuser").
+		return handler.AllCapabilities(), "", nil
 	}
 	identity, ok := httpauth.IdentityFromContext(ctx)
 	if !ok {

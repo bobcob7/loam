@@ -21,20 +21,6 @@ const usageText = `Loam CLI: agents orient with "instructions" (this command) an
 	`3 not found. After "clone", source control is plain git -- there are no "loam ` +
 	`commit"/"loam push" commands; the server authorizes each push at receive time.`
 
-// allCapabilities is the fixed ten-operation vocabulary in its entirety
-// (docs/web-spec.md -> RoleService), used only for an admin superuser
-// caller: RequireCapability's own bypass means an admin's role is never
-// gated on any single RPC, so GetInstructions reports every gated command
-// as available to them too, rather than resolving a role that does not
-// exist for an admin (internal/httpauth.IdentityFromContext: "ok is false
-// ... for every request on a path group the admin reached as superuser").
-var allCapabilities = []handler.Capability{
-	handler.CapabilityWorkStart, handler.CapabilityWorkSet, handler.CapabilityWorkRequestReview,
-	handler.CapabilityWorkReply, handler.CapabilityWorkVerdict, handler.CapabilityWorkRead,
-	handler.CapabilityGitClone, handler.CapabilityGitPush, handler.CapabilityGraphQuery,
-	handler.CapabilitySearch,
-}
-
 // catalogEntry is one CLI command in the fixed catalog below. A zero-value
 // Capability marks a command as ungated -- always included regardless of
 // the caller's granted operations, matching docs/web-spec.md: "instructions

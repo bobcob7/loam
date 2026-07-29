@@ -11,6 +11,71 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createRole = `-- name: CreateRole :one
+INSERT INTO roles (id, name, instructions)
+VALUES ($1, $2, $3)
+RETURNING id, name, instructions, builtin, created_at, updated_at
+`
+
+type CreateRoleParams struct {
+	ID           pgtype.UUID
+	Name         string
+	Instructions string
+}
+
+// Creates an admin-defined role. builtin is NOT a parameter and is left to
+// the column default (false): only migration 0001_init seeds a builtin
+// role, and there is deliberately no statement in this file through which
+// an RPC could mint one.
+func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error) {
+	row := q.db.QueryRow(ctx, createRole, arg.ID, arg.Name, arg.Instructions)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Instructions,
+		&i.Builtin,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteRole = `-- name: DeleteRole :execrows
+DELETE FROM roles WHERE name = $1 AND NOT builtin
+`
+
+// Unenrolls an admin-defined role by name, cascading to its
+// role_operations rows (role_operations.role_id REFERENCES roles (id) ON
+// DELETE CASCADE, 0001_init.up.sql).
+//
+// `AND NOT builtin` is defence in depth, not the primary gate: the handler
+// reads the role first and refuses a built-in with failed_precondition, so
+// that the caller learns WHY (a bare zero-rows result here cannot tell
+// "built-in" from "no such role" apart). This predicate exists so that a
+// regression above it cannot delete author or reviewer -- the worst it can
+// do is report the wrong reason.
+func (q *Queries) DeleteRole(ctx context.Context, name string) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteRole, name)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteRoleOperations = `-- name: DeleteRoleOperations :exec
+DELETE FROM role_operations WHERE role_id = $1
+`
+
+// Clears a role's granted operations, the first half of the
+// delete-then-insert UpdateRole performs inside one transaction. Never run
+// outside that transaction: on its own it strips a role to zero
+// capabilities.
+func (q *Queries) DeleteRoleOperations(ctx context.Context, roleID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteRoleOperations, roleID)
+	return err
+}
+
 const getRoleByName = `-- name: GetRoleByName :one
 SELECT id, name, instructions, builtin, created_at, updated_at FROM roles WHERE name = $1
 `
@@ -29,6 +94,54 @@ func (q *Queries) GetRoleByName(ctx context.Context, name string) (Role, error) 
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertRoleOperation = `-- name: InsertRoleOperation :exec
+INSERT INTO role_operations (role_id, operation) VALUES ($1, $2)
+`
+
+type InsertRoleOperationParams struct {
+	RoleID    pgtype.UUID
+	Operation string
+}
+
+// Grants one operation to a role. The value is CHECK-constrained by
+// role_operations_operation_check (0001_init.up.sql) to the fixed
+// vocabulary, so an operation outside it is refused by the database even
+// if a caller skipped internal/handler's own validation -- and PRIMARY KEY
+// (role_id, operation) refuses a duplicate grant.
+func (q *Queries) InsertRoleOperation(ctx context.Context, arg InsertRoleOperationParams) error {
+	_, err := q.db.Exec(ctx, insertRoleOperation, arg.RoleID, arg.Operation)
+	return err
+}
+
+const listAllRoleOperations = `-- name: ListAllRoleOperations :many
+SELECT role_id, operation FROM role_operations ORDER BY role_id, operation
+`
+
+// Every (role_id, operation) pair in one round trip, so ListRoles can
+// attach operations to every role without a per-role ListRoleOperations
+// query. Ordered by role then operation so the caller can group by role_id
+// and still get each role's operations in the same deterministic order
+// ListRoleOperations gives for a single role.
+func (q *Queries) ListAllRoleOperations(ctx context.Context) ([]RoleOperation, error) {
+	rows, err := q.db.Query(ctx, listAllRoleOperations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RoleOperation
+	for rows.Next() {
+		var i RoleOperation
+		if err := rows.Scan(&i.RoleID, &i.Operation); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRoleOperations = `-- name: ListRoleOperations :many
@@ -56,4 +169,75 @@ func (q *Queries) ListRoleOperations(ctx context.Context, roleID pgtype.UUID) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const listRoles = `-- name: ListRoles :many
+SELECT id, name, instructions, builtin, created_at, updated_at FROM roles ORDER BY name
+`
+
+// Every role, built-in and admin-defined, ordered by name for a stable
+// list (loam.admin.v1.RoleService.ListRoles). Unpaginated on purpose: the
+// proto's ListRolesRequest carries no Page (unlike ListRepos), because the
+// role set is operator-authored configuration a handful of rows deep, not
+// unbounded user data.
+func (q *Queries) ListRoles(ctx context.Context) ([]Role, error) {
+	rows, err := q.db.Query(ctx, listRoles)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Role
+	for rows.Next() {
+		var i Role
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Instructions,
+			&i.Builtin,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateRoleInstructions = `-- name: UpdateRoleInstructions :one
+UPDATE roles
+SET instructions = $2, updated_at = now()
+WHERE name = $1
+RETURNING id, name, instructions, builtin, created_at, updated_at
+`
+
+type UpdateRoleInstructionsParams struct {
+	Name         string
+	Instructions string
+}
+
+// Rewrites a role's instruction text (the body
+// loam.v1.MetaService.GetInstructions returns) by name, the natural key
+// every RoleService RPC carries. Applies to built-in roles too: a built-in
+// ships with instructions set to the empty string (0001_init.up.sql), so
+// refusing this here would leave the author/reviewer instruction text permanently empty and
+// make features/roles.feature's "A role's instructions reach its agents"
+// unimplementable for the very roles it names. name itself is not
+// updatable -- RoleService has no rename RPC and UpdateRoleRequest carries
+// one name, which identifies the role rather than renaming it.
+func (q *Queries) UpdateRoleInstructions(ctx context.Context, arg UpdateRoleInstructionsParams) (Role, error) {
+	row := q.db.QueryRow(ctx, updateRoleInstructions, arg.Name, arg.Instructions)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Instructions,
+		&i.Builtin,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

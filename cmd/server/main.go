@@ -94,6 +94,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler/proposal"
 	"github.com/bobcob7/loam/internal/handler/repo"
 	"github.com/bobcob7/loam/internal/handler/repoadmin"
+	"github.com/bobcob7/loam/internal/handler/role"
 	"github.com/bobcob7/loam/internal/handler/search"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
 	"github.com/bobcob7/loam/internal/hooksocket"
@@ -377,6 +378,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool,
 	registerRepoAdminService(router, cfg, pool, ingestPool, hookBinaryPath)
 	registerCredentialService(router, cfg, pool)
 	registerProposalService(router, cfg, pool)
+	registerRoleService(router, cfg, pool)
 	registerGraphService(router, cfg, pool)
 	registerSearchService(router, cfg, pool)
 	return router
@@ -620,6 +622,31 @@ func registerProposalService(router *server.Router, cfg config.Config, pool *pgx
 	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewProposalServiceHandler(
 		proposal.New(workBranches, repos, verdicts, accepter, prCloser, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
+	))
+}
+
+// registerRoleService wires loam.admin.v1.RoleService (loam-ofg.13) over
+// pool: the admin's configuration of what each agent role may do and the
+// instruction text MetaService.GetInstructions returns for it. It takes
+// *rolestore.Store DIRECTLY, not the roleStoreAdapter every /loam.v1.*
+// registration above wraps it in -- the adapter narrows the store to the
+// []handler.Capability read those services need, and this service is the
+// writer of the very rows that read returns.
+//
+// Until this line existed there was no supported way to change a role at
+// all: the two built-ins seeded by migration 0001_init were the entire
+// runtime role set, both with empty instructions, and
+// /loam.admin.v1.RoleService/* 404'd through internal/server's group-level
+// fallback.
+//
+// pool == nil is the only guard here, for the same reason and exercised the
+// same way as registerMetadataServices' own guard.
+func registerRoleService(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	if pool == nil {
+		return
+	}
+	router.RegisterAdmin(adminv1connect.NewRoleServiceHandler(
+		role.New(rolestore.NewStore(pool, cfg.Logger), handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 	))
 }
 
