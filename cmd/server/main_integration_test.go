@@ -101,6 +101,16 @@ func TestMain(m *testing.M) {
 // is ever running at a time.
 func newPostgres(t *testing.T) string {
 	t.Helper()
+	_, dsn := newPostgresContainer(t)
+	return dsn
+}
+
+// newPostgresContainer is newPostgres with the container handle returned
+// alongside the DSN, for the one test that has to STOP Postgres out from
+// under an already-running server (loam-ofg.22's readiness proof). Every
+// other caller wants only the DSN and goes through newPostgres.
+func newPostgresContainer(t *testing.T) (*postgres.PostgresContainer, string) {
+	t.Helper()
 	ctx := context.Background()
 	container, err := postgres.Run(ctx, testdb.PostgresImage,
 		postgres.WithDatabase("loam"),
@@ -114,7 +124,7 @@ func newPostgres(t *testing.T) string {
 	})
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
-	return dsn
+	return container, dsn
 }
 
 // runningServer is one started, listening instance of the compiled binary.
@@ -286,6 +296,153 @@ func TestServer_Healthz_ReachableWithAndWithoutAuthorizationHeader(t *testing.T)
 	assert.Equal(t, http.StatusOK, noAuthStatus)
 	assert.Equal(t, http.StatusOK, garbageAuthStatus)
 	assert.Equal(t, noAuthBody, garbageAuthBody)
+}
+
+// TestServer_Readyz_ReachableWithAndWithoutAuthorizationHeader is
+// /healthz's sibling proof for the OTHER exempt route. It matters
+// separately: /readyz is the endpoint that consults the database, so it is
+// the one a reviewer would most expect to have been quietly tucked behind
+// the admin wrapper, and docs/web-spec.md -> Auth names both, not one.
+func TestServer_Readyz_ReachableWithAndWithoutAuthorizationHeader(t *testing.T) {
+	rs := startServer(t, newPostgres(t))
+	noAuthBody, noAuthStatus := getWithAuthorization(t, rs.addr, "/readyz", "")
+	garbageAuthBody, garbageAuthStatus := getWithAuthorization(t, rs.addr, "/readyz", "Bogus not-a-real-scheme")
+	assert.Equal(t, http.StatusOK, noAuthStatus, "serverLog: %s", rs.serverLog())
+	assert.Equal(t, "ready", noAuthBody)
+	assert.Equal(t, http.StatusOK, garbageAuthStatus)
+	assert.Equal(t, noAuthBody, garbageAuthBody)
+	// A 401 would come with this challenge header; asserting its ABSENCE
+	// distinguishes "the route is exempt" from "the route happens to
+	// answer 200 to anyone", which a future mis-wiring could not.
+	assert.Empty(t, headerOf(t, rs.addr, "/readyz", "WWW-Authenticate"))
+}
+
+// headerOf reads one response header from an unauthenticated GET.
+func headerOf(t *testing.T, addr, path, header string) string {
+	t.Helper()
+	resp, err := newIsolatedHTTPClient(t).Get("http://" + addr + path)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	return resp.Header.Get(header)
+}
+
+// probe issues an unauthenticated GET and returns the status and body
+// without touching *testing.T. require/assert must not be called from the
+// goroutine testify runs an Eventually predicate on, so the polling tests
+// below need a helper that reports failure by return value.
+func probe(addr, path string, client *http.Client) (int, string, error) {
+	resp, err := client.Get("http://" + addr + path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode, string(body), nil
+}
+
+// TestServer_Readyz_ReportsNotReadyWhenPostgresGoesDown is the
+// "reports not-ready when X is down" half of loam-ofg.22, and it is
+// deliberately driven by stopping the REAL Postgres container out from
+// under an already-booted server rather than by a fault injected through
+// any test seam. Startup's own fail-fast cannot produce this state at all
+// -- run() exits before the listener binds if the pool will not connect --
+// so the only way to observe it is to break the dependency AFTER the
+// process is serving, which is exactly the failure mode a readiness probe
+// exists for.
+//
+// It asserts three things, and all three are load-bearing:
+//
+//  1. /readyz answered 200 BEFORE the container stopped. Without this the
+//     test would pass against a /readyz that returns 503 unconditionally.
+//  2. /readyz becomes 503 naming the database check, polled with
+//     require.Eventually rather than sampled once: the pool notices its
+//     backend is gone when it next tries to use it, not at the instant
+//     the container dies, so a single sample is a race (loam-4q2).
+//  3. /healthz is STILL 200 at that same moment. This is the asymmetry
+//     the whole design rests on -- an orchestrator must take this
+//     instance out of rotation, not kill and restart it, because
+//     restarting it would not bring Postgres back. It is also the
+//     regression guard for every integration test and `task demo:*`
+//     target in this repo, all of which poll /healthz as their startup
+//     signal.
+func TestServer_Readyz_ReportsNotReadyWhenPostgresGoesDown(t *testing.T) {
+	container, dsn := newPostgresContainer(t)
+	rs := startServer(t, dsn)
+	client := newIsolatedHTTPClient(t)
+	client.Timeout = 10 * time.Second
+	status, body, err := probe(rs.addr, "/readyz", client)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status, "readiness must be 200 while Postgres is up, or this test proves nothing; body: %s, serverLog: %s", body, rs.serverLog())
+	stopTimeout := 30 * time.Second
+	require.NoError(t, container.Stop(context.Background(), &stopTimeout))
+	observed := &lastObserved{}
+	require.Eventuallyf(t, func() bool {
+		status, body, err := probe(rs.addr, "/readyz", client)
+		if err != nil {
+			observed.set("transport error: " + err.Error())
+			return false
+		}
+		observed.set(strconv.Itoa(status) + " " + body)
+		return status == http.StatusServiceUnavailable && strings.Contains(body, "database unreachable")
+	}, 60*time.Second, 250*time.Millisecond,
+		"with Postgres stopped, /readyz must report 503 and name the database check; last observed %s. serverLog: %s", observed, rs.serverLog())
+	liveBody, liveStatus := getWithAuthorization(t, rs.addr, "/healthz", "")
+	assert.Equal(t, http.StatusOK, liveStatus, "liveness must survive a database outage: restarting this process would not repair Postgres. serverLog: %s", rs.serverLog())
+	assert.Equal(t, "live", liveBody)
+	assert.Contains(t, rs.serverLog(), "readiness check failed",
+		"the operator's log must carry the failure the 503 body deliberately withholds")
+}
+
+// TestServer_Readyz_ReportsNotReadyWhenTheSchemaIsNotCurrent covers the
+// migration half of docs/server-spec.md -> Health, and it does so without
+// stopping anything: golang-migrate's own bookkeeping row is flipped to
+// dirty underneath the running server, which is precisely the state a
+// migration that started and never finished leaves behind.
+//
+// The recovery leg -- restoring the row and watching /readyz return to
+// 200 -- is what proves the check is a live per-request read rather than
+// a verdict latched at startup or cached after the first failure. A test
+// that only drove the failure direction would pass against a handler that
+// went unready permanently on first error.
+func TestServer_Readyz_ReportsNotReadyWhenTheSchemaIsNotCurrent(t *testing.T) {
+	dsn := newPostgres(t)
+	rs := startServer(t, dsn)
+	client := newIsolatedHTTPClient(t)
+	client.Timeout = 10 * time.Second
+	status, body, err := probe(rs.addr, "/readyz", client)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status, "readiness must be 200 against a freshly migrated database; body: %s, serverLog: %s", body, rs.serverLog())
+	setSchemaDirty(t, dsn, true)
+	status, body, err = probe(rs.addr, "/readyz", client)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, status, "a dirty schema must take the instance out of rotation; serverLog: %s", rs.serverLog())
+	assert.Contains(t, body, "migrations not current")
+	_, liveStatus := getWithAuthorization(t, rs.addr, "/healthz", "")
+	assert.Equal(t, http.StatusOK, liveStatus, "a schema problem is not a reason to kill and restart the process")
+	setSchemaDirty(t, dsn, false)
+	status, body, err = probe(rs.addr, "/readyz", client)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status, "readiness must be re-derived per request, so a repaired schema restores it with no restart; body: %s", body)
+	assert.Equal(t, "ready", body)
+}
+
+// setSchemaDirty flips golang-migrate's schema_migrations.dirty flag
+// directly, connecting straight to Postgres rather than through anything
+// in this module -- the question is what the RUNNING SERVER observes in
+// the real table, so the fixture must not share code with the check under
+// test.
+func setSchemaDirty(t *testing.T, dsn string, dirty bool) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer conn.Close()
+	tag, err := conn.Exec(ctx, `UPDATE schema_migrations SET dirty = $1`, dirty)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected(), "golang-migrate keeps exactly one bookkeeping row; this test's premise is wrong if it does not")
 }
 
 // TestServer_Root_ValidAdminAuth_ServesEmbeddedIndex proves the embedded

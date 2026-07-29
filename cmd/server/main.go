@@ -40,21 +40,27 @@
 // returns a live pool or run() has already returned its error before
 // buildRouter is ever reached.
 //
-// The /healthz and /readyz handlers below are placeholders: loam-ofg.22
-// owns their real liveness/readiness logic. They exist so this bead's own
-// claim -- that the health exemption is reachable at the mux level with no
-// Authorization header, the "only such exemption" in docs/server-spec.md
-// -- is checkable against a running binary today, and so a future bead
-// replaces only their handler bodies, not the RegisterUnauthenticated call
-// that makes them unauthenticated. Because Startup now gates the listener
-// behind a real migrate-then-pool-connect (both of which fail fast and
-// exit the process on error), simply reaching either endpoint at all is
-// already a meaningful readiness signal for anything driving this binary
-// (e.g. a Taskfile backgrounding it for a demo): poll GET /readyz until it
-// returns 200 instead of sleeping a guessed number of seconds. ofg.22's
-// follow-up (an ongoing per-request Postgres/migration check) only
-// sharpens that signal for failures occurring *after* startup; it does not
-// change what a caller polling readiness during startup should do today.
+// The /healthz and /readyz handlers are internal/health's (loam-ofg.22),
+// registered by registerHealth below. They replaced the placeholders this
+// comment used to describe, and only the handler bodies changed: the
+// RegisterUnauthenticated calls that make them the "only such exemption"
+// in docs/server-spec.md are the same ones loam-ofg.2 wrote. /healthz is
+// unconditional liveness and /readyz re-checks Postgres reachability plus
+// migration currency on every request -- see internal/health's package
+// doc comment for the full account of what readiness checks, what it
+// deliberately does not, and why the two endpoints are asymmetric.
+//
+// Because Startup gates the listener behind a real
+// migrate-then-pool-connect (both of which fail fast and exit the process
+// on error), simply reaching either endpoint at all is already a
+// meaningful startup signal for anything driving this binary (e.g. a
+// Taskfile backgrounding it for a demo): poll GET /healthz until it
+// returns 200 instead of sleeping a guessed number of seconds. That
+// remains the right poll for STARTUP -- it is the one endpoint that
+// cannot start reporting failure because a dependency degraded, so it
+// never turns a demo or a test harness into a false negative. /readyz is
+// the sharper signal for whether the process can serve correctly RIGHT
+// NOW, which is a different question.
 package main
 
 import (
@@ -96,6 +102,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler/repoadmin"
 	"github.com/bobcob7/loam/internal/handler/search"
 	"github.com/bobcob7/loam/internal/handler/workbranch"
+	"github.com/bobcob7/loam/internal/health"
 	"github.com/bobcob7/loam/internal/hooksocket"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/ingest"
@@ -369,8 +376,7 @@ func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool,
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
 	router := server.New(auth)
 	router.RegisterSPA(loamweb.Dist())
-	router.RegisterUnauthenticated("/healthz", placeholderHealthHandler("live"))
-	router.RegisterUnauthenticated("/readyz", placeholderHealthHandler("ready"))
+	registerHealth(router, cfg, pool)
 	registerMetadataServices(router, cfg, pool)
 	registerWorkBranchService(router, cfg, pool)
 	registerGitService(router, cfg, pool)
@@ -715,13 +721,27 @@ func (a roleStoreAdapter) RoleInstructions(ctx context.Context, role string) (st
 	return r.Instructions, nil
 }
 
-// placeholderHealthHandler stands in for loam-ofg.22's real /healthz and
-// /readyz handlers (liveness, and Postgres/migration readiness
-// respectively).
-func placeholderHealthHandler(status string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(status))
-	})
+// registerHealth wires docs/server-spec.md -> Health's two unauthenticated
+// endpoints (loam-ofg.22). internal/health owns both handler bodies and
+// the reasoning behind them; this function owns only which collaborators
+// they get.
+//
+// /healthz is registered UNCONDITIONALLY, unlike every other register*
+// function's pool-guarded body, and that is the point: liveness takes no
+// collaborator, so there is nothing a nil pool could make it unable to
+// answer. Every integration test in this package and every `task demo:*`
+// target polls this endpoint as its startup signal, so it must exist in
+// every configuration this router can be built in.
+//
+// /readyz needs the live pool for both of its checks -- Pool.Ping and a
+// schema_migrations read over that same pool -- so it takes the same
+// pool == nil guard every other register* function here takes, exercised
+// the same way (buildRouter's own tests, which have no database). run()
+// never passes nil.
+func registerHealth(router *server.Router, cfg config.Config, pool *pgxpool.Pool) {
+	router.RegisterUnauthenticated("/healthz", health.Live())
+	if pool == nil {
+		return
+	}
+	router.RegisterUnauthenticated("/readyz", health.NewReadiness(pool, migrations.NewSchemaCheck(pool), cfg.Logger))
 }
