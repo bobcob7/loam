@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
+import { AppProviders } from "../App";
 import { AppLayout } from "./AppLayout";
 import { AppRoutes } from "./AppRoutes";
 import { proposalDetailPath, repoDetailPath } from "./paths";
@@ -13,15 +14,25 @@ import { proposalDetailPath, repoDetailPath } from "./paths";
  * asserts on what the user ends up looking at, at a real URL.
  */
 
-/** Mounts the shell at `path`, and hands back the recording location hook. */
+/**
+ * Mounts the shell at `path`, and hands back the recording location hook.
+ *
+ * Wrapped in `AppProviders`: Repos (loam-nvb.8) queries `ListRepos` on
+ * mount, and every other screen bead lands the same way, so this table's own
+ * test needs a real `QueryClientProvider`/`TransportProvider` ancestor even
+ * though it never waits on a query settling -- it only asserts on the
+ * synchronous first render.
+ */
 const renderAt = (path: string) => {
   const location = memoryLocation({ path, record: true });
   render(
-    <Router hook={location.hook}>
-      <AppLayout>
-        <AppRoutes />
-      </AppLayout>
-    </Router>,
+    <AppProviders>
+      <Router hook={location.hook}>
+        <AppLayout>
+          <AppRoutes />
+        </AppLayout>
+      </Router>
+    </AppProviders>,
   );
   return location;
 };

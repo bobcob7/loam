@@ -1,0 +1,88 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour
+   or a var() naming a token that does not exist. */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-block-end: var(--space-5);
+}
+
+/* AppLayout.module.css already puts --space-5 below every screen's <h1>;
+   without this the header would carry that margin a second time, since the
+   heading itself -- not this flex row -- is what that global rule targets. */
+.header h1 {
+  margin-block-end: 0;
+}
+
+.syncCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.syncDetail {
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+}
+
+.branchGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.branchGroupLabel {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.branchGroupRequired {
+  margin-inline-start: var(--space-1);
+  color: var(--color-danger-fg);
+}
+
+.branchAddRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.branchAddRow > :first-child {
+  flex: 1;
+}
+
+.branchList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.branchChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-inline: var(--space-2);
+  padding-block: var(--space-1);
+  background-color: var(--color-surface-raised);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+}
+
+.branchChipText {
+  font-family: var(--font-mono);
+}
+
+.branchChipRemove {
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+
+.branchHint {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
