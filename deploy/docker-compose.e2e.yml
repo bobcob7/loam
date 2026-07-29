@@ -1,0 +1,79 @@
+# Layer 3 compose stack (docs/testing-spec.md -> "Layer 3 — End-to-End"):
+# the two REAL infrastructure dependencies the e2e/Playwright suite needs,
+# Postgres/pgvector and a seeded real Forgejo -- never internal/fakeforge,
+# which Layers 1-2 use. Layer 3 exists specifically to prove the SHIPPED
+# artifacts compose, so the fake forge would defeat the point.
+#
+# The third leg docs/testing-spec.md names, "the server binary (embedded
+# SPA)", is deliberately NOT a service here: it is built by `task
+# build:bin` (loam-m6hg fixed it to embed the REAL admin SPA, not the
+# committed placeholder) and run directly on the host by `task test:e2e`
+# (Taskfile.yml) against the two services below over their fixed host
+# ports -- the same real-binary-against-containerized-infra shape
+# demo:m2/demo:m3 already use, so there is no container-to-container
+# networking of the server's own to manage, and the binary under test is
+# byte-for-byte what `task build:bin` produces.
+#
+# Fixed container names (not compose's default `<project>-<service>-1`) so
+# `docker exec loam-e2e-forgejo ...` is stable regardless of which compose
+# implementation runs this file -- Taskfile.yml's test:e2e target works
+# with either the `docker compose` plugin or the standalone
+# `docker-compose` binary (LOAM_COMPOSE_CMD to force one).
+#
+# loam-li0.10 (the E2E golden-path smoke suite) needs this exact same
+# stack per its own bead text; whichever of it and loam-li0.11.1 lands
+# first owns this file and the other reuses it unchanged (noted on both
+# beads).
+#
+# Bring up by hand for manual poking (task test:e2e does this itself, plus
+# seeding -- see Taskfile.yml):
+#   docker compose -p loam-e2e -f deploy/docker-compose.e2e.yml up -d
+# Tear down:
+#   docker compose -p loam-e2e -f deploy/docker-compose.e2e.yml down -v --remove-orphans
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: loam-e2e-postgres
+    environment:
+      POSTGRES_USER: loam
+      POSTGRES_PASSWORD: loam
+      POSTGRES_DB: loam
+    ports:
+      # Host-side polling in Taskfile.yml's test:e2e is what this target
+      # actually waits on, not `depends_on: condition: service_healthy` --
+      # see that target's own note on why (compose-implementation
+      # portability). This healthcheck is still real and left in for
+      # anyone bringing the stack up by hand with `docker compose ps`.
+      - "127.0.0.1:${LOAM_E2E_PG_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loam"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  forgejo:
+    # Pinned to the exact version internal/forgesuite's real-Forgejo
+    # Provider contract leg already verifies against
+    # (forgesuite/forgejo_integration_test.go's forgejoImage) -- an exact
+    # tag this repo makes empirical claims about, never a floating one.
+    image: codeberg.org/forgejo/forgejo:9.0.3
+    container_name: loam-e2e-forgejo
+    environment:
+      # Same INSTALL_LOCK/sqlite3/OFFLINE_MODE/DISABLE_REGISTRATION shape
+      # internal/forgesuite's newForgejoHarness already verified works
+      # against this exact image -- see forgejo_integration_test.go.
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__database__PATH: /data/gitea/forgejo.db
+      FORGEJO__server__OFFLINE_MODE: "true"
+      FORGEJO__server__ROOT_URL: "http://127.0.0.1:${LOAM_E2E_FORGEJO_PORT:-13000}/"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__log__LEVEL: Warn
+    ports:
+      - "127.0.0.1:${LOAM_E2E_FORGEJO_PORT:-13000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/v1/version"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
