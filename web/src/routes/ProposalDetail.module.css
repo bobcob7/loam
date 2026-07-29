@@ -1,0 +1,96 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour
+   or a var() naming a token that does not exist. */
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-block-end: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.metaItem {
+  color: var(--color-text-muted);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+}
+
+.section {
+  margin-block-start: var(--space-6);
+}
+
+.section h2 {
+  margin-block-end: var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+/* A unified diff is preformatted, identifier-dense text -- the mono face is
+   functional here (src/styles/tokens.css -> Typography), not decorative. */
+.diff {
+  overflow-x: auto;
+  padding: var(--space-4);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.threadList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 0;
+  list-style: none;
+}
+
+.thread {
+  padding: var(--space-3);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.threadHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block-end: var(--space-2);
+}
+
+.commentList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.commentAuthor {
+  font-weight: var(--weight-medium);
+}
+
+.acceptedPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  margin-block-end: var(--space-4);
+  background-color: var(--color-surface-raised);
+  border-radius: var(--radius-md);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-3);
+}
