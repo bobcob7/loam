@@ -1,0 +1,61 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.label {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.required {
+  margin-inline-start: var(--space-1);
+  color: var(--color-danger-fg);
+}
+
+/* --control-height is what keeps this input on the same baseline as a Button
+   beside it in a filter bar. --color-border-strong (3:1) rather than
+   --color-border, because this is the boundary of an interactive control. */
+.control {
+  block-size: var(--control-height);
+  padding-inline: var(--space-2);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--text-md);
+  transition: border-color var(--transition-fast);
+}
+
+/* Placeholders are styled once globally in reset.css (--color-text-faint), so
+   there is no ::placeholder rule here. */
+
+.textarea {
+  block-size: auto;
+  min-block-size: calc(var(--control-height) * 3);
+  padding-block: var(--space-2);
+  line-height: var(--leading-normal);
+}
+
+/* The error state is carried by the same attribute the assistive technology
+   reads, so the two cannot drift apart. */
+.control[aria-invalid="true"] {
+  border-color: var(--color-danger-fg);
+}
+
+.hint {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+}
+
+/* Colour is not the only signal: this text is the message itself, and the
+   control it describes also carries aria-invalid. */
+.error {
+  color: var(--color-danger-fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+}

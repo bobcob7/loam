@@ -1,0 +1,105 @@
+/* No :focus-visible rule here on purpose: reset.css declares one ring for the
+   whole app, so a component that adds its own only risks disagreeing with it. */
+
+.root {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  block-size: var(--control-height);
+  padding-inline: var(--space-3);
+  /* Every variant carries a border box so the three stay the same size; the
+     filled variant just makes its border transparent. */
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.sm {
+  block-size: var(--control-height-sm);
+  padding-inline: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* The filled action. It has no border, so its fill is its own boundary --
+   --color-accent clears 3:1 against all four surfaces for exactly that
+   reason, and --color-text-on-accent clears 4.5:1 on both accent states. */
+.primary {
+  background-color: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+
+.primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-accent-hover);
+}
+
+/* --color-border-strong, not --color-border: this is the visual boundary of
+   an interactive control, which SC 1.4.11 holds to 3:1. */
+.secondary {
+  background-color: var(--color-surface);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.secondary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+}
+
+/* Outlined rather than filled: there is no solid danger fill in the palette
+   (--color-danger-bg is a tint meant to sit under --color-danger-fg text, and
+   nothing in the palette is a legible foreground on it at button weight), and
+   an outlined destructive action reads as the deliberate one anyway. The
+   border and the label are both --color-danger-fg, which clears 4.5:1 on
+   every surface and so clears 3:1 as a boundary. Hover fills with the tint,
+   where the same label measures 6.49:1. */
+.danger {
+  background-color: transparent;
+  border-color: var(--color-danger-fg);
+  color: var(--color-danger-fg);
+}
+
+.danger:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-danger-bg);
+}
+
+/* One disabled look for all three variants. It uses --color-text-faint rather
+   than an opacity fade, which would silently drag whatever is underneath
+   below its verified contrast; faint still clears 4.5:1 on every surface. */
+.root:disabled {
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-faint);
+  cursor: not-allowed;
+}
+
+/* Pending is a live control, not a dead one: it keeps its variant colours and
+   only changes the cursor, so the button the user just pressed does not
+   appear to vanish. */
+.root[aria-disabled="true"] {
+  cursor: progress;
+}
+
+.pending::after {
+  content: "";
+  inline-size: 0.75em;
+  block-size: 0.75em;
+  border: 2px solid currentColor;
+  border-block-start-color: transparent;
+  border-radius: var(--radius-pill);
+  /* reset.css collapses animation duration under prefers-reduced-motion, so
+     this stops spinning without a media query here. */
+  animation: spin 600ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}

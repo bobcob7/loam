@@ -1,0 +1,16 @@
+/* One vertical rhythm for every form in the app, so a screen never has to
+   pick a gap. --space-4 between fields is the stack step from tokens.css. */
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Trailing actions, end-aligned. --space-2 between buttons keeps a Cancel
+   next to a Save without them reading as one control. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
