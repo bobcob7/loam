@@ -1,0 +1,19 @@
+/* One vertical rhythm for the screen's sections (heading, filters, banners,
+   table, pager) -- --space-5 is tokens.css's "section separation" step,
+   distinct from the tighter --space-4 Form already uses between its own
+   fields. */
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The Repo/Status filter pair, side by side. flex-end bottom-aligns the two
+   Field controls even though only one of them carries a hint line, so the
+   inputs stay level with each other rather than the labels. */
+.filterRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-4);
+}
