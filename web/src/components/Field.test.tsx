@@ -1,4 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { useRef } from "react";
+import { Dialog } from "./Dialog";
 import { Field } from "./Field";
 
 // Every query here goes through the accessibility tree on purpose.
@@ -79,6 +82,29 @@ describe("Field", () => {
       render(<Field label="Upstream URL" required />);
       // The accessible name is the label text alone; the "*" is decorative.
       expect(screen.getByRole("textbox", { name: "Upstream URL" })).toBeInTheDocument();
+    });
+  });
+
+  describe("ref", () => {
+    // Regression for loam-cucq: Field must forward a ref to the control it
+    // renders (not merely accept the prop) so a consumer can hand that ref
+    // straight to Dialog's initialFocusRef -- the only way, per Dialog's own
+    // effect-ordering note, to land initial focus on a Field-rendered input
+    // instead of the dialog panel itself. A type-only ref (accepted but
+    // never attached to the underlying <input>) would pass a type check and
+    // still fail this: the assertion is about document.activeElement, not
+    // about the ref's declared type.
+    it("receives the ref that Dialog uses to place initial focus", () => {
+      function Harness(): ReactElement {
+        const initialFocusRef = useRef<HTMLInputElement>(null);
+        return (
+          <Dialog open title="Enroll a repo" onClose={() => {}} initialFocusRef={initialFocusRef}>
+            <Field label="Upstream URL" ref={initialFocusRef} />
+          </Dialog>
+        );
+      }
+      render(<Harness />);
+      expect(screen.getByLabelText("Upstream URL")).toBe(document.activeElement);
     });
   });
 

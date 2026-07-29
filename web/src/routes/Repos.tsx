@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@connectrpc/connect-query";
 import type { ChangeEvent, KeyboardEvent, ReactElement } from "react";
-import { useCallback, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Link } from "wouter";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
@@ -158,24 +158,12 @@ function EnrollDialog({ onClose }: EnrollDialogProps): ReactElement {
   const [probeFailed, setProbeFailed] = useState(false);
   const branchGroupLabelId = useId();
   const branchDatalistId = useId();
-  const initialFocusRef = useRef<HTMLElement | null>(null);
+  const initialFocusRef = useRef<HTMLInputElement>(null);
 
   const probeMutation = useMutation(probeRepo);
   const enrollMutation = useMutationInvalidating(enrollRepo, [{ schema: listRepos }], {
     onSuccess: onClose,
   });
-
-  // Field (loam-nvb.5) does not forward a ref to the control it renders, so
-  // there is no way to hand Dialog's initialFocusRef the actual <input> by
-  // passing it through Field's props. This wrapper queries for it instead,
-  // via a ref callback (which fires during commit, before Dialog's own
-  // focus effect runs) rather than an effect in this component (which would
-  // run after -- see Dialog.tsx's own note on effect ordering).
-  const attachInitialFocus = useCallback((node: HTMLDivElement | null): void => {
-    if (node === null) return;
-    const control = node.querySelector<HTMLElement>("input, select, textarea");
-    if (control !== null) initialFocusRef.current = control;
-  }, []);
 
   const handleProbe = (): void => {
     const url = upstreamUrl.trim();
@@ -252,18 +240,17 @@ function EnrollDialog({ onClose }: EnrollDialogProps): ReactElement {
         <ErrorBanner title="Could not enroll repo" message={generalErrorMessage} />
       )}
       <Form aria-label="Enroll a repo" onSubmit={handleSubmit}>
-        <div ref={attachInitialFocus}>
-          <Field
-            label="Upstream URL"
-            required
-            placeholder="https://forge.example/acme/widgets"
-            value={upstreamUrl}
-            error={upstreamUrlError}
-            hint="Probed automatically when you leave this field, to suggest branches."
-            onChange={(event: ChangeEvent<HTMLInputElement>) => setUpstreamUrl(event.target.value)}
-            onBlur={handleProbe}
-          />
-        </div>
+        <Field
+          label="Upstream URL"
+          required
+          ref={initialFocusRef}
+          placeholder="https://forge.example/acme/widgets"
+          value={upstreamUrl}
+          error={upstreamUrlError}
+          hint="Probed automatically when you leave this field, to suggest branches."
+          onChange={(event: ChangeEvent<HTMLInputElement>) => setUpstreamUrl(event.target.value)}
+          onBlur={handleProbe}
+        />
         <div className={styles.branchGroup}>
           <span id={branchGroupLabelId} className={styles.branchGroupLabel}>
             Target branches

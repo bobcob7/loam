@@ -2,6 +2,7 @@ import { useId } from "react";
 import type {
   InputHTMLAttributes,
   ReactElement,
+  Ref,
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from "react";
@@ -20,11 +21,11 @@ interface FieldOwnProps {
 type Controlled<T> = Omit<T, "aria-invalid" | "aria-describedby" | "className">;
 
 export type FieldProps =
-  | ({ readonly as?: "input" } & FieldOwnProps &
+  | ({ readonly as?: "input"; readonly ref?: Ref<HTMLInputElement> } & FieldOwnProps &
       Controlled<InputHTMLAttributes<HTMLInputElement>>)
-  | ({ readonly as: "textarea" } & FieldOwnProps &
+  | ({ readonly as: "textarea"; readonly ref?: Ref<HTMLTextAreaElement> } & FieldOwnProps &
       Controlled<TextareaHTMLAttributes<HTMLTextAreaElement>>)
-  | ({ readonly as: "select" } & FieldOwnProps &
+  | ({ readonly as: "select"; readonly ref?: Ref<HTMLSelectElement> } & FieldOwnProps &
       Controlled<SelectHTMLAttributes<HTMLSelectElement>>);
 
 /**
@@ -43,6 +44,12 @@ export type FieldProps =
  *
  * The `id` is generated with `useId` unless one is supplied, so two Fields
  * with the same label on one screen never collide.
+ *
+ * `ref` forwards to the rendered control itself (the `<input>`, `<textarea>`
+ * or `<select>`, not the wrapping `<div>`), typed per `as` variant. This is a
+ * plain prop, not `forwardRef` — React 19 passes `ref` through to function
+ * components without it. It exists so a caller can hand the control straight
+ * to `Dialog`'s `initialFocusRef`, which needs the actual focusable element.
  *
  * The error is announced through `aria-invalid` + `aria-describedby`, not a
  * live region. A form that fails validation moves focus to the first invalid
@@ -73,16 +80,18 @@ export function Field(props: FieldProps): ReactElement {
   const control = ((): ReactElement => {
     switch (props.as) {
       case "textarea": {
-        const { as: _as, label: _label, hint: _hint, error: _error, ...rest } = props;
-        return <textarea {...rest} {...shared} className={controlClass(styles.textarea)} />;
+        const { as: _as, label: _label, hint: _hint, error: _error, ref, ...rest } = props;
+        return (
+          <textarea {...rest} {...shared} ref={ref} className={controlClass(styles.textarea)} />
+        );
       }
       case "select": {
-        const { as: _as, label: _label, hint: _hint, error: _error, ...rest } = props;
-        return <select {...rest} {...shared} className={controlClass()} />;
+        const { as: _as, label: _label, hint: _hint, error: _error, ref, ...rest } = props;
+        return <select {...rest} {...shared} ref={ref} className={controlClass()} />;
       }
       default: {
-        const { as: _as, label: _label, hint: _hint, error: _error, ...rest } = props;
-        return <input {...rest} {...shared} className={controlClass()} />;
+        const { as: _as, label: _label, hint: _hint, error: _error, ref, ...rest } = props;
+        return <input {...rest} {...shared} ref={ref} className={controlClass()} />;
       }
     }
   })();

@@ -114,7 +114,8 @@ still receive the identifier in its wire form (`web/src/routes/paths.ts`).
   - Queries: `WorkBranchService.GetWorkBranch` + `GetWorkBranchDiff` + `ListComments` +
     `ListVerdicts` (admin superuser on `loam.v1`).
   - Actions: `ProposalService.AcceptProposal`, `ProposalService.CloseWorkBranch`,
-    `WorkBranchService.RequestReview` (send back for re-review, with a comment).
+    `WorkBranchService.RequestReview` (send back for re-review; no comment field —
+    feedback lives in the work branch's threads).
 - **`/jobs` → Jobs.** Ingest activity across repos.
   - Queries: `RepoAdminService.ListIngestJobs` (paginated; filter by repo/status).
   - Actions: `RepoAdminService.ReindexRepo` (force a full rebuild).

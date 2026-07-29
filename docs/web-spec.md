@@ -158,7 +158,7 @@ defaults:
 ### ProposalService
 Only the genuinely admin-exclusive actions on work branches. Everything shared — viewing
 (`GetWorkBranch`), diff (`GetWorkBranchDiff`), comments (`ListComments`), and sending a
-branch back (`RequestReview`, with a comment) — is the CLI's `WorkBranchService` in
+branch back (`RequestReview`) — is the CLI's `WorkBranchService` in
 `loam.v1`, which the admin reaches as a superuser. Admin protos reuse `WorkBranch`, `Page`,
 and `PageInfo` from `loam.v1` (they import `loam/v1/common.proto`).
 
