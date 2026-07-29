@@ -11,12 +11,44 @@ import (
 	"github.com/stretchr/testify/require"
 
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
 func removeReq(name string) *connect.Request[adminv1.RemoveRepoRequest] {
 	return connect.NewRequest(&adminv1.RemoveRepoRequest{Repo: name})
+}
+
+// adminCtx is the context RemoveRepo sees in production: every request on
+// the /loam.admin.v1.* path group has already passed through
+// httpauth.Auth.AdminOnly, which marks the context via httpauth.WithAdmin
+// before any handler runs. RemoveRepo re-checks that flag itself
+// (requireAdmin, remove.go), so every test of its real behavior must
+// supply it -- TestRemoveRepo_NonAdmin_PermissionDenied is the one that
+// deliberately does not.
+func adminCtx(t *testing.T) context.Context {
+	t.Helper()
+	return httpauth.WithAdmin(t.Context())
+}
+
+// TestRemoveRepo_NonAdmin_PermissionDenied proves RemoveRepo's own admin
+// re-check is real and is the FIRST thing it does: a context that never
+// passed httpauth.Auth.AdminOnly gets CodePermissionDenied, and no store
+// is touched at all -- not the name resolution, not the work-branch guard,
+// and certainly not the deleter.
+func TestRemoveRepo_NonAdmin_PermissionDenied(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	h := d.handler(t, "/data")
+	_, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+	require.Error(t, err)
+	var connErr *connect.Error
+	require.ErrorAs(t, err, &connErr)
+	assert.Equal(t, connect.CodePermissionDenied, connErr.Code())
+	assert.Empty(t, d.store.GetRepoByNameCalls())
+	assert.Empty(t, d.workBranch.ListCalls())
+	assert.Empty(t, d.deleter.DeleteRepoCalls(), "a non-admin caller must never reach the destructive delete path")
 }
 
 // TestRemoveRepo_NoWorkBranches_DeletesAndSucceeds is the happy path: no
@@ -26,7 +58,7 @@ func TestRemoveRepo_NoWorkBranches_DeletesAndSucceeds(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
 	h := d.handler(t, "/data")
-	resp, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+	resp, err := h.RemoveRepo(adminCtx(t), removeReq("acme/widgets"))
 	require.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Len(t, d.deleter.DeleteRepoCalls(), 1)
@@ -48,7 +80,7 @@ func TestRemoveRepo_NonTerminalWorkBranch_FailedPreconditionWithDetail(t *testin
 		}, 1, nil
 	}
 	h := d.handler(t, "/data")
-	_, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+	_, err := h.RemoveRepo(adminCtx(t), removeReq("acme/widgets"))
 	require.Error(t, err)
 	var connErr *connect.Error
 	require.ErrorAs(t, err, &connErr)
@@ -77,7 +109,7 @@ func TestRemoveRepo_OnlyTerminalWorkBranches_NotBlocked(t *testing.T) {
 		}, 2, nil
 	}
 	h := d.handler(t, "/data")
-	_, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+	_, err := h.RemoveRepo(adminCtx(t), removeReq("acme/widgets"))
 	require.NoError(t, err)
 	assert.Len(t, d.deleter.DeleteRepoCalls(), 1)
 }
@@ -94,7 +126,7 @@ func TestRemoveRepo_EveryNonTerminalStateBlocks(t *testing.T) {
 				return []workbranchstore.WorkBranch{{Name: "wb-x", State: state}}, 1, nil
 			}
 			h := d.handler(t, "/data")
-			_, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+			_, err := h.RemoveRepo(adminCtx(t), removeReq("acme/widgets"))
 			require.Error(t, err)
 			assert.Empty(t, d.deleter.DeleteRepoCalls())
 		})
@@ -110,7 +142,7 @@ func TestRemoveRepo_UnenrolledRepo_NotFound(t *testing.T) {
 		return reposstore.Repo{}, reposstore.ErrNotFound
 	}
 	h := d.handler(t, "/data")
-	_, err := h.RemoveRepo(t.Context(), removeReq("acme/ghost"))
+	_, err := h.RemoveRepo(adminCtx(t), removeReq("acme/ghost"))
 	require.Error(t, err)
 	var connErr *connect.Error
 	require.ErrorAs(t, err, &connErr)
@@ -125,7 +157,7 @@ func TestRemoveRepo_EmptyRepo_InvalidArgument(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
 	h := d.handler(t, "/data")
-	_, err := h.RemoveRepo(t.Context(), removeReq(""))
+	_, err := h.RemoveRepo(adminCtx(t), removeReq(""))
 	require.Error(t, err)
 	var connErr *connect.Error
 	require.ErrorAs(t, err, &connErr)
@@ -133,20 +165,20 @@ func TestRemoveRepo_EmptyRepo_InvalidArgument(t *testing.T) {
 	assert.Empty(t, d.store.GetRepoByNameCalls())
 }
 
-// TestRemoveRepo_DeleteRepoNotImplemented_MapsToInternalAndLogs proves
-// cmd/server/main.go's notImplementedRepoDeleter stand-in (wired until
-// loam-cwb lands a real cross-table delete) surfaces as a real, logged
-// error -- never a silent success -- when the guard clears but no repo
-// row can actually be dropped yet.
-func TestRemoveRepo_DeleteRepoNotImplemented_MapsToInternalAndLogs(t *testing.T) {
+// TestRemoveRepo_DeleterFails_MapsToInternalAndLogs proves a failure in
+// the delete path itself (internal/reporemove.Remover in production --
+// e.g. its mirror could not be moved aside, so the metadata is gone but a
+// directory needs removing by hand) surfaces as a real, logged error
+// carrying that message, never a silent success.
+func TestRemoveRepo_DeleterFails_MapsToInternalAndLogs(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
-	wantErr := "repo delete path not implemented (loam-cwb)"
+	wantErr := "metadata is deleted but its mirror could not be moved aside"
 	d.deleter.DeleteRepoFunc = func(_ context.Context, _ uuid.UUID) error {
 		return errors.New(wantErr)
 	}
 	h := d.handler(t, "/data")
-	_, err := h.RemoveRepo(t.Context(), removeReq("acme/widgets"))
+	_, err := h.RemoveRepo(adminCtx(t), removeReq("acme/widgets"))
 	require.Error(t, err)
 	var connErr *connect.Error
 	require.ErrorAs(t, err, &connErr)

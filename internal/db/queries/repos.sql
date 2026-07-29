@@ -32,6 +32,37 @@ SELECT count(*) FROM repos;
 -- caller rendering a bounded page for a human.
 SELECT name FROM repos ORDER BY name;
 
+-- name: DeleteRepo :one
+-- Unenrollment (loam-cwb; RepoAdminService.RemoveRepo, docs/web-spec.md:
+-- "drop the mirror, the derived indexes, and the repo's metadata (work
+-- branches, rounds, verdicts, threads -- unenrollment removes history;
+-- re-enrolling starts fresh). Queued/running ingest jobs are deleted.").
+--
+-- This ONE statement is the whole database half of that contract: every
+-- table that holds repo-scoped data reaches repos.id through a chain of
+-- ON DELETE CASCADE foreign keys, so Postgres removes all of them in this
+-- statement's own transaction, atomically. Directly:
+-- repo_target_branches, work_branches, ingest_jobs (0001_init.up.sql);
+-- symbols, symbol_references, graph_edges, chunks (0002_code_intel.up.sql,
+-- chunks carrying the pgvector embeddings). Transitively: review_rounds,
+-- threads, comments (via work_branches), verdicts (via review_rounds), and
+-- symbol_history (via symbols). Nothing enumerates those tables in Go --
+-- adding a new repo-scoped table with the same FK gets swept up here for
+-- free, and one added WITHOUT it fails this DELETE loudly on a foreign-key
+-- violation rather than silently orphaning rows.
+--
+-- credentials is deliberately NOT in that set: it is keyed by forge HOST
+-- (credentials_host_key UNIQUE (host)) and shared by every repo on that
+-- host, so it has no repos FK and unenrolling one repo must not revoke the
+-- token its siblings still use.
+--
+-- RETURNING * rather than :execrows: the caller needs the deleted row's
+-- name to derive the bare mirror's on-disk path (internal/mirrorpath.Dir)
+-- AFTER the row is gone, and reading it back out of the same statement
+-- avoids both a second round trip and the window between a separate SELECT
+-- and this DELETE. A no-rows result is the store's ErrNotFound signal.
+DELETE FROM repos WHERE id = $1 RETURNING *;
+
 -- name: UpdateRepo :one
 -- Updates the enrollment-config fields an admin can change post-enroll
 -- (RepoAdminService.SetTargetBranches's indexed_branch change; a future

@@ -59,7 +59,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -69,7 +68,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bobcob7/loam/internal/catchup"
@@ -107,6 +105,7 @@ import (
 	"github.com/bobcob7/loam/internal/ingest/vectors"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/parser"
+	"github.com/bobcob7/loam/internal/reporemove"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
@@ -149,29 +148,6 @@ func buildIngestOrchestrator(cfg config.Config, pool *pgxpool.Pool, repoStore *r
 	chunk := chunker.NewChunker(parsers, cfg.Logger)
 	indexer := vectors.New(embedder, cfg.Logger)
 	return orchestrator.New(cfg.Logger, cfg.DataDir, pool, repoStore, extractor, chunk, indexer, embedder), extractor.Close, nil
-}
-
-// errRepoDeleteNotImplemented is returned by notImplementedRepoDeleter in
-// place of loam-cwb's real cross-table repos-row delete path (a separate,
-// still-open bead: "no store can delete a repos row today"). See
-// internal/handler/repoadmin's RemoveRepo doc comment for the guard-vs-
-// delete split this bead's own scope draws -- the guard (enumerate
-// blocking non-terminal work branches, typed RemovalBlocked detail) is
-// wired below and genuinely enforced; only the final delete step fails
-// loudly until loam-cwb lands.
-var errRepoDeleteNotImplemented = errors.New("repo delete path not implemented (loam-cwb)")
-
-// notImplementedRepoDeleter stands in for loam-cwb's real repos-row
-// delete path, wired here instead of leaving RemoveRepo unregistered so
-// its guard (the half loam-ofg.12 owns) is genuinely reachable and
-// enforced. The same "loud failure over silent wrong behavior" choice
-// this file already makes for buildIngestOrchestrator, which fails
-// startup outright rather than wiring a stand-in pipeline.
-type notImplementedRepoDeleter struct{}
-
-// DeleteRepo implements internal/handler/repoadmin's repoDeleter.
-func (notImplementedRepoDeleter) DeleteRepo(_ context.Context, _ uuid.UUID) error {
-	return errRepoDeleteNotImplemented
 }
 
 func main() {
@@ -516,9 +492,11 @@ func bindHookBinary(hookBinaryPath string) func(context.Context, string) error {
 // entire /loam.admin.v1.* path group is already wrapped in
 // httpauth.Auth.AdminOnly before any request reaches a handler
 // (docs/web-spec.md -> Auth), so there is no per-RPC capability gate to
-// add on top of it. RemoveRepo's actual cross-table delete is wired to
-// notImplementedRepoDeleter until loam-cwb lands a real one; its guard
-// (enumerating blocking non-terminal work branches) is fully real.
+// add on top of it. RemoveRepo's actual cross-table delete is a real
+// reporemove.Remover (loam-cwb) over the same repos store and the same
+// cfg.DataDir the enrollment clone writes its mirror under, so both halves
+// of that RPC -- the guard enumerating blocking non-terminal work branches
+// and the delete itself -- are live here.
 //
 // pool == nil or ingestPool == nil is the only guard here, for the same
 // reason and exercised the same way as registerMetadataServices' own
@@ -549,7 +527,7 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	checker := repoadmin.ForgeChecker{HTTPClient: httpClient, Logger: cfg.Logger}
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
-		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, notImplementedRepoDeleter{}, errorMapper, cfg.Logger),
+		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, reporemove.New(cfg.DataDir, repos, cfg.Logger), errorMapper, cfg.Logger),
 	))
 }
 
