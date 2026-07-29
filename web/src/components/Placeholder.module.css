@@ -1,17 +1,21 @@
-/* Scaffold-only styling. The real design tokens (dark theme, spacing, colour)
-   arrive with the styling foundation in loam-nvb.4; this file exists so the
-   CSS Modules pipeline is proven end to end -- Vite build and Vitest render
-   -- from the first commit. */
+/* The convention, demonstrated: one ComponentName.module.css beside its
+   ComponentName.tsx, built entirely from the tokens in src/styles/tokens.css
+   -- no raw colours, no magic pixel values. src/styles/tokens.test.ts
+   enforces both of those over every *.module.css under src/, so this file is
+   also the fixture proving that check is not passing vacuously. */
 
 .root {
   display: grid;
   place-items: center;
+  gap: var(--space-3);
   min-block-size: 100vh;
-  font-family: system-ui, sans-serif;
+  padding: var(--space-6);
 }
 
 .title {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 600;
+  color: var(--color-text);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
 }

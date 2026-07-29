@@ -1,0 +1,185 @@
+/**
+ * Design tokens for the Loam admin SPA.
+ *
+ * THEME MECHANISM: one theme, declared unconditionally on `:root`. There is
+ * no `prefers-color-scheme` fork, no `[data-theme]` attribute and no toggle,
+ * because docs/web-frontend-spec.md -> Conventions says "Dark theme only --
+ * a single theme, no light mode or toggle". The one theme-ish declaration
+ * here is `color-scheme: dark`, which is not a second theme: it tells the
+ * user agent to render the things CSS cannot reach -- scrollbars, the canvas
+ * behind the body, native form-control chrome, the date/colour pickers -- in
+ * their dark form. Without it a dark page gets light scrollbars and white
+ * `<select>` popups. src/styles/tokens.test.ts enforces the absence of a
+ * light fork.
+ *
+ * HOW TO USE THESE: never write a raw colour or a magic pixel value in a
+ * component's `.module.css`. Reach for a token; if none fits, add one here
+ * (and re-run the tests -- the contrast table in tokens.test.ts is derived
+ * from this file, so a new or edited colour is checked, not trusted).
+ * tokens.test.ts also fails the build on a hard-coded colour in any
+ * `*.module.css`, so this is enforced rather than requested.
+ *
+ * CONTRAST: every foreground/background pair a component is expected to
+ * form is asserted against WCAG 2.1 in src/styles/tokens.test.ts -- 4.5:1
+ * for text (SC 1.4.3; the base font size is 14px, so nothing here qualifies
+ * for the relaxed "large text" threshold) and 3:1 for control boundaries
+ * and focus indicators (SC 1.4.11). The values below were chosen by running
+ * that check, not by eye.
+ */
+
+:root {
+  /* Ask the UA for dark scrollbars, form controls and canvas. Not a theme
+     switch -- there is only ever one theme. */
+  color-scheme: dark;
+
+  /* ---- Colour: surfaces -------------------------------------------------
+     A three-step elevation ramp. `bg` is the page; `surface` is a panel,
+     card or table body resting on it; `surface-raised` is something floating
+     above both (dialog, menu, popover) and is also the neutral status tint.
+     `surface-hover` is the row/menu-item hover fill -- deliberately between
+     `surface` and `surface-raised` so a hovered row never reads as elevated.
+     Every text token below is legible on all four. */
+  --color-bg: #0d1117;
+  --color-surface: #151b23;
+  --color-surface-raised: #1d242e;
+  --color-surface-hover: #1a212a;
+
+  /* `border` is for decorative separation only -- table rules, panel edges,
+     hairlines between list items. It is intentionally low-contrast and is
+     NOT held to 3:1. `border-strong` is the token for the visible boundary
+     of an interactive control (text input, select, secondary button); WCAG
+     SC 1.4.11 requires 3:1 there, which is why it is noticeably lighter than
+     it "looks like it wants to be". Do not swap one for the other. */
+  --color-border: #2a323d;
+  --color-border-strong: #6b7785;
+
+  /* ---- Colour: text -----------------------------------------------------
+     `text` is body copy and table cells. `muted` is secondary matter --
+     column headers, field labels, helper text. `faint` is the quietest tier:
+     placeholders, timestamps, disabled labels. All three clear 4.5:1 on all
+     four surfaces, so `faint` stays safe even though WCAG exempts disabled
+     controls -- there is no tier here that a screen author can misuse. */
+  --color-text: #e8eef5;
+  --color-text-muted: #a3b1c2;
+  --color-text-faint: #8b99ab;
+  /* Foreground for anything filled with --color-accent(-hover). */
+  --color-text-on-accent: #ffffff;
+
+  /* ---- Colour: interaction ----------------------------------------------
+     `accent` fills the primary action and marks the active nav item.
+     `accent-hover` is lighter, and both hold >=4.5:1 against
+     --color-text-on-accent, so a filled button stays legible in both states;
+     both also hold >=3:1 against every surface, so the button's own edge is
+     discernible without a border. `accent-muted` is the low-chroma fill for
+     a selected row or an active tab, and takes --color-text. */
+  --color-accent: #2a67dd;
+  --color-accent-hover: #2f6feb;
+  --color-accent-muted: #16305c;
+  /* The :focus-visible ring. reset.css applies it globally, so components do
+     not need to opt in; override only to reposition it. */
+  --color-focus: #589bff;
+  /* Scrim behind a modal dialog. */
+  --color-overlay: rgb(1 4 9 / 0.72);
+
+  /* ---- Colour: status ---------------------------------------------------
+     Five intents, each a `-fg`/`-bg` pair, so a status pill can be written
+     as a single interpolation: `var(--color-{intent}-fg)` on
+     `var(--color-{intent}-bg)`. Every `-fg` clears 4.5:1 both on its own
+     `-bg` and on all four surfaces, so the same token works as a pill, as
+     bare coloured text in a dense table cell, and as an icon.
+
+     The intents map onto the schema's enums (proto/):
+       neutral  SYNC_STATE_IDLE, INGEST_STATUS_QUEUED,
+                WORK_BRANCH_STATE_DRAFT/CLOSED, VERDICT_OUTCOME_NEUTRAL,
+                and stale verdicts
+       info     SYNC_STATE_SYNCING, INGEST_STATUS_RUNNING,
+                WORK_BRANCH_STATE_REVIEWABLE
+       success  INGEST_STATUS_SUCCEEDED, WORK_BRANCH_STATE_COMPLETE,
+                VERDICT_OUTCOME_APPROVE
+       warning  WORK_BRANCH_STATE_REVIEWED (awaiting the admin), and any
+                needs-attention state that is not an error
+       danger   SYNC_STATE_ERROR, INGEST_STATUS_FAILED,
+                VERDICT_OUTCOME_DISAPPROVE
+     Colour is never the only signal -- pair it with the status word. */
+  --color-neutral-fg: #a3b1c2;
+  --color-neutral-bg: #1d242e;
+  --color-info-fg: #79c0ff;
+  --color-info-bg: #132b48;
+  --color-success-fg: #56d364;
+  --color-success-bg: #102f1a;
+  --color-warning-fg: #e3b341;
+  --color-warning-bg: #3a2a10;
+  --color-danger-fg: #ff8a80;
+  --color-danger-bg: #421c1f;
+
+  /* ---- Spacing ----------------------------------------------------------
+     One 4px-based ramp, used for margin, padding and gap alike. Numeric
+     rather than t-shirt-sized so the steps stay orderable and extensible.
+     Dense-table padding is 1/2; component internals 2/3; stack gaps 4/5;
+     section separation 6/7. */
+  --space-1: 0.25rem; /*  4px */
+  --space-2: 0.5rem; /*   8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /*   16px */
+  --space-5: 1.5rem; /* 24px */
+  --space-6: 2rem; /*   32px */
+  --space-7: 3rem; /*   48px */
+
+  /* ---- Radius -----------------------------------------------------------
+     sm: pills, badges, tags. md: buttons, inputs, table wrappers.
+     lg: dialogs and panels. pill: fully-rounded ends. */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* ---- Typography -------------------------------------------------------
+     `mono` is load-bearing here, not decoration: repo names, branch names,
+     commit SHAs, file paths and the CopyField contents are all identifiers
+     where character disambiguation matters. */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* 14px base: an admin console packing wide tables, not a marketing page. */
+  --text-xs: 0.75rem; /*    12px -- badges, table meta */
+  --text-sm: 0.8125rem; /* 13px -- dense cells, labels */
+  --text-md: 0.875rem; /*  14px -- body, the default */
+  --text-lg: 1rem; /*      16px -- section headings */
+  --text-xl: 1.25rem; /*   20px -- page title */
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --leading-tight: 1.3; /* headings, single-line cells */
+  --leading-normal: 1.55; /* prose, wrapped cells */
+
+  /* ---- Elevation --------------------------------------------------------
+     Shadows read weakly on a dark canvas, so a raised element should pair
+     one of these with --color-border; the shadow alone is not the signal.
+     sm: resting panel. md: menu/popover. lg: modal dialog. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 16px 40px rgb(0 0 0 / 0.6);
+
+  /* ---- Layers -----------------------------------------------------------
+     The complete set of stacking contexts. Anything needing a z-index picks
+     one of these rather than inventing a number. */
+  --layer-sticky: 10; /*   sticky table header, toolbar */
+  --layer-overlay: 100; /* dialog scrim, dropdown surface */
+  --layer-dialog: 110; /*  the dialog itself, above its scrim */
+
+  /* ---- Controls ---------------------------------------------------------
+     A shared control height keeps a button, an input and a select on the
+     same baseline in a filter bar without per-component fiddling. */
+  --control-height: 2rem; /*      32px -- buttons, inputs, selects */
+  --control-height-sm: 1.5rem; /* 24px -- in-row actions, pager buttons */
+
+  /* ---- Motion -----------------------------------------------------------
+     One duration. reset.css disables transitions wholesale under
+     prefers-reduced-motion, so components do not each have to. */
+  --transition-fast: 120ms ease;
+}

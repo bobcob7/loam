@@ -154,7 +154,17 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
   focus-trapped dialogs, keyboard-dismiss): `Button`, `Table`, `Dialog`, `Field`/`Form`,
   `ErrorBanner`, `Pager`.
 - **CSS Modules** per component; global `reset.css` + `tokens.css` (spacing, color, radius as
-  CSS variables). **Dark theme only** — a single theme, no light mode or toggle.
+  CSS variables). **Dark theme only** — a single theme, no light mode or toggle. The single
+  theme is declared unconditionally on `:root`: no `prefers-color-scheme` fork and no
+  `[data-theme]` attribute, only `color-scheme: dark` so the user agent renders scrollbars,
+  the canvas and native control chrome to match. `src/styles/tokens.css` is the vocabulary
+  (surfaces, text, interaction, five status intents, spacing, radius, typography, elevation,
+  layers, control heights, motion) and documents each family; components consume it and
+  never write a raw colour or a magic pixel value. `src/styles/tokens.test.ts` enforces
+  that: it checks every foreground/background pair against WCAG 2.1 (4.5:1 text, 3:1
+  control boundaries and focus rings), fails on a `var()` naming a token that does not
+  exist, fails on a hard-coded colour in any `*.module.css`, and fails on a light-theme
+  fork.
 - No client-side secrets or config — the SPA is same-origin and unconfigured; everything
   comes from the API.
 
