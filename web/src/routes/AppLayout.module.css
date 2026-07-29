@@ -1,0 +1,73 @@
+/* The app shell's chrome. Tokens only -- src/styles/tokens.test.ts fails the
+   build on a raw colour or a var() naming a token that does not exist. */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-block-size: 100vh;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: 0 var(--space-5);
+  block-size: var(--space-7);
+  background-color: var(--color-surface);
+  border-block-end: 1px solid var(--color-border);
+  /* The nav stays reachable while a long jobs or proposals table scrolls. */
+  position: sticky;
+  inset-block-start: 0;
+  z-index: var(--layer-sticky);
+}
+
+.brand {
+  color: var(--color-text);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+  text-decoration: none;
+}
+
+.navList {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.navLink {
+  display: block;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  text-decoration: none;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.navLink:hover {
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* The current section, keyed off the same aria-current the layout sets, so
+   the visual state and the announced state cannot drift apart. */
+.navLink[aria-current="page"] {
+  background-color: var(--color-accent-muted);
+  color: var(--color-text);
+}
+
+.main {
+  padding: var(--space-6) var(--space-5);
+}
+
+/* Headings are reset to inherit (src/styles/reset.css) so that the level
+   chosen for document structure is independent of size. Every screen's page
+   title is its <h1>, so the shell sizes it once here rather than making each
+   screen remember a token. */
+.main h1 {
+  margin-block-end: var(--space-5);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
