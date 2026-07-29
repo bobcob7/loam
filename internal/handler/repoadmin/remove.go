@@ -11,6 +11,7 @@ import (
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
@@ -24,29 +25,40 @@ import (
 // cost of a few extra round trips for an admin-initiated, rare operation.
 const removeRepoListPageSize = 200
 
-// RemoveRepo is the GUARD half of docs/web-spec.md's RemoveRepo contract
-// ("Fails with failed_precondition while any non-terminal work branch
-// exists, enumerating each blocker ... else drops mirror + derived +
-// metadata incl. history and deletes ingest jobs"). THIS METHOD OWNS ONLY
-// THE GUARD: resolving the repo, enumerating every non-terminal (not
-// COMPLETE/CLOSED) work branch, and returning CodeFailedPrecondition with
-// a typed RemovalBlocked error detail (never just a string message --
-// docs/web-spec.md: "travels as a typed Connect error detail so the UI
-// renders it structurally") when any exist.
+// RemoveRepo implements docs/web-spec.md's RemoveRepo contract ("Fails
+// with failed_precondition while any non-terminal work branch exists,
+// enumerating each blocker ... else drops mirror + derived + metadata
+// incl. history and deletes ingest jobs") in two parts.
 //
-// The actual cross-table delete (mirror + repo_target_branches +
-// work_branches/rounds/verdicts/threads + derived graph/vector indexes +
-// ingest_jobs) is loam-cwb's scope, a separate, still-open bead filed
-// specifically because "no store can delete a repos row today: reposstore
-// exposes create/get/list/update only". This method calls h.deleter
-// (the repoDeleter interface, interfaces.go) once the guard clears;
-// cmd/server/main.go wires a loud-failure stand-in until loam-cwb lands
-// (this composition root's existing convention for a missing cross-bead
-// dependency -- see notImplementedDiffComputer/notImplementedRepoDeleter
-// in that file), so RemoveRepo's guard is genuinely enforced in
-// production today even though the delete step is not yet implemented
-// anywhere.
+// The GUARD is this method's own: resolving the repo, enumerating every
+// non-terminal (not COMPLETE/CLOSED) work branch, and returning
+// CodeFailedPrecondition with a typed RemovalBlocked error detail (never
+// just a string message -- docs/web-spec.md: "travels as a typed Connect
+// error detail so the UI renders it structurally") when any exist. That
+// guard is also the ONLY confirmation step in this contract: the proto has
+// no force/confirm field (RemoveRepoRequest carries exactly `string repo`)
+// and none is invented here, because the dangerous case the guard already
+// refuses -- open work branches carrying unmerged agent commits -- is
+// precisely the case a force flag would exist to override. The spec's
+// remedy is explicit and is not "pass force": "accept or close each, then
+// remove."
+//
+// The DELETE is h.deleter's (the repoDeleter interface, interfaces.go):
+// the repos row and, through its ON DELETE CASCADE chain,
+// repo_target_branches, work_branches and their rounds/verdicts/threads/
+// comments, ingest_jobs, and the derived graph/vector indexes, plus the
+// bare mirror on disk. cmd/server/main.go wires the real
+// internal/reporemove.Remover (loam-cwb); that package's DeleteRepo doc
+// comment owns the ordering and partial-failure reasoning, and this method
+// deliberately holds none of it.
+//
+// Nothing in either half touches the upstream forge. Removal unenrolls a
+// repo FROM LOAM; the repository it mirrors is untouched, and this package
+// has no forge client to touch it with.
 func (h *Handler) RemoveRepo(ctx context.Context, req *connect.Request[adminv1.RemoveRepoRequest]) (*connect.Response[adminv1.RemoveRepoResponse], error) {
+	if err := requireAdmin(ctx, "removing a repo"); err != nil {
+		return nil, h.errors.ToConnectErr(err)
+	}
 	name := req.Msg.GetRepo()
 	if name == "" {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("remove repo: empty repo identifier: %w", handler.ErrInvalidArgument))
@@ -69,6 +81,31 @@ func (h *Handler) RemoveRepo(ctx context.Context, req *connect.Request[adminv1.R
 		return nil, h.errors.ToConnectErr(fmt.Errorf("remove repo %s: %w", name, err))
 	}
 	return connect.NewResponse(&adminv1.RemoveRepoResponse{}), nil
+}
+
+// requireAdmin is defence in depth on top of the routing-level gate, not
+// a replacement for it: the whole /loam.admin.v1.* path group is already
+// wrapped in httpauth.Auth.AdminOnly before any request reaches a handler
+// (docs/web-spec.md -> Auth), which is why this package's doc comment
+// records having no per-RPC gate anywhere else.
+//
+// RemoveRepo is the one exception, for the same reason
+// internal/handler/proposal's own requireAdmin exists (loam-ofg.14) and
+// on the same narrow line: it is the only RPC in this package that
+// destroys data irreversibly. Every other method here creates or edits an
+// enrollment, and the worst outcome of a wrongly-admitted call is a state
+// an admin can edit back. This one drops a repo's entire history -- work
+// branches, review rounds, verdicts, threads, comments -- with no undo,
+// and re-enrolling starts fresh (docs/web-spec.md). httpauth.IsAdmin reads
+// the flag AdminOnly itself sets, so this costs one context read and makes
+// "only an admin can unenroll a repo" a property asserted by this
+// package's own tests rather than one inherited from a wiring line in
+// cmd/server that no test in this package can see.
+func requireAdmin(ctx context.Context, operation string) error {
+	if httpauth.IsAdmin(ctx) {
+		return nil
+	}
+	return fmt.Errorf("%s requires the admin superuser: %w", operation, handler.ErrPermissionDenied)
 }
 
 // nonTerminalWorkBranches returns every work branch on repoID whose state

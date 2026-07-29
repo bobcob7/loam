@@ -32,6 +32,9 @@ var _ querier = &querierMock{}
 //			CreateRepoFunc: func(ctx context.Context, arg gen.CreateRepoParams) (gen.Repo, error) {
 //				panic("mock out the CreateRepo method")
 //			},
+//			DeleteRepoFunc: func(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
+//				panic("mock out the DeleteRepo method")
+//			},
 //			GetRepoByIDFunc: func(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
 //				panic("mock out the GetRepoByID method")
 //			},
@@ -77,6 +80,9 @@ type querierMock struct {
 
 	// CreateRepoFunc mocks the CreateRepo method.
 	CreateRepoFunc func(ctx context.Context, arg gen.CreateRepoParams) (gen.Repo, error)
+
+	// DeleteRepoFunc mocks the DeleteRepo method.
+	DeleteRepoFunc func(ctx context.Context, id pgtype.UUID) (gen.Repo, error)
 
 	// GetRepoByIDFunc mocks the GetRepoByID method.
 	GetRepoByIDFunc func(ctx context.Context, id pgtype.UUID) (gen.Repo, error)
@@ -132,6 +138,13 @@ type querierMock struct {
 			Ctx context.Context
 			// Arg is the arg argument value.
 			Arg gen.CreateRepoParams
+		}
+		// DeleteRepo holds details about calls to the DeleteRepo method.
+		DeleteRepo []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID pgtype.UUID
 		}
 		// GetRepoByID holds details about calls to the GetRepoByID method.
 		GetRepoByID []struct {
@@ -199,6 +212,7 @@ type querierMock struct {
 	lockAdvanceIngestedRef  sync.RWMutex
 	lockCountRepos          sync.RWMutex
 	lockCreateRepo          sync.RWMutex
+	lockDeleteRepo          sync.RWMutex
 	lockGetRepoByID         sync.RWMutex
 	lockGetRepoByName       sync.RWMutex
 	lockGetTargetBranch     sync.RWMutex
@@ -347,6 +361,42 @@ func (mock *querierMock) CreateRepoCalls() []struct {
 	mock.lockCreateRepo.RLock()
 	calls = mock.calls.CreateRepo
 	mock.lockCreateRepo.RUnlock()
+	return calls
+}
+
+// DeleteRepo calls DeleteRepoFunc.
+func (mock *querierMock) DeleteRepo(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
+	if mock.DeleteRepoFunc == nil {
+		panic("querierMock.DeleteRepoFunc: method is nil but querier.DeleteRepo was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  pgtype.UUID
+	}{
+		Ctx: ctx,
+		ID:  id,
+	}
+	mock.lockDeleteRepo.Lock()
+	mock.calls.DeleteRepo = append(mock.calls.DeleteRepo, callInfo)
+	mock.lockDeleteRepo.Unlock()
+	return mock.DeleteRepoFunc(ctx, id)
+}
+
+// DeleteRepoCalls gets all the calls that were made to DeleteRepo.
+// Check the length with:
+//
+//	len(mockedquerier.DeleteRepoCalls())
+func (mock *querierMock) DeleteRepoCalls() []struct {
+	Ctx context.Context
+	ID  pgtype.UUID
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  pgtype.UUID
+	}
+	mock.lockDeleteRepo.RLock()
+	calls = mock.calls.DeleteRepo
+	mock.lockDeleteRepo.RUnlock()
 	return calls
 }
 

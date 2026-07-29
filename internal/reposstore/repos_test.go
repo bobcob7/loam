@@ -194,6 +194,65 @@ func TestUpdateRepoNotFoundMapsToErrNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
+// TestDeleteRepoReturnsTheRowAsItWasBeforeDeletion pins the whole reason
+// this method returns a Repo rather than nothing: the caller
+// (internal/reporemove) needs the deleted row's NAME to derive the bare
+// mirror's on-disk path after the row itself is gone. A DeleteRepo that
+// dropped the row and returned a zero Repo would compile, satisfy every
+// "the row is gone" assertion, and silently leave every mirror on disk.
+func TestDeleteRepoReturnsTheRowAsItWasBeforeDeletion(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		DeleteRepoFunc: func(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
+			assert.Equal(t, [16]byte{1}, id.Bytes)
+			assert.True(t, id.Valid)
+			return genRepoFixture(), nil
+		},
+	}
+	store := NewStore(mock, testLogger())
+	got, err := store.DeleteRepo(t.Context(), [16]byte{1})
+	require.NoError(t, err)
+	assert.Equal(t, "group/repo", got.Name)
+	assert.Equal(t, "main", got.IndexedBranch)
+	require.Len(t, mock.DeleteRepoCalls(), 1)
+}
+
+// TestDeleteRepoNotFoundMapsToErrNotFound proves deleting a repo that is
+// not enrolled is a distinguishable ErrNotFound and not a silent success:
+// unenrollment is destructive enough that a caller must be able to tell
+// "I removed it" from "there was nothing to remove", and RemoveRepo maps
+// exactly that sentinel onward.
+func TestDeleteRepoNotFoundMapsToErrNotFound(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		DeleteRepoFunc: func(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
+			return gen.Repo{}, pgx.ErrNoRows
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.DeleteRepo(t.Context(), [16]byte{1})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// TestDeleteRepoWrapsAnUnexpectedError proves a real database failure is
+// NOT flattened into ErrNotFound -- a connection error must never be
+// reported as "already gone" to a caller about to delete a mirror on the
+// strength of it.
+func TestDeleteRepoWrapsAnUnexpectedError(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("connection refused")
+	mock := &querierMock{
+		DeleteRepoFunc: func(ctx context.Context, id pgtype.UUID) (gen.Repo, error) {
+			return gen.Repo{}, wantErr
+		},
+	}
+	store := NewStore(mock, testLogger())
+	_, err := store.DeleteRepo(t.Context(), [16]byte{1})
+	require.ErrorIs(t, err, wantErr)
+	assert.NotErrorIs(t, err, ErrNotFound)
+}
+
 func TestUpdateRepoOmitsNameFromParams(t *testing.T) {
 	t.Parallel()
 	mock := &querierMock{

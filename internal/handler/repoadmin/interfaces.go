@@ -7,16 +7,19 @@
 // before any request reaches a handler (docs/web-spec.md -> Auth: "Basic-
 // auth middleware wraps the admin RPC paths"), so there is no per-RPC
 // handler.CapabilityChecker call here the way loam.v1.RepoService.GetRepo
-// has one.
+// has one. RemoveRepo is the single exception, and re-checks admin itself
+// as defence in depth -- see requireAdmin (remove.go) for the narrow line
+// that draws.
 //
 // EnrollRepo owns the initial bare-mirror clone (loam-ofg.12 NOTES,
 // confirmed missing tree-wide by loam-giq.2's review: the only
 // `git clone --mirror`/`git init --bare` hits anywhere were test-only,
 // internal/fakeforge/seed.go and internal/testfixture/fixture.go).
-// RemoveRepo's split with loam-cwb (a separate, still-open bead) is
-// documented on that method: this package owns the guard (enumerate
-// blocking non-terminal work branches, typed RemovalBlocked detail);
-// loam-cwb owns the actual cross-table repos-row delete.
+// RemoveRepo is the inverse and is split the same way EnrollRepo is not:
+// this package owns the guard (enumerate blocking non-terminal work
+// branches, typed RemovalBlocked detail) and delegates the cross-table
+// repos-row delete plus the mirror removal to internal/reporemove
+// (loam-cwb), behind the repoDeleter interface below.
 package repoadmin
 
 import (
@@ -114,14 +117,19 @@ type jobLister interface {
 // 0001_init.up.sql), work branch history, and derived graph/vector
 // indexes (docs/web-spec.md -> RepoAdminService "RemoveRepo": "drops
 // mirror + derived + metadata incl. history and deletes ingest jobs").
-// Defined here at the consumer: loam-cwb (a separate, still-open bead
-// filed specifically because "no store can delete a repos row today") owns
-// the real production implementation. This package's own RemoveRepo scope
+// Defined here at the consumer; *reporemove.Remover (loam-cwb) is the
+// production implementation and owns every ordering and partial-failure
+// decision behind this one method. This package's own RemoveRepo scope
 // stops at the guard (enumerate blocking non-terminal work branches,
 // return a typed RemovalBlocked detail) -- see that method's doc comment.
-// cmd/server/main.go wires a loud-failure stand-in until loam-cwb lands,
-// matching this composition root's existing convention for a missing
-// cross-bead dependency (notImplementedDiffComputer).
+//
+// The signature is one error, not a partial-success report, deliberately:
+// RemoveRepo has exactly one thing to tell its caller ("the repo is
+// unenrolled" or "it is not"), and the one asymmetric case behind this
+// seam -- a mirror moved aside but not fully deleted, which leaves the
+// canonical path free and the contract met -- is logged there rather than
+// dressed up as a third outcome this RPC's proto response (an empty
+// RemoveRepoResponse) has nowhere to put.
 type repoDeleter interface {
 	DeleteRepo(ctx context.Context, id uuid.UUID) error
 }

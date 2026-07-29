@@ -60,6 +60,56 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (Repo, e
 	return i, err
 }
 
+const deleteRepo = `-- name: DeleteRepo :one
+DELETE FROM repos WHERE id = $1 RETURNING id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at
+`
+
+// Unenrollment (loam-cwb; RepoAdminService.RemoveRepo, docs/web-spec.md:
+// "drop the mirror, the derived indexes, and the repo's metadata (work
+// branches, rounds, verdicts, threads -- unenrollment removes history;
+// re-enrolling starts fresh). Queued/running ingest jobs are deleted.").
+//
+// This ONE statement is the whole database half of that contract: every
+// table that holds repo-scoped data reaches repos.id through a chain of
+// ON DELETE CASCADE foreign keys, so Postgres removes all of them in this
+// statement's own transaction, atomically. Directly:
+// repo_target_branches, work_branches, ingest_jobs (0001_init.up.sql);
+// symbols, symbol_references, graph_edges, chunks (0002_code_intel.up.sql,
+// chunks carrying the pgvector embeddings). Transitively: review_rounds,
+// threads, comments (via work_branches), verdicts (via review_rounds), and
+// symbol_history (via symbols). Nothing enumerates those tables in Go --
+// adding a new repo-scoped table with the same FK gets swept up here for
+// free, and one added WITHOUT it fails this DELETE loudly on a foreign-key
+// violation rather than silently orphaning rows.
+//
+// credentials is deliberately NOT in that set: it is keyed by forge HOST
+// (credentials_host_key UNIQUE (host)) and shared by every repo on that
+// host, so it has no repos FK and unenrolling one repo must not revoke the
+// token its siblings still use.
+//
+// RETURNING * rather than :execrows: the caller needs the deleted row's
+// name to derive the bare mirror's on-disk path (internal/mirrorpath.Dir)
+// AFTER the row is gone, and reading it back out of the same statement
+// avoids both a second round trip and the window between a separate SELECT
+// and this DELETE. A no-rows result is the store's ErrNotFound signal.
+func (q *Queries) DeleteRepo(ctx context.Context, id pgtype.UUID) (Repo, error) {
+	row := q.db.QueryRow(ctx, deleteRepo, id)
+	var i Repo
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.UpstreamUrl,
+		&i.ForgeHost,
+		&i.IndexedBranch,
+		&i.SyncState,
+		&i.LastSyncedAt,
+		&i.SyncError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRepoByID = `-- name: GetRepoByID :one
 SELECT id, name, upstream_url, forge_host, indexed_branch, sync_state, last_synced_at, sync_error, created_at, updated_at FROM repos WHERE id = $1
 `

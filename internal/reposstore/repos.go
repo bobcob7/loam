@@ -127,6 +127,40 @@ func (s *Store) UpdateRepo(ctx context.Context, id uuid.UUID, params UpdateRepoP
 	return fromGenRepo(row), nil
 }
 
+// DeleteRepo unenrolls id, deleting its repos row and -- through the
+// ON DELETE CASCADE chain every repo-scoped table in this schema hangs
+// off repos.id by -- every row derived from or belonging to it, in this
+// one statement's own transaction (see internal/db/queries/repos.sql's
+// DeleteRepo for the full table list and why credentials, keyed by forge
+// host and shared across repos, is deliberately not in it). It returns
+// the row as it was immediately before deletion, so a caller that must
+// also clean up out-of-database state keyed by repos.name -- the bare
+// mirror on disk, internal/mirrorpath.Dir -- can read the name from the
+// same statement that removed it rather than racing a separate SELECT
+// against a concurrent rename that this schema does not permit but a
+// separate query would still have to assume.
+//
+// This is the database half only, and it is deliberately the ONLY half
+// this package owns: a store does not remove directories. The composed
+// operation (row first, then mirror) lives in internal/reporemove.
+//
+// Returns a wrapped ErrNotFound if id does not exist. Deleting a repo
+// twice is therefore an error, not a silent success: the second caller
+// genuinely did not delete anything and unenrollment is destructive
+// enough that "it was already gone" is worth surfacing rather than
+// smoothing over.
+func (s *Store) DeleteRepo(ctx context.Context, id uuid.UUID) (Repo, error) {
+	row, err := s.db.DeleteRepo(ctx, pgUUID(id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Repo{}, fmt.Errorf("deleting repo %s: %w", id, ErrNotFound)
+		}
+		return Repo{}, fmt.Errorf("deleting repo %s: %w", id, err)
+	}
+	s.logger.InfoContext(ctx, "deleted repo", "repo_id", id, "repo", row.Name)
+	return fromGenRepo(row), nil
+}
+
 // UpdateSyncState sets the repos row's sync_state (+ last_synced_at, +
 // sync_error) for id -- the write RepoAdminService.EnrollRepo (loam-ofg.12)
 // uses to mark Syncing for the duration of the initial mirror clone, then

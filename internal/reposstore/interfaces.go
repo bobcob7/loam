@@ -31,6 +31,7 @@ type querier interface {
 	ListRepos(ctx context.Context, arg gen.ListReposParams) ([]gen.Repo, error)
 	CountRepos(ctx context.Context) (int64, error)
 	ListRepoNames(ctx context.Context) ([]string, error)
+	DeleteRepo(ctx context.Context, id pgtype.UUID) (gen.Repo, error)
 	UpdateRepo(ctx context.Context, arg gen.UpdateRepoParams) (gen.Repo, error)
 	UpdateRepoSyncState(ctx context.Context, arg gen.UpdateRepoSyncStateParams) (gen.Repo, error)
 	AddTargetBranch(ctx context.Context, arg gen.AddTargetBranchParams) (gen.RepoTargetBranch, error)
