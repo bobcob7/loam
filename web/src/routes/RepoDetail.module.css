@@ -1,0 +1,84 @@
+/* Repo detail (/repos/:group/:name). Tokens only -- src/styles/tokens.test.ts
+   fails the build on a raw colour or a var() naming a token that does not
+   exist. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-block-end: var(--space-7);
+}
+
+.sectionTitle {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.statusRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* Colour is not the only signal here: this text always sits beside the
+   SyncStatus StatusBadge, which already carries the word "Error". */
+.errorText {
+  color: var(--color-danger-fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* mapConnectError.ts: an invalid_argument on SetTargetBranches has no typed
+   per-field detail, so it renders "next to the form", not in the page-level
+   ErrorBanner -- this is that inline slot. Not a live region: ErrorBanner is
+   the app's one live region (docs/web-frontend-spec.md -> Conventions), and
+   this message appears beside a control the admin is still looking at. */
+.inlineError {
+  color: var(--color-danger-fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+}
+
+.statusList {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.statusList dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* The RemoveRepo blocking-work-branches panel: deliberately distinct from
+   ErrorBanner (docs/web-frontend-spec.md -> Error mapping), a bordered panel
+   rather than the app's one assertive banner. */
+.blockingPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.blockingTitle {
+  color: var(--color-danger-fg);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
