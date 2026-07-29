@@ -1,0 +1,43 @@
+/* --radius-sm, not --radius-pill: tokens.css's Radius section documents
+   --radius-sm for "pills, badges, tags" -- --radius-pill (999px) is reserved
+   for fully-round shapes, e.g. Button's spinner. --text-xs matches the
+   "badges, table meta" tier in Typography, same as Table's column headers.
+   Every foreground/background pair below is asserted against WCAG 2.1 in
+   tokens.test.ts -- 4.5:1 for each `-fg` both on its own `-bg` and on all
+   four surfaces -- so nothing here is eyeballed. */
+.root {
+  display: inline-flex;
+  align-items: center;
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+}
+
+.neutral {
+  background-color: var(--color-neutral-bg);
+  color: var(--color-neutral-fg);
+}
+
+.info {
+  background-color: var(--color-info-bg);
+  color: var(--color-info-fg);
+}
+
+.success {
+  background-color: var(--color-success-bg);
+  color: var(--color-success-fg);
+}
+
+.warning {
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.danger {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
