@@ -75,7 +75,7 @@ func validateSyncInterval(interval time.Duration) error {
 // It holds the scheduler's Run and Shutdown METHOD VALUES, never the
 // *mirrorsync.Scheduler itself, and that is loam-f75 ("never call
 // Scheduler.Run and Scheduler.Tick on the same Scheduler") satisfied by
-// construction rather than by convention: buildSyncScheduler below is the
+// construction rather than by convention: newSyncRunner below is the
 // only function in this package that ever holds the Scheduler value, it
 // holds it as a local, and it returns a plain runner. No other code in
 // this binary -- production or test -- has a reference through which Tick
@@ -117,6 +117,99 @@ func (s syncRunner) Run(ctx context.Context) {
 	}
 }
 
+// defaultMaxConcurrentCycles bounds how many repo sync cycles this binary
+// runs at once, across every enrolled repo combined -- the cap loam-5v5
+// added the mechanism for (mirrorsync.WithMaxConcurrentCycles) and
+// loam-k1fb applies here, at the composition root. It is a package-level
+// default with the Option reserved for tests, exactly the shape
+// defaultShutdownGrace (serve.go) uses, and for the same reason: an option
+// that only tests ever pass bounds nothing in production, which is what
+// left tick's one-goroutine-per-enrolled-repo fan-out live in the shipped
+// binary after the mechanism landed.
+//
+// Why 32 -- neither a smaller "obviously safe" number nor a much larger
+// one:
+//
+//   - It is a ceiling on concurrently held OS resources, which is the
+//     thing actually being bounded. Every in-flight cycle owns a git fetch
+//     subprocess pair (git plus its git-remote-https helper) and the pipes
+//     os/exec holds for it, one or more forge HTTPS connections, and a pgx
+//     pool connection during each of its store-backed steps. Thirty-two of
+//     those sit comfortably inside a container's usual 1024 open-file
+//     limit and inside darwin's stingier 256 for local runs. The unbounded
+//     behaviour this replaces put no ceiling on any of them, and the "few
+//     thousand enrolled repos" loam-5v5 names exhausts all three at once.
+//   - It sits above the pgx pool's own default MaxConns
+//     (pgxpool.ParseConfig defaults it to max(4, NumCPU) and internal/db's
+//     NewPool does not override it), so the DB-bound steps still saturate
+//     that pool rather than being throttled below it -- but not so far
+//     above that dozens of cycles pile up waiting on Acquire.
+//   - It keeps a full sweep inside the tick interval at the enrollment
+//     scale that motivated the bound. The common per-repo cycle is a no-op
+//     incremental fetch -- one round trip, no pack, a few hundred
+//     milliseconds -- so a sweep costs roughly ceil(N/32) of those: ~10s
+//     at 1,000 repos and ~50s at 5,000, both inside LOAM_SYNC_INTERVAL's
+//     60s default. Past that the sweep degrades gracefully rather than
+//     piling up (tick's tryStart skips a repo whose previous cycle is
+//     still queued or running), but the effective interval does stretch --
+//     the honest cost of any bound, and the reason this one is not
+//     smaller.
+//
+// Shutdown is deliberately NOT an argument for keeping this number large,
+// despite how the arithmetic looks: the cycles still queued behind the
+// bound when the process is signalled do not each cost a full cycle before
+// the drain completes. They inherit the already-canceled context, and
+// every production collaborator honours it -- git runs under
+// exec.CommandContext (internal/gittransport, internal/gitmergetree), the
+// forge client builds every request with http.NewRequestWithContext
+// (internal/forge), and pgx fails a canceled query immediately -- so a
+// queued cycle unwinds through its five steps in microseconds, not
+// seconds. What defaultShutdownGrace has to cover is therefore about one
+// in-flight wave, near enough independent of this value.
+//
+// What this number deliberately does not solve: a cycle that HANGS holds
+// its slot indefinitely, so enough simultaneously hung repos starve every
+// other repo -- head-of-line blocking that a smaller bound makes worse and
+// a larger one only postpones (hung slots accumulate; they are never
+// reclaimed). The fix for that is a timeout on the calls that can hang --
+// loam-1kl, the forge REST client having none -- not a bigger constant
+// here.
+const defaultMaxConcurrentCycles = 32
+
+// newSyncRunner builds the *mirrorsync.Scheduler over already-constructed
+// collaborators and wraps it as a runner, applying the production bound
+// (defaultMaxConcurrentCycles) on the way through. Its parameters mirror
+// mirrorsync.New's own, in the same order, plus the shutdown grace period
+// syncRunner drains under.
+//
+// It exists as its own function so the bound is testable as WIRING rather
+// than as an option value: buildSyncScheduler below needs a live
+// *pgxpool.Pool to construct its seven collaborators, so no unit test can
+// reach the Scheduler it builds, and a test that merely re-applied
+// WithMaxConcurrentCycles itself would pass just as happily if this
+// binary passed nothing at all. Everything between here and serve's
+// background tier -- the bound, the Run/Shutdown pairing, the grace period
+// -- is exercised through this one function instead (sync_test.go).
+//
+// The Scheduler value stays a local here and only its method values
+// escape, which is where syncRunner's doc comment's loam-f75 claim is
+// actually enforced.
+func newSyncRunner(logger *slog.Logger, ticks <-chan time.Time, repos mirrorsync.RepoLister, fetcher mirrorsync.Fetcher, advances mirrorsync.AdvanceDetector, mergeability mirrorsync.MergeabilityChecker, enqueuer mirrorsync.IngestEnqueuer, prPoller mirrorsync.PRPoller, reporter mirrorsync.SyncStateReporter, grace time.Duration) runner {
+	scheduler := mirrorsync.New(
+		logger,
+		ticks,
+		repos,
+		fetcher,
+		advances,
+		mergeability,
+		enqueuer,
+		prPoller,
+		reporter,
+		mirrorsync.WithMaxConcurrentCycles(defaultMaxConcurrentCycles),
+	)
+	return syncRunner{run: scheduler.Run, shutdown: scheduler.Shutdown, grace: grace, logger: logger}
+}
+
 // buildSyncScheduler constructs the production mirrorsync.Scheduler and
 // every one of its seven collaborators over pool and ingestPool -- the
 // same live Postgres connection and ingest worker pool run() already
@@ -133,11 +226,15 @@ func (s syncRunner) Run(ctx context.Context) {
 // own credential from the encrypted credential store (via
 // gittransport.Transport itself for git, and via forgePRTracker below for
 // the forge REST surface). Everything else -- constructor order,
-// arguments, and which store backs which seam -- matches one for one.
+// arguments, and which store backs which seam -- matches one for one,
+// including the concurrency bound: the harness passes the same
+// defaultMaxConcurrentCycles this function does, so an acceptance scenario
+// never exercises a fan-out shape production cannot produce.
 //
 // ticks is the trigger seam. run() passes a real time.Ticker's channel;
 // the interval is validated by validateSyncInterval before the ticker is
-// ever constructed.
+// ever constructed. The Scheduler itself is constructed by newSyncRunner
+// above, which is where the bound is applied.
 //
 // A failure here fails startup rather than degrading to a stand-in, the
 // same choice buildIngestOrchestrator makes and for the same reason: a
@@ -167,7 +264,7 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 	enqueuer := mirrorsync.NewStoreIngestEnqueuer(repos, repos, ingestPool)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
 	prPoller := mirrorsync.NewStorePRPoller(cfg.DataDir, cfg.Logger, repos, workBranches, workBranches, tracker, transport)
-	scheduler := mirrorsync.New(
+	return newSyncRunner(
 		cfg.Logger,
 		ticks,
 		mirrorsync.NewStoreRepoLister(repos),
@@ -177,8 +274,8 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 		enqueuer,
 		prPoller,
 		state.New(pool),
-	)
-	return syncRunner{run: scheduler.Run, shutdown: scheduler.Shutdown, grace: grace, logger: cfg.Logger}, nil
+		grace,
+	), nil
 }
 
 // buildProposalAccepter constructs the production
