@@ -1,0 +1,28 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour
+   or a var() naming a token that does not exist. */
+
+.verdictList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.verdictItem {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.reviewer {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.round {
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+}
+
+.pager {
+  margin-block-start: var(--space-4);
+}

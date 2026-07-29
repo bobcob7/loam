@@ -1,7 +1,11 @@
+import { createRouterTransport } from "@connectrpc/connect";
+import { TransportProvider } from "@connectrpc/connect-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
+import { createQueryClient } from "../queryClient";
 import { AppLayout } from "./AppLayout";
 import { AppRoutes } from "./AppRoutes";
 import { proposalDetailPath, repoDetailPath } from "./paths";
@@ -13,15 +17,31 @@ import { proposalDetailPath, repoDetailPath } from "./paths";
  * asserts on what the user ends up looking at, at a real URL.
  */
 
-/** Mounts the shell at `path`, and hands back the recording location hook. */
+/**
+ * Mounts the shell at `path`, and hands back the recording location hook.
+ *
+ * Wrapped in a real `QueryClient` and a stub `TransportProvider`: a screen
+ * mounted here (e.g. Proposals, loam-nvb.12) may call connect-query's
+ * `useQuery` unconditionally on render, which throws synchronously without a
+ * `QueryClientProvider` above it (`useQueryClient` has no fallback the way
+ * `useTransport` does -- see src/App.test.tsx). The router transport is an
+ * empty stub, not a mock of any one screen's RPC: every case below asserts
+ * on the routing/nav chrome, not on fetched data, so an unimplemented-RPC
+ * error settling after the assertions have already run is fine.
+ */
 const renderAt = (path: string) => {
   const location = memoryLocation({ path, record: true });
+  const transport = createRouterTransport(() => undefined);
   render(
-    <Router hook={location.hook}>
-      <AppLayout>
-        <AppRoutes />
-      </AppLayout>
-    </Router>,
+    <TransportProvider transport={transport}>
+      <QueryClientProvider client={createQueryClient()}>
+        <Router hook={location.hook}>
+          <AppLayout>
+            <AppRoutes />
+          </AppLayout>
+        </Router>
+      </QueryClientProvider>
+    </TransportProvider>,
   );
   return location;
 };
