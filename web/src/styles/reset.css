@@ -1,0 +1,176 @@
+/**
+ * Global reset plus the token-driven element defaults for the admin SPA.
+ *
+ * These are the only two global stylesheets (this file and tokens.css);
+ * everything else is a CSS Module scoped to one component --
+ * docs/web-frontend-spec.md -> Conventions. Both are imported once, from
+ * src/main.tsx.
+ *
+ * The `var(--...)` references below resolve against tokens.css regardless of
+ * which of the two stylesheets the bundler emits first: custom properties
+ * are resolved at computed-value time from the cascade, not at parse time,
+ * so there is no import-order hazard between these files.
+ *
+ * Deliberately small. It normalises the handful of things that actually bite
+ * a hand-rolled component library -- box sizing, default margins, form
+ * elements not inheriting the page font, media overflowing its container --
+ * and then sets the page's own defaults from tokens. It is not a
+ * normalize.css: unopinionated UA behaviour is left alone.
+ */
+
+/* ---- Reset ------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* The UA's default margins on headings, paragraphs and lists fight every
+   layout built from `gap`. Components opt back in where they want them. */
+body,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+dl,
+dd,
+ol,
+ul {
+  margin: 0;
+}
+
+ol,
+ul {
+  padding: 0;
+  list-style: none;
+}
+
+/* Headings inherit the body size; a component picks a --text-* token
+   explicitly. This keeps the heading level chosen for document structure
+   (and therefore for screen readers) independent of how large it looks. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* Form controls do not inherit typography from the page by default. */
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+textarea {
+  resize: vertical;
+}
+
+img,
+picture,
+svg,
+video,
+canvas {
+  display: block;
+  max-inline-size: 100%;
+}
+
+/* Tables are a primary surface in this app (repos, jobs, proposals); the UA
+   default of separated borders makes hairline row rules impossible. */
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+th {
+  text-align: start;
+  font-weight: inherit;
+}
+
+/* ---- Element defaults from tokens ------------------------------------- */
+
+html {
+  /* Never override the user's root font size: --text-* are rem-based, so
+     doing so would silently rescale the whole app away from their setting. */
+  block-size: 100%;
+}
+
+body {
+  min-block-size: 100%;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  font-weight: var(--weight-normal);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9375em; /* Monospace runs optically large next to the sans. */
+}
+
+a {
+  color: var(--color-info-fg);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  color: var(--color-text);
+}
+
+::placeholder {
+  color: var(--color-text-faint);
+  opacity: 1; /* Firefox dims placeholders further; the token already did. */
+}
+
+::selection {
+  background-color: var(--color-accent-muted);
+  color: var(--color-text);
+}
+
+/* One focus ring for the whole app, so no component has to remember to
+   provide one -- and `:focus-visible` (not `:focus`) means it appears for
+   keyboard users without ringing every mouse click. --color-focus clears
+   3:1 against all four surfaces (WCAG SC 1.4.11). */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* Honour the OS "reduce motion" setting globally rather than per component.
+   The values are near-zero rather than `none` so that transitionend/
+   animationend handlers still fire. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

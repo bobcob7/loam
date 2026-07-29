@@ -1,6 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Placeholder } from "./components/Placeholder";
+// The only two global stylesheets (docs/web-frontend-spec.md -> Conventions);
+// everything else is a CSS Module scoped to its component. Imported here, at
+// the entry, so they are in the bundle before any component's module CSS.
+import "./styles/reset.css";
+import "./styles/tokens.css";
 
 // Entry point. loam-nvb.3 replaces the render below with the real shell --
 // QueryClientProvider, the connect-web transport, and the wouter router
