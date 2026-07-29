@@ -81,10 +81,23 @@ tasks:
       to rerun from a clean checkout with no other setup beyond the same
       CGO_ENABLED=1 + C toolchain `build` above needs.
     cmds:
+      # web:build first, for the same reason the aggregate `build` target
+      # does it (loam-nvb.15): go:embed reads whatever is on disk at COMPILE
+      # time, so without this, bin/server embeds the two committed web/dist
+      # placeholders and serves "Loam admin interface — coming soon" in place
+      # of the console. This target produces the SHIPPING binaries, which
+      # made it the worst one to get this wrong (loam-m6hg). The EXIT trap
+      # restores the placeholders even if a compile fails, so a red build
+      # never also leaves a dirty tree of hashed filenames (loam-68os).
       - mkdir -p bin
-      - go build -o bin/server ./cmd/server
-      - go build -o bin/loam ./cmd/loam
-      - go build -o bin/loamhook ./cmd/loamhook
+      - task: web:build
+      - |
+        set -u
+        set -o pipefail
+        trap 'git checkout -- web/dist && git clean -fd web/dist' EXIT
+        go build -o bin/server ./cmd/server
+        go build -o bin/loam ./cmd/loam
+        go build -o bin/loamhook ./cmd/loamhook
 
   web:install:
     desc: >-
