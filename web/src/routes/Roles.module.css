@@ -1,0 +1,50 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour or
+   a var() naming a token that does not exist. */
+
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-end: var(--space-4);
+}
+
+.rowActions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* A fieldset styled like Field's own control (Field.module.css -> .control),
+   so the checkbox group reads as one labelled unit alongside the Name and
+   Instructions fields rather than a bare list of inputs. */
+.operations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.operationsLegend {
+  padding-inline: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.operationsEmpty {
+  color: var(--color-text-faint);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.operationLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+  font-size: var(--text-md);
+}
+
+.operationName {
+  font-family: var(--font-mono);
+}
