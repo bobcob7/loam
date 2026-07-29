@@ -9,3 +9,15 @@
 *.go    text eol=lf
 *.mod   text eol=lf
 *.sum   text eol=lf
+
+# web/ — the admin SPA (docs/web-frontend-spec.md).
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+
+# Collapse the npm lockfile in GitHub diffs and keep it out of the language
+# stats. Deliberately not `-diff`: the diff must stay reviewable, since a
+# lockfile change is a dependency change.
+web/package-lock.json linguist-generated=true

@@ -1,0 +1,43 @@
+{
+  "name": "loam-web",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Loam admin single-page app (docs/web-frontend-spec.md).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.13.0",
+    "@connectrpc/connect": "2.1.2",
+    "@connectrpc/connect-query": "2.2.0",
+    "@connectrpc/connect-web": "2.1.2",
+    "@tanstack/react-query": "5.101.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "wouter": "3.10.0"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "2.13.0",
+    "@connectrpc/protoc-gen-connect-query": "2.2.0",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "24.10.4",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "jsdom": "29.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  }
+}

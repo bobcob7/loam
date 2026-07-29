@@ -1,0 +1,42 @@
+{
+  // One tsconfig covers both the app (src/) and the build config
+  // (vite.config.ts), rather than the split app/node project references the
+  // stock Vite template ships. The split exists to keep Node's globals out of
+  // browser code, but it turns the root tsconfig into a files-less solution
+  // file, and `tsc --noEmit` on a files-less solution file type-checks
+  // nothing and exits 0 — a false green for the exact gate this project
+  // relies on (`npm run typecheck`, and `npm run build`, which runs it
+  // first). A single real project is worth the leaked `process` global.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    // "vite/client" supplies import.meta.env and the ambient module
+    // declarations for asset imports, including `*.module.css`;
+    // "vitest/globals" types the describe/it/expect globals enabled by
+    // `test.globals` in vite.config.ts; "node" is for vite.config.ts only.
+    "types": ["node", "vite/client", "vitest/globals"],
+
+    // Required by CLAUDE.md -> TypeScript standards.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+
+    // Vite does the emitting; tsc is only ever a type checker here.
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "vite.config.ts"]
+}

@@ -1,0 +1,17 @@
+/* Scaffold-only styling. The real design tokens (dark theme, spacing, colour)
+   arrive with the styling foundation in loam-nvb.4; this file exists so the
+   CSS Modules pipeline is proven end to end -- Vite build and Vitest render
+   -- from the first commit. */
+
+.root {
+  display: grid;
+  place-items: center;
+  min-block-size: 100vh;
+  font-family: system-ui, sans-serif;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
