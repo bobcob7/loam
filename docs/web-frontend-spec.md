@@ -81,6 +81,12 @@ Client-side routes map to the screens in `docs/web-spec.md`. Each screen lists i
 (queries), actions (mutations), and states. The admin is a **superuser**, so screens freely
 mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 
+`:repo` below is the enrolled repo identifier, `<group>/<repo_name>` — it contains a slash
+and therefore spans **two** URL path segments. The URLs are exactly as written
+(`/repos/acme/widgets`, `/proposals/acme/widgets/wb-9c2f1a`), but the router's *patterns*
+capture it as `:group/:name` and rejoin the two segments at the route table, so screens
+still receive the identifier in its wire form (`web/src/routes/paths.ts`).
+
 - **`/` → Repos** (default). List enrolled repos with sync status.
   - Queries: `RepoAdminService.ListRepos`.
   - Actions: `EnrollRepo` (form: upstream URL, then `ProbeRepo` on the URL loads a
