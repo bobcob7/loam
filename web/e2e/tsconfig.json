@@ -1,0 +1,36 @@
+{
+  // A separate project from the app's own tsconfig.json (whose "include"
+  // is deliberately just ["src", "vite.config.ts"], and whose "types"
+  // includes "vitest/globals" -- an ambient global `test`/`expect` that
+  // would otherwise shadow the ones @playwright/test's files import
+  // explicitly). Playwright ships its own types; nothing here needs
+  // vite/client or vitest/globals at all.
+  //
+  // Not wired into any package.json script or Taskfile gate: this exists
+  // so an editor and a developer running `npx tsc -p e2e --noEmit` by hand
+  // get real type-checking over web/e2e, without touching the root
+  // tsconfig.json or vite.config.ts that CI's existing `tsc --noEmit` /
+  // `npm test` gates depend on.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [".", "../playwright.config.ts"]
+}

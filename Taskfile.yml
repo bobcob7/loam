@@ -282,6 +282,240 @@ tasks:
       # cache cannot tell a stale replayed "ok" apart from a genuine rerun.
       - go test -tags=acceptance -count=1 ./cmd/server/... -run TestFeatures -v
 
+  web:e2e:install:
+    desc: >-
+      Install the pinned Chromium build the Playwright suite needs
+      (loam-li0.11.1). A SEPARATE, explicit step from `task test:e2e`
+      below, deliberately: Playwright caches browsers under
+      ~/.cache/ms-playwright keyed by its own pinned version
+      (web/package.json's @playwright/test), so running this is a one-time
+      (or once-per-version-bump) action, not something test:e2e should
+      trigger on every invocation -- silently re-downloading ~300MB on
+      every local test run is exactly what this bead's scope calls out to
+      avoid. Safe to rerun: `playwright install` itself no-ops when the
+      pinned version is already present.
+    dir: web
+    cmds:
+      - task: web:install
+      - npx playwright install --with-deps chromium
+
+  test:e2e:
+    desc: >-
+      Layer 3 (docs/testing-spec.md "Layer 3 — End-to-End"; loam-li0.11.1):
+      brings up deploy/docker-compose.e2e.yml (Postgres/pgvector + a seeded
+      REAL Forgejo, never internal/fakeforge), builds the real
+      server/loam/loamhook binaries (task build:bin -- loam-m6hg: this now
+      embeds the REAL admin SPA, not the committed placeholder), boots the
+      server against that stack, then runs the Playwright admin-journey
+      suite (web/e2e) against the running server over its own admin basic
+      auth. NIGHTLY stage only, per docs/testing-spec.md's CI Stages table
+      -- deliberately NOT wired into the per-PR gate (`task test`).
+      Requires `task web:e2e:install` to have been run at least once
+      (separate on purpose -- see that task).
+
+      Needs a Docker (or Docker-API-compatible) daemon and either the
+      `docker compose` plugin or the standalone `docker-compose` binary
+      (LOAM_COMPOSE_CMD to force one, e.g. `LOAM_COMPOSE_CMD=docker-compose`
+      -- this environment's `docker` CLI has no `compose` subcommand at
+      all, only the standalone binary, which is exactly the case this
+      override exists for). On podman, TESTCONTAINERS_RYUK_DISABLED is
+      irrelevant here (this target never uses testcontainers-go -- it
+      shells out to compose directly), so it is neither needed nor set.
+
+      Every fixture choice mirrors demo:m2/demo:m3's own established
+      patterns rather than inventing new ones:
+        - The credential row is written directly via `demoenv
+          seed-credential`, exactly as demo:m3 does and for the identical
+          reason (loam-4kz, cmd/demoenv/credential.go's own doc comment):
+          CredentialService.SetUpstreamToken validates through a plain
+          &http.Client{} that prepends "https://" to any scheme-less host,
+          while EnrollRepo resolves credentials by deriveRepoIdentity's
+          BARE host:port -- so for this stack's plaintext-HTTP Forgejo (no
+          TLS is set up here, matching demo:m3's fake forge) no single host
+          string can both validate over the RPC and be found again at
+          enrollment. Going through the RPC here would fail every run.
+        - The seeded repo is created via Forgejo's own REST API with
+          `auto_init: true` (internal/forgesuite's own SeedRepo helper does
+          the same), not a git clone+push -- there is nothing this suite's
+          one enroll journey needs from repo *content*, only that the
+          upstream has a real HEAD for ProbeRepo to discover.
+        - Fixed container names (deploy/docker-compose.e2e.yml) and a fixed
+          server port, both self-healed pre-flight exactly like
+          demo:m1/demo:m2's own containers and ports, for the identical
+          reason documented on those targets: go-task's shell (mvdan/sh)
+          does not run an EXIT trap on its own SIGINT interception, so a
+          Ctrl-C'd previous run can leak either one.
+    cmds:
+      - task: build:bin
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        compose_file="deploy/docker-compose.e2e.yml"
+        compose_project="loam-e2e"
+        compose() {
+          if [ -n "${LOAM_COMPOSE_CMD:-}" ]; then
+            $LOAM_COMPOSE_CMD -p "$compose_project" -f "$compose_file" "$@"
+          elif docker compose version >/dev/null 2>&1; then
+            docker compose -p "$compose_project" -f "$compose_file" "$@"
+          else
+            docker-compose -p "$compose_project" -f "$compose_file" "$@"
+          fi
+        }
+        pg_port="${LOAM_E2E_PG_PORT:-15432}"
+        forgejo_port="${LOAM_E2E_FORGEJO_PORT:-13000}"
+        export LOAM_E2E_PG_PORT="$pg_port"
+        export LOAM_E2E_FORGEJO_PORT="$forgejo_port"
+        server_addr="127.0.0.1:8099"
+        admin_user="admin"
+        admin_password="e2e-Loam-Admin-Passw0rd1"
+        # A fixed, non-secret AES-256 key -- the same value demo:m2 already
+        # commits to this file for the identical purpose (a valid
+        # LOAM_ENCRYPTION_KEY for a throwaway local run, nothing this key
+        # protects outlives the run).
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        forgejo_admin_user="e2eadmin"
+        forgejo_admin_password="e2e-Forgejo-Admin-Passw0rd1"
+        forgejo_admin_email="e2eadmin@example.invalid"
+        repo_name="e2e-repo"
+        repo_identifier="$forgejo_admin_user/$repo_name"
+        target_branch="main"
+        data_dir=""
+        workspace=""
+        find_server_pids() {
+          # See demo:m2's own find_server_pids comment for why this is
+          # pgrep -f against the absolute binary path rather than $!/kill:
+          # go-task's shell has no kill builtin and no real OS pid in $!.
+          pgrep -f "$repo_root/bin/server" 2>/dev/null || true
+        }
+        stop_server() {
+          stop_pids="$(find_server_pids)"
+          [ -z "$stop_pids" ] && return 0
+          for stop_pid in $stop_pids; do /bin/kill -TERM "$stop_pid" 2>/dev/null || true; done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_server_pids)" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_server_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
+        }
+        cleanup() {
+          echo "=== test:e2e cleanup: stopping server, tearing down compose stack, removing temp dirs ==="
+          stop_server
+          compose down -v --remove-orphans >/dev/null 2>&1 || true
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$workspace" ] && rm -rf "$workspace"
+        }
+        trap cleanup EXIT
+        echo "=== test:e2e pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        compose down -v --remove-orphans >/dev/null 2>&1 || true
+        stop_server
+        wait_for_http_ok() {
+          poll_url="$1"; poll_label="$2"; poll_timeout="${3:-60}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            [ "$poll_code" = "200" ] && { echo "$poll_label ready (HTTP 200 from $poll_url)"; return 0; }
+            if [ "$(( $(date +%s) - poll_start ))" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        echo ""
+        echo "=== step 1/7: bring up Postgres/pgvector + a real Forgejo (deploy/docker-compose.e2e.yml) ==="
+        compose up -d
+        pg_deadline=$(( $(date +%s) + 60 ))
+        until docker exec loam-e2e-postgres pg_isready -U loam >/dev/null 2>&1; do
+          [ "$(date +%s)" -ge "$pg_deadline" ] && { echo "postgres never became ready within 60s" >&2; exit 1; }
+          sleep 0.5
+        done
+        echo "postgres ready on 127.0.0.1:$pg_port"
+        wait_for_http_ok "http://127.0.0.1:$forgejo_port/api/v1/version" "forgejo" 90
+        echo ""
+        echo "=== step 2/7: seed the admin user, an access token, and one auto-initialized repo on the real Forgejo ==="
+        # -u git: Forgejo refuses to run its own CLI as root
+        # ("Forgejo is not supposed to be run as root"), and `docker exec`
+        # defaults to root regardless of the image's own service user --
+        # confirmed directly while building this task. internal/forgesuite's
+        # forgejoExec hits the identical requirement (tcexec.WithUser("git")).
+        docker exec -u git loam-e2e-forgejo forgejo admin user create \
+          --admin --username "$forgejo_admin_user" --password "$forgejo_admin_password" \
+          --email "$forgejo_admin_email" --must-change-password=false >/dev/null
+        forgejo_token="$(docker exec -u git loam-e2e-forgejo forgejo admin user generate-access-token \
+          -u "$forgejo_admin_user" --token-name e2e --scopes all --raw)"
+        curl -sS --fail-with-body -X POST \
+          -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$repo_name\",\"auto_init\":true,\"default_branch\":\"$target_branch\",\"private\":true}" \
+          "http://127.0.0.1:$forgejo_port/api/v1/user/repos" >/dev/null
+        # A second commit with ~800KB across 200 files, pushed on top of
+        # auto_init's own commit -- not padding, load-bearing. Measured
+        # directly while building the enroll journey spec: a bare 1-commit
+        # auto_init repo clones over loopback in ~110ms total, most of
+        # which is Forgejo's own smart-HTTP request handling rather than
+        # transfer time, leaving too narrow (and too variable) a
+        # sync_state=syncing window for web/e2e/enroll.e2e.ts's
+        # observeSyncState poll to reliably catch -- confirmed by a raw
+        # curl-loop trace showing the window at ~100-150ms wide starting
+        # after EnrollRepo's preceding CheckRepo probe and DB insert. This
+        # widens it to a comfortably observable size without an artificial
+        # delay anywhere.
+        seed_content_dir="$(mktemp -d /tmp/loam-e2e-seed-content.XXXXXX)"
+        git clone -q "http://$forgejo_admin_user:$forgejo_token@127.0.0.1:$forgejo_port/$repo_identifier.git" "$seed_content_dir"
+        for content_i in $(seq 1 200); do head -c 4096 /dev/urandom > "$seed_content_dir/file_$content_i.bin"; done
+        git -C "$seed_content_dir" add -A
+        git -C "$seed_content_dir" -c user.email=e2e-seed@example.invalid -c user.name=e2e-seed \
+          commit -q -m "e2e: bulk content so the initial clone is reliably observable as syncing"
+        git -C "$seed_content_dir" push -q
+        rm -rf "$seed_content_dir"
+        upstream_url="http://127.0.0.1:$forgejo_port/$repo_identifier.git"
+        echo "seeded $repo_identifier at $upstream_url"
+        echo ""
+        echo "=== step 3/7: build cmd/demoenv (test-support tool; NOT one of the shipped binaries -- see cmd/demoenv/main.go) ==="
+        go build -o bin/demoenv ./cmd/demoenv
+        echo ""
+        echo "=== step 4/7: boot the real server binary (task build:bin already ran, embedding the REAL admin SPA) ==="
+        data_dir="$(mktemp -d /tmp/loam-e2e-data.XXXXXX)"
+        workspace="$(mktemp -d /tmp/loam-e2e-ws.XXXXXX)"
+        server_log="$workspace/server.log"
+        database_url="postgres://loam:loam@127.0.0.1:$pg_port/loam?sslmode=disable"
+        # LOAM_SYNC_INTERVAL=1h: found live while building this task, not
+        # assumed up front. Left at its 60s default, the REAL
+        # mirrorsync.Scheduler's own periodic tick landed inside the
+        # enroll journey's own assertion window and flipped the
+        # just-enrolled repo's sync_state back to Syncing mid-test -- the
+        # UI genuinely showed "Syncing" again, paired with the
+        # last_synced_at timestamp the PRECEDING successful cycle had
+        # already written, which is what made the failure legible rather
+        # than a bare timeout. cmd/server/main.go's own doc comment
+        # documents the identical precaution for the acceptance harness
+        # ("sets LOAM_SYNC_INTERVAL well past its own runtime so this
+        # function's wall-clock scheduler cannot cycle a repo underneath a
+        # manual tick") -- this is the same fix, for the same reason, one
+        # layer up.
+        env PATH="$PATH" LOAM_HTTP_ADDR="$server_addr" LOAM_ADMIN_USER="$admin_user" \
+          LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+          LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+          LOAM_SYNC_INTERVAL=1h \
+          "$repo_root/bin/server" >"$server_log" 2>&1 &
+        wait_for_http_ok "http://$server_addr/healthz" "server" 60
+        echo ""
+        echo "=== step 5/7: seed the encrypted forge credential EnrollRepo resolves by host (loam-4kz; see task desc) ==="
+        "$repo_root/bin/demoenv" seed-credential -database-url "$database_url" \
+          -host "127.0.0.1:$forgejo_port" -token "$forgejo_token" -encryption-key "$encryption_key"
+        echo ""
+        echo "=== step 6/7: run the Playwright admin-journey suite (web/e2e) against the running server ==="
+        set +e
+        env LOAM_E2E_BASE_URL="http://$server_addr" LOAM_E2E_ADMIN_USER="$admin_user" \
+          LOAM_E2E_ADMIN_PASSWORD="$admin_password" LOAM_E2E_UPSTREAM_URL="$upstream_url" \
+          LOAM_E2E_REPO_IDENTIFIER="$repo_identifier" LOAM_E2E_TARGET_BRANCH="$target_branch" \
+          npx --prefix web playwright test --config=web/playwright.config.ts
+        playwright_status=$?
+        set -e
+        echo ""
+        echo "=== step 7/7: done (cleanup runs on EXIT regardless of the result above) ==="
+        exit "$playwright_status"
+
   demo:m1:
     desc: >-
       Demo M1 (loam-ejr): run the store integration suite (loam-li0.6,
