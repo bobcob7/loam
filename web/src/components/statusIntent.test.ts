@@ -1,9 +1,11 @@
+import { create } from "@bufbuild/protobuf";
 import { IngestStatus, SyncState } from "../gen/loam/admin/v1/repo_admin_pb";
-import { VerdictOutcome, WorkBranchState } from "../gen/loam/v1/common_pb";
+import { VerdictOutcome, VerdictSummarySchema, WorkBranchState, type VerdictSummary } from "../gen/loam/v1/common_pb";
 import {
   ingestStatusIntent,
   syncStateIntent,
   verdictOutcomeIntent,
+  verdictSummaryIntent,
   workBranchStateIntent,
   type StatusBadgeContent,
 } from "./statusIntent";
@@ -150,5 +152,83 @@ describe("verdictOutcomeIntent", () => {
       intent: "warning",
       label: "Unknown",
     });
+  });
+});
+
+// verdictSummaryIntent is the fix for loam-2xe6: VerdictSummary.stale is a
+// bool FIELD (field 3 on the message), not a VerdictOutcome enum member, so
+// verdictOutcomeIntent structurally cannot see it. Requesting review marks
+// the prior round's verdicts stale, and only non-stale verdicts count toward
+// the approval bar (loam/v1/common.proto, VerdictSummary doc comment) -- a
+// screen that renders a stale APPROVE via the outcome alone would show
+// success/green "Approve", telling an admin the approval bar is met when it
+// is not. Every case below is built from a real create()'d VerdictSummary,
+// never a bare outcome, so the test exercises the same shape a screen does.
+describe("verdictSummaryIntent", () => {
+  const summary = (outcome: VerdictOutcome, stale: boolean, round: number): VerdictSummary =>
+    create(VerdictSummarySchema, { reviewer: "agent-7-reviewer", outcome, stale, round });
+
+  const knownNonStale: ReadonlyArray<readonly [VerdictOutcome, StatusBadgeContent]> = [
+    [VerdictOutcome.APPROVE, { intent: "success", label: "Approve" }],
+    [VerdictOutcome.DISAPPROVE, { intent: "danger", label: "Disapprove" }],
+    [VerdictOutcome.NEUTRAL, { intent: "neutral", label: "Neutral" }],
+  ];
+
+  it("covers every named VerdictOutcome member besides UNSPECIFIED", () => {
+    const namedValues = Object.entries(VerdictOutcome)
+      .filter(([name]) => name !== "UNSPECIFIED")
+      .map(([, value]) => value);
+    expect(knownNonStale.map(([value]) => value).sort()).toEqual(namedValues.sort());
+  });
+
+  it.each(knownNonStale)(
+    "passes a non-stale %s verdict through to verdictOutcomeIntent unchanged",
+    (outcome, expected) => {
+      expect(verdictSummaryIntent(summary(outcome, false, 1))).toEqual(expected);
+    },
+  );
+
+  it.each(knownNonStale)(
+    "forces neutral and appends '(stale)' to the label once a %s verdict goes stale",
+    (outcome, expected) => {
+      expect(verdictSummaryIntent(summary(outcome, true, 2))).toEqual({
+        intent: "neutral",
+        label: `${expected.label} (stale)`,
+      });
+    },
+  );
+
+  it("renders a stale APPROVE as neutral, not success -- the case that misleads an admin about the approval bar", () => {
+    const result = verdictSummaryIntent(summary(VerdictOutcome.APPROVE, true, 3));
+    expect(result.intent).not.toBe("success");
+    expect(result).toEqual({ intent: "neutral", label: "Approve (stale)" });
+  });
+
+  it("keeps the unset zero value neutral, and still appends '(stale)' once it goes stale", () => {
+    expect(verdictSummaryIntent(summary(VerdictOutcome.UNSPECIFIED, true, 1))).toEqual({
+      intent: "neutral",
+      label: "Unspecified (stale)",
+    });
+  });
+
+  it("passes an unrecognised outcome through as the warning fallback when not stale", () => {
+    expect(verdictSummaryIntent(summary(999 as unknown as VerdictOutcome, false, 1))).toEqual({
+      intent: "warning",
+      label: "Unknown",
+    });
+  });
+
+  it("overrides even an unrecognised outcome's warning fallback to neutral once stale", () => {
+    expect(verdictSummaryIntent(summary(999 as unknown as VerdictOutcome, true, 1))).toEqual({
+      intent: "neutral",
+      label: "Unknown (stale)",
+    });
+  });
+
+  it("does not fold `round` into the intent or label -- two stale APPROVEs from different rounds render identically", () => {
+    const earlyRound = verdictSummaryIntent(summary(VerdictOutcome.APPROVE, true, 1));
+    const laterRound = verdictSummaryIntent(summary(VerdictOutcome.APPROVE, true, 9));
+    expect(earlyRound).toEqual({ intent: "neutral", label: "Approve (stale)" });
+    expect(laterRound).toEqual({ intent: "neutral", label: "Approve (stale)" });
   });
 });

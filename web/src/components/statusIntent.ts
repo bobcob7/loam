@@ -1,5 +1,5 @@
 import { IngestStatus, SyncState } from "../gen/loam/admin/v1/repo_admin_pb";
-import { VerdictOutcome, WorkBranchState } from "../gen/loam/v1/common_pb";
+import { VerdictOutcome, WorkBranchState, type VerdictSummary } from "../gen/loam/v1/common_pb";
 import type { StatusIntent } from "./StatusBadge";
 
 /**
@@ -93,18 +93,21 @@ export function workBranchStateIntent(state: WorkBranchState): StatusBadgeConten
 /**
  * Maps `loam.v1.VerdictOutcome` to a status pill (a proposal's verdicts).
  *
- * This maps the outcome alone. tokens.css also assigns `neutral` to a
- * *stale* verdict regardless of its outcome (`VerdictSummary.stale`,
- * loam/v1/common.proto) -- staleness is a separate boolean field, not an
- * enum member, so it is out of scope for an enum-to-intent helper and is not
- * folded in here. A screen rendering a `VerdictSummary` decides that for
- * itself, e.g.:
+ * This maps the outcome alone and DELIBERATELY has no knowledge of staleness:
+ * tokens.css also assigns `neutral` to a *stale* verdict regardless of its
+ * outcome (`VerdictSummary.stale`, loam/v1/common.proto), but staleness is a
+ * separate boolean field, not an enum member, so an enum-to-intent helper
+ * structurally cannot see it.
  *
- * ```ts
- * const content = summary.stale
- *   ? { intent: "neutral" as const, label: verdictOutcomeIntent(summary.outcome).label }
- *   : verdictOutcomeIntent(summary.outcome);
- * ```
+ * Do not call this directly on a `VerdictSummary`'s outcome -- a stale
+ * APPROVE would render as `success`/"Approve", telling an admin the approval
+ * bar is met when the verdict does not count toward it
+ * (loam/v1/common.proto: "only non-stale verdicts count toward the approval
+ * bar"). Call {@link verdictSummaryIntent} instead, which takes the whole
+ * summary and applies the staleness override. This function stays exported
+ * because {@link verdictSummaryIntent} is built on it, and because a caller
+ * that only has a bare `VerdictOutcome` with no staleness to consider (none
+ * exists in this codebase today) would still have a legitimate use for it.
  */
 export function verdictOutcomeIntent(outcome: VerdictOutcome): StatusBadgeContent {
   switch (outcome) {
@@ -119,4 +122,43 @@ export function verdictOutcomeIntent(outcome: VerdictOutcome): StatusBadgeConten
     default:
       return UNKNOWN_STATUS;
   }
+}
+
+/**
+ * Maps a whole `loam.v1.VerdictSummary` to a status pill (a proposal's
+ * verdicts) -- the function every screen rendering a `VerdictSummary` MUST
+ * call instead of `verdictOutcomeIntent(summary.outcome)`.
+ *
+ * loam/v1/common.proto's doc comment on `VerdictSummary` is the source of
+ * truth this enforces: "requesting review marks the prior round's verdicts
+ * `stale`, and only non-stale verdicts count toward the approval bar." A
+ * stale verdict's `outcome` is unchanged by going stale, but it no longer
+ * counts, so it must never keep the outcome's own intent -- most importantly
+ * a stale APPROVE must never render as `success`, which would read as "the
+ * approval bar is met" when it is not. This function forces `neutral` for
+ * any stale verdict, matching tokens.css's own listing of "stale verdicts"
+ * under the neutral intent, regardless of `outcome` (including an outcome
+ * this build does not recognise -- staleness wins even over the `warning`
+ * fallback `verdictOutcomeIntent` gives an unknown outcome).
+ *
+ * The label also names the staleness explicitly, e.g. "Approve (stale)"
+ * rather than a bare "Approve" recoloured neutral: StatusBadge's own contract
+ * (see StatusBadge.tsx) is that colour is never the sole carrier of meaning,
+ * so a neutral pill that still reads "Approve" is exactly the ambiguous
+ * rendering this bead exists to remove -- a admin scanning a dense table by
+ * word rather than hue must not be able to mistake it for a counted verdict.
+ *
+ * `summary.round` is deliberately left out of the label. It is a plain
+ * `number` already on the summary, independent of intent, that a screen can
+ * render as its own column or alongside the badge (e.g. "Round 2") if the
+ * screen judges it useful context; folding it into this pill's text would
+ * overload one label with two unrelated facts and every screen would have to
+ * parse it back out to lay them out separately.
+ */
+export function verdictSummaryIntent(summary: VerdictSummary): StatusBadgeContent {
+  const content = verdictOutcomeIntent(summary.outcome);
+  if (!summary.stale) {
+    return content;
+  }
+  return { intent: "neutral", label: `${content.label} (stale)` };
 }
