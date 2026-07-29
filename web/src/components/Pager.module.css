@@ -1,0 +1,45 @@
+.root {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+}
+
+.summary {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* --color-border-strong, not --color-border: this is the visible boundary of
+   an interactive control, which WCAG SC 1.4.11 holds to 3:1
+   (src/styles/tokens.css -> Colour: surfaces). */
+.button {
+  block-size: var(--control-height-sm);
+  padding-inline: var(--space-3);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: 1;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.button:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  transition: background-color var(--transition-fast);
+}
+
+/* A disabled control is exempt from the contrast minimum (SC 1.4.3/1.4.11),
+   and reading as inert is the point -- so the quiet border token here. */
+.button:disabled {
+  color: var(--color-text-faint);
+  border-color: var(--color-border);
+  cursor: default;
+}

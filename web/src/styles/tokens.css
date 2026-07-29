@@ -178,6 +178,15 @@
   --control-height: 2rem; /*      32px -- buttons, inputs, selects */
   --control-height-sm: 1.5rem; /* 24px -- in-row actions, pager buttons */
 
+  /* ---- Sizes ------------------------------------------------------------
+     Added by loam-nvb.6 for Dialog, which is the first component needing a
+     width cap. A modal that fills a wide admin window runs its text past a
+     readable measure, and every dialog here is a short form or a
+     confirmation; Dialog clamps this against the viewport so a narrow window
+     still fits. This is a cap, not a width -- it is not the page-content
+     max-width, which no component has needed yet. */
+  --size-dialog: 32rem; /* 512px */
+
   /* ---- Motion -----------------------------------------------------------
      One duration. reset.css disables transitions wholesale under
      prefers-reduced-motion, so components do not each have to. */
