@@ -73,13 +73,12 @@ Feature: Work branch lifecycle
     Then the work branch's commits are unchanged
     And it keeps its state "reviewable"
 
-  @wip
   Scenario: A conflicting target advance resets the work branch to draft
     Given a work branch in state "reviewed" with one "approve" verdict
     When the target branch advances with conflicting changes
     Then the work branch is in state "draft"
     And it is flagged as conflicted
-    And the prior verdicts are marked stale
+    And its prior verdicts are not yet stale, because no new round has opened
 
   Scenario: Catching up returns a conflict-reset work branch to review
     Given a work branch reset to "draft" by a conflicting target advance

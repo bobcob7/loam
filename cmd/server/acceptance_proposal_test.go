@@ -159,6 +159,9 @@ func (h *acceptanceHarness) registerProposalSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the upstream PR URL is recorded on the work branch$`, h.stepTheUpstreamPRURLIsRecorded)
 	sc.Step(`^a new review round is opened$`, h.stepANewReviewRoundIsOpened)
 	sc.Step(`^the prior verdicts are marked stale$`, h.stepThePriorVerdictsAreMarkedStale)
+	sc.Step(`^its prior verdicts are not yet stale, because no new round has opened$`, h.stepPriorVerdictsAreNotYetStale)
+	sc.Step(`^it is flagged as conflicted$`, h.stepItIsFlaggedAsConflicted)
+	sc.Step(`^the target branch advances with conflicting changes$`, h.stepTheTargetAdvancesWithConflictingChanges)
 	sc.Step(`^it no longer appears in the proposal queue$`, h.stepItNoLongerAppearsInTheProposalQueue)
 	sc.Step(`^the reason is recorded on the work branch$`, h.stepTheReasonIsRecordedOnTheWorkBranch)
 	sc.Step(`^the upstream PR is closed$`, h.stepTheUpstreamPRIsClosed)
@@ -1386,4 +1389,79 @@ func (h *acceptanceHarness) stepNoNewUpstreamPRIsCreated(ctx context.Context) er
 		return fmt.Errorf("the forge answered for pull request #%d (err %v), so a second one was allocated", world.upstreamPRNumber+1, err)
 	}
 	return nil
+}
+
+// stepPriorVerdictsAreNotYetStale pins the timing loam-di9q settled:
+// staleness is DERIVED from the round number
+// (review_rounds.sql's is_current_round compares against MAX(number)), and
+// MarkConflicted demotes without opening a round -- so at the moment of
+// demotion the verdicts' round is still the max and they read as CURRENT.
+// They go stale only when the catch-up restore opens round 2, which the
+// next scenario asserts.
+//
+// The precondition is what stops this holding vacuously: a branch with no
+// verdicts at all, or one already sitting on a later round, would satisfy
+// "not stale" for the wrong reason. Both are rejected explicitly.
+//
+// Nothing can act on the branch during this window regardless:
+// AcceptProposal gates independently on state = reviewed AND
+// conflict = none (internal/handler/proposal/proposal.go), and a demoted
+// branch fails both.
+func (h *acceptanceHarness) stepPriorVerdictsAreNotYetStale(ctx context.Context) error {
+	world := worldFrom(ctx)
+	number, _, err := h.latestRound(ctx, world, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if number != 1 {
+		return fmt.Errorf("the branch is on round %d, so \"not yet stale\" would not be about the demotion; want round 1", number)
+	}
+	verdicts, err := h.listVerdicts(world, world.reviewer, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if len(verdicts) == 0 {
+		return fmt.Errorf("work branch %s carries no verdicts, so \"not yet stale\" would hold vacuously", world.workBranch)
+	}
+	for _, v := range verdicts {
+		if v.Stale {
+			return fmt.Errorf("verdict %+v reads stale after a demotion that opened no round; staleness must follow the catch-up restore, not the demotion (loam-di9q)", v)
+		}
+	}
+	return nil
+}
+
+// stepItIsFlaggedAsConflicted asserts the conflict column alone, leaving
+// the state assertion to its own Then. The demotion sets both, and
+// work-branch-lifecycle.feature deliberately checks them separately so a
+// change that moved the state but dropped the flag (or the reverse) fails
+// on the half that actually broke.
+//
+// "reset" rather than "flagged" is the expected value here: the branch was
+// reviewed, so it was DEMOTED, and workbranchstore distinguishes a demoted
+// branch (conflict = reset) from one that was already draft and merely
+// gained the flag (conflict = flagged). loam-giq.6's restore rule turns on
+// exactly that distinction.
+func (h *acceptanceHarness) stepItIsFlaggedAsConflicted(ctx context.Context) error {
+	world := worldFrom(ctx)
+	_, conflict, err := h.workBranchStateConflict(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if conflict != "reset" {
+		return fmt.Errorf("work branch %s carries conflict %q, want \"reset\" -- a reviewed branch is DEMOTED by a conflicting advance, not merely flagged", world.workBranch, conflict)
+	}
+	return nil
+}
+
+// stepTheTargetAdvancesWithConflictingChanges is the bare WHEN, for the
+// scenario that asserts the demotion's own three consequences separately
+// (state, conflict flag, verdict staleness) rather than folding them into
+// one Given the way stepAConflictingTargetAdvanceResetIt does.
+//
+// It deliberately asserts NOTHING itself: each Then that follows is the
+// assertion, and duplicating them here would mean a broken demotion failed
+// on the When with a message about the wrong thing.
+func (h *acceptanceHarness) stepTheTargetAdvancesWithConflictingChanges(ctx context.Context) error {
+	return h.advanceTargetConflictingly(ctx, worldFrom(ctx))
 }

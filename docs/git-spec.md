@@ -168,9 +168,16 @@ advance — notices before any agent does. The behavior, as it shapes transport:
   - **Merges cleanly** → nothing happens. Behind-but-mergeable is a normal state; the
     *forge* performs the actual merge when the accepted PR merges.
   - **Conflict** → a `reviewable` or `reviewed` branch (including an accepted proposal
-    with an open PR) is **reset to `draft`** and flagged as conflicted; its verdicts go
-    stale, since they judged content the target has invalidated. A `draft` branch just
-    gains the flag.
+    with an open PR) is **reset to `draft`** and flagged as conflicted. Its verdicts
+    judged content the target has since invalidated, and they go **stale when the
+    branch returns to review** — the catch-up restore opens a new round, and staleness
+    is derived from the round number (see "A flagged branch recovers by push" below).
+    They are not marked stale at the moment of demotion: no round opens there, so
+    there is nothing for the derivation to compare against, and opening one would
+    invent a review round for a branch nobody has asked anyone to review. Nothing can
+    act on the branch in the meantime regardless — acceptance gates independently on
+    `state = reviewed` **and** `conflict = none`, and a demoted branch fails both.
+    A `draft` branch just gains the flag. Resolved as loam-di9q.
 - A flagged branch recovers **by push**: when an agent pushes commits that bring the
   branch up to date (its history contains the current target tip), the server clears the
   flag, and a conflict-reset branch flips **directly back to `reviewable`** — no

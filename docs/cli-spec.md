@@ -186,9 +186,11 @@ stale), requested by the author (`request-review`) or by the admin. Each transit
 recorded against their round. The terminal states are
 `complete` (set by the server when the upstream PR merges) and `closed` (admin-only, or when
 the upstream PR is closed) — neither is an agent action. A conflicting target advance
-resets a `reviewable`/`reviewed` branch to `draft` (marking its verdicts stale); a push
+resets a `reviewable`/`reviewed` branch to `draft` and flags it as conflicted; a push
 that catches the branch up to its target returns it to `reviewable` automatically, with no
-`request-review` (see `docs/git-spec.md` → Target Advances & Catch-Up).
+`request-review` — and it is that restore, which opens a fresh round, that marks the
+prior round's verdicts stale (staleness is derived from the round number, so nothing
+marks them at demotion time) (see `docs/git-spec.md` → Target Advances & Catch-Up).
 
 Commands that act on an existing work branch take `<repo>` and `<work-branch>` (its name) as
 positional arguments; both are optional when run from inside the repo directory (inferred
