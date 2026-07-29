@@ -520,9 +520,16 @@ tasks:
         echo ""
         echo "=== step 6/7: run the Playwright admin-journey suite (web/e2e) against the running server ==="
         set +e
+        # LOAM_E2E_FORGEJO_HOST/LOAM_E2E_FORGEJO_TOKEN (loam-li0.11.2, additive):
+        # the bare host:port and real access token already generated above,
+        # handed to web/e2e/credentials.e2e.ts so it can submit
+        # SetUpstreamToken for real against the real seeded Forgejo, rather
+        # than only relying on the credential row step 5 seeds out of band
+        # for enrollment's sake.
         env LOAM_E2E_BASE_URL="http://$server_addr" LOAM_E2E_ADMIN_USER="$admin_user" \
           LOAM_E2E_ADMIN_PASSWORD="$admin_password" LOAM_E2E_UPSTREAM_URL="$upstream_url" \
           LOAM_E2E_REPO_IDENTIFIER="$repo_identifier" LOAM_E2E_TARGET_BRANCH="$target_branch" \
+          LOAM_E2E_FORGEJO_HOST="127.0.0.1:$forgejo_port" LOAM_E2E_FORGEJO_TOKEN="$forgejo_token" \
           npx --prefix web playwright test --config=web/playwright.config.ts
         playwright_status=$?
         set -e

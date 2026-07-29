@@ -53,6 +53,28 @@ export const e2eEnv = {
   get targetBranch(): string {
     return requireEnv("LOAM_E2E_TARGET_BRANCH");
   },
+  /**
+   * The seeded Forgejo's bare `host:port` (e.g. "127.0.0.1:13000") -- the
+   * same string Taskfile.yml's step 5 hands to `demoenv seed-credential`
+   * for enrollment, and the same format the Credentials screen's own Host
+   * field hints an admin should type ("github.com", "forgejo.example.com").
+   * Added for loam-li0.11.2 (credentials.e2e.ts), which -- unlike the enroll
+   * journey -- must submit `SetUpstreamToken` for real, against the real
+   * seeded Forgejo, rather than relying on the row that step 5 seeds out of
+   * band. See credentials.e2e.ts's own doc comment for why the bare form of
+   * this host trips loam-4kz.
+   */
+  get forgejoHost(): string {
+    return requireEnv("LOAM_E2E_FORGEJO_HOST");
+  },
+  /**
+   * A real Forgejo access token for the seeded admin user, scope `all` --
+   * the same token Taskfile.yml's step 5 already generates and uses to
+   * seed both the credential row and the repo content.
+   */
+  get forgejoToken(): string {
+    return requireEnv("LOAM_E2E_FORGEJO_TOKEN");
+  },
 };
 
 export const test = base;
