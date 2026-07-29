@@ -142,6 +142,14 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // graph at all, so "the next sync runs" drives a genuine five-step Mirror
 // Sync cycle end to end rather than erroring out at step 2.
 //
+// It also applies production's own cross-repo concurrency bound
+// (defaultMaxConcurrentCycles, sync.go -- loam-k1fb), so this graph stays
+// identical to buildSyncScheduler's in fan-out shape too, not just in
+// which type backs which seam. No scenario enrolls anywhere near that many
+// repos, so the bound is behaviourally invisible here; it is passed so the
+// harness cannot drift into exercising a fan-out the shipped binary is
+// incapable of.
+//
 // This is loam-f75's constraint ("never call Scheduler.Run and
 // Scheduler.Tick on the same Scheduler") satisfied by construction, not by
 // convention: the *mirrorsync.Scheduler value itself is a local variable
@@ -178,7 +186,7 @@ func newSyncHarness(srv acceptanceServer, transport *gittransport.Transport, for
 	ingestEnqueuer := mirrorsync.NewStoreIngestEnqueuer(repoStore, repoStore, srv.ingestPool)
 	prPoller := mirrorsync.NewStorePRPoller(srv.dataDir, logger, repoStore, workBranchStore, workBranchStore, forgeClient, transport)
 	reporter := state.New(srv.pool)
-	scheduler := mirrorsync.New(logger, nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, advances, mergeability, ingestEnqueuer, prPoller, reporter)
+	scheduler := mirrorsync.New(logger, nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, advances, mergeability, ingestEnqueuer, prPoller, reporter, mirrorsync.WithMaxConcurrentCycles(defaultMaxConcurrentCycles))
 	return testsched.NewSyncHarness(scheduler)
 }
 

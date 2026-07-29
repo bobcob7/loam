@@ -49,7 +49,11 @@ One binary, one process, five long-lived components:
   decisions to the hook stubs in the mirrors (`docs/git-spec.md` → Enforcement
   Mechanics). Filesystem-local by construction; never exposed on the network.
 - **Sync scheduler** — ticks every `LOAM_SYNC_INTERVAL`, running the per-repo sync cycle
-  (`docs/sync-spec.md`), serialized per repo.
+  (`docs/sync-spec.md`), serialized per repo. Total in-flight cycles are capped across
+  all repos combined, so a large enrollment does not issue one concurrent git fetch per
+  enrolled repo per tick; repos over the cap queue and run as slots free, and a sweep
+  that outlasts the tick interval simply stretches the effective interval rather than
+  piling up. The cap is a fixed build-time value, not a configuration knob for the MVP.
 - **Ingest worker pool** (`LOAM_INGEST_WORKERS`) — consumes `ingest_jobs`, serialized per
   repo (`docs/ingestion-spec.md`).
 - **Embedder client** — talks to `LOAM_EMBEDDER_URL`; a plain dependency of ingest, not
