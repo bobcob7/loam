@@ -10,6 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "generate": "cd .. && go tool buf generate --template web/buf.gen.yaml",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

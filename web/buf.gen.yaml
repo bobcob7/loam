@@ -1,0 +1,93 @@
+version: v2
+
+# TypeScript codegen for the admin SPA (docs/web-frontend-spec.md -> Codegen).
+# The SPA consumes the SAME proto/ schema as the server; this template is the
+# TS counterpart of the repo-root buf.gen.yaml, which generates Go into
+# internal/gen.
+#
+# Run it from the REPOSITORY ROOT, through the repo's pinned buf:
+#
+#     (cd web && npm ci)                                   # once, for the plugins
+#     go tool buf generate --template web/buf.gen.yaml
+#
+# Both `out` below and the plugin paths are resolved relative to the process
+# working directory, so the repo root is not a stylistic preference — running
+# this from inside web/ writes to web/web/src/gen and fails to find the
+# plugins.
+#
+# web/package.json's `generate` script is that exact command with a leading
+# `cd ..` (npm runs scripts with the cwd set to the package directory, i.e.
+# web/), so `npm --prefix web run generate` works from anywhere. It shells out
+# to `go`, which looks odd in an npm project but is the point: the spec calls
+# for the REPO's pinned buf, not a second copy of buf pinned in npm that could
+# drift from the one generating internal/gen. loam-nvb.15 re-homes this as a
+# `web:generate` Taskfile target; that target must set `dir: '{{.ROOT_DIR}}'`
+# (or call the npm script) for the same working-directory reason.
+#
+# Plugin invocation: the root template uses `local: [go, tool, protoc-gen-go]`
+# because those plugins are pinned in go.mod's `tool` block. That form does
+# NOT work here — protoc-gen-es and protoc-gen-connect-query are npm packages
+# pinned in web/package.json devDependencies and installed by `npm ci` into
+# web/node_modules. `local` takes a full argv, so the executable is named by
+# path into node_modules/.bin rather than by a PATH lookup; nothing has to be
+# installed globally, and the versions are exactly the ones package-lock.json
+# pins. The npm bin shims are `#!/usr/bin/env node` scripts, executed directly
+# (CI runs ubuntu-latest and macos-latest).
+#
+# Plugin/runtime versions are matched pairs and must stay that way (loam-nvb.1):
+# protoc-gen-es 2.13.0 <-> @bufbuild/protobuf 2.13.0, and
+# protoc-gen-connect-query 2.2.0 <-> @connectrpc/connect-query 2.2.0.
+
+# Delete web/src/gen before generating, so a renamed or deleted .proto cannot
+# leave an orphaned .ts file behind. Without this, a stale generated file
+# would keep compiling, keep passing `npm run build`, and be invisible to a
+# drift check (which only sees files that CHANGED, never files that should no
+# longer exist).
+clean: true
+
+inputs:
+  # The whole proto module, i.e. both loam.v1 and loam.admin.v1
+  # (docs/web-frontend-spec.md -> Codegen). The admin is a superuser and the
+  # SPA mixes loam.admin.v1 calls with loam.v1 WorkBranchService calls, and
+  # every loam.admin.v1 file imports loam/v1/common.proto, so loam.v1 could
+  # not be excluded wholesale in any case.
+  - directory: proto
+
+plugins:
+  # Messages, enums, and service descriptors (@bufbuild/protobuf runtime).
+  - local: web/node_modules/.bin/protoc-gen-es
+    out: web/src/gen
+    opt:
+      # Emit .ts rather than the default .js + .d.ts pair: web/tsconfig.json's
+      # `include` covers src/, so TypeScript sources here are type-checked by
+      # `npm run build`, which is what gives a future drift check teeth.
+      - target=ts
+      # Emit protobuf enums as `as const` objects instead of TypeScript
+      # `enum` declarations. Two independent reasons, either sufficient:
+      #
+      #   1. web/tsconfig.json sets `erasableSyntaxOnly`, and a TS `enum` is
+      #      the canonical thing that flag rejects (TS1294). Without this
+      #      option `npm run typecheck` fails on five generated declarations
+      #      in common_pb.ts and repo_admin_pb.ts. The alternative fix would
+      #      be dropping erasableSyntaxOnly from the app's tsconfig, i.e.
+      #      loosening every hand-written file to accommodate generated code
+      #      — the wrong direction.
+      #   2. CLAUDE.md -> TypeScript standards says "avoid enums — use
+      #      `as const` objects or string literal unions". This is that.
+      #
+      # Marked experimental upstream (protoc-gen-es README). The generated
+      # surface is the same either way — `WorkBranchState.REVIEWED` and the
+      # `WorkBranchState` type both still exist — so the blast radius of the
+      # option changing is a regeneration, not a rewrite. `ts_nocheck=true`
+      # is the escape hatch protoc-gen-es documents for hostile compiler
+      # settings; it is deliberately NOT used, because switching off type
+      # checking for src/gen would hide real drift between the schema and
+      # the code consuming it.
+      - erasable_syntax=true
+
+  # TanStack Query hooks (@connectrpc/connect-query runtime) — the
+  # `useQuery(listProposals)` / `useMutation(acceptProposal)` surface.
+  - local: web/node_modules/.bin/protoc-gen-connect-query
+    out: web/src/gen
+    opt:
+      - target=ts
