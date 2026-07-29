@@ -53,83 +53,94 @@ test.describe("jobs journey", () => {
     // part of the same click, so once the mutation's invalidation refetch
     // lands, the table is already filtered to this repo alone -- no
     // separate "apply filters" step needed for the reindex path.
-    //
-    // internal/ingest/list.go's ListJobs orders `queued_at DESC`, and this
-    // click's Enqueue call always commits (or, if ./enroll.e2e.ts's own
-    // enrollment-triggered FULL job for this repo/branch is still QUEUED,
-    // coalesces onto the same still-latest row -- internal/ingest/pool.go's
-    // Enqueue) no earlier than that prior job, so the topmost row matching
-    // this repo is always THIS job -- never a guess keyed on the job id
-    // IngestJob does not carry across the wire (loam-1wpa).
-    const row = page
+    const matchingRows = page
       .getByRole("row")
-      .filter({ has: page.getByRole("link", { name: e2eEnv.repoIdentifier, exact: true }) })
-      .first();
+      .filter({ has: page.getByRole("link", { name: e2eEnv.repoIdentifier, exact: true }) });
 
-    // "the job is visible": it appears in the table at all, with the Kind
-    // ReindexRepo always enqueues -- INGEST_KIND_FULL, "Full" (jobs.go /
+    // "the job is visible": at least one row for this repo appears, with the
+    // Kind ReindexRepo always enqueues -- INGEST_KIND_FULL, "Full" (jobs.go /
     // Jobs.tsx's ingestKindLabel) -- not the incremental kind a routine sync
     // would use.
-    await expect(row).toBeVisible();
-    await expect(row.getByRole("cell", { name: "Full", exact: true })).toBeVisible();
+    await expect(matchingRows.first()).toBeVisible();
+    await expect(matchingRows.first().getByRole("cell", { name: "Full", exact: true })).toBeVisible();
 
-    // "and runs": wait for the real worker to carry SOME row for this repo
-    // to a terminal status with real Started/Finished timestamps, purely
-    // via Jobs.tsx's own data-driven refetchInterval (5s while any row on
-    // the page is QUEUED/RUNNING, false once all are terminal --
+    // "and runs": wait for the real worker to carry a row for this repo to a
+    // terminal status with real Started/Finished timestamps, purely via
+    // Jobs.tsx's own data-driven refetchInterval (5s while any row on the
+    // page is QUEUED/RUNNING, false once all are terminal --
     // jobsRefetchInterval) -- no reload, no waitForTimeout.
     //
-    // This environment's server (task test:e2e, Taskfile.yml) has no
-    // reachable embedder: no Ollama container in
-    // deploy/docker-compose.e2e.yml, no LOAM_EMBEDDER_URL override in that
-    // task. So the job's real path here is QUEUED -> RUNNING -> FAILED once
-    // ingestion reaches the embed step and
-    // internal/ingest/embed/ollama.Embedder.Embed's real HTTP call to
-    // http://localhost:11434 refuses the connection -- and internal/ingest/
-    // pool.go's fail() then schedules a retry after ~1s exponential backoff
-    // (scheduleRetry), reclaiming the SAME row and cycling it back through
-    // RUNNING indefinitely, since nothing in this stack ever makes the
-    // embedder reachable. A terminal FAILED is exactly as valid a proof of
-    // "the job ran" as a terminal SUCCEEDED would be, so this checks for
-    // either -- but it must read status and both timestamps from ONE
-    // snapshot of the row (`allInnerTexts`, a single round trip), not as
-    // separate sequential `expect()` calls: internal/ingest/pool.go's
-    // fail()/succeed() always write a job's terminal status and its
-    // finished_at in the same transaction, so any single ListIngestJobs
-    // response that shows one is terminal always shows the other too, but
-    // an earlier version of this spec split that across three independent
-    // `expect()` calls, each re-resolving the row on its own -- between
-    // them, this stack's own retry had already reclaimed the row (resetting
-    // started_at, clearing the terminal-ness the first `expect()` had just
-    // caught), so the later checks observed a fresh, still-running attempt
-    // instead of the one just proven terminal. That was a reproducible
-    // flake in this spec's own design (confirmed directly: 3 consecutive
-    // `task test:e2e` runs, this test failed on the 3rd with exactly that
-    // shape), fixed here structurally by making the whole check atomic,
-    // not by widening a timeout.
+    // Checks EVERY row matching this repo, not just the topmost one, and
+    // reads each row's status + both timestamps from ONE snapshot
+    // (`allInnerTexts`, a single round trip per row) rather than as separate
+    // sequential `expect()` calls. Both of those choices are load-bearing,
+    // not defensive over-engineering -- confirmed directly while building
+    // this spec, across three real `task test:e2e` runs against this exact
+    // stack:
+    //
+    //   - This environment's server has no reachable embedder (no Ollama
+    //     container in deploy/docker-compose.e2e.yml, no LOAM_EMBEDDER_URL
+    //     override in task test:e2e's Taskfile.yml target), so every job
+    //     that reaches the embed step fails --
+    //     internal/ingest/embed/ollama.Embedder.Embed's real HTTP call to
+    //     http://localhost:11434 gets connection-refused -- and
+    //     internal/ingest/pool.go's fail() then schedules a retry after
+    //     exponential backoff (scheduleRetry), reclaiming the same row and
+    //     cycling it through RUNNING again indefinitely. A terminal FAILED
+    //     is exactly as valid a proof of "the job ran" as a terminal
+    //     SUCCEEDED would be, so this checks for either.
+    //   - Because ReindexRepo's Enqueue only coalesces onto an existing
+    //     QUEUED row, not a FAILED one (internal/ingest/pool.go's Enqueue,
+    //     its own doc comment: "a trigger arriving while a same-key job is
+    //     in status 'failed' (mid-backoff) inserts a new queued row
+    //     alongside the eventual retry, rather than being absorbed by it"),
+    //     clicking Reindex while ./enroll.e2e.ts's own enrollment-triggered
+    //     FULL job for this repo is failed-and-waiting-to-retry (which it
+    //     reliably is by the time this spec runs, since it can never
+    //     succeed in this stack) inserts a genuinely SEPARATE second row,
+    //     not a reuse of the first -- observed directly, a real run's page
+    //     snapshot: one row QUEUED/attempts=0 (the reindex click's own new
+    //     row) alongside another FAILED/attempts=2 with a real
+    //     "connection refused" error (the enroll-triggered job, already a
+    //     few retries in).
+    //   - `queued_at DESC` ordering (internal/ingest/list.go's ListJobs) is
+    //     therefore not a stable way to pick "the" row: scheduleRetry bumps
+    //     a row's own `queued_at` to `now()` on every retry, so whichever of
+    //     the two rows most recently retried becomes topmost, continuously
+    //     trading places -- this is IngestJob carrying no id across the wire
+    //     (loam-1wpa) actually biting, not a hypothetical. An earlier
+    //     version of this spec picked only `.first()`, and confirmed
+    //     directly against a real run: the topmost row was a freshly
+    //     requeued attempt (QUEUED, attempts=0, no timestamps yet) while the
+    //     OTHER row, in the very same DOM snapshot, was already FAILED with
+    //     both timestamps populated -- a real, reproducible false negative
+    //     from scoping to the wrong row, not a timing miss. Checking every
+    //     matching row removes that ambiguity: this spec does not claim to
+    //     know which physical row is "the one Reindex enqueued" (loam-1wpa
+    //     makes that unknowable from the UI at all), only that a real FULL
+    //     ingest job for this repo, triggered into existence by this test's
+    //     own click, genuinely ran to a terminal state.
     await expect
       .poll(
         async () => {
-          const candidate = page
-            .getByRole("row")
-            .filter({ has: page.getByRole("link", { name: e2eEnv.repoIdentifier, exact: true }) })
-            .first();
-          if ((await candidate.count()) === 0) return false;
-          // Column order is Jobs.tsx's own `columns` array: Repo(0)
-          // Branch(1) Kind(2) Status(3) Attempts(4) Queued(5) Started(6)
-          // Finished(7) Error(8).
-          const texts = await candidate.locator("td, th").allInnerTexts();
-          if (texts.length < 8) return false;
-          const kind = texts[2];
-          const status = texts[3];
-          const started = texts[6];
-          const finished = texts[7];
-          return (
-            kind === "Full" &&
-            (status === "Succeeded" || status === "Failed") &&
-            started !== "—" &&
-            finished !== "—"
-          );
+          const count = await matchingRows.count();
+          for (let i = 0; i < count; i++) {
+            // Column order is Jobs.tsx's own `columns` array: Repo(0)
+            // Branch(1) Kind(2) Status(3) Attempts(4) Queued(5) Started(6)
+            // Finished(7) Error(8). One `allInnerTexts()` call per row is one
+            // round trip, so a row's status and its own timestamps are
+            // always read together, never straddling a change underneath.
+            const texts = await matchingRows.nth(i).locator("td, th").allInnerTexts();
+            if (texts.length < 8) continue;
+            const kind = texts[2];
+            const status = texts[3];
+            const started = texts[6];
+            const finished = texts[7];
+            if (kind === "Full" && (status === "Succeeded" || status === "Failed") && started !== "—" && finished !== "—") {
+              return true;
+            }
+          }
+          return false;
         },
         { timeout: 45_000, intervals: [250, 250, 500, 500, 1_000, 1_000, 2_000] },
       )
