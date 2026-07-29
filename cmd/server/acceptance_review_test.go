@@ -23,10 +23,10 @@
 //     workShowOutput), so every round assertion here reads `work comments`
 //     or `work verdicts`.
 //
-//   - `work diff` fails with precondition_failed for essentially every work
-//     branch, because nothing creates refs/heads/<name> in the mirror yet
-//     (loam-5iu). No step here calls it: "I stage a comment on a line of the
+//   - No step here calls `work diff`: "I stage a comment on a line of the
 //     diff" anchors to a file/line of the seeded upstream fixture directly.
+//     The anchor is not what these scenarios are about, and reading it out
+//     of a diff would couple them to diff computation for no gain.
 package main
 
 import (
@@ -640,10 +640,9 @@ func (h *acceptanceHarness) stepIsIncluded(ctx context.Context, name string) err
 
 // stepIStageACommentOnALineOfTheDiff stages one line-anchored comment as
 // the reviewer. The anchor names a real file and line of the seeded
-// upstream fixture rather than one read out of `loam work diff`, which
-// currently fails for every work branch (loam-5iu) -- the anchor is not
-// what this scenario is about, and depending on diff would make it
-// unrunnable for a reason unrelated to staging.
+// upstream fixture rather than one read out of `loam work diff` -- the
+// anchor is not what this scenario is about, and depending on diff would
+// couple it to diff computation for no gain.
 func (h *acceptanceHarness) stepIStageACommentOnALineOfTheDiff(ctx context.Context) error {
 	world := worldFrom(ctx)
 	_, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceFirstStagedBody, 8)

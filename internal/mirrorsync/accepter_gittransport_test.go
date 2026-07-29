@@ -182,7 +182,7 @@ func TestAcceptProposal_CreatesTheNamespacedUpstreamBranch(t *testing.T) {
 	f := newAcceptFixture(t)
 	mainSHA, err := mirrorRevParse(t, f.mirrorDir, "refs/heads/main")
 	require.NoError(t, err)
-	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/wb-9c2f1a", mainSHA)
+	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/loam-reserved/wb-9c2f1a", mainSHA)
 	require.NoErrorf(t, err, "seeding the mirror's work-branch ref: %s", out)
 	out, err = acceptVerificationGit(t, "ls-remote", f.authedURL, "refs/heads/loam/wb-9c2f1a")
 	require.NoErrorf(t, err, "ls-remote: %s", out)
@@ -222,9 +222,9 @@ func TestAcceptProposal_RefusesANonFastForwardPush(t *testing.T) {
 	// The mirror's work branch sits at main's tip; upstream's loam/ branch
 	// is then advanced one commit past it, so pushing the mirror's tip
 	// would DISCARD that upstream commit.
-	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/wb-9c2f1a", mainSHA)
+	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/loam-reserved/wb-9c2f1a", mainSHA)
 	require.NoErrorf(t, err, "seeding the mirror's work-branch ref: %s", out)
-	_, err = f.transport.Push(t.Context(), f.host, f.mirrorDir, f.upstreamURL, "refs/heads/wb-9c2f1a:refs/heads/loam/wb-9c2f1a")
+	_, err = f.transport.Push(t.Context(), f.host, f.mirrorDir, f.upstreamURL, "refs/heads/loam-reserved/wb-9c2f1a:refs/heads/loam/wb-9c2f1a")
 	require.NoError(t, err)
 	require.NoError(t, f.srv.AdvanceBranch(t.Context(), "acme/widgets", "loam/wb-9c2f1a", fakeforge.AdvanceOptions{Message: "upstream work nobody asked to destroy"}))
 	out, err = acceptVerificationGit(t, "ls-remote", f.authedURL, "refs/heads/loam/wb-9c2f1a")
@@ -252,13 +252,13 @@ func TestAcceptProposal_FastForwardsAnExistingUpstreamBranch(t *testing.T) {
 	f := newAcceptFixture(t)
 	mainSHA, err := mirrorRevParse(t, f.mirrorDir, "refs/heads/main")
 	require.NoError(t, err)
-	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/wb-9c2f1a", mainSHA)
+	out, err := acceptVerificationGit(t, "--git-dir="+f.mirrorDir, "update-ref", "refs/heads/loam-reserved/wb-9c2f1a", mainSHA)
 	require.NoErrorf(t, err, "seeding the mirror's work-branch ref: %s", out)
-	_, err = f.transport.Push(t.Context(), f.host, f.mirrorDir, f.upstreamURL, "refs/heads/wb-9c2f1a:refs/heads/loam/wb-9c2f1a")
+	_, err = f.transport.Push(t.Context(), f.host, f.mirrorDir, f.upstreamURL, "refs/heads/loam-reserved/wb-9c2f1a:refs/heads/loam/wb-9c2f1a")
 	require.NoError(t, err)
 	// The agent pushes one more commit onto the work branch: the mirror is
 	// now strictly ahead of upstream, so the re-accept is a fast-forward.
-	caughtUpSHA := acceptCommitIntoMirror(t, f.mirrorDir, "wb-9c2f1a")
+	caughtUpSHA := acceptCommitIntoMirror(t, f.mirrorDir, "refs/heads/loam-reserved/wb-9c2f1a")
 	require.NotEqual(t, mainSHA, caughtUpSHA)
 
 	wb := acceptWorkBranch("wb-9c2f1a")
@@ -277,26 +277,34 @@ func TestAcceptProposal_FastForwardsAnExistingUpstreamBranch(t *testing.T) {
 	assert.Contains(t, string(out), caughtUpSHA, "the re-accept must fast-forward the upstream branch to the new tip")
 }
 
-// acceptCommitIntoMirror writes one commit onto branch inside the bare
-// mirror by cloning it, committing, and pushing back -- the only way to
-// move a bare repo's ref to a NEW commit without hand-rolling plumbing.
-// Returns the new tip SHA.
-func acceptCommitIntoMirror(t *testing.T, mirrorDir, branch string) string {
+// acceptCommitIntoMirror writes one commit onto the FULL ref path ref
+// inside the bare mirror by cloning it, committing, and pushing back --
+// the only way to move a bare repo's ref to a NEW commit without
+// hand-rolling plumbing. Returns the new tip SHA.
+//
+// ref is a full path, not a bare branch name, because a work branch's ref
+// lives under refs/heads/loam-reserved/ (internal/refnames) while a target
+// branch's does not; a plain `git clone` of the mirror maps refs/heads/*
+// to refs/remotes/origin/*, so the remote-tracking name this checks out is
+// ref with exactly that one prefix swapped.
+func acceptCommitIntoMirror(t *testing.T, mirrorDir, ref string) string {
 	t.Helper()
+	require.True(t, strings.HasPrefix(ref, "refs/heads/"), "acceptCommitIntoMirror needs a refs/heads/ ref, got %q", ref)
+	tracking := "origin/" + strings.TrimPrefix(ref, "refs/heads/")
 	work := t.TempDir()
 	clone := filepath.Join(work, "clone")
 	out, err := acceptVerificationGit(t, "clone", "--quiet", mirrorDir, clone)
 	require.NoErrorf(t, err, "cloning the mirror: %s", out)
-	out, err = acceptGitIn(t, clone, "checkout", "--quiet", "-B", branch, "origin/"+branch)
-	require.NoErrorf(t, err, "checking out %s: %s", branch, out)
+	out, err = acceptGitIn(t, clone, "checkout", "--quiet", "-B", "local-work", tracking)
+	require.NoErrorf(t, err, "checking out %s: %s", tracking, out)
 	require.NoError(t, os.WriteFile(filepath.Join(clone, "CATCHUP.txt"), []byte("caught up\n"), 0o644))
 	out, err = acceptGitIn(t, clone, "add", "CATCHUP.txt")
 	require.NoErrorf(t, err, "git add: %s", out)
 	out, err = acceptGitIn(t, clone, "commit", "--quiet", "-m", "acceptance: catch-up commit")
 	require.NoErrorf(t, err, "git commit: %s", out)
-	out, err = acceptGitIn(t, clone, "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
+	out, err = acceptGitIn(t, clone, "push", "--quiet", "origin", "HEAD:"+ref)
 	require.NoErrorf(t, err, "pushing into the mirror: %s", out)
-	sha, err := mirrorRevParse(t, mirrorDir, "refs/heads/"+branch)
+	sha, err := mirrorRevParse(t, mirrorDir, ref)
 	require.NoError(t, err)
 	return sha
 }

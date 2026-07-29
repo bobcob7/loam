@@ -76,6 +76,7 @@ import (
 	"time"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -124,14 +125,14 @@ const diffTruncatedMarkerFormat = "\n... diff truncated at %d bytes; git produce
 var ErrMirrorMissing = errors.New("gitdiff: bare mirror missing or invalid on disk")
 
 // ErrRefMissing indicates a ref this diff needs -- the work branch's
-// target, or its own name -- does not exist in the mirror. Both refs are
-// expected to exist once a work branch is genuinely created and pushed to
-// (docs/git-spec.md -> "Ref Policy": work-branch refs are created
-// server-side by `work start`; target branches are mirrored refs kept
-// current by upstream sync), so this signals the mirror has fallen out of
-// sync with the work-branch registry, not that the caller named something
-// invalid -- resolveWorkBranch (workbranch.go) already rejects an unknown
-// work branch before Computer.Diff is ever called.
+// target, or its own name -- does not exist in the mirror. Both refs exist
+// for any genuinely created work branch (docs/git-spec.md -> "Ref Policy":
+// work-branch refs are created server-side by `work start`, which since
+// loam-5iu it really does; target branches are mirrored refs kept current
+// by upstream sync), so this signals the mirror has fallen out of sync with
+// the work-branch registry, not that the caller named something invalid --
+// resolveWorkBranch (workbranch.go) already rejects an unknown work branch
+// before Computer.Diff is ever called.
 var ErrRefMissing = errors.New("gitdiff: ref not found in mirror")
 
 // ErrNoMergeBase indicates target and name share no common ancestor --
@@ -169,20 +170,27 @@ func (c *Computer) Diff(ctx context.Context, wb workbranchstore.WorkBranch) (str
 		return "", fmt.Errorf("resolving repo for work branch %s: %w", wb.Name, err)
 	}
 	mirrorDir := mirrorpath.Dir(c.dataDir, repo.Name)
-	if err := c.verifyRef(ctx, mirrorDir, wb.Target); err != nil {
+	// The two refs live in DIFFERENT namespaces and neither may be
+	// spelled by hand here: a target branch is a mirrored ref and stays
+	// where upstream put it (refs/heads/<target>), while a work-branch ref
+	// lives under Loam's own reserved, server-owned namespace
+	// (refs/heads/loam-reserved/<name>) so a mid-fetch prune can never
+	// delete it -- see internal/refnames.
+	targetRef, workBranchRef := refnames.TargetBranch(wb.Target), refnames.WorkBranch(wb.Name)
+	if err := c.verifyRef(ctx, mirrorDir, wb.Target, targetRef); err != nil {
 		return "", fmt.Errorf("verifying target branch %s: %w", wb.Target, err)
 	}
-	if err := c.verifyRef(ctx, mirrorDir, wb.Name); err != nil {
+	if err := c.verifyRef(ctx, mirrorDir, wb.Name, workBranchRef); err != nil {
 		return "", fmt.Errorf("verifying work branch %s: %w", wb.Name, err)
 	}
-	diff, err := c.runDiff(ctx, mirrorDir, wb.Target, wb.Name)
+	diff, err := c.runDiff(ctx, mirrorDir, targetRef, workBranchRef, wb.Name)
 	if err != nil {
 		return "", fmt.Errorf("diffing %s...%s in %s: %w", wb.Target, wb.Name, mirrorDir, err)
 	}
 	return diff, nil
 }
 
-// verifyRef confirms ref exists as refs/heads/<ref> in the mirror at
+// verifyRef confirms the full ref path ref exists in the mirror at
 // mirrorDir, via `git rev-parse --verify --quiet`, classifying the three
 // distinguishable outcomes verified empirically against real git: exit 0
 // (ref exists), exit 1 with no stderr under --quiet (ref does not exist --
@@ -190,8 +198,14 @@ func (c *Computer) Diff(ctx context.Context, wb workbranchstore.WorkBranch) (str
 // (bad --git-dir -- ErrMirrorMissing, via isMirrorMissingStderr). Any other
 // nonzero exit is reported as-is rather than forced into one of those two
 // buckets.
-func (c *Computer) verifyRef(ctx context.Context, mirrorDir, ref string) error {
-	out, err := c.run(ctx, mirrorDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+ref)
+//
+// name is the bare branch name the same ref is known by everywhere a
+// human or an agent reads (a CLI argument, a work_branches row); it
+// appears in the returned errors, while ref is what git is actually asked
+// about. Keeping both is what lets ErrRefMissing say "wb-9c2f1a" rather
+// than making a caller decode a reserved-namespace ref path.
+func (c *Computer) verifyRef(ctx context.Context, mirrorDir, name, ref string) error {
+	out, err := c.run(ctx, mirrorDir, "rev-parse", "--verify", "--quiet", ref)
 	if err != nil {
 		return err
 	}
@@ -199,7 +213,7 @@ func (c *Computer) verifyRef(ctx context.Context, mirrorDir, ref string) error {
 	case 0:
 		return nil
 	case 1:
-		return fmt.Errorf("%s: %w", ref, ErrRefMissing)
+		return fmt.Errorf("%s: %w", name, ErrRefMissing)
 	default:
 		if isMirrorMissingStderr(out.stderr) {
 			return fmt.Errorf("%s: %w", mirrorDir, ErrMirrorMissing)
@@ -221,24 +235,29 @@ func isMirrorMissingStderr(stderr string) bool {
 	return strings.Contains(strings.ToLower(stderr), "not a git repository")
 }
 
-// runDiff runs `git diff <target>...<name>` (three-dot: the diff from
-// target and name's merge base, per this package's own doc comment) against
-// mirrorDir and returns its stdout, capped at maxDiffBytes with a visible
-// trailing marker if git produced more. verifyRef has already confirmed
-// both refs exist by the time this runs, so a nonzero exit here means
-// either no merge base (ErrNoMergeBase) or a mirror that went missing
-// between verifyRef and this call (ErrMirrorMissing) -- both classified
-// from git's own stderr, the same way verifyRef classifies its own exit
-// codes.
-func (c *Computer) runDiff(ctx context.Context, mirrorDir, target, name string) (string, error) {
-	out, err := c.run(ctx, mirrorDir, "diff", "--no-ext-diff", target+"..."+name)
+// runDiff runs `git diff <targetRef>...<workBranchRef>` (three-dot: the
+// diff from the two refs' merge base, per this package's own doc comment)
+// against mirrorDir and returns its stdout, capped at maxDiffBytes with a
+// visible trailing marker if git produced more. Both arguments are FULL
+// ref paths, never bare names -- the work branch's is under
+// refnames.ReservedNamespace, which no bare-name revspec would resolve.
+// name is the work branch's bare name, used only in the truncation marker
+// an agent reads.
+//
+// verifyRef has already confirmed both refs exist by the time this runs,
+// so a nonzero exit here means either no merge base (ErrNoMergeBase) or a
+// mirror that went missing between verifyRef and this call
+// (ErrMirrorMissing) -- both classified from git's own stderr, the same
+// way verifyRef classifies its own exit codes.
+func (c *Computer) runDiff(ctx context.Context, mirrorDir, targetRef, workBranchRef, name string) (string, error) {
+	out, err := c.run(ctx, mirrorDir, "diff", "--no-ext-diff", targetRef+"..."+workBranchRef)
 	if err != nil {
 		return "", err
 	}
 	if out.exitCode != 0 {
 		switch {
 		case strings.Contains(out.stderr, "no merge base"):
-			return "", fmt.Errorf("%s...%s: %w", target, name, ErrNoMergeBase)
+			return "", fmt.Errorf("%s...%s: %w", targetRef, workBranchRef, ErrNoMergeBase)
 		case isMirrorMissingStderr(out.stderr):
 			return "", fmt.Errorf("%s: %w", mirrorDir, ErrMirrorMissing)
 		default:

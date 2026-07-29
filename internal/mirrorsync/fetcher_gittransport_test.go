@@ -184,13 +184,13 @@ func TestMirrorFetcherExcludesWorkBranchRefFromForcePush(t *testing.T) {
 	fetcher, mirrorDir, _ := newRealMirrorFetcher(t, srv, token, []string{"wb-mine"})
 	_, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
 	require.NoError(t, err)
-	seedSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/wb-mine", "refs/heads/main")
+	seedSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/loam-reserved/wb-mine", "refs/heads/main")
 	require.NoError(t, srv.CreateCollidingBranch(t.Context(), "acme/widgets", "wb-mine", ""))
 	require.NoError(t, srv.AdvanceBranch(t.Context(), "acme/widgets", "wb-mine", fakeforge.AdvanceOptions{}))
 	require.NoError(t, srv.ForcePushBranch(t.Context(), "acme/widgets", "wb-mine", fakeforge.ForcePushOptions{}))
 	_, err = fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
 	require.NoError(t, err)
-	postSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/wb-mine")
+	postSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/loam-reserved/wb-mine")
 	require.NoError(t, err, "the work-branch ref must still exist in the mirror")
 	assert.Equal(t, seedSHA, postSHA, "an upstream force-push of a same-named branch must never touch the excluded work-branch ref")
 }
@@ -217,11 +217,57 @@ func TestMirrorFetcherExcludesWorkBranchRefFromPrune(t *testing.T) {
 	require.NoError(t, srv.CreateCollidingBranch(t.Context(), "acme/widgets", "wb-mine", ""))
 	_, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
 	require.NoError(t, err)
-	seedSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/wb-mine", "refs/heads/main")
+	seedSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/loam-reserved/wb-mine", "refs/heads/main")
 	require.NoError(t, srv.DeleteBranch(t.Context(), "acme/widgets", "wb-mine"))
 	_, err = fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
 	require.NoError(t, err)
-	postSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/wb-mine")
+	postSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/loam-reserved/wb-mine")
 	require.NoError(t, err, "the work-branch ref must still exist in the mirror after upstream deletes its same-named branch")
 	assert.Equal(t, seedSHA, postSHA, "an upstream deletion of a same-named branch must never prune the excluded work-branch ref")
+}
+
+// TestMirrorFetcherProtectsAnUNREGISTEREDReservedRefFromPrune is loam-cmq's
+// whole point, and it is the one test in this file the ENUMERATED
+// exclusions cannot pass.
+//
+// The scenario is the TOCTOU window itself, reproduced exactly: a
+// work-branch ref exists in the mirror, has NEVER existed upstream, and is
+// NOT in the fetcher's exclusion list -- which is precisely the state of
+// every ref created after ResolveRepo returned and before the fetch's argv
+// finished executing. Note workBranchNames is nil below: the fetcher is
+// told about no work branches at all, so nothing enumerated protects this
+// ref. Only refnames.ReservedExclusionRefspec does.
+//
+// Without that glob the ref is DELETED -- verified against real git 2.50.1,
+// which reports "- <sha> 000...0 refs/heads/<name>" for it -- and the
+// deletion is unrecoverable, since work_branches has no SHA column and a
+// bare mirror has no reflog. The control ref seeded alongside it (an
+// ordinary local ref OUTSIDE the reserved namespace) is what proves this
+// test would actually notice: it is pruned in the same fetch, so a fetch
+// that quietly stopped pruning anything at all could not make this test
+// pass by accident.
+//
+// A test asserting on buildFetchRefspecs' returned STRING would prove
+// nothing here: the claim is about what git does with that string, not
+// about its spelling.
+func TestMirrorFetcherProtectsAnUNREGISTEREDReservedRefFromPrune(t *testing.T) {
+	t.Parallel()
+	srv := newFakeForgeServer(t)
+	const token = "reserved-glob-prune-token"
+	srv.AddToken(token)
+	fetcher, mirrorDir, _ := newRealMirrorFetcher(t, srv, token, nil)
+	_, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
+	require.NoError(t, err)
+	reservedSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/loam-reserved/wb-brandnew", "refs/heads/main")
+	controlSHA := mustSetLocalRef(t, mirrorDir, "refs/heads/wb-brandnew", "refs/heads/main")
+	require.Equal(t, reservedSHA, controlSHA, "precondition: both seeded refs start at main's tip")
+
+	_, err = fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
+	require.NoError(t, err)
+
+	postSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/loam-reserved/wb-brandnew")
+	require.NoError(t, err, "a ref in the reserved namespace must survive a pruning fetch even though it is in no exclusion list and never existed upstream")
+	assert.Equal(t, reservedSHA, postSHA)
+	_, err = mirrorRevParse(t, mirrorDir, "refs/heads/wb-brandnew")
+	assert.Error(t, err, "control: the identical ref OUTSIDE the reserved namespace is pruned, so this fetch really does prune")
 }

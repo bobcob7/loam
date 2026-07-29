@@ -14,6 +14,7 @@ import (
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/gitdiff"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reposstore"
@@ -54,6 +55,7 @@ type Handler struct {
 	repos        RepoStore
 	rounds       RoundStore
 	diff         DiffComputer
+	refs         WorkBranchRefWriter
 	threads      ThreadStore
 	verdicts     VerdictStore
 	publisher    VerdictPublisher
@@ -67,9 +69,9 @@ var _ loamv1connect.WorkBranchServiceHandler = (*Handler)(nil)
 
 // New builds a Handler over the given seams, gating every RPC with
 // capabilities and mapping domain errors through errors.
-func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff DiffComputer, threads ThreadStore, verdicts VerdictStore, publisher VerdictPublisher, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
+func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff DiffComputer, refs WorkBranchRefWriter, threads ThreadStore, verdicts VerdictStore, publisher VerdictPublisher, capabilities *handler.CapabilityChecker, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
 	return &Handler{
-		workBranches: workBranches, repos: repos, rounds: rounds, diff: diff,
+		workBranches: workBranches, repos: repos, rounds: rounds, diff: diff, refs: refs,
 		threads: threads, verdicts: verdicts, publisher: publisher,
 		capabilities: capabilities, errors: errors, logger: logger,
 	}
@@ -81,6 +83,29 @@ func New(workBranches WorkBranchStore, repos RepoStore, rounds RoundStore, diff 
 // branch (proto's own comment on CreateWorkBranchRequest.from: "Always
 // explicit"); a bead DESIGN note claiming otherwise does not match the
 // proto this handler implements and is not followed here.
+//
+// # The ref is written BEFORE the row, and rolled back if the row fails
+//
+// A work branch is two things: a work_branches row and a ref in the bare
+// mirror (docs/git-spec.md -> Ref Policy, which makes the ref the server's
+// job and forbids a push from creating one). They cannot be written
+// atomically -- one is Postgres, one is a git subprocess -- so the order
+// decides which half-state is reachable, and the two are not equally bad:
+//
+//   - Ref, then row. A failed insert leaves an ORPHAN REF: invisible to
+//     every RPC (nothing lists refs), unpushable (refpolicy rejects a ref
+//     with no row), and protected from the mirror fetch by
+//     refnames.ReservedExclusionRefspec. Inert. It is also compensated
+//     below, so it only survives if the rollback itself fails.
+//   - Row, then ref. A failed create leaves a ROW WITH NO REF -- which is
+//     precisely the loam-5iu defect this code exists to remove, reachable
+//     again on every partial failure: `work diff` answers
+//     FailedPrecondition and `loam clone` has nothing to fetch, with no
+//     way for the agent to tell that branch from a healthy one.
+//
+// So the ref goes first, and the invariant this establishes is the strong
+// one every other component already assumes: a work_branches row always
+// has its ref. The write pair itself lives in createWorkBranchRefFirst.
 func (h *Handler) CreateWorkBranch(ctx context.Context, req *connect.Request[loamv1.CreateWorkBranchRequest]) (*connect.Response[loamv1.CreateWorkBranchResponse], error) {
 	if err := h.capabilities.RequireCapability(ctx, handler.CapabilityWorkStart); err != nil {
 		return nil, h.errors.ToConnectErr(err)
@@ -108,11 +133,33 @@ func (h *Handler) CreateWorkBranch(ctx context.Context, req *connect.Request[loa
 	if err != nil {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("generating work branch name: %w", err))
 	}
-	wb, err := h.workBranches.Create(ctx, repoRow.ID, name, from, author)
+	wb, err := h.createWorkBranchRefFirst(ctx, repoRow, name, from, author)
 	if err != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("creating work branch in repo %s from %s: %w", repo, from, err))
+		return nil, h.errors.ToConnectErr(err)
 	}
 	return connect.NewResponse(&loamv1.CreateWorkBranchResponse{WorkBranch: workBranchToProto(repoRow.Name, wb)}), nil
+}
+
+// createWorkBranchRefFirst performs CreateWorkBranch's two non-atomic
+// writes in the order its doc comment justifies: the mirror ref, then the
+// work_branches row, with a best-effort delete of the ref if the row fails.
+func (h *Handler) createWorkBranchRefFirst(ctx context.Context, repoRow reposstore.Repo, name, from, author string) (workbranchstore.WorkBranch, error) {
+	if err := h.refs.CreateWorkBranchRef(ctx, repoRow.Name, name, from); err != nil {
+		return workbranchstore.WorkBranch{}, mapRefWriterErr(err, fmt.Sprintf("creating the mirror ref for work branch %s/%s from %s", repoRow.Name, name, from))
+	}
+	wb, err := h.workBranches.Create(ctx, repoRow.ID, name, from, author)
+	if err != nil {
+		// Best-effort compensation: a failure here is logged, not
+		// returned, because the caller's error is the INSERT's -- that is
+		// what actually went wrong and what the agent must act on -- and
+		// what is left behind is an inert ref (see above), not a
+		// half-created work branch.
+		if delErr := h.refs.DeleteWorkBranchRef(ctx, repoRow.Name, name); delErr != nil {
+			h.logger.ErrorContext(ctx, "rolling back a work-branch ref after its row failed to insert did not succeed; the mirror holds an orphan ref", "repo", repoRow.Name, "work_branch", name, "error", delErr)
+		}
+		return workbranchstore.WorkBranch{}, fmt.Errorf("creating work branch in repo %s from %s: %w", repoRow.Name, from, err)
+	}
+	return wb, nil
 }
 
 // UpdateWorkBranch replaces a work branch's title and/or description at any
@@ -433,6 +480,31 @@ func mapDiffComputerErr(err error, context string) error {
 	default:
 		return fmt.Errorf("%s: %w", context, err)
 	}
+}
+
+// mapRefWriterErr maps a WorkBranchRefWriter failure to the handler.Err*
+// sentinel ErrorMapper recognizes.
+//
+// gitref.ErrTargetMissing is the one caller-visible precondition here, and
+// it is genuinely reachable without anything being broken: CreateWorkBranch
+// validates `from` against repo_target_branches, while the ref lives in the
+// mirror, so a repo enrolled moments ago whose first sync has not landed
+// yet has the row and not the ref. "Try again once the repo has synced" is
+// a precondition, not an internal error, so it maps to
+// ErrFailedPrecondition with err wrapped alongside (Go 1.20+ multi-%w) so
+// the message still names the branch -- the same shape mapDiffComputerErr
+// uses, and for the same reason loam-blc established there.
+//
+// gitref.ErrMirrorMissing and gitref.ErrRefExists deliberately have no case:
+// a missing mirror for an enrolled repo is an operational fault, and a
+// colliding ref means randomWorkBranchName produced a name whose ref
+// already exists -- neither is anything the calling agent can act on, so
+// both fall through to ErrorMapper's CodeInternal-and-log path.
+func mapRefWriterErr(err error, context string) error {
+	if errors.Is(err, gitref.ErrTargetMissing) {
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
+	}
+	return fmt.Errorf("%s: %w", context, err)
 }
 
 // mapRequestReviewErr is mapWorkBranchStoreErr's RequestReview-specific

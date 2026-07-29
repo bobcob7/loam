@@ -175,7 +175,7 @@ func TestCheckMergeability_ConflictingBranchIsFlagged(t *testing.T) {
 	wb := workBranch("wb-9c2f1a", "main", workbranchstore.StateReviewed, workbranchstore.ConflictNone)
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{wb},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: true}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: true}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "newtip")}))
 	assert.Equal(t, []uuid.UUID{wb.ID}, *fixture.markedIDs)
@@ -188,7 +188,7 @@ func TestCheckMergeability_CleanBranchIsLeftUntouched(t *testing.T) {
 	t.Parallel()
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{workBranch("wb-9c2f1a", "main", workbranchstore.StateReviewable, workbranchstore.ConflictNone)},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: false}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: false}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "newtip")}))
 	assert.Empty(t, *fixture.markedIDs, "a cleanly merging branch must have nothing written about it")
@@ -210,7 +210,7 @@ func TestCheckMergeability_CleanRecheckOfAFlaggedBranchDoesNotClearTheFlag(t *te
 	flagged := workBranch("wb-9c2f1a", "main", workbranchstore.StateDraft, workbranchstore.ConflictReset)
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{flagged},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: false}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: false}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "newtip")}))
 	assert.Empty(t, *fixture.markedIDs)
@@ -229,7 +229,7 @@ func TestCheckMergeability_StillConflictingBranchIsFlaggedAgain(t *testing.T) {
 	flagged := workBranch("wb-9c2f1a", "main", workbranchstore.StateDraft, workbranchstore.ConflictReset)
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{flagged},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: true}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: true}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "newtip")}))
 	assert.Equal(t, []uuid.UUID{flagged.ID}, *fixture.markedIDs)
@@ -252,8 +252,8 @@ func TestCheckMergeability_ChecksEachBranchAgainstItsOwnTargetTip(t *testing.T) 
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), advanced))
 	mirrorDir := mirrorpath.Dir(fixture.dataDir, fixtureRepoName)
 	assert.Equal(t, []mergeCall{
-		{mirrorDir: mirrorDir, ours: "refs/heads/wb-main", theirs: "mainTip"},
-		{mirrorDir: mirrorDir, ours: "refs/heads/wb-rel", theirs: "relTip"},
+		{mirrorDir: mirrorDir, ours: "refs/heads/loam-reserved/wb-main", theirs: "mainTip"},
+		{mirrorDir: mirrorDir, ours: "refs/heads/loam-reserved/wb-rel", theirs: "relTip"},
 	}, *fixture.mergeCalls)
 }
 
@@ -271,11 +271,11 @@ func TestCheckMergeability_BranchesTargetingAnUnadvancedBranchAreNotChecked(t *t
 			workBranch("wb-main", "main", workbranchstore.StateDraft, workbranchstore.ConflictNone),
 			workBranch("wb-quiet", "untouched-branch", workbranchstore.StateDraft, workbranchstore.ConflictNone),
 		},
-		verdicts: map[string]mergeVerdict{"refs/heads/wb-quiet": {conflicted: true}},
+		verdicts: map[string]mergeVerdict{"refs/heads/loam-reserved/wb-quiet": {conflicted: true}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")}))
 	require.Len(t, *fixture.mergeCalls, 1)
-	assert.Equal(t, "refs/heads/wb-main", (*fixture.mergeCalls)[0].ours)
+	assert.Equal(t, "refs/heads/loam-reserved/wb-main", (*fixture.mergeCalls)[0].ours)
 	assert.Empty(t, *fixture.markedIDs, "the untouched target's branch must not be flagged despite its canned conflicting verdict")
 }
 
@@ -293,14 +293,14 @@ func TestCheckMergeability_TerminalBranchesAreNotChecked(t *testing.T) {
 			workBranch("wb-open", "main", workbranchstore.StateDraft, workbranchstore.ConflictNone),
 		},
 		verdicts: map[string]mergeVerdict{
-			"refs/heads/wb-done": {conflicted: true},
-			"refs/heads/wb-gone": {conflicted: true},
-			"refs/heads/wb-open": {conflicted: true},
+			"refs/heads/loam-reserved/wb-done": {conflicted: true},
+			"refs/heads/loam-reserved/wb-gone": {conflicted: true},
+			"refs/heads/loam-reserved/wb-open": {conflicted: true},
 		},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")}))
 	require.Len(t, *fixture.mergeCalls, 1)
-	assert.Equal(t, "refs/heads/wb-open", (*fixture.mergeCalls)[0].ours)
+	assert.Equal(t, "refs/heads/loam-reserved/wb-open", (*fixture.mergeCalls)[0].ours)
 }
 
 // TestCheckMergeability_NoAdvancesDoesNothingAtAll pins the cheap common
@@ -325,7 +325,7 @@ func TestCheckMergeability_DeletedTargetRefIsSkipped(t *testing.T) {
 	t.Parallel()
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{workBranch("wb-9c2f1a", "gone", workbranchstore.StateDraft, workbranchstore.ConflictNone)},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: true}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: true}},
 	})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{{Branch: "gone", OldSHA: "oldtip", NewSHA: ""}}))
 	assert.Zero(t, *fixture.repoLookups)
@@ -362,8 +362,8 @@ func TestCheckMergeability_MergeCheckFailureAbortsWithoutFlaggingAnything(t *tes
 			workBranch("wb-later", "main", workbranchstore.StateReviewed, workbranchstore.ConflictNone),
 		},
 		verdicts: map[string]mergeVerdict{
-			"refs/heads/wb-broken": {err: boom},
-			"refs/heads/wb-later":  {conflicted: true},
+			"refs/heads/loam-reserved/wb-broken": {err: boom},
+			"refs/heads/loam-reserved/wb-later":  {conflicted: true},
 		},
 	})
 	err := fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")})
@@ -383,7 +383,7 @@ func TestCheckMergeability_MarkConflictedFailurePropagates(t *testing.T) {
 	boom := errors.New("illegal transition")
 	fixture := newCheckerFixture(t, fixtureOptions{
 		workBranches: []workbranchstore.WorkBranch{workBranch("wb-9c2f1a", "main", workbranchstore.StateReviewed, workbranchstore.ConflictNone)},
-		verdicts:     map[string]mergeVerdict{"refs/heads/wb-9c2f1a": {conflicted: true}},
+		verdicts:     map[string]mergeVerdict{"refs/heads/loam-reserved/wb-9c2f1a": {conflicted: true}},
 		markErr:      boom,
 	})
 	err := fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")})
@@ -426,7 +426,7 @@ func TestCheckMergeability_PagesThroughEveryWorkBranch(t *testing.T) {
 	for i := range total {
 		name := fmt.Sprintf("wb-%02d", i)
 		branches = append(branches, workBranch(name, "main", workbranchstore.StateDraft, workbranchstore.ConflictNone))
-		verdicts["refs/heads/"+name] = mergeVerdict{conflicted: true}
+		verdicts["refs/heads/loam-reserved/"+name] = mergeVerdict{conflicted: true}
 	}
 	fixture := newCheckerFixture(t, fixtureOptions{workBranches: branches, verdicts: verdicts, pageSize: 3})
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")}))

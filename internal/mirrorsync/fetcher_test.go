@@ -12,13 +12,13 @@ import (
 func TestBuildFetchRefspecsNoWorkBranchesReturnsOnlyWildcard(t *testing.T) {
 	t.Parallel()
 	refspecs := buildFetchRefspecs(nil)
-	assert.Equal(t, []string{"+refs/*:refs/*"}, refspecs)
+	assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*"}, refspecs)
 }
 
 func TestBuildFetchRefspecsAddsOneNegativeExclusionPerWorkBranch(t *testing.T) {
 	t.Parallel()
 	refspecs := buildFetchRefspecs([]string{"wb-1", "wb-2"})
-	assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/wb-1", "^refs/heads/wb-2"}, refspecs)
+	assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1", "^refs/heads/loam-reserved/wb-2"}, refspecs)
 }
 
 func TestParsePorcelainFetchParsesFastForward(t *testing.T) {
@@ -144,7 +144,7 @@ func TestMirrorFetcherFetchBuildsRefspecsAndParsesResult(t *testing.T) {
 			assert.Equal(t, "forge.example.com", host)
 			assert.Equal(t, "/data/mirrors/acme/widgets.git", mirrorDir)
 			assert.Equal(t, "https://forge.example.com/acme/widgets.git", upstreamURL)
-			assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/wb-1"}, refspecs)
+			assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1"}, refspecs)
 			return []byte("  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 refs/heads/main\n"), nil
 		},
 	}

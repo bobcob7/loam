@@ -154,8 +154,16 @@ segment of the identifier, with no override (e.g. `bobcob7/doc-server` → `./do
 The clone's only remote is that endpoint. Checks out `branch` as a single-branch clone —
 a convenient default shape, not an enforcement. `clone` then bootstraps
 the clone for plain git: it sets the git author (`user.name` / `user.email`) to the agent
-identity so commits are attributed, and writes the agent identity headers into the
-clone's git config so every subsequent git operation carries them.
+identity so commits are attributed, writes the agent identity headers into the
+clone's git config so every subsequent git operation carries them, and writes the
+`remote.origin.push` / `remote.origin.fetch` refspecs that map a work branch's bare name
+onto its server-owned ref path (`docs/git-spec.md` → The CLI's Role). Unlike the rest of
+the bootstrap, **those refspecs are load-bearing**: without them plain `git push` from
+the clone is rejected, so a hand-rolled `git clone` no longer works for pushing.
+
+A `branch` the repo does not report as a target branch is taken to be a work branch and
+cloned from its server-owned ref; `clone` renames the resulting local branch back to the
+bare name, so the checked-out branch is `wb-9c2f1a`, as every other command expects.
 
 After the clone, **source control is plain git** — commit, push, fetch, merge, pull.
 There are no `loam commit` or `loam push` commands and no client-side hook guard. The

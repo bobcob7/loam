@@ -118,8 +118,42 @@ The mirror's refs fall into two classes:
 - **Mirrored refs** — target branches and every other upstream ref. **Read-only to
   agents**; owned by upstream sync (upstream-wins). Without this rule, anything writable
   here would silently corrupt the mirror until the next sync clobbered it.
-- **Work-branch refs** — `refs/heads/<name>` where `<name>` is a registered work branch
-  of this repo. Created **server-side by `work start` only**, never by push.
+- **Work-branch refs** — `refs/heads/loam-reserved/<name>` where `<name>` is a registered
+  work branch of this repo. Created **server-side by `work start` only**, never by push.
+
+### The `refs/heads/loam-reserved/` namespace is server-owned
+
+`refs/heads/loam-reserved/` is **reserved in the mirror**: everything below it is written
+by Loam itself, and **upstream refs under that path are consequently not mirrored** — the
+mirror fetch excludes the whole subtree structurally, so an upstream branch that happened
+to be named `loam-reserved/…` is simply never carried in. That is the one carve-out from
+"target branches and every other upstream ref" above.
+
+The namespace exists because the mirror fetch is a **pruning** fetch of `+refs/*:refs/*`
+whose argv — including one negative exclusion per *currently registered* work branch — is
+fixed **before** the network operation begins. A work branch created at any point during
+that fetch is absent from the enumerated exclusions, and its brand-new, purely-local ref
+is therefore a prune candidate; no colliding upstream name is needed. The loss is
+unrecoverable: `work_branches` carries no SHA column and a bare mirror has no reflog, so
+the row survives pointing at a ref that no longer exists. A whole reserved path segment,
+excluded by glob, closes that window for every work-branch ref that will ever exist. The
+enumerated per-branch exclusions remain the semantic rule; the glob is a structural
+backstop.
+
+**Only the mirror's ref path carries the namespace.** The work branch's *name* is
+unchanged — still `wb-9c2f1a` as a CLI argument, still `loam/wb-9c2f1a` upstream:
+
+| | |
+| --- | --- |
+| name | `wb-9c2f1a` |
+| mirror ref | `refs/heads/loam-reserved/wb-9c2f1a` |
+| upstream proposal branch | `refs/heads/loam/wb-9c2f1a` |
+
+A push aimed at `refs/heads/<name>` for a name that *is* a registered work branch is
+rejected with a reason naming the ref that would have worked — see the table below. It is
+a reachable shape, not a hypothetical: `git push origin HEAD` resolves its destination by
+name and bypasses `remote.origin.push`, as does any push from a clone that `loam clone`
+never bootstrapped.
 
 Stock git enforces the mechanical rules: every mirror carries
 `receive.denyNonFastForwards` and `receive.denyDeletes`, so force pushes and ref
@@ -147,6 +181,7 @@ reason:
 | --- | --- |
 | read-only ref | `loam: refs/heads/main is read-only (target branch)` |
 | unknown ref | `loam: refs/heads/foo is not a work branch; create one with 'work start'` |
+| wrong ref path | `loam: wb-9c2f1a must be pushed to refs/heads/loam-reserved/wb-9c2f1a; re-run 'loam clone' to configure the push refspec, then push by branch name` |
 | not the author | `loam: wb-9c2f1a belongs to grace-hopper-3-author` |
 | terminal state | `loam: wb-9c2f1a is closed` |
 
@@ -241,9 +276,29 @@ Loam's client-side git surface shrinks to one bootstrap verb:
 
 - **`loam clone <repo> [branch]`** — composes the URL, clones (default shape:
   `--branch <b> --single-branch`, a convenience rather than an enforcement), sets
-  `user.name` / `user.email` to the agent identity, and writes the identity headers into
-  the clone's config. After that, agents use **plain git**: commit, push, fetch, merge,
-  pull.
+  `user.name` / `user.email` to the agent identity, writes the identity headers into
+  the clone's config, and writes the two refspecs below. After that, agents use **plain
+  git**: commit, push, fetch, merge, pull.
+
+  | Key | Value | Written with |
+  | --- | --- | --- |
+  | `remote.origin.push` | `refs/heads/wb-*:refs/heads/loam-reserved/wb-*` | `git config` (single-valued) |
+  | `remote.origin.fetch` | `+refs/heads/loam-reserved/*:refs/remotes/origin/*` | `git config --add` (appended — the `--single-branch` clone's own refspec must survive) |
+
+  These map a work branch's bare name to its reserved ref path in both directions, so
+  `git push origin wb-9c2f1a` lands on `refs/heads/loam-reserved/wb-9c2f1a` and
+  `git fetch origin` brings work branches down as `origin/wb-9c2f1a`. git resolves a
+  command-line refspec with no `:<dst>` through `remote.origin.push`, which is what makes
+  the plain form work.
+
+  **This makes the clone bootstrap load-bearing for pushes**, unlike every other thing
+  `loam clone` writes. A hand-rolled `git clone <url>` still fetches and commits, but its
+  pushes aim at `refs/heads/<name>` and are rejected (see the ref-policy table's *wrong
+  ref path* row). `git push origin HEAD` bypasses `remote.origin.push` too, for the same
+  reason, and is rejected the same way — push by branch name, or plain `git push`.
+  The `wb-*` scoping of the push refspec is deliberate: an unscoped `refs/heads/*` would
+  sweep the clone's own `main` into every bare `git push`, and pre-receive atomicity would
+  then reject the work branch along with it.
 - **`loam commit`, `loam push`, the `pre-commit`/`pre-push` hook guard, and the
   `LOAM_INTERNAL` sentinel are removed.** They existed to inject identity per invocation;
   with identity in the clone's config they gate nothing the server does not already

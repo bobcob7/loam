@@ -28,6 +28,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // registerCloneAndPushSteps wires every step clone-and-push.feature's
@@ -213,7 +214,14 @@ func (h *acceptanceHarness) stepIAmInTheCloneCheckedOutOn(ctx context.Context, b
 func (h *acceptanceHarness) stepICommitAndPush(ctx context.Context) error {
 	world := worldFrom(ctx)
 	h.ensureCloned(world)
-	return world.writeCommitAndPush("agent-change.txt", "acceptance change", "acceptance: agent change", "HEAD")
+	// The refspec is the BARE work-branch name, not "HEAD": a
+	// destination-less refspec is the only shape that consults
+	// remote.origin.push, which is what maps the name to its reserved ref
+	// path (refnames.ClientPushRefspec, written by `loam clone`).
+	// "HEAD" resolves its destination by name instead and would aim at the
+	// unregistered refs/heads/<name> -- which is exactly the mistake
+	// docs/git-spec.md's "wrong ref path" rejection row exists for.
+	return world.writeCommitAndPush("agent-change.txt", "acceptance change", "acceptance: agent change", world.workBranch)
 }
 
 // stepMyCommitsReachTheServerOn asserts the push landed: the mirror's
@@ -223,16 +231,17 @@ func (h *acceptanceHarness) stepMyCommitsReachTheServerOn(ctx context.Context, b
 	if world.lastGitErr != nil {
 		return fmt.Errorf("push failed: %v\n%s", world.lastGitErr, world.lastGitOutput)
 	}
-	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, "refs/heads/"+branch)
+	ref := refnames.WorkBranch(branch)
+	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, ref)
 	if err != nil {
-		return fmt.Errorf("reading mirror ref refs/heads/%s: %w", branch, err)
+		return fmt.Errorf("reading mirror ref %s: %w", ref, err)
 	}
 	cloneSHA, err := cloneHeadSHA(world.clonePath)
 	if err != nil {
 		return fmt.Errorf("reading clone HEAD: %w", err)
 	}
 	if mirrorSHA != cloneSHA {
-		return fmt.Errorf("mirror's refs/heads/%s (%s) does not match the pushed commit (%s)", branch, mirrorSHA, cloneSHA)
+		return fmt.Errorf("mirror's %s (%s) does not match the pushed commit (%s)", ref, mirrorSHA, cloneSHA)
 	}
 	return nil
 }
@@ -279,7 +288,7 @@ func (h *acceptanceHarness) stepACloneWithNoAgentIdentity(ctx context.Context) e
 // identity-stripped) clone.
 func (h *acceptanceHarness) stepIPushFromIt(ctx context.Context) error {
 	world := worldFrom(ctx)
-	return world.writeCommitAndPush("no-identity-change.txt", "no identity", "acceptance: no identity", "HEAD:refs/heads/"+world.workBranch)
+	return world.writeCommitAndPush("no-identity-change.txt", "no identity", "acceptance: no identity", "HEAD:"+refnames.WorkBranch(world.workBranch))
 }
 
 // stepThePushIsRejected is the generic push-rejection assertion several

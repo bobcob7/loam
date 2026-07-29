@@ -180,9 +180,9 @@ func TestCatchUp_RealPushThroughTheRealHook(t *testing.T) {
 	// contain the new target tip.
 	isolatedGit(t, clone, "checkout", "--quiet", "-b", "wb-demoted", "origin/main")
 	commitFile(t, clone, "wb.txt", "work in progress")
-	out, err := pushRef(t, clone, "refs/heads/wb-demoted")
+	out, err := pushRef(t, clone, "refs/heads/loam-reserved/wb-demoted")
 	require.NoError(t, err, "the push itself must be ACCEPTED -- catch-up detection only runs post-accept: %s", out)
-	require.NotEmpty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-demoted"), "the ref must actually have landed")
+	require.NotEmpty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/loam-reserved/wb-demoted"), "the ref must actually have landed")
 	assert.Empty(t, clearer.Calls(), "a push that does not contain the current target tip must leave the conflict flag alone (docs/git-spec.md: 'the flag simply stays until a push catches up')")
 	assert.Empty(t, opener.Calls())
 
@@ -190,7 +190,7 @@ func TestCatchUp_RealPushThroughTheRealHook(t *testing.T) {
 	runGit(t, clone, "fetch", "--quiet", "origin", "main")
 	isolatedGit(t, clone, "merge", "--quiet", "--no-edit", "FETCH_HEAD")
 	require.Equal(t, "", isolatedGit(t, clone, "merge-base", "--is-ancestor", advancedTip, "HEAD"), "fixture precondition: the caught-up branch must now contain the advanced target tip")
-	out, err = pushRef(t, clone, "refs/heads/wb-demoted")
+	out, err = pushRef(t, clone, "refs/heads/loam-reserved/wb-demoted")
 	require.NoError(t, err, "push: %s", out)
 	require.Equal(t, []uuid.UUID{demotedID}, clearer.Calls(), "a push whose history contains the current target tip must clear the conflict")
 	assert.Equal(t, []string{catchup.RoundRequestedBy}, opener.Calls(), "a DEMOTED branch flips back to reviewable, and that transition opens a fresh round attributed to the server")
@@ -198,7 +198,7 @@ func TestCatchUp_RealPushThroughTheRealHook(t *testing.T) {
 	// The same caught-up history pushed to a MERELY FLAGGED branch: it
 	// loses the flag and nothing else. A round here would invent a review
 	// nobody asked for.
-	out, err = pushRef(t, clone, "refs/heads/wb-flagged")
+	out, err = pushRef(t, clone, "refs/heads/loam-reserved/wb-flagged")
 	require.NoError(t, err, "push: %s", out)
 	assert.Equal(t, []uuid.UUID{demotedID, flaggedID}, clearer.Calls(), "a merely flagged branch still loses its flag on catch-up")
 	assert.Equal(t, []string{catchup.RoundRequestedBy}, opener.Calls(), "the merely-flagged branch never transitioned into reviewable, so it must NOT have opened a second round")

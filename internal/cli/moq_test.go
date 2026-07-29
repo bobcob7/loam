@@ -893,8 +893,14 @@ var _ gitCloner = &gitClonerMock{}
 //
 //		// make and configure a mocked gitCloner
 //		mockedgitCloner := &gitClonerMock{
+//			AddConfigFunc: func(ctx context.Context, dest string, key string, value string) error {
+//				panic("mock out the AddConfig method")
+//			},
 //			CloneFunc: func(ctx context.Context, url string, branch string, dest string, headers []string) error {
 //				panic("mock out the Clone method")
+//			},
+//			RenameBranchFunc: func(ctx context.Context, dest string, from string, to string) error {
+//				panic("mock out the RenameBranch method")
 //			},
 //			SetConfigFunc: func(ctx context.Context, dest string, key string, value string) error {
 //				panic("mock out the SetConfig method")
@@ -906,14 +912,31 @@ var _ gitCloner = &gitClonerMock{}
 //
 //	}
 type gitClonerMock struct {
+	// AddConfigFunc mocks the AddConfig method.
+	AddConfigFunc func(ctx context.Context, dest string, key string, value string) error
+
 	// CloneFunc mocks the Clone method.
 	CloneFunc func(ctx context.Context, url string, branch string, dest string, headers []string) error
+
+	// RenameBranchFunc mocks the RenameBranch method.
+	RenameBranchFunc func(ctx context.Context, dest string, from string, to string) error
 
 	// SetConfigFunc mocks the SetConfig method.
 	SetConfigFunc func(ctx context.Context, dest string, key string, value string) error
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// AddConfig holds details about calls to the AddConfig method.
+		AddConfig []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dest is the dest argument value.
+			Dest string
+			// Key is the key argument value.
+			Key string
+			// Value is the value argument value.
+			Value string
+		}
 		// Clone holds details about calls to the Clone method.
 		Clone []struct {
 			// Ctx is the ctx argument value.
@@ -927,6 +950,17 @@ type gitClonerMock struct {
 			// Headers is the headers argument value.
 			Headers []string
 		}
+		// RenameBranch holds details about calls to the RenameBranch method.
+		RenameBranch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dest is the dest argument value.
+			Dest string
+			// From is the from argument value.
+			From string
+			// To is the to argument value.
+			To string
+		}
 		// SetConfig holds details about calls to the SetConfig method.
 		SetConfig []struct {
 			// Ctx is the ctx argument value.
@@ -939,8 +973,54 @@ type gitClonerMock struct {
 			Value string
 		}
 	}
-	lockClone     sync.RWMutex
-	lockSetConfig sync.RWMutex
+	lockAddConfig    sync.RWMutex
+	lockClone        sync.RWMutex
+	lockRenameBranch sync.RWMutex
+	lockSetConfig    sync.RWMutex
+}
+
+// AddConfig calls AddConfigFunc.
+func (mock *gitClonerMock) AddConfig(ctx context.Context, dest string, key string, value string) error {
+	if mock.AddConfigFunc == nil {
+		panic("gitClonerMock.AddConfigFunc: method is nil but gitCloner.AddConfig was just called")
+	}
+	callInfo := struct {
+		Ctx   context.Context
+		Dest  string
+		Key   string
+		Value string
+	}{
+		Ctx:   ctx,
+		Dest:  dest,
+		Key:   key,
+		Value: value,
+	}
+	mock.lockAddConfig.Lock()
+	mock.calls.AddConfig = append(mock.calls.AddConfig, callInfo)
+	mock.lockAddConfig.Unlock()
+	return mock.AddConfigFunc(ctx, dest, key, value)
+}
+
+// AddConfigCalls gets all the calls that were made to AddConfig.
+// Check the length with:
+//
+//	len(mockedgitCloner.AddConfigCalls())
+func (mock *gitClonerMock) AddConfigCalls() []struct {
+	Ctx   context.Context
+	Dest  string
+	Key   string
+	Value string
+} {
+	var calls []struct {
+		Ctx   context.Context
+		Dest  string
+		Key   string
+		Value string
+	}
+	mock.lockAddConfig.RLock()
+	calls = mock.calls.AddConfig
+	mock.lockAddConfig.RUnlock()
+	return calls
 }
 
 // Clone calls CloneFunc.
@@ -988,6 +1068,50 @@ func (mock *gitClonerMock) CloneCalls() []struct {
 	mock.lockClone.RLock()
 	calls = mock.calls.Clone
 	mock.lockClone.RUnlock()
+	return calls
+}
+
+// RenameBranch calls RenameBranchFunc.
+func (mock *gitClonerMock) RenameBranch(ctx context.Context, dest string, from string, to string) error {
+	if mock.RenameBranchFunc == nil {
+		panic("gitClonerMock.RenameBranchFunc: method is nil but gitCloner.RenameBranch was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Dest string
+		From string
+		To   string
+	}{
+		Ctx:  ctx,
+		Dest: dest,
+		From: from,
+		To:   to,
+	}
+	mock.lockRenameBranch.Lock()
+	mock.calls.RenameBranch = append(mock.calls.RenameBranch, callInfo)
+	mock.lockRenameBranch.Unlock()
+	return mock.RenameBranchFunc(ctx, dest, from, to)
+}
+
+// RenameBranchCalls gets all the calls that were made to RenameBranch.
+// Check the length with:
+//
+//	len(mockedgitCloner.RenameBranchCalls())
+func (mock *gitClonerMock) RenameBranchCalls() []struct {
+	Ctx  context.Context
+	Dest string
+	From string
+	To   string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Dest string
+		From string
+		To   string
+	}
+	mock.lockRenameBranch.RLock()
+	calls = mock.calls.RenameBranch
+	mock.lockRenameBranch.RUnlock()
 	return calls
 }
 

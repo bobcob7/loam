@@ -176,8 +176,28 @@ type gitCloner interface {
 	// failure with the reason git itself gave.
 	Clone(ctx context.Context, url, branch, dest string, headers []string) error
 	// SetConfig runs `git -C dest config <key> <value>`, overwriting a
-	// single-valued key. Used for user.name / user.email.
+	// single-valued key. Used for user.name / user.email and for
+	// remote.origin.push.
 	SetConfig(ctx context.Context, dest, key, value string) error
+	// AddConfig runs `git -C dest config --add <key> <value>`, APPENDING
+	// to a multi-valued key rather than replacing it. It exists as a
+	// separate method from SetConfig for exactly one key --
+	// remote.origin.fetch -- where replacing would be a bug: `git clone
+	// --single-branch` has already written the target branch's own fetch
+	// refspec there, and clobbering it would leave the clone unable to
+	// fetch the very branch it was cloned at.
+	AddConfig(ctx context.Context, dest, key, value string) error
+	// RenameBranch runs `git -C dest branch -m <from> <to>`. Called only
+	// when the clone was made at a work branch, whose ref lives under
+	// refnames.ReservedNamespace: `git clone --branch loam-reserved/wb-x`
+	// names the local branch after its argument, and the agent's branch
+	// must be the bare "wb-x" -- it is what the CLI infers a work-branch
+	// argument from (docs/cli-spec.md -> Workspace: "work branch from the
+	// current git branch") and what refnames.ClientPushRefspec's
+	// "refs/heads/wb-*" source side matches. `git branch -m` carries
+	// branch.<name>.remote/merge across with the rename, so the branch
+	// keeps tracking the reserved ref it was cloned from.
+	RenameBranch(ctx context.Context, dest, from, to string) error
 }
 
 // WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs

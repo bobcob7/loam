@@ -11,6 +11,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/forge"
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -301,9 +302,12 @@ func (a *StoreProposalAccepter) adoptRacedPR(ctx context.Context, repo RepoID, r
 }
 
 // upstreamProposalRefspec returns the push refspec and the upstream branch
-// name for a work branch: refs/heads/<name> to refs/heads/loam/<name>,
-// exactly the namespace docs/sync-spec.md specifies and the same one
-// StorePRPoller is the only deleter of.
+// name for a work branch: the mirror's own work-branch ref
+// (refnames.WorkBranch(name), under Loam's reserved namespace) to
+// refs/heads/loam/<name> upstream, exactly the namespace docs/sync-spec.md
+// specifies and the same one StorePRPoller is the only deleter of. The
+// reserved namespace stops at the mirror -- the UPSTREAM name is unchanged
+// by loam-cmq, since upstream is already namespaced under loam/.
 //
 // The refspec carries no leading '+', and cannot: name is validated by
 // safeWorkBranchName, whose character class (letters, digits, '.', '_',
@@ -317,7 +321,7 @@ func upstreamProposalRefspec(name string) (refspec, upstreamBranch string, err e
 	if err != nil {
 		return "", "", err
 	}
-	return "refs/heads/" + name + ":" + ref, strings.TrimPrefix(ref, "refs/heads/"), nil
+	return refnames.WorkBranch(name) + ":" + ref, strings.TrimPrefix(ref, "refs/heads/"), nil
 }
 
 // prBody builds the upstream pull request body from the work branch's

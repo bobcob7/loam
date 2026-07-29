@@ -55,6 +55,7 @@ func TestDiff_HappyPath_ReturnsWorkBranchsOwnChange(t *testing.T) {
 	runGit(t, src, "checkout", "--quiet", "main")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	diff, err := c.Diff(t.Context(), workBranch("main", "wb-1"))
 	require.NoError(t, err)
@@ -74,6 +75,7 @@ func TestDiff_NoDivergence_ReturnsEmptyStringNoError(t *testing.T) {
 	runGit(t, src, "branch", "wb-1")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	diff, err := c.Diff(t.Context(), workBranch("main", "wb-1"))
 	require.NoError(t, err)
@@ -111,6 +113,7 @@ func TestDiff_ThreeDotExcludesTargetOnlyChanges_TwoDotWouldNotHave(t *testing.T)
 	writeAndCommit(t, src, "target.txt", targetOnlyChangeMarker+"\n", "main's own, independent advance")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	diff, err := c.Diff(t.Context(), workBranch("main", "wb-1"))
 	require.NoError(t, err)
@@ -120,7 +123,7 @@ func TestDiff_ThreeDotExcludesTargetOnlyChanges_TwoDotWouldNotHave(t *testing.T)
 	// Compute the two-dot form directly with real git (not this package's
 	// own code) to prove the two forms genuinely differ for this fixture,
 	// rather than trusting that assumption undemonstrated.
-	twoDot := runGit(t, "", "--git-dir="+mirrorpath.Dir(dataDir, "acme/widgets"), "diff", "main..wb-1")
+	twoDot := runGit(t, "", "--git-dir="+mirrorpath.Dir(dataDir, "acme/widgets"), "diff", "main..refs/heads/loam-reserved/wb-1")
 	assert.Contains(t, twoDot, targetOnlyChangeMarker, "two-dot diff over the same fixture DOES show target's independent advance, proving the forms differ")
 }
 
@@ -140,6 +143,7 @@ func TestDiff_UnrelatedHistories_NoMergeBase(t *testing.T) {
 	runGit(t, src, "checkout", "--quiet", "main")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	_, err := c.Diff(t.Context(), workBranch("main", "wb-1"))
 	require.Error(t, err)
@@ -171,6 +175,7 @@ func TestDiff_TargetRefMissing_ReturnsErrRefMissing(t *testing.T) {
 	runGit(t, src, "branch", "wb-1")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	_, err := c.Diff(t.Context(), workBranch("no-such-target", "wb-1"))
 	require.Error(t, err)
@@ -179,10 +184,11 @@ func TestDiff_TargetRefMissing_ReturnsErrRefMissing(t *testing.T) {
 
 // TestDiff_WorkBranchRefMissing_ReturnsErrRefMissing is
 // TestDiff_TargetRefMissing_ReturnsErrRefMissing's sibling for the work
-// branch's own ref: today nothing in this tree creates a work branch's
-// refs/heads/<name> ref in the mirror at CreateWorkBranch time (a separate,
-// tracked gap), so this is the realistic, commonly-reachable shape of
-// ErrRefMissing, not merely a hypothetical.
+// branch's own ref. Since loam-5iu `work start` creates that ref
+// server-side, so this is no longer the commonly-reachable shape of
+// ErrRefMissing it once was -- it now means the mirror has fallen out of
+// step with the work-branch registry, which is exactly what ErrRefMissing
+// is documented to signal.
 func TestDiff_WorkBranchRefMissing_ReturnsErrRefMissing(t *testing.T) {
 	t.Parallel()
 	src := t.TempDir()
@@ -220,6 +226,12 @@ func TestDiff_UsesGitDirNotDashC_UpwardDiscoveryHazard(t *testing.T) {
 	runGit(t, outer, "checkout", "--quiet", "-b", "wb-1")
 	writeAndCommit(t, outer, "f.txt", "outer main\nWRONG_REPO_MARKER\n", "outer wb-1")
 	runGit(t, outer, "checkout", "--quiet", "main")
+	// outer carries the work branch at the RESERVED ref path too, so a -C
+	// mutant escaping into it would resolve every ref this diff needs and
+	// return outer's wrong answer. Without this the mutant would instead
+	// die on ErrRefMissing, and the test would still pass -- for the wrong
+	// reason, killing nothing.
+	seedWorkBranchRef(t, filepath.Join(outer, ".git"), "wb-1")
 	// mirrorDir exists as a plain directory nested inside outer, but is
 	// not itself a git repository -- exactly the shape mirrorpath.Dir
 	// produces for a repo enrolled in the store whose mirror was never
@@ -258,6 +270,7 @@ func TestDiff_TruncatesOversizedDiffWithVisibleMarker(t *testing.T) {
 	runGit(t, src, "checkout", "--quiet", "main")
 	dataDir := t.TempDir()
 	bareCloneInto(t, src, mirrorpath.Dir(dataDir, "acme/widgets"))
+	seedWorkBranchRef(t, mirrorpath.Dir(dataDir, "acme/widgets"), "wb-1")
 	c := computerOver(dataDir, "acme/widgets")
 	diff, err := c.Diff(t.Context(), workBranch("main", "wb-1"))
 	require.NoError(t, err)
@@ -272,7 +285,7 @@ func TestDiff_TruncatesOversizedDiffWithVisibleMarker(t *testing.T) {
 func TestVerifyRef_MirrorMissing_ClassifiesGitsOwnStderr(t *testing.T) {
 	t.Parallel()
 	c := New(t.TempDir(), nil)
-	err := c.verifyRef(t.Context(), filepath.Join(t.TempDir(), "does-not-exist.git"), "main")
+	err := c.verifyRef(t.Context(), filepath.Join(t.TempDir(), "does-not-exist.git"), "main", "refs/heads/main")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrMirrorMissing))
 }
@@ -292,7 +305,7 @@ func TestVerifyRef_MirrorMissing_ClassifiesGitsOwnStderr(t *testing.T) {
 func TestRunDiff_MirrorMissing_ClassifiesGitsDifferentWordingForDiff(t *testing.T) {
 	t.Parallel()
 	c := New(t.TempDir(), nil)
-	_, err := c.runDiff(t.Context(), filepath.Join(t.TempDir(), "does-not-exist.git"), "main", "wb-1")
+	_, err := c.runDiff(t.Context(), filepath.Join(t.TempDir(), "does-not-exist.git"), "refs/heads/main", "refs/heads/loam-reserved/wb-1", "wb-1")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrMirrorMissing)
 }

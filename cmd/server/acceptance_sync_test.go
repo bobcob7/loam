@@ -32,6 +32,7 @@ import (
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // registerSyncSteps wires every step features/sync.feature's Background
@@ -91,7 +92,7 @@ func (h *acceptanceHarness) stepMirrorHasDiverged(ctx context.Context, branch st
 	if err != nil {
 		return err
 	}
-	divergedSHA, err := commitIntoMirror(ctx, world.mirrorDir, branch, "", "MIRROR-DIVERGENCE.txt", "written into the mirror only\n", "acceptance: diverge the mirror")
+	divergedSHA, err := commitIntoMirror(ctx, world.mirrorDir, refnames.TargetBranch(branch), "", "MIRROR-DIVERGENCE.txt", "written into the mirror only\n", "acceptance: diverge the mirror")
 	if err != nil {
 		return err
 	}
@@ -174,7 +175,7 @@ func (h *acceptanceHarness) stepAWorkBranchExists(ctx context.Context, name stri
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.agentName); err != nil {
 		return err
 	}
-	sha, err := commitIntoMirror(ctx, world.mirrorDir, name, "", "WORK.txt", "work branch content\n", "acceptance: work branch commit")
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(name), "", "WORK.txt", "work branch content\n", "acceptance: work branch commit")
 	if err != nil {
 		return err
 	}
@@ -208,9 +209,9 @@ func (h *acceptanceHarness) stepUpstreamHasABranchNamed(ctx context.Context, nam
 // out entirely.
 func (h *acceptanceHarness) stepWorkBranchIsUnchangedInTheMirror(ctx context.Context, name string) error {
 	world := worldFrom(ctx)
-	sha, err := mirrorRefSHA(world.mirrorDir, "refs/heads/"+name)
+	sha, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(name))
 	if err != nil {
-		return fmt.Errorf("reading mirror ref refs/heads/%s: %w", name, err)
+		return fmt.Errorf("reading mirror ref %s: %w", refnames.WorkBranch(name), err)
 	}
 	if sha != world.workBranchSHA {
 		return fmt.Errorf("mirror's work branch %s moved from %s to %s", name, world.workBranchSHA, sha)
@@ -247,10 +248,10 @@ func (h *acceptanceHarness) stepUpstreamDeletedTheTargetBranch(ctx context.Conte
 	if err := h.insertWorkBranchRow(ctx, world.repoID, world.workBranch, world.targetBranch, "reviewable", world.agentName); err != nil {
 		return err
 	}
-	if _, err := commitIntoMirror(ctx, world.mirrorDir, world.workBranch, "refs/heads/"+world.targetBranch, "README.md", "work branch rewrite\n", "acceptance: work branch edit"); err != nil {
+	if _, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), refnames.TargetBranch(world.targetBranch), "README.md", "work branch rewrite\n", "acceptance: work branch edit"); err != nil {
 		return err
 	}
-	if _, err := commitIntoMirror(ctx, world.mirrorDir, world.targetBranch, "", "README.md", "target rewrite\n", "acceptance: conflicting target edit"); err != nil {
+	if _, err := commitIntoMirror(ctx, world.mirrorDir, refnames.TargetBranch(world.targetBranch), "", "README.md", "target rewrite\n", "acceptance: conflicting target edit"); err != nil {
 		return err
 	}
 	before, err := h.workBranchStates(ctx, world.repoID)
@@ -413,7 +414,7 @@ func (h *acceptanceHarness) stepAnAcceptedWorkBranchWhosePRHasMerged(ctx context
 	if err := h.setWorkBranchTitleDescription(ctx, world.repoID, world.workBranch, "acceptance proposal", "acceptance proposal body"); err != nil {
 		return err
 	}
-	sha, err := commitIntoMirror(ctx, world.mirrorDir, world.workBranch, "", "PROPOSAL.txt", "proposed change\n", "acceptance: proposal commit")
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), "", "PROPOSAL.txt", "proposed change\n", "acceptance: proposal commit")
 	if err != nil {
 		return err
 	}
@@ -627,7 +628,7 @@ func (h *acceptanceHarness) workBranchStates(ctx context.Context, repoID uuid.UU
 // from an older target tip, and so genuinely conflicts with a later one);
 // an empty fromRef branches off whatever the clone's own HEAD is.
 // Returns the new commit's SHA as the mirror now records it.
-func commitIntoMirror(ctx context.Context, mirrorDir, branch, fromRef, filename, content, message string) (string, error) {
+func commitIntoMirror(ctx context.Context, mirrorDir, ref, fromRef, filename, content, message string) (string, error) {
 	work, err := os.MkdirTemp("", "loam-acceptance-mirror-commit-*")
 	if err != nil {
 		return "", fmt.Errorf("creating scratch clone dir: %w", err)
@@ -637,12 +638,17 @@ func commitIntoMirror(ctx context.Context, mirrorDir, branch, fromRef, filename,
 	if _, err := runIsolatedGit(ctx, work, "clone", "--quiet", mirrorDir, clone); err != nil {
 		return "", fmt.Errorf("cloning mirror %s: %w", mirrorDir, err)
 	}
-	checkout := []string{"checkout", "--quiet", "-B", branch}
+	// A fixed local branch name, never ref's own: ref is a full path, and
+	// a work branch's is refs/heads/loam-reserved/<name>, which is not a
+	// legal local branch name to check out under. What the commit lands on
+	// is decided by the push refspec below, not by what the scratch clone
+	// happens to call its branch.
+	checkout := []string{"checkout", "--quiet", "-B", "acceptance-scratch"}
 	if fromRef != "" {
 		checkout = append(checkout, "origin/"+strings.TrimPrefix(fromRef, "refs/heads/"))
 	}
 	if _, err := runIsolatedGit(ctx, clone, checkout...); err != nil {
-		return "", fmt.Errorf("checking out %s: %w", branch, err)
+		return "", fmt.Errorf("checking out %s: %w", ref, err)
 	}
 	if err := os.WriteFile(filepath.Join(clone, filename), []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("writing %s: %w", filename, err)
@@ -653,10 +659,10 @@ func commitIntoMirror(ctx context.Context, mirrorDir, branch, fromRef, filename,
 	if _, err := runIsolatedGit(ctx, clone, "commit", "--quiet", "-m", message); err != nil {
 		return "", fmt.Errorf("committing %s: %w", filename, err)
 	}
-	if _, err := runIsolatedGit(ctx, clone, "push", "--quiet", "--force", "origin", "HEAD:refs/heads/"+branch); err != nil {
-		return "", fmt.Errorf("pushing %s into the mirror: %w", branch, err)
+	if _, err := runIsolatedGit(ctx, clone, "push", "--quiet", "--force", "origin", "HEAD:"+ref); err != nil {
+		return "", fmt.Errorf("pushing %s into the mirror: %w", ref, err)
 	}
-	return mirrorRefSHA(mirrorDir, "refs/heads/"+branch)
+	return mirrorRefSHA(mirrorDir, ref)
 }
 
 // runIsolatedGit runs one git subcommand with no ambient configuration

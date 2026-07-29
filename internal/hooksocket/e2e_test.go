@@ -232,9 +232,9 @@ func TestE2E_AllowedPush_RealHookRealSocketRealGit(t *testing.T) {
 	}
 	env := setupE2E(t, agent, store)
 	clonePath := cloneAndCommit(t, env, "allowed.txt")
-	out, err := pushRef(t, clonePath, "refs/heads/wb-good")
+	out, err := pushRef(t, clonePath, "refs/heads/loam-reserved/wb-good")
 	require.NoError(t, err, "an author pushing their own draft work branch must be accepted: %s", out)
-	mirrorHead := runGit(t, "", "--git-dir="+env.mirrorDir, "log", "-1", "--format=%s", "refs/heads/wb-good")
+	mirrorHead := runGit(t, "", "--git-dir="+env.mirrorDir, "log", "-1", "--format=%s", "refs/heads/loam-reserved/wb-good")
 	assert.Equal(t, "add allowed.txt", mirrorHead, "the pushed commit must have actually landed on the mirror")
 }
 
@@ -270,12 +270,12 @@ func TestE2E_RejectedPushes_RealGitClientSeesRemotePrefixedLoamReason(t *testing
 		},
 		{
 			name:       "not the author: pushing another agent's work branch",
-			ref:        "refs/heads/wb-owned-by-bob",
+			ref:        "refs/heads/loam-reserved/wb-owned-by-bob",
 			wantReason: "loam: wb-owned-by-bob belongs to bob",
 		},
 		{
 			name:       "terminal state: pushing a closed work branch",
-			ref:        "refs/heads/wb-closed",
+			ref:        "refs/heads/loam-reserved/wb-closed",
 			wantReason: "loam: wb-closed is closed",
 		},
 	}

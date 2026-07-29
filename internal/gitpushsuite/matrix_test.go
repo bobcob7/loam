@@ -108,7 +108,7 @@ func TestPushMatrix(t *testing.T) {
 			// docs/git-spec.md:150 template: "loam: <name> belongs to <author>".
 			name:      "3 non-author: alice pushes bob's work branch",
 			agentName: "alice", agentID: "1", agentRole: "author",
-			ref:            "refs/heads/wb-owned-by-bob",
+			ref:            "refs/heads/loam-reserved/wb-owned-by-bob",
 			wantReason:     "loam: wb-owned-by-bob belongs to bob",
 			wantLoamPrefix: true,
 			wantHookRan:    true,
@@ -118,7 +118,7 @@ func TestPushMatrix(t *testing.T) {
 			// branch. docs/git-spec.md:151 template: "loam: <name> is <state>".
 			name:      "4 terminal state: alice's own closed branch",
 			agentName: "alice", agentID: "1", agentRole: "author",
-			ref:            "refs/heads/wb-closed",
+			ref:            "refs/heads/loam-reserved/wb-closed",
 			wantReason:     "loam: wb-closed is closed",
 			wantLoamPrefix: true,
 			wantHookRan:    true,
@@ -136,7 +136,7 @@ func TestPushMatrix(t *testing.T) {
 			name:      "7 missing identity: no Loam-Agent-* headers at all",
 			agentName: "dave", agentID: "3", agentRole: "author",
 			stripIdentity:  true,
-			ref:            "refs/heads/wb-anything",
+			ref:            "refs/heads/loam-reserved/wb-anything",
 			wantReason:     "loam: forbidden: missing agent identity",
 			wantLoamPrefix: true, // this IS loam:-prefixed (loam-j33), even though it never reaches the hook -- httpauth.GitIdentity writes it, not refpolicy
 			wantHookRan:    false,
@@ -147,7 +147,7 @@ func TestPushMatrix(t *testing.T) {
 			// before the git-receive-pack process even spawns.
 			name:      "8 wrong role: reviewer lacks git.push",
 			agentName: "carol", agentID: "2", agentRole: "reviewer",
-			ref:            "refs/heads/wb-anything",
+			ref:            "refs/heads/loam-reserved/wb-anything",
 			wantReason:     `loam: role "reviewer" may not push (missing git.push capability)`,
 			wantLoamPrefix: true,
 			wantHookRan:    false,
