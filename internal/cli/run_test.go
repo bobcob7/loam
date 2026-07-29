@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -73,8 +74,15 @@ func TestRun_WrappedUsageError_StillExitsUsage(t *testing.T) {
 // TestRun_CommandError_DelegatesToErrorMapper proves a command handler's
 // error (as opposed to a routing usageError) is encoded and its exit code
 // comes from the injected ErrorMapper.
+//
+// It dispatches through a purpose-built router rather than a real command,
+// as TestRun_Success_ReturnsZero already does. It used to lean on `whoami`
+// returning the errNotImplemented stub; loam-0pj.7 made `whoami` succeed,
+// which would have made this test silently assert nothing about the error
+// path. The behaviour under test is Run's, not any one command's.
 func TestRun_CommandError_DelegatesToErrorMapper(t *testing.T) {
 	t.Parallel()
+	errBoom := errors.New("boom")
 	var encoded errorPayload
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error {
 		payload, ok := v.(errorPayload)
@@ -83,14 +91,17 @@ func TestRun_CommandError_DelegatesToErrorMapper(t *testing.T) {
 		return nil
 	}}
 	errMapper := &ErrorMapperMock{ExitCodeFunc: func(err error) int {
-		assert.ErrorIs(t, err, errNotImplemented)
+		assert.ErrorIs(t, err, errBoom)
 		return 7
 	}}
 	deps := NewDeps(testLogger(), &ConfigMock{}, encoder, errMapper, &WorkspaceResolverMock{}, fakeConnect{}, nil, nil)
-	router := NewRouter(deps)
-	code := Run(t.Context(), router, []string{"whoami"})
+	router := &Router{deps: deps, commands: map[string]*command{
+		"failing": {run: func(context.Context, *Deps, []string) error { return errBoom }},
+	}}
+	code := Run(t.Context(), router, []string{"failing"})
 	assert.Equal(t, 7, code)
 	assert.Equal(t, "internal", encoded.Error.Code)
+	assert.Equal(t, "boom", encoded.Error.Message)
 }
 
 // TestRun_Success_ReturnsZero proves a nil error from Dispatch exits 0

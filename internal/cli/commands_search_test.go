@@ -310,8 +310,8 @@ func TestRunSearch_InvalidArgument_ExitsTwo(t *testing.T) {
 // the real search handler (not the errNotImplemented stub, and not a
 // routing usageError) -- the same shape
 // TestRouterDispatch_GraphSubqueries_ReachRealHandlers proves for the graph
-// subqueries. Named in stillStubbedExemptions (router_test.go) as the test
-// that proves search's coverage.
+// subqueries. Named in commandImplementationProofs (router_test.go) as the
+// test that proves search's coverage.
 func TestRouterDispatch_Search_ReachesRealHandler(t *testing.T) {
 	t.Parallel()
 	client := &SearchClientMock{

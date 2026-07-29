@@ -68,57 +68,56 @@ func TestRouterDispatch_GroupWithNoSubcommand_ReturnsUsageError(t *testing.T) {
 	assert.ErrorAs(t, err, &ue)
 }
 
-// stillStubbedExemptions lists dispatchable leaf commands (see
-// leafCommandKeys) deliberately absent from
-// TestRouterDispatch_EveryCommandIsReachable's table because they no longer
-// return errNotImplemented: a real handler exists, and that command's own
-// test file proves it is reachable instead. clone is entry #1 -- covered by
-// TestRouterDispatch_Clone_ReachesRealHandler in clone_test.go (loam-0pj.8).
-// As each future command bead lands, add its leaf key here rather than
-// deleting its row from the table silently: this keeps the coverage claim
-// enforced by TestRouterDispatch_EveryCommandIsReachable's drift check
-// below instead of by a reviewer noticing a table shrank.
-var stillStubbedExemptions = map[string]bool{
-	"clone": true,
-	// work start/set/request-review are covered by
-	// TestRouterDispatch_WorkStartSetRequestReview_ReachRealHandlers in
-	// commands_work_test.go (loam-0pj.11).
-	"work start":          true,
-	"work set":            true,
-	"work request-review": true,
-	// work comment is covered by TestRouterDispatch_WorkComment_
-	// ReachesRealHandler in commands_work_comment_test.go (loam-0pj.12).
-	"work comment": true,
-	// work reply/verdict are covered by TestRouterDispatch_WorkReply_
-	// ReachesRealHandler and TestRouterDispatch_WorkVerdict_
-	// ReachesRealHandler (loam-0pj.13).
-	"work reply":   true,
-	"work verdict": true,
-	// work list/show/diff/comments/verdicts are covered by
-	// TestRouterDispatch_WorkReadCommands_ReachRealHandlers in
-	// commands_work_read_test.go (loam-0pj.10).
-	"work list":     true,
-	"work show":     true,
-	"work diff":     true,
-	"work comments": true,
-	"work verdicts": true,
-	// graph def/refs/deps/dependents/history are covered by
-	// TestRouterDispatch_GraphSubqueries_ReachRealHandlers in
-	// commands_graph_test.go (loam-0pj.14).
-	"graph def":        true,
-	"graph refs":       true,
-	"graph deps":       true,
-	"graph dependents": true,
-	"graph history":    true,
-	// search is covered by TestRouterDispatch_Search_ReachesRealHandler in
-	// commands_search_test.go (loam-0pj.15).
-	"search": true,
+// commandImplementationProofs names, for every dispatchable leaf command
+// (see leafCommandKeys), the test that proves dispatching it reaches that
+// command's real handler rather than a routing usageError.
+//
+// This replaces the pair of lists that used to live here -- a
+// "stillStubbedExemptions" set and a reachability table of still-stubbed
+// commands -- which had to be kept complementary by hand and which a merge
+// had already once broken by unioning them wrongly. With loam-0pj.7 no leaf
+// is stubbed any more (errNotImplemented is gone), so the table had no rows
+// left to hold and the invariant collapses to a single exhaustive map: one
+// entry per leaf, no more and no fewer, checked in both directions by
+// TestCommandTree_EveryLeafHasAnImplementationProof. There is nothing left
+// for two lists to disagree about.
+//
+// The values are documentation, not assertions -- Go cannot check that a
+// named test exists -- but the KEYS are enforced exactly, so a new command
+// added to commandTree() fails this file until someone writes its proof,
+// and a command deleted from the tree fails it until its stale entry goes.
+var commandImplementationProofs = map[string]string{
+	"instructions": "TestRouterDispatch_Instructions_ReachesRealHandler (commands_root_test.go, loam-0pj.7)",
+	"whoami":       "TestRouterDispatch_Whoami_ReachesRealHandler (commands_root_test.go, loam-0pj.7)",
+	"clone":        "TestRouterDispatch_Clone_ReachesRealHandler (clone_test.go, loam-0pj.8)",
+
+	"work start":          "TestRouterDispatch_WorkStartSetRequestReview_ReachRealHandlers (commands_work_test.go, loam-0pj.11)",
+	"work set":            "TestRouterDispatch_WorkStartSetRequestReview_ReachRealHandlers (commands_work_test.go, loam-0pj.11)",
+	"work request-review": "TestRouterDispatch_WorkStartSetRequestReview_ReachRealHandlers (commands_work_test.go, loam-0pj.11)",
+
+	"work list":     "TestRouterDispatch_WorkReadCommands_ReachRealHandlers (commands_work_read_test.go, loam-0pj.10)",
+	"work show":     "TestRouterDispatch_WorkReadCommands_ReachRealHandlers (commands_work_read_test.go, loam-0pj.10)",
+	"work diff":     "TestRouterDispatch_WorkReadCommands_ReachRealHandlers (commands_work_read_test.go, loam-0pj.10)",
+	"work comments": "TestRouterDispatch_WorkReadCommands_ReachRealHandlers (commands_work_read_test.go, loam-0pj.10)",
+	"work verdicts": "TestRouterDispatch_WorkReadCommands_ReachRealHandlers (commands_work_read_test.go, loam-0pj.10)",
+
+	"work comment": "TestRouterDispatch_WorkComment_ReachesRealHandler (commands_work_comment_test.go, loam-0pj.12)",
+	"work reply":   "TestRouterDispatch_WorkReply_ReachesRealHandler (commands_work_reply_test.go, loam-0pj.13)",
+	"work verdict": "TestRouterDispatch_WorkVerdict_ReachesRealHandler (commands_work_verdict_test.go, loam-0pj.13)",
+
+	"graph def":        "TestRouterDispatch_GraphSubqueries_ReachRealHandlers (commands_graph_test.go, loam-0pj.14)",
+	"graph refs":       "TestRouterDispatch_GraphSubqueries_ReachRealHandlers (commands_graph_test.go, loam-0pj.14)",
+	"graph deps":       "TestRouterDispatch_GraphSubqueries_ReachRealHandlers (commands_graph_test.go, loam-0pj.14)",
+	"graph dependents": "TestRouterDispatch_GraphSubqueries_ReachRealHandlers (commands_graph_test.go, loam-0pj.14)",
+	"graph history":    "TestRouterDispatch_GraphSubqueries_ReachRealHandlers (commands_graph_test.go, loam-0pj.14)",
+
+	"search": "TestRouterDispatch_Search_ReachesRealHandler (commands_search_test.go, loam-0pj.15)",
 }
 
 // leafCommandKeys walks tree and returns the set of dispatchable leaf
 // command keys: a top-level leaf's own name, or "<group> <sub>" for a
-// subcommand -- the same shape leafKeyFromArgs derives from a reachability
-// table row's args, so the two can be compared directly.
+// subcommand -- the same shape commandImplementationProofs is keyed by, so
+// the two sets can be compared directly.
 func leafCommandKeys(tree map[string]*command) map[string]bool {
 	leaves := make(map[string]bool)
 	for name, cmd := range tree {
@@ -133,62 +132,21 @@ func leafCommandKeys(tree map[string]*command) map[string]bool {
 	return leaves
 }
 
-// leafKeyFromArgs maps a reachability-table row's args to the same
-// "<top>"/"<top> <sub>" key leafCommandKeys produces. Only "work" and
-// "graph" are groups in the current command tree; every other top-level
-// command is itself a leaf.
-func leafKeyFromArgs(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	top := args[0]
-	if top != "work" && top != "graph" || len(args) < 2 {
-		return top
-	}
-	return top + " " + args[1]
-}
-
-// TestRouterDispatch_EveryCommandIsReachable proves every still-stubbed
-// command named in docs/cli-spec.md is registered and dispatchable: given
-// plausible args, each resolves to its stub handler and returns
-// errNotImplemented rather than a routing usageError. This is
-// self-enforcing, not just a fixed list: it walks commandTree() itself and
-// fails if any leaf command has neither a row below nor an entry in
-// stillStubbedExemptions, so the next ~24 command beads (each of which
-// turns one more row real, exactly as loam-0pj.8 did for clone) cannot
-// silently shrink this test's coverage by deleting a row -- the leaf must
-// be exempted explicitly instead.
-func TestRouterDispatch_EveryCommandIsReachable(t *testing.T) {
+// TestCommandTree_EveryLeafHasAnImplementationProof is the drift check on
+// commandImplementationProofs: it walks commandTree() itself and asserts
+// the two sets are equal in BOTH directions, so neither adding a command
+// without a proof nor removing one and leaving its entry behind can pass
+// silently.
+func TestCommandTree_EveryLeafHasAnImplementationProof(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"instructions", []string{"instructions"}},
-		{"instructions with target", []string{"instructions", "work list"}},
-		{"whoami", []string{"whoami"}},
+	leaves := leafCommandKeys(commandTree())
+	for leaf := range leaves {
+		assert.Contains(t, commandImplementationProofs, leaf,
+			"command %q is dispatchable but has no entry in commandImplementationProofs naming the test that proves it reaches a real handler", leaf)
 	}
-
-	covered := make(map[string]bool, len(tests))
-	for _, tt := range tests {
-		covered[leafKeyFromArgs(tt.args)] = true
-	}
-	for leaf := range leafCommandKeys(commandTree()) {
-		if stillStubbedExemptions[leaf] {
-			continue
-		}
-		assert.True(t, covered[leaf], "command %q has no row in the reachability table above and no entry in stillStubbedExemptions", leaf)
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			router := NewRouter(newTestDeps())
-			err := router.Dispatch(t.Context(), tt.args)
-			assert.ErrorIs(t, err, errNotImplemented)
-			var ue *usageError
-			assert.NotErrorAs(t, err, &ue)
-		})
+	for leaf := range commandImplementationProofs {
+		assert.Contains(t, leaves, leaf,
+			"commandImplementationProofs names %q, which is no longer a dispatchable leaf in commandTree()", leaf)
 	}
 }
 

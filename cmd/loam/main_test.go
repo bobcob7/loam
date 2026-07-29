@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,18 +126,55 @@ func TestLoam_MissingRequiredEnvVar_ExitsUsage(t *testing.T) {
 	assert.Contains(t, result.stdout, "LOAM_AGENT_ROLE")
 }
 
-// TestLoam_ValidEnv_CommandNotYetImplemented_ExitsInternal proves the full
-// production wiring — real config, real workspace resolver, real Connect
-// clients, real error mapper, real encoder — all construct successfully
-// from a valid environment, even though no command bodies exist yet (that
-// is later beads' work): whoami's stub returns errNotImplemented, which the
-// real ErrorMapper classifies as an unexpected internal error, exit 1. If
-// NewProductionDeps' wiring were broken (e.g. newConnectClient failing on
-// a valid config), this test would see a construction-time usage/internal
-// error instead of ever reaching the command dispatch at all.
-func TestLoam_ValidEnv_CommandNotYetImplemented_ExitsInternal(t *testing.T) {
+// TestLoam_ValidEnv_Whoami_ReportsIdentityWithoutContactingTheServer proves
+// two things at once through the real binary.
+//
+// First, the full production wiring — real config, real workspace resolver,
+// real Connect clients, real error mapper, real encoder — constructs
+// successfully from a valid environment and dispatch actually happens: if
+// NewProductionDeps' wiring were broken (e.g. newConnectClient failing on a
+// valid config), this would be a construction-time usage/internal error
+// instead of a rendered identity.
+//
+// Second, and this is the acceptance criterion "whoami works without
+// contacting the server" (features/instructions.feature): validEnv()'s
+// LOAM_SERVER_URL points at https://loam.example, which resolves to
+// nothing. A whoami that made any RPC would fail here. Exit 0 with the
+// identity on stdout is only reachable if it made none.
+//
+// The identifier is asserted as the full "<name>-<id>-<role>" string, not
+// just checked for presence: reporting the bare agent name in that field
+// was the P0 in loam-ppb, and that regression would still satisfy a
+// looser assertion.
+func TestLoam_ValidEnv_Whoami_ReportsIdentityWithoutContactingTheServer(t *testing.T) {
 	t.Parallel()
 	result := runLoam(t, validEnv(), "whoami")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Empty(t, result.stderr)
+	var out struct {
+		Name       string `json:"name"`
+		ID         string `json:"id"`
+		Role       string `json:"role"`
+		Identifier string `json:"identifier"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &out), "whoami must write a single JSON object: %s", result.stdout)
+	assert.Equal(t, "ada-lovelace", out.Name)
+	assert.Equal(t, "7", out.ID)
+	assert.Equal(t, "reviewer", out.Role)
+	assert.Equal(t, "ada-lovelace-7-reviewer", out.Identifier)
+}
+
+// TestLoam_ValidEnv_Instructions_ServerUnreachable_ExitsInternal proves the
+// other half of the orientation pair through the real binary: `instructions`
+// IS server-backed (loam.v1.MetaService.GetInstructions), so against
+// validEnv()'s unreachable LOAM_SERVER_URL it fails — and fails with exit 1,
+// the "server is unreachable" code docs/cli-spec.md -> instructions ->
+// Errors pins. Run next to the whoami test above, the pair is the real
+// evidence for the split: same environment, same binary, one command
+// succeeds locally and the other cannot.
+func TestLoam_ValidEnv_Instructions_ServerUnreachable_ExitsInternal(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, validEnv(), "instructions")
 	assert.Equal(t, 1, result.exitCode)
 	assert.Contains(t, result.stdout, `"code":"internal"`)
 }
