@@ -152,7 +152,11 @@ mix `loam.admin.v1` and `loam.v1` (`WorkBranchService`) calls.
 - **TypeScript strict**; no `any` in app code (generated code excepted).
 - **Hand-rolled components** on native elements with basic accessibility (labeled inputs,
   focus-trapped dialogs, keyboard-dismiss): `Button`, `Table`, `Dialog`, `Field`/`Form`,
-  `ErrorBanner`, `Pager`.
+  `ErrorBanner`, `Pager`, `CopyField`. `Dialog` is built on `role="dialog"` +
+  `aria-modal`, not the native `<dialog>` element: `showModal()` would supply the top
+  layer, backdrop, background inertness and Escape for free, but jsdom implements none of
+  `HTMLDialogElement`, so every one of those behaviours would ship untested. It instead
+  traps and restores focus, inerts the rest of `<body>`, and handles Escape explicitly.
 - **CSS Modules** per component; global `reset.css` + `tokens.css` (spacing, color, radius as
   CSS variables). **Dark theme only** — a single theme, no light mode or toggle. The single
   theme is declared unconditionally on `:root`: no `prefers-color-scheme` fork and no
