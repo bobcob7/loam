@@ -137,21 +137,42 @@ still receive the identifier in its wire form (`web/src/routes/paths.ts`).
 
 ## Build & Embed
 
-- **Build**: `vite build` → `web/dist/` (hashed assets + `index.html`). `web/dist` is
-  **gitignored**; `task web:build` produces it before the Go embed compiles.
+- **Build**: `vite build` → `web/dist/` (hashed assets + `index.html`). `web/dist` is **NOT**
+  gitignored (see `web/.gitignore` for the rationale, at length): `web/embed.go` embeds it
+  via `//go:embed all:dist`, and go:embed treats a missing embed target as a hard *compile*
+  error, so an ignored (and therefore absent) `dist/` would break `go build ./...` on any
+  clean checkout that has never run Node. `dist/` instead ships two committed placeholders
+  (`dist/index.html`, `dist/assets/placeholder.txt`) so the Go build always has something to
+  embed; `task web:build` overwrites them with the real Vite output (loam-68os).
 - **Embed**: a Go package embeds `web/dist` (`//go:embed all:dist`) and serves it with **SPA
   fallback** — any path that is not an RPC route or a real asset returns `index.html`
   (client router takes over). Static + fallback are behind admin basic auth (see web-spec
   routing table).
-- **Task integration**: `task web:install` (`npm ci`), `task web:generate`, `task web:build`;
-  the top-level build depends on `web:build` so `dist` exists before the Go embed compiles.
+- **Task integration** (loam-nvb.15): `task web:install` (`npm ci`), `task web:generate`,
+  `task web:build` (`npm run build` — `tsc --noEmit` then `vite build` — writing the real
+  output over the placeholders above). The top-level `task build` depends on `web:build` so
+  `dist` holds the real SPA before the `go build` step embeds it, then restores the
+  committed placeholders in `web/dist` immediately afterward: by that point the real output
+  is already baked into the compiled binary via go:embed, so leaving it on disk any longer
+  only costs a permanently dirty tree of unstably-hashed filenames that were never meant to
+  be committed. `task web:build` run on its own (e.g. to inspect the real output, or ahead of
+  `task build:bin`) leaves the real build in place — only the top-level `build` task restores
+  placeholders.
 
 ## Dev Workflow
 
-- `vite dev` serves the SPA on a dev port with HMR; a Vite **proxy** forwards
-  `/loam.v1.*` and `/loam.admin.v1.*` to a locally running Go server, so the dev SPA talks to
-  the real backend. Basic auth is entered once in the browser.
-- `task web:generate` after any `proto/` change refreshes `web/src/gen/`.
+- Run the Go server locally (e.g. `task build:bin && ./bin/server`, with the usual
+  `LOAM_*` env vars — see `docs/server-spec.md`), then run `vite dev` (`task web:install`
+  once, then `npm --prefix web run dev`, or `cd web && npm run dev`) to serve the SPA on a
+  dev port with HMR. Vite's dev **proxy** (`web/vite.config.ts`) forwards `/loam.v1.*` and
+  `/loam.admin.v1.*` to that running Go server (default `http://localhost:8080`, overridable
+  via `LOAM_DEV_SERVER_URL`), so the dev SPA talks to the real backend instead of a mock.
+- Open the dev SPA's URL in a browser and enter basic auth **once**, at the Go server's own
+  admin credentials — the browser caches it and attaches it to every same-origin (proxied)
+  request thereafter (see §Auth above).
+- `task web:generate` after any `proto/` change refreshes `web/src/gen/` from `proto/`.
+- `task web:test` runs the Vitest suite; `task web:build` type-checks and builds to
+  `web/dist` (see §Build & Embed above for what that does to the committed placeholders).
 
 ## Conventions
 
