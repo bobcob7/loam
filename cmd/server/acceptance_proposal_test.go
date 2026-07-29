@@ -63,6 +63,7 @@ import (
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // acceptanceProposalReviewerID is the reviewer identity every proposal
@@ -464,7 +465,7 @@ func (h *acceptanceHarness) seedReviewedWorkBranch(ctx context.Context, world *a
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier()); err != nil {
 		return "", err
 	}
-	sha, err := commitIntoMirror(ctx, world.mirrorDir, name, "refs/heads/"+world.targetBranch,
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(name), refnames.TargetBranch(world.targetBranch),
 		acceptanceProposalFile, acceptanceProposalReadme(name), "acceptance: the proposal's own commit on "+name)
 	if err != nil {
 		return "", err
@@ -761,7 +762,7 @@ func (h *acceptanceHarness) stepAWorkBranchFlaggedAsConflicted(ctx context.Conte
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier()); err != nil {
 		return err
 	}
-	sha, err := commitIntoMirror(ctx, world.mirrorDir, name, "refs/heads/"+world.targetBranch,
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(name), refnames.TargetBranch(world.targetBranch),
 		acceptanceProposalFile, acceptanceProposalReadme(name), "acceptance: the proposal's own commit on "+name)
 	if err != nil {
 		return err
@@ -1098,9 +1099,9 @@ func (h *acceptanceHarness) stepAnUpstreamPRIsCreatedWithAGeneratedBranchName(ct
 	if err != nil {
 		return fmt.Errorf("upstream branch %s was never created: %w", want, err)
 	}
-	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, "refs/heads/"+world.workBranch)
+	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
 	if err != nil {
-		return fmt.Errorf("reading the mirror's refs/heads/%s: %w", world.workBranch, err)
+		return fmt.Errorf("reading the mirror's %s: %w", refnames.WorkBranch(world.workBranch), err)
 	}
 	if upstreamSHA != mirrorSHA {
 		return fmt.Errorf("upstream %s is at %s, want the work branch's own tip %s", want, upstreamSHA, mirrorSHA)
@@ -1351,9 +1352,9 @@ func (h *acceptanceHarness) stepTheExistingUpstreamPRIsUpdatedInPlace(ctx contex
 	if err != nil {
 		return err
 	}
-	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, "refs/heads/"+world.workBranch)
+	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
 	if err != nil {
-		return fmt.Errorf("reading the mirror's refs/heads/%s: %w", world.workBranch, err)
+		return fmt.Errorf("reading the mirror's %s: %w", refnames.WorkBranch(world.workBranch), err)
 	}
 	if upstreamSHA != mirrorSHA {
 		return fmt.Errorf("upstream %s is at %s, want the caught-up tip %s", upstreamBranch, upstreamSHA, mirrorSHA)

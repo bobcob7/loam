@@ -341,9 +341,19 @@ tasks:
         repo_name="bobcob7/doc-server"
         target_branch="main"
         work_branch="wb-9c2f1a"
-        agent_name="grace-hopper-3-author"
-        agent_id="1"
+        agent_name="grace-hopper"
+        agent_id="3"
         agent_role="author"
+        # work_branches.author holds the IDENTIFIER ("<name>-<id>-<role>"),
+        # which is what internal/refpolicy compares the pushing agent
+        # against (loam-ppb). This fixture used to seed the bare
+        # $agent_name -- with the name itself spelled
+        # "grace-hopper-3-author" so it LOOKED like an identifier -- so the
+        # happy-path push in step 8 was rejected as "belongs to
+        # grace-hopper-3-author" while the real identifier was
+        # "grace-hopper-3-author-1-author". loam-ppb corrected demo:m4's
+        # fixture but not this one.
+        agent_identifier="$agent_name-$agent_id-$agent_role"
         http_port="18089"
         http_addr="127.0.0.1:$http_port"
         data_dir=""
@@ -490,7 +500,7 @@ tasks:
         VALUES ('$repo_id', '$repo_name', 'https://example.invalid/$repo_name', 'example.invalid', '$target_branch');
         INSERT INTO repo_target_branches (repo_id, branch) VALUES ('$repo_id', '$target_branch');
         INSERT INTO work_branches (id, repo_id, name, target, state, author)
-        VALUES ('$wb_id', '$repo_id', '$work_branch', '$target_branch', 'draft', '$agent_name');
+        VALUES ('$wb_id', '$repo_id', '$work_branch', '$target_branch', 'draft', '$agent_identifier');
         "
         echo "=== step 5/10: seed the bare mirror on disk, with both the target branch and the work branch ==="
         mirror_dir="$data_dir/mirrors/$repo_name.git"
@@ -502,9 +512,13 @@ tasks:
         echo "hello" > "$seed_src/README.md"
         git -C "$seed_src" add README.md
         git -C "$seed_src" commit --quiet -m "init"
-        git -C "$seed_src" branch "$work_branch"
         git clone --quiet --bare "$seed_src" "$mirror_dir"
         rm -rf "$seed_src"
+        # Work-branch refs live under Loam's reserved, server-owned
+        # namespace (docs/git-spec.md -> Ref Policy), which is what
+        # `work start` writes and what refpolicy, gitdiff and the sync
+        # components all address -- NOT a plain refs/heads/<name>.
+        git --git-dir="$mirror_dir" update-ref "refs/heads/loam-reserved/$work_branch" "refs/heads/$target_branch"
         echo "=== step 6/10: second server boot -- reconciles the pre-existing mirror (installs the real loamhook + receive.deny* config) ==="
         server_log_2="$workspace/server-second-boot.log"
         env PATH="$PATH" LOAM_HTTP_ADDR="$http_addr" LOAM_ADMIN_USER=admin \
@@ -548,19 +562,24 @@ tasks:
         echo "demo change" > "$clone_dir/agent-change.txt"
         git -C "$clone_dir" add agent-change.txt
         git -C "$clone_dir" commit --quiet -m "demo: agent change"
-        if push_happy_out=$(git -C "$clone_dir" push origin HEAD 2>&1); then push_happy_status=0; else push_happy_status=$?; fi
+        # Push by BRANCH NAME, not "HEAD": only a destination-less refspec
+        # consults remote.origin.push, which is what `loam clone` wrote to
+        # map the bare name onto refs/heads/loam-reserved/<name>. "HEAD"
+        # resolves its destination by name and would aim at the
+        # unregistered refs/heads/<name>.
+        if push_happy_out=$(git -C "$clone_dir" push origin "$work_branch" 2>&1); then push_happy_status=0; else push_happy_status=$?; fi
         echo "$push_happy_out"
         if [ "$push_happy_status" -ne 0 ]; then
           echo "FAIL: the happy-path push was rejected (expected success)" >&2
           exit 1
         fi
-        mirror_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")
+        mirror_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")
         clone_sha=$(git -C "$clone_dir" rev-parse HEAD)
         if [ "$mirror_sha" != "$clone_sha" ]; then
           echo "FAIL: mirror's $work_branch ($mirror_sha) does not match the pushed commit ($clone_sha)" >&2
           exit 1
         fi
-        echo "PASS: plain git push landed on the mirror's refs/heads/$work_branch ($mirror_sha)"
+        echo "PASS: plain git push landed on the mirror's refs/heads/loam-reserved/$work_branch ($mirror_sha)"
         echo "=== step 9/10: three live rejections ==="
         echo "--- rejection 1/3: push to the read-only target branch \"$target_branch\" ---"
         if reject1_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$target_branch" 2>&1); then reject1_status=0; else reject1_status=$?; fi
@@ -579,7 +598,7 @@ tasks:
         echo "more demo change" >> "$clone_dir/agent-change.txt"
         git -C "$clone_dir" add agent-change.txt
         git -C "$clone_dir" commit --quiet -m "demo: change after stripping identity"
-        if reject2_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$work_branch" 2>&1); then reject2_status=0; else reject2_status=$?; fi
+        if reject2_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/loam-reserved/$work_branch" 2>&1); then reject2_status=0; else reject2_status=$?; fi
         echo "$reject2_out"
         if [ "$reject2_status" -eq 0 ]; then
           echo "FAIL: push with no Loam-Agent-* headers should have been rejected" >&2
@@ -601,7 +620,7 @@ tasks:
         fi
         rm -f "$hook_sock"
         echo "removed $hook_sock while the server keeps running: any NEW dial to it now fails at the filesystem-path resolution step, exactly like the socket being down"
-        if reject3_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/$work_branch" 2>&1); then reject3_status=0; else reject3_status=$?; fi
+        if reject3_out=$(git -C "$clone_dir" push origin "HEAD:refs/heads/loam-reserved/$work_branch" 2>&1); then reject3_status=0; else reject3_status=$?; fi
         echo "$reject3_out"
         if [ "$reject3_status" -eq 0 ]; then
           echo "FAIL: push with the policy socket down should have been rejected (fail-closed)" >&2
@@ -615,14 +634,14 @@ tasks:
           *"connect"*) echo "PASS: fail-closed, loam:-prefixed, and names the connection failure" ;;
           *) echo "FAIL: expected the reason to name the connection failure (\"connect\")" >&2; exit 1 ;;
         esac
-        if [ -n "$(git --git-dir="$mirror_dir" for-each-ref "refs/heads/$work_branch" --format='%(objectname)')" ]; then
-          post_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")
+        if [ -n "$(git --git-dir="$mirror_dir" for-each-ref "refs/heads/loam-reserved/$work_branch" --format='%(objectname)')" ]; then
+          post_sha=$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")
           if [ "$post_sha" != "$mirror_sha" ]; then
             echo "FAIL: the mirror's $work_branch moved even though the fail-closed push was rejected" >&2
             exit 1
           fi
         fi
-        echo "confirmed: refs/heads/$work_branch on the mirror never moved past the happy-path commit"
+        echo "confirmed: refs/heads/loam-reserved/$work_branch on the mirror never moved past the happy-path commit"
         echo "=== step 10/10: done -- summary ==="
         echo "clone-and-push.feature scenarios observed passing against the real binaries:"
         echo "  - Cloning a work branch bootstraps plain git"
@@ -1057,16 +1076,19 @@ tasks:
           echo "FAIL: no repos row for $repo_name after a successful EnrollRepo" >&2
           exit 1
         fi
-        # The row matters as much as the ref: MirrorFetcher builds its
-        # negative refspecs ("^refs/heads/<name>") from the work branches
-        # REGISTERED for the repo, not from a name prefix, so a ref with
-        # no row would be pruned like any other upstream-absent ref and
-        # would prove the opposite of what this step is here to show.
+        # The row still matters as much as the ref: MirrorFetcher builds
+        # its ENUMERATED negative refspecs from the work branches
+        # REGISTERED for the repo. Since loam-cmq those enumerated
+        # exclusions are backed by a structural one over the whole
+        # refs/heads/loam-reserved/ namespace, so an unregistered ref there
+        # would survive too -- but registering it is what this step is
+        # demonstrating, and it is also what makes the ref reachable to
+        # every other component (refpolicy, diff, mergeability).
         "$docker_cli" exec "$pg_container" psql -U loam -d loam -v ON_ERROR_STOP=1 -c "
         INSERT INTO work_branches (id, repo_id, name, target, state, author)
         VALUES ('$wb_id', '$repo_id', '$work_branch', '$target_branch', 'draft', '$agent_name');" >/dev/null
-        git --git-dir="$mirror_dir" update-ref "refs/heads/$work_branch" "$pre_enroll_ref"
-        wb_ref_before="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        git --git-dir="$mirror_dir" update-ref "refs/heads/loam-reserved/$work_branch" "$pre_enroll_ref"
+        wb_ref_before="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")"
         mirror_main_before="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$target_branch")"
         if [ -z "$(git --git-dir="$mirror_dir" for-each-ref 'refs/heads/doomed' --format='%(objectname)')" ]; then
           echo "FAIL: the mirror never carried refs/heads/doomed, so pruning it would prove nothing" >&2
@@ -1101,12 +1123,12 @@ tasks:
           exit 1
         fi
         echo "PASS: a branch deleted upstream is pruned from the mirror -- refs/heads/doomed is gone"
-        wb_ref_after="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        wb_ref_after="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")"
         if [ "$wb_ref_after" != "$wb_ref_before" ]; then
-          echo "FAIL: refs/heads/$work_branch moved from $wb_ref_before to $wb_ref_after" >&2
+          echo "FAIL: refs/heads/loam-reserved/$work_branch moved from $wb_ref_before to $wb_ref_after" >&2
           exit 1
         fi
-        echo "PASS: sync never touches work branch refs -- refs/heads/$work_branch is still $wb_ref_after, and upstream never had it"
+        echo "PASS: sync never touches work branch refs -- refs/heads/loam-reserved/$work_branch is still $wb_ref_after, and upstream never had it"
         echo ""
         echo "=== step 11/12: query the index with the real compiled loam CLI ==="
         echo ""
@@ -1175,7 +1197,7 @@ tasks:
         echo "One live sync tick (LOAM_SYNC_INTERVAL=2s, production mirrorsync.Scheduler) proved:"
         echo "  - the mirror follows upstream, always      $mirror_main_before -> $mirror_main_after (non-fast-forward)"
         echo "  - a branch deleted upstream is pruned      refs/heads/doomed removed"
-        echo "  - sync never touches work branch refs      refs/heads/$work_branch still $wb_ref_after"
+        echo "  - sync never touches work branch refs      refs/heads/loam-reserved/$work_branch still $wb_ref_after"
         echo "Advance detection enqueued an ingest job and the queue drained (ListIngestJobs: all SUCCEEDED)."
         echo "Every graph and search response named the ingested commit: $new_ref"
         echo "Graph resolved fixture-polyglot's cross-file symbols; search ranked pkg/auth/auth.go first."
@@ -1584,13 +1606,13 @@ tasks:
         fi
         echo "$push_out"
         echo "PASS: the author pushed to their own work branch through /git/* and the real pre-receive hook"
-        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch")"
+        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch")"
         clone_wb_sha="$(git -C "$author_clone" rev-parse HEAD)"
         if [ "$mirror_wb_sha" != "$clone_wb_sha" ]; then
           echo "FAIL: the mirror's $work_branch ($mirror_wb_sha) does not match the author's commit ($clone_wb_sha)" >&2
           exit 1
         fi
-        echo "mirror now carries refs/heads/$work_branch at $mirror_wb_sha (landed by the push, not by fixture plumbing)"
+        echo "mirror now carries refs/heads/loam-reserved/$work_branch at $mirror_wb_sha (landed by the push, not by fixture plumbing)"
         echo ""
         echo "--- loam work diff again, now that the ref exists: gitdiff itself is sound, loam-5iu is only the missing ref ---"
         author_cwd="$author_clone"
@@ -1683,7 +1705,7 @@ tasks:
           echo "FAIL: the author's follow-up push was REJECTED (loam-ppb regression)" >&2
           exit 1
         fi
-        echo "mirror's $work_branch advanced to $(git --git-dir="$mirror_dir" rev-parse "refs/heads/$work_branch") (landed by a real push)"
+        echo "mirror's $work_branch advanced to $(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$work_branch") (landed by a real push)"
         echo ""
         echo "--- loam work request-review again: this opens ROUND 2 ---"
         author_cli work request-review
@@ -2377,7 +2399,7 @@ tasks:
         echo "    upstream branch: $upstream_branch"
         assert_equal "the accept pushed the namespaced upstream branch" "$upstream_branch" "loam/$proposal_wb"
         upstream_wb_sha="$(git ls-remote "$auth_upstream_url" "refs/heads/loam/$proposal_wb" | cut -f1)"
-        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$proposal_wb")"
+        mirror_wb_sha="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$proposal_wb")"
         assert_equal "loam/$proposal_wb upstream is the work branch's own tip" "$upstream_wb_sha" "$mirror_wb_sha"
         assert_equal "the PR number was recorded on the work branch" \
           "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
@@ -2473,7 +2495,7 @@ tasks:
         assert_equal "the recorded PR number never changed" \
           "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
         upstream_wb_sha_2="$(git ls-remote "$auth_upstream_url" "refs/heads/loam/$proposal_wb" | cut -f1)"
-        mirror_wb_sha_2="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/$proposal_wb")"
+        mirror_wb_sha_2="$(git --git-dir="$mirror_dir" rev-parse "refs/heads/loam-reserved/$proposal_wb")"
         assert_equal "the second accept fast-forwarded loam/$proposal_wb to the caught-up tip" "$upstream_wb_sha_2" "$mirror_wb_sha_2"
         if [ "$upstream_wb_sha_2" = "$upstream_wb_sha" ]; then
           echo "FAIL: loam/$proposal_wb never moved, so the second accept pushed nothing" >&2

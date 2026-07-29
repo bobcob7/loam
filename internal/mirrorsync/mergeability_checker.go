@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -140,13 +141,12 @@ func advancedTips(advanced []Advance) map[string]string {
 }
 
 // workBranchRef builds the mirror ref path for a registered work branch's
-// bare name (docs/git-spec.md -> Ref Policy: "Work-branch refs --
-// refs/heads/<name> where <name> is a registered work branch"), the same
-// convention buildFetchRefspecs excludes from every mirror fetch. A full
-// ref path is passed to git rather than the bare name so a same-named tag
-// or remote-tracking ref in the mirror can never be resolved instead.
+// bare name (docs/git-spec.md -> Ref Policy), the same convention
+// buildFetchRefspecs excludes from every mirror fetch. A full ref path is
+// passed to git rather than the bare name so a same-named tag or remote-
+// tracking ref in the mirror can never be resolved instead.
 func workBranchRef(name string) string {
-	return "refs/heads/" + name
+	return refnames.WorkBranch(name)
 }
 
 // listOpenWorkBranches pages through every work_branches row for repoID

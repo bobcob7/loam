@@ -118,7 +118,7 @@ func TestServer_AllowedPush_RoundTrip(t *testing.T) {
 		Repo:  "acme/widgets",
 		Agent: AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{
-			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"},
+			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/loam-reserved/wb-good"},
 		},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
@@ -141,7 +141,7 @@ func TestServer_RejectedPush_ReasonSurfacesOverTheWire(t *testing.T) {
 		Repo:  "acme/widgets",
 		Agent: AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{
-			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-owned"},
+			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/loam-reserved/wb-owned"},
 		},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
@@ -166,7 +166,7 @@ func TestServer_MixedPush_WholeResponseRejectedOverTheWire(t *testing.T) {
 		Repo:  "acme/widgets",
 		Agent: AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{
-			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"},
+			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/loam-reserved/wb-good"},
 			{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/main"},
 		},
 	}
@@ -197,7 +197,7 @@ func TestServer_StoreError_FailsClosedOverTheWire(t *testing.T) {
 		// guard (loam-ppb) and the test would "pass" its recovery claim
 		// while asserting the opposite of what it means to assert.
 		Agent:   AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
-		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"}},
+		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/loam-reserved/wb-good"}},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
 	require.NoError(t, err, "the SOCKET round trip itself succeeds; it is the push that must be reported unaccepted")
@@ -231,7 +231,7 @@ func TestServer_MalformedRequestDoesNotCrashOrWedgeTheServer(t *testing.T) {
 		// AgentIdentity is now rejected on the identity guard (loam-ppb),
 		// which would leave this test asserting the opposite of its point.
 		Agent:   AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
-		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/wb-good"}},
+		Updates: []RefUpdateWire{{OldSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NewSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Ref: "refs/heads/loam-reserved/wb-good"}},
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
 	require.NoError(t, err)
@@ -347,7 +347,7 @@ func TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow(t *testing.T)
 	req := Request{
 		Repo:          "acme/widgets",
 		Agent:         AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
-		Updates:       []RefUpdateWire{{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-good"}},
+		Updates:       []RefUpdateWire{{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/loam-reserved/wb-good"}},
 		QuarantineDir: "/data/mirrors/acme/widgets.git/objects/tmp_objdir-incoming-Ab12Cd",
 	}
 	resp, err := Call(socketPath, req, DialTimeout, RPCTimeout)
@@ -362,7 +362,7 @@ func TestServer_AcceptedPush_PostAcceptCarriesRepoQuarantineAndRow(t *testing.T)
 	assert.Equal(t, "acme/widgets", got.Repo)
 	assert.Equal(t, req.QuarantineDir, got.QuarantineDir, "the quarantine directory must survive the wire; without it the server cannot read the pushed objects at all")
 	assert.Equal(t, wb, got.WorkBranch, "the pre-push row EvaluatePush already fetched must be handed through, not re-queried")
-	assert.Equal(t, "refs/heads/wb-good", got.Update.Ref)
+	assert.Equal(t, "refs/heads/loam-reserved/wb-good", got.Update.Ref)
 	assert.Equal(t, req.Updates[0].NewSHA, got.Update.NewSHA)
 }
 
@@ -380,8 +380,8 @@ func TestServer_RejectedPush_PostAcceptNeverFires(t *testing.T) {
 		Repo:  "acme/widgets",
 		Agent: AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
 		Updates: []RefUpdateWire{
-			{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-good"},
-			{OldSHA: "0000000000000000000000000000000000000000", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/wb-unregistered"},
+			{OldSHA: "1111111111111111111111111111111111111111", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/loam-reserved/wb-good"},
+			{OldSHA: "0000000000000000000000000000000000000000", NewSHA: "2222222222222222222222222222222222222222", Ref: "refs/heads/loam-reserved/wb-unregistered"},
 		},
 	}, DialTimeout, RPCTimeout)
 	require.NoError(t, err)

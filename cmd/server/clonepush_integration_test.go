@@ -41,6 +41,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // loamBinaryOnce/loamBinaryPath/loamBinaryErr let every test in this file
@@ -206,6 +207,14 @@ func seedEnrolledRepoWithMirror(t *testing.T, dsn, dataDir, repoName, branch str
 		id, repoName, "https://example.invalid/"+repoName, "example.invalid", branch,
 	)
 	require.NoError(t, err)
+	// A real enrollment always registers its target branches, and `loam
+	// clone` now READS them (GetRepoResponse.target_branches) to decide
+	// whether the branch it was asked for is a mirrored target ref or a
+	// work branch under refs/heads/loam-reserved/ -- so a fixture that
+	// skipped this row would send an ordinary target branch down the
+	// work-branch path and fail to clone at all.
+	_, err = conn.Exec(ctx, `INSERT INTO repo_target_branches (repo_id, branch) VALUES ($1, $2)`, id, branch)
+	require.NoError(t, err)
 	mirrorDir := mirrorpath.Dir(dataDir, repoName)
 	seedThrowawayBareMirror(t, mirrorDir, branch)
 }
@@ -295,9 +304,14 @@ func assertSingleBranchClone(t *testing.T, clonePath, branch string) {
 	t.Helper()
 	localBranches := runGitCmd(t, clonePath, "for-each-ref", "--format=%(refname:short)", "refs/heads")
 	assert.Equal(t, branch, localBranches, "a single-branch clone must have exactly one local branch: the requested one")
-	fetchRefspec := runGitCmd(t, clonePath, "config", "--get", "remote.origin.fetch")
-	assert.Equal(t, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch), fetchRefspec,
+	fetchRefspecs := strings.Split(runGitCmd(t, clonePath, "config", "--get-all", "remote.origin.fetch"), "\n")
+	require.Len(t, fetchRefspecs, 2, "the clone's own refspec plus the work-branch one `loam clone` appends")
+	assert.Equal(t, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch), fetchRefspecs[0],
 		"single-branch clones narrow remote.origin.fetch to the one requested branch")
+	assert.Equal(t, refnames.ClientFetchRefspec, fetchRefspecs[1],
+		"`loam clone` APPENDS the work-branch refspec -- replacing would strip the single-branch one above")
+	assert.Equal(t, refnames.ClientPushRefspec, runGitCmd(t, clonePath, "config", "--get", "remote.origin.push"),
+		"without this, plain `git push origin <work-branch>` aims at an unregistered ref (docs/git-spec.md -> The CLI's Role)")
 }
 
 // assertIdentityHeadersConfigured proves the clone's own git config carries

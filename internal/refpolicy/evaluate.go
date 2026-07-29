@@ -4,17 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/refnames"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
-
-// refsHeadsPrefix is the only ref namespace a work branch (or a mirrored
-// target branch, for that matter -- both live under refs/heads/ in this
-// system) can ever occupy (docs/git-spec.md "Ref Policy (push)": "Work-
-// branch refs -- refs/heads/<name>").
-const refsHeadsPrefix = "refs/heads/"
 
 // zeroChar is the character git's own ref-update wire format uses to fill
 // an old-sha or new-sha value that names "no object" -- an all-zero SHA
@@ -134,14 +128,14 @@ func EvaluatePush(ctx context.Context, store WorkBranchPolicyStore, repoName str
 // string, so the whole push fails closed rather than one ref quietly
 // reporting a misleading rejection reason.
 func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName string, agent httpauth.Identity, update RefUpdate) (RefVerdict, workbranchstore.WorkBranch, error) {
-	if !strings.HasPrefix(update.Ref, refsHeadsPrefix) {
-		return readOnlyVerdict(update.Ref), workbranchstore.WorkBranch{}, nil
+	branchName, isWorkBranchRef := refnames.WorkBranchName(update.Ref)
+	if !isWorkBranchRef {
+		return outsideReservedNamespaceVerdict(ctx, store, repoName, update)
 	}
-	branchName := strings.TrimPrefix(update.Ref, refsHeadsPrefix)
 	wb, err := store.GetWorkBranch(ctx, repoName, branchName)
 	if err != nil {
 		if errors.Is(err, workbranchstore.ErrNotFound) {
-			return unknownOrReadOnlyVerdict(update), workbranchstore.WorkBranch{}, nil
+			return unknownRefVerdict(update.Ref), workbranchstore.WorkBranch{}, nil
 		}
 		return RefVerdict{}, workbranchstore.WorkBranch{}, fmt.Errorf("looking up work branch %s: %w", branchName, err)
 	}
@@ -186,11 +180,72 @@ func evaluateOne(ctx context.Context, store WorkBranchPolicyStore, repoName stri
 	return RefVerdict{Ref: update.Ref, Allowed: true}, wb, nil
 }
 
+// outsideReservedNamespaceVerdict decides every ref that is NOT under
+// refnames.ReservedNamespace, which since loam-cmq is every ref a push can
+// name except a work branch's own: a mirrored target branch, some other
+// refs/heads/ name, or a ref outside refs/heads/ entirely.
+//
+// The one case worth spending a store lookup on is a push aimed at
+// refs/heads/<name> where <name> IS a registered work branch of this repo.
+// That is not a hypothetical: agents push with plain git, and `git push
+// origin HEAD` resolves its destination by name and lands on
+// refs/heads/wb-9c2f1a regardless of remote.origin.push (verified against
+// real git 2.50.1), as does any push from a clone that `loam clone` never
+// bootstrapped. Answering that with the generic "is not a work branch;
+// create one with 'work start'" would tell an agent who DID run work start
+// to run it again -- so it gets its own reason naming the ref that would
+// have worked. Every other ref keeps the reasons docs/git-spec.md's table
+// already pins.
+func outsideReservedNamespaceVerdict(ctx context.Context, store WorkBranchPolicyStore, repoName string, update RefUpdate) (RefVerdict, workbranchstore.WorkBranch, error) {
+	branchName, isBranch := refnames.BranchName(update.Ref)
+	if !isBranch {
+		return readOnlyVerdict(update.Ref), workbranchstore.WorkBranch{}, nil
+	}
+	wb, err := store.GetWorkBranch(ctx, repoName, branchName)
+	if err != nil {
+		if errors.Is(err, workbranchstore.ErrNotFound) {
+			return unknownOrReadOnlyVerdict(update), workbranchstore.WorkBranch{}, nil
+		}
+		return RefVerdict{}, workbranchstore.WorkBranch{}, fmt.Errorf("looking up work branch %s: %w", branchName, err)
+	}
+	// The WorkBranch row is deliberately NOT returned to the caller here:
+	// this verdict is a rejection, and EvaluatePush only ever hands
+	// onAccept rows for updates it allowed.
+	return misplacedWorkBranchVerdict(update.Ref, wb.Name), workbranchstore.WorkBranch{}, nil
+}
+
 // readOnlyVerdict is rule 1's rejection for any ref outside refs/heads/
 // entirely (docs/git-spec.md "Ref Policy (push)": "any update outside
 // refs/heads/ ... rejected"; "Mirrored refs ... read-only to agents").
 func readOnlyVerdict(ref string) RefVerdict {
 	return RefVerdict{Ref: ref, Allowed: false, Reason: fmt.Sprintf("loam: %s is read-only (target branch)", ref)}
+}
+
+// unknownRefVerdict is rule 1's rejection for a ref inside
+// refnames.ReservedNamespace that names no registered work branch. Unlike
+// unknownOrReadOnlyVerdict below it needs no create/update discrimination:
+// the reserved namespace is server-owned and is never mirrored from
+// upstream (refnames.ReservedExclusionRefspec removes the whole subtree
+// from every fetch), so a ref there is either a registered work branch --
+// handled by the caller, before this is reached -- or something that
+// should not exist, whichever way its old-sha reads.
+func unknownRefVerdict(ref string) RefVerdict {
+	return RefVerdict{Ref: ref, Allowed: false, Reason: fmt.Sprintf("loam: %s is not a work branch; create one with 'work start'", ref)}
+}
+
+// misplacedWorkBranchVerdict rejects a push that names a real, registered
+// work branch at the WRONG ref path -- refs/heads/<name> rather than
+// refnames.WorkBranch(<name>). The reason names the ref that would have
+// worked and the one command that reconfigures a clone to produce it,
+// because the cause is always a clone whose remote.origin.push
+// refnames.ClientPushRefspec never reached (a hand-rolled clone) or a push
+// that bypassed it (`git push origin HEAD`).
+func misplacedWorkBranchVerdict(ref, name string) RefVerdict {
+	return RefVerdict{
+		Ref:     ref,
+		Allowed: false,
+		Reason:  fmt.Sprintf("loam: %s must be pushed to %s; re-run 'loam clone' to configure the push refspec, then push by branch name", name, refnames.WorkBranch(name)),
+	}
 }
 
 // unknownOrReadOnlyVerdict picks between rule 1's two reasons for a
@@ -199,12 +254,12 @@ func readOnlyVerdict(ref string) RefVerdict {
 // brand-new ref creation ("unknown ref": docs/git-spec.md's example is
 // literally "create one with 'work start'") apart from a push updating a
 // ref that already exists in the mirror, which given the only refs a bare
-// mirror ever holds are registered work branches (handled above, before
-// this is reached) and upstream/target refs, must be the latter
-// ("read-only ref": "<ref> is read-only (target branch)").
+// mirror holds outside the reserved namespace are upstream/target refs,
+// must be the latter ("read-only ref": "<ref> is read-only (target
+// branch)").
 func unknownOrReadOnlyVerdict(update RefUpdate) RefVerdict {
 	if isZeroSHA(update.OldSHA) {
-		return RefVerdict{Ref: update.Ref, Allowed: false, Reason: fmt.Sprintf("loam: %s is not a work branch; create one with 'work start'", update.Ref)}
+		return unknownRefVerdict(update.Ref)
 	}
 	return readOnlyVerdict(update.Ref)
 }

@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // cloneOutput is the JSON success shape for `loam clone` (see
@@ -33,8 +34,10 @@ type cloneOutput struct {
 // /git/* request missing them, and headers written into dest's config only
 // AFTER Clone returns would be too late for that very first request; (3)
 // bootstraps the rest of the clone for plain git: user.name / user.email
-// set to the agent identity, so commits are attributed; (4) emits {repo,
-// path, branch} through the injected encoder.
+// set to the agent identity, so commits are attributed, AND the two
+// refspecs that map a work branch's bare name to its reserved ref path in
+// the mirror (see bootstrapWorkBranchRefspecs); (4) emits {repo, path,
+// branch} through the injected encoder.
 func runCloneCommand(ctx context.Context, deps *Deps, repo, branch string) error {
 	if repo == "" || branch == "" {
 		return newUsageCLIError("clone requires a non-empty repo and branch argument", nil)
@@ -43,18 +46,50 @@ func runCloneCommand(ctx context.Context, deps *Deps, repo, branch string) error
 	if !ok {
 		return newUsageCLIError(fmt.Sprintf("repo %q must be shaped like <group>/<repo_name>", repo), nil)
 	}
-	if _, err := deps.connect.Repo().GetRepo(ctx, connect.NewRequest(&loamv1.GetRepoRequest{Repo: repo})); err != nil {
+	repoResp, err := deps.connect.Repo().GetRepo(ctx, connect.NewRequest(&loamv1.GetRepoRequest{Repo: repo}))
+	if err != nil {
 		return fmt.Errorf("resolving enrolled repo %s: %w", repo, err)
 	}
 	dest := "./" + name
 	remoteURL := cloneURL(deps.config.ServerURL(), group, name)
-	if err := deps.cloner.Clone(ctx, remoteURL, branch, dest, identityHeaders(deps.config)); err != nil {
+	cloneBranch := cloneBranchFor(branch, repoResp.Msg.GetTargetBranches())
+	if err := deps.cloner.Clone(ctx, remoteURL, cloneBranch, dest, identityHeaders(deps.config)); err != nil {
 		return newPreconditionFailedError(fmt.Sprintf("cloning %s at branch %q: %s", repo, branch, err), err)
+	}
+	if cloneBranch != branch {
+		if err := deps.cloner.RenameBranch(ctx, dest, cloneBranch, branch); err != nil {
+			return fmt.Errorf("renaming the cloned branch %s to %s in %s: %w", cloneBranch, branch, dest, err)
+		}
 	}
 	if err := bootstrapCloneIdentity(ctx, deps.cloner, dest, deps.config); err != nil {
 		return fmt.Errorf("bootstrapping clone identity in %s: %w", dest, err)
 	}
+	if err := bootstrapWorkBranchRefspecs(ctx, deps.cloner, dest); err != nil {
+		return fmt.Errorf("bootstrapping work-branch refspecs in %s: %w", dest, err)
+	}
 	return deps.encoder.Encode(cloneOutput{Repo: repo, Path: dest, Branch: branch})
+}
+
+// cloneBranchFor decides how `git clone --branch` must spell branch. A
+// TARGET branch is a mirrored ref and is spelled exactly as given; anything
+// else is a work branch, whose ref lives under refnames.ReservedNamespace
+// and which --branch can only reach by its "loam-reserved/<name>" short
+// form (see refnames.CloneBranch).
+//
+// targetBranches is GetRepoResponse.target_branches, which
+// runCloneCommand's own enrollment check has ALREADY fetched -- so this
+// classification costs no extra request and consults the registry that
+// actually owns the answer, rather than pattern-matching the name or
+// probing the remote. A branch that is neither a target nor an existing
+// work branch fails in git, with git's own "Remote branch ... not found"
+// reason, which docs/cli-spec.md maps to exit 2.
+func cloneBranchFor(branch string, targetBranches []string) string {
+	for _, target := range targetBranches {
+		if target == branch {
+			return branch
+		}
+	}
+	return refnames.CloneBranch(branch)
 }
 
 // identityHeaders builds the three "<Header>: <value>" strings (see
@@ -108,6 +143,40 @@ func bootstrapCloneIdentity(ctx context.Context, cloner gitCloner, dest string, 
 	return nil
 }
 
+// bootstrapWorkBranchRefspecs writes the two refspecs that make PLAIN git
+// reach a work branch, whose ref in the mirror lives under Loam's reserved,
+// server-owned namespace (refs/heads/loam-reserved/<name>) rather than at
+// refs/heads/<name> -- see internal/refnames for why the namespace exists
+// at all.
+//
+// This is the one place `loam clone` stops being purely a convenience.
+// docs/git-spec.md -> "The CLI's Role" describes clone as bootstrapping
+// "URL, identity, config" and then getting out of the way, and that is
+// still what this is -- but without these two lines `git push origin
+// wb-9c2f1a` from the clone targets refs/heads/wb-9c2f1a, an unregistered
+// ref internal/refpolicy rejects. A HAND-ROLLED CLONE THEREFORE CANNOT
+// PUSH, which is a genuine behavioural change and is stated as such in
+// docs/git-spec.md.
+//
+//   - remote.origin.push (SetConfig, single-valued): git-push(1) documents
+//     that a command-line refspec with no ":<dst>" resolves its
+//     destination through this key, so `git push origin wb-9c2f1a` lands
+//     on the reserved path. Verified against real git 2.50.1 by
+//     TestExecGitCloner_RefspecsMakePlainPushReachTheReservedNamespace.
+//   - remote.origin.fetch (AddConfig, multi-valued -- see AddConfig's own
+//     doc comment): brings work branches down as refs/remotes/origin/<name>
+//     under their bare names, which is what a reviewer's clone needs to
+//     check one out at all.
+func bootstrapWorkBranchRefspecs(ctx context.Context, cloner gitCloner, dest string) error {
+	if err := cloner.SetConfig(ctx, dest, "remote.origin.push", refnames.ClientPushRefspec); err != nil {
+		return fmt.Errorf("setting remote.origin.push: %w", err)
+	}
+	if err := cloner.AddConfig(ctx, dest, "remote.origin.fetch", refnames.ClientFetchRefspec); err != nil {
+		return fmt.Errorf("adding remote.origin.fetch: %w", err)
+	}
+	return nil
+}
+
 // execGitCloner is the real gitCloner, backed by the git binary on PATH.
 type execGitCloner struct{}
 
@@ -137,6 +206,16 @@ func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, header
 // SetConfig implements gitCloner via `git -C dest config key value`.
 func (execGitCloner) SetConfig(ctx context.Context, dest, key, value string) error {
 	return runGitCommand(ctx, dest, "config", key, value)
+}
+
+// AddConfig implements gitCloner via `git -C dest config --add key value`.
+func (execGitCloner) AddConfig(ctx context.Context, dest, key, value string) error {
+	return runGitCommand(ctx, dest, "config", "--add", key, value)
+}
+
+// RenameBranch implements gitCloner via `git -C dest branch -m from to`.
+func (execGitCloner) RenameBranch(ctx context.Context, dest, from, to string) error {
+	return runGitCommand(ctx, dest, "branch", "-m", from, to)
 }
 
 // runGitCommand runs `git -C dir <args...>` (or `git <args...>` when dir is

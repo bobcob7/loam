@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // insertRepoRow inserts world's repo row plus its one registered target
@@ -113,6 +114,20 @@ func seedBareMirrorWithBranches(ctx context.Context, dataDir, repo, targetBranch
 		return "", fmt.Errorf("creating mirror parent dir for %s: %w", repo, err)
 	}
 	if err := seedRunGit(ctx, "", "clone", "--quiet", "--bare", src, mirrorDir); err != nil {
+		return "", err
+	}
+	// The bare clone lands the work branch at refs/heads/<name>, which is
+	// where an ordinary git branch lives -- but a Loam mirror keeps
+	// work-branch refs under refnames.ReservedNamespace, which is what
+	// `work start` writes and what refpolicy, gitdiff, the mergeability
+	// check, and the proposal push all address. Relocating it here (and
+	// DELETING the unreserved one, so nothing can accidentally resolve the
+	// old path) is what makes this fixture a Loam mirror rather than a
+	// plain clone.
+	if err := seedRunGit(ctx, "", "--git-dir="+mirrorDir, "update-ref", refnames.WorkBranch(workBranch), refnames.TargetBranch(workBranch)); err != nil {
+		return "", err
+	}
+	if err := seedRunGit(ctx, "", "--git-dir="+mirrorDir, "update-ref", "-d", refnames.TargetBranch(workBranch)); err != nil {
 		return "", err
 	}
 	return mirrorDir, nil

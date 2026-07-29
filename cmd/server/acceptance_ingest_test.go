@@ -14,6 +14,7 @@ import (
 	"github.com/bobcob7/loam/internal/fakeforge"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorsync"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // registerIngestAndQuerySteps wires the steps ingestion.feature and
@@ -329,7 +330,7 @@ func (h *acceptanceHarness) stepIAmWorkingInsideACloneOf(ctx context.Context, re
 	if err != nil {
 		return err
 	}
-	if out, err := runPlainGit("", "--git-dir="+world.mirrorDir, "update-ref", "refs/heads/"+world.workBranch, tip); err != nil {
+	if out, err := runPlainGit("", "--git-dir="+world.mirrorDir, "update-ref", refnames.WorkBranch(world.workBranch), tip); err != nil {
 		return fmt.Errorf("creating %s in the mirror: %w\n%s", world.workBranch, err, out)
 	}
 	if err := h.reconcileSeededMirror(ctx, world.mirrorDir); err != nil {

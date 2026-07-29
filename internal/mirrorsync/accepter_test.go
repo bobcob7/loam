@@ -199,7 +199,7 @@ func TestAcceptProposal_PushesTheNamespacedBranchAndOpensThePR(t *testing.T) {
 	result, err := h.accept(t.Context())
 	require.NoError(t, err)
 	require.Len(t, *h.pushes, 1)
-	assert.Equal(t, "refs/heads/wb-9c2f1a:refs/heads/loam/wb-9c2f1a", (*h.pushes)[0].refspec)
+	assert.Equal(t, "refs/heads/loam-reserved/wb-9c2f1a:refs/heads/loam/wb-9c2f1a", (*h.pushes)[0].refspec)
 	assert.Equal(t, acceptForgeHost, (*h.pushes)[0].host)
 	assert.Equal(t, acceptUpstreamURL, (*h.pushes)[0].upstreamURL)
 	assert.Equal(t, "/srv/loam/mirrors/acme/widgets.git", (*h.pushes)[0].mirrorDir)
@@ -262,7 +262,7 @@ func TestAcceptProposal_PushIsNeverForced(t *testing.T) {
 	require.Len(t, *h.pushes, 1)
 	refspec := (*h.pushes)[0].refspec
 	assert.NotContains(t, refspec, "+", "a '+' in the refspec is a forced update")
-	assert.Equal(t, "refs/heads/wb-9c2f1a:refs/heads/loam/wb-9c2f1a", refspec)
+	assert.Equal(t, "refs/heads/loam-reserved/wb-9c2f1a:refs/heads/loam/wb-9c2f1a", refspec)
 }
 
 // TestUpstreamProposalRefspec_NeverProducesAForceRefspec sweeps the
@@ -289,7 +289,7 @@ func TestUpstreamProposalRefspec_NeverProducesAForceRefspec(t *testing.T) {
 			}
 			assert.NotContains(t, refspec, "+")
 			assert.NotContains(t, refspec, " ")
-			assert.Equal(t, "refs/heads/"+name+":refs/heads/loam/"+name, refspec)
+			assert.Equal(t, "refs/heads/loam-reserved/"+name+":refs/heads/loam/"+name, refspec)
 			assert.Equal(t, "loam/"+name, upstreamBranch)
 		})
 	}

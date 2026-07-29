@@ -29,9 +29,9 @@ func TestFailClosed_PolicySocketDown_PushRejectedThroughRealHTTPHeaders(t *testi
 	env := newStack(t, nil, loamhookBinary, false) // false: the policy socket is never started at all
 	clonePath := cloneWithIdentity(t, env, "alice", "1", "author")
 	commitFile(t, clonePath, "failclosed.txt", "must never land")
-	out, err := pushRef(t, clonePath, "refs/heads/wb-anything")
+	out, err := pushRef(t, clonePath, "refs/heads/loam-reserved/wb-anything")
 	require.Error(t, err, "a push must be rejected when the policy socket is unreachable, never silently accepted: %s", out)
 	assert.Contains(t, out, "remote: loam:", "the hook's own fail-closed explanation must still reach the real git client")
 	assert.Contains(t, out, "connect", "the hook's fail-closed message must name the connection failure")
-	assert.Empty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/wb-anything"), "the ref must never have been created on the mirror")
+	assert.Empty(t, mirrorRefSHA(t, env.mirrorDir, "refs/heads/loam-reserved/wb-anything"), "the ref must never have been created on the mirror")
 }

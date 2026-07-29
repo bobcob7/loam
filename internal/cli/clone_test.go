@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // --- splitRepo / cloneURL: pure helpers, no collaborators needed ---
@@ -104,8 +105,10 @@ func TestRunCloneCommand_Success(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
-		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("bobcob7/doc-server"), cloner, &encoded)
@@ -116,7 +119,7 @@ func TestRunCloneCommand_Success(t *testing.T) {
 	require.Len(t, cloner.CloneCalls(), 1)
 	cloneCall := cloner.CloneCalls()[0]
 	assert.Equal(t, "https://loam.example/git/bobcob7/doc-server.git", cloneCall.URL)
-	assert.Equal(t, "wb-9c2f1a", cloneCall.Branch)
+	assert.Equal(t, "loam-reserved/wb-9c2f1a", cloneCall.Branch, "a work branch is not among the repo's target branches, so it is cloned at its reserved ref path")
 	assert.Equal(t, "./doc-server", cloneCall.Dest)
 	assert.Equal(t, []string{
 		"Loam-Agent-Name: grace-hopper",
@@ -124,15 +127,56 @@ func TestRunCloneCommand_Success(t *testing.T) {
 		"Loam-Agent-Role: author",
 	}, cloneCall.Headers, "Clone itself must carry all three identity headers -- writing them into the clone's config only after Clone returns would be too late for its own initial fetch")
 
-	require.Len(t, cloner.SetConfigCalls(), 2, "user.name and user.email")
+	require.Len(t, cloner.SetConfigCalls(), 3, "user.name, user.email, and remote.origin.push")
 	assert.Equal(t, "user.name", cloner.SetConfigCalls()[0].Key)
 	assert.Equal(t, "grace-hopper", cloner.SetConfigCalls()[0].Value)
 	assert.Equal(t, "user.email", cloner.SetConfigCalls()[1].Key)
 	assert.Equal(t, "grace-hopper-3-author@loam", cloner.SetConfigCalls()[1].Value)
+	// remote.origin.push is a SetConfig (single-valued, overwrite) while
+	// remote.origin.fetch is an AddConfig (multi-valued, append): the
+	// clone's own --single-branch refspec already occupies the latter, and
+	// overwriting it would leave the clone unable to fetch the branch it
+	// was cloned at.
+	assert.Equal(t, "remote.origin.push", cloner.SetConfigCalls()[2].Key)
+	assert.Equal(t, "refs/heads/wb-*:refs/heads/loam-reserved/wb-*", cloner.SetConfigCalls()[2].Value)
+	require.Len(t, cloner.AddConfigCalls(), 1, "remote.origin.fetch, appended never replaced")
+	assert.Equal(t, "remote.origin.fetch", cloner.AddConfigCalls()[0].Key)
+	assert.Equal(t, "+refs/heads/loam-reserved/*:refs/remotes/origin/*", cloner.AddConfigCalls()[0].Value)
+
+	require.Len(t, cloner.RenameBranchCalls(), 1, "the cloned branch must be renamed back to its bare name")
+	assert.Equal(t, "loam-reserved/wb-9c2f1a", cloner.RenameBranchCalls()[0].From)
+	assert.Equal(t, "wb-9c2f1a", cloner.RenameBranchCalls()[0].To)
 
 	out, ok := encoded.(cloneOutput)
 	require.True(t, ok, "clone must encode a cloneOutput")
 	assert.Equal(t, cloneOutput{Repo: "bobcob7/doc-server", Path: "./doc-server", Branch: "wb-9c2f1a"}, out)
+}
+
+// TestRunCloneCommand_TargetBranch_ClonedAtItsOwnRefAndNeverRenamed is the
+// other half of cloneBranchFor: a branch the repo reports as a TARGET is a
+// mirrored ref, so it is cloned exactly as named and no rename happens.
+// Without this, a change that sent every branch through the reserved path
+// would still pass the work-branch test above.
+func TestRunCloneCommand_TargetBranch_ClonedAtItsOwnRefAndNeverRenamed(t *testing.T) {
+	t.Parallel()
+	cfg := cloneTestConfig("https://loam.example")
+	cloner := &gitClonerMock{
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
+	}
+	getRepo := func(_ context.Context, req *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
+		return connect.NewResponse(&loamv1.GetRepoResponse{Repo: req.Msg.Repo, TargetBranches: []string{"main", "release"}}), nil
+	}
+	var encoded any
+	deps := cloneTestDeps(cfg, getRepo, cloner, &encoded)
+
+	require.NoError(t, runCloneCommand(t.Context(), deps, "bobcob7/doc-server", "main"))
+
+	require.Len(t, cloner.CloneCalls(), 1)
+	assert.Equal(t, "main", cloner.CloneCalls()[0].Branch)
+	assert.Empty(t, cloner.RenameBranchCalls(), "a target branch is already at the ref it was cloned from")
 }
 
 // TestRunCloneCommand_RepoNotEnrolled_ExitsThree proves the bead's "exit 3
@@ -148,8 +192,10 @@ func TestRunCloneCommand_RepoNotEnrolled_ExitsThree(t *testing.T) {
 		// ever lets Clone run despite an unenrolled repo, this test must
 		// still fail on the cloneCalled assertion below, not on an
 		// unrelated nil-func panic one call deeper into bootstrap.
-		CloneFunc:     func(context.Context, string, string, string, []string) error { cloneCalled = true; return nil },
-		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
+		CloneFunc:        func(context.Context, string, string, string, []string) error { cloneCalled = true; return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	notFound := func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("repo bobcob7/doc-server is not enrolled"))
@@ -175,7 +221,9 @@ func TestRunCloneCommand_BranchMissing_ExitsTwo(t *testing.T) {
 		CloneFunc: func(context.Context, string, string, string, []string) error {
 			return errors.New("exit status 128: fatal: Remote branch wb-missing not found in upstream origin")
 		},
-		SetConfigFunc: func(context.Context, string, string, string) error { bootstrapped = true; return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { bootstrapped = true; return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { bootstrapped = true; return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("bobcob7/doc-server"), cloner, &encoded)
@@ -204,8 +252,10 @@ func TestRunCloneCommand_MalformedRepo_ExitsTwo(t *testing.T) {
 		return connect.NewResponse(&loamv1.GetRepoResponse{}), nil
 	}
 	cloner := &gitClonerMock{
-		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
-		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, getRepo, cloner, &encoded)
@@ -224,7 +274,9 @@ func TestRunCloneCommand_BootstrapFailure_PropagatesAsError(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc: func(context.Context, string, string, string, []string) error { return nil },
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 		SetConfigFunc: func(context.Context, string, string, string) error {
 			return errors.New("git config failed: permission denied")
 		},
@@ -247,8 +299,10 @@ func TestRouterDispatch_Clone_ReachesRealHandler(t *testing.T) {
 	t.Parallel()
 	cfg := cloneTestConfig("https://loam.example")
 	cloner := &gitClonerMock{
-		CloneFunc:     func(context.Context, string, string, string, []string) error { return nil },
-		SetConfigFunc: func(context.Context, string, string, string) error { return nil },
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
 	}
 	var encoded any
 	deps := cloneTestDeps(cfg, okGetRepo("acme/repo"), cloner, &encoded)
@@ -421,4 +475,27 @@ func TestExecGitCloner_Clone_MissingBranch_ReturnsGitsOwnReason(t *testing.T) {
 	err := cloner.Clone(t.Context(), upstream, "does-not-exist", dest, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does-not-exist")
+}
+
+// TestExecGitCloner_AddConfig_AppendsRatherThanReplacing proves AddConfig's
+// reason for existing as a method separate from SetConfig, against real
+// git: remote.origin.fetch is multi-valued and `git clone --single-branch`
+// has already written the cloned branch's own refspec into it, so the
+// work-branch refspec must be APPENDED. A SetConfig here would silently
+// leave the clone unable to fetch the very branch it was cloned at.
+func TestExecGitCloner_AddConfig_AppendsRatherThanReplacing(t *testing.T) {
+	t.Parallel()
+	upstream := newBareRepoWithTwoBranches(t)
+	dest := filepath.Join(t.TempDir(), "doc-server")
+	cloner := execGitCloner{}
+	require.NoError(t, cloner.Clone(t.Context(), upstream, "main", dest, nil))
+	before := mustRunGit(t, dest, "config", "--get-all", "remote.origin.fetch")
+	require.Contains(t, before, "refs/heads/main", "precondition: --single-branch wrote the cloned branch's own refspec")
+
+	require.NoError(t, cloner.AddConfig(t.Context(), dest, "remote.origin.fetch", refnames.ClientFetchRefspec))
+
+	got := strings.Split(mustRunGit(t, dest, "config", "--get-all", "remote.origin.fetch"), "\n")
+	assert.Len(t, got, 2, "the clone's own refspec must survive alongside the added one")
+	assert.Contains(t, got[0], "refs/heads/main")
+	assert.Equal(t, refnames.ClientFetchRefspec, got[1])
 }

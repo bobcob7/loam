@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // allRefsRefspec is the wildcard positive refspec MirrorFetcher pairs with
@@ -92,23 +93,39 @@ func (f *MirrorFetcher) mirrorDir(repo RepoID) string {
 	return mirrorpath.Dir(f.dataDir, string(repo))
 }
 
-// buildFetchRefspecs returns the wildcard positive refspec plus one
-// negative exclusion, "^refs/heads/<name>", per name in workBranches
-// (docs/git-spec.md -> Ref Policy: "Work-branch refs -- refs/heads/<name>
-// where <name> is a registered work branch"). Excluding a ref this way
-// means the fetch never considers it for this invocation at all -- not
-// "fetch then restore" -- so it survives both an upstream force-push of a
-// same-named branch and an upstream deletion, since neither ever reaches
-// this ref. Tags and every other upstream ref are covered by the wildcard
-// unconditionally: docs/sync-spec.md's Mirror Sync step 1 says "fetch all
-// upstream refs", with no carve-out for tags or any refs/pull/*-style
-// namespace, and none appears anywhere else in docs/sync-spec.md or
-// docs/git-spec.md either.
+// buildFetchRefspecs returns the wildcard positive refspec, the structural
+// exclusion of Loam's whole reserved ref namespace, and then one negative
+// exclusion per name in workBranches (docs/git-spec.md -> Ref Policy).
+// Excluding a ref this way means the fetch never considers it for this
+// invocation at all -- not "fetch then restore" -- so it survives both an
+// upstream force-push of a same-named branch and an upstream deletion,
+// since neither ever reaches this ref. Tags and every other upstream ref
+// are covered by the wildcard unconditionally: docs/sync-spec.md's Mirror
+// Sync step 1 says "fetch all upstream refs", with no carve-out for tags
+// or any refs/pull/*-style namespace, and none appears anywhere else in
+// docs/sync-spec.md or docs/git-spec.md either.
+//
+// TWO MECHANISMS, DELIBERATELY. The enumerated per-branch exclusions are
+// the SEMANTIC rule -- they say, ref by ref, which refs Loam owns, and
+// they are what docs/sync-spec.md's DESIGN mandates. refnames.
+// ReservedExclusionRefspec is a STRUCTURAL backstop, not a replacement,
+// and it exists because the enumerated list cannot be complete: it is
+// resolved from work_branches immediately before this call, but the window
+// it must cover is THE ENTIRE DURATION OF THE FETCH, since argv is fixed
+// before the network operation begins (seconds to minutes on a large
+// repo). A work branch created inside that window is absent from the
+// enumerated list, and its brand-new ref -- purely local, never upstream
+// -- is therefore a PRUNE candidate, which needs no colliding upstream
+// name at all. Verified against real git 2.50.1, and unrecoverable if it
+// fires: work_branches carries no SHA column and a bare mirror has no
+// reflog, so the row survives pointing at a ref that no longer exists
+// (loam-cmq). No amount of re-listing closes that window; a namespace
+// glob does, for every work-branch ref that will ever exist.
 func buildFetchRefspecs(workBranches []string) []string {
-	refspecs := make([]string, 0, len(workBranches)+1)
-	refspecs = append(refspecs, allRefsRefspec)
+	refspecs := make([]string, 0, len(workBranches)+2)
+	refspecs = append(refspecs, allRefsRefspec, refnames.ReservedExclusionRefspec)
 	for _, name := range workBranches {
-		refspecs = append(refspecs, "^refs/heads/"+name)
+		refspecs = append(refspecs, "^"+refnames.WorkBranch(name))
 	}
 	return refspecs
 }

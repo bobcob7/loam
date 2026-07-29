@@ -63,7 +63,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			name:        "allowed: author pushing to their own non-terminal work branch",
 			ctx:         t.Context(),
 			store:       registeredBranch(repoName, "wb-owned", draftOwnedByAlice),
-			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantAllowed: true,
 		},
 		{
@@ -91,12 +91,46 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			wantReason:  "loam: refs/heads/foo is not a work branch; create one with 'work start'",
 		},
 		{
+			name:        "rejection 2: unknown ref -- creating an unregistered name INSIDE the reserved namespace",
+			ctx:         t.Context(),
+			store:       registeredBranch(repoName, "wb-owned", draftOwnedByAlice),
+			update:      RefUpdate{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/foo"},
+			wantAllowed: false,
+			wantReason:  "loam: refs/heads/loam-reserved/foo is not a work branch; create one with 'work start'",
+		},
+		{
+			// The reserved namespace is never mirrored from upstream
+			// (refnames.ReservedExclusionRefspec), so an UPDATE to an
+			// unregistered ref there is not "read-only, owned by upstream"
+			// the way refs/heads/<something> would be -- it is the same
+			// unknown ref, whichever way its old-sha reads.
+			name:        "rejection 2: unknown ref -- UPDATING an unregistered name inside the reserved namespace",
+			ctx:         t.Context(),
+			store:       registeredBranch(repoName, "wb-owned", draftOwnedByAlice),
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/foo"},
+			wantAllowed: false,
+			wantReason:  "loam: refs/heads/loam-reserved/foo is not a work branch; create one with 'work start'",
+		},
+		{
+			// The shape `git push origin HEAD`, and every push from a
+			// clone `loam clone` never bootstrapped, produces: a REAL
+			// work branch aimed at the unreserved ref path. Answering it
+			// with the generic "create one with 'work start'" would tell
+			// an agent who already ran work start to run it again.
+			name:        "rejection 1: a registered work branch pushed to the UNRESERVED ref path",
+			ctx:         t.Context(),
+			store:       registeredBranch(repoName, "wb-owned", draftOwnedByAlice),
+			update:      RefUpdate{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			wantAllowed: false,
+			wantReason:  "loam: wb-owned must be pushed to refs/heads/loam-reserved/wb-owned; re-run 'loam clone' to configure the push refspec, then push by branch name",
+		},
+		{
 			name: "rejection 3: not the author",
 			ctx:  t.Context(),
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
 				Name: "wb-owned", Author: "grace-hopper-3-author", State: workbranchstore.StateDraft,
 			}),
-			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantAllowed: false,
 			wantReason:  "loam: wb-owned belongs to grace-hopper-3-author",
 		},
@@ -106,7 +140,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
 				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateClosed,
 			}),
-			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantAllowed: false,
 			wantReason:  "loam: wb-owned is closed",
 		},
@@ -116,7 +150,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
 				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateComplete,
 			}),
-			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantAllowed: false,
 			wantReason:  "loam: wb-owned is complete",
 		},
@@ -126,7 +160,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 			store: registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
 				Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.StateReviewable,
 			}),
-			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:      RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantAllowed: true,
 		},
 		{
@@ -137,7 +171,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 					return workbranchstore.WorkBranch{}, errors.New("connection refused")
 				},
 			},
-			update:  RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:  RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantErr: true,
 		},
 		{
@@ -153,7 +187,7 @@ func TestEvaluatePush_TableDriven(t *testing.T) {
 					return workbranchstore.WorkBranch{}, ctx.Err()
 				},
 			},
-			update:  RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"},
+			update:  RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"},
 			wantErr: true,
 		},
 	}
@@ -198,7 +232,7 @@ func TestEvaluatePush_AtomicRejection(t *testing.T) {
 	// and disagreed with production (loam-ppb).
 	agent := httpauth.Identity{Name: "alice", ID: "1", Role: "author"}
 	store := registeredBranch(repoName, "wb-good", workbranchstore.WorkBranch{Name: "wb-good", Author: agent.Identifier(), State: workbranchstore.StateDraft})
-	goodUpdate := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}
+	goodUpdate := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-good"}
 	badUpdate := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/main"} // not a registered work branch
 
 	// Both orderings are exercised deliberately: an aggregation bug that
@@ -253,7 +287,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 		var calls []RefUpdate
 		onAccept := func(_ context.Context, _ workbranchstore.WorkBranch, update RefUpdate) { calls = append(calls, update) }
 		updates := []RefUpdate{
-			{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"},
+			{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-good"},
 			{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/main"},
 		}
 		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, onAccept)
@@ -270,7 +304,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 			calls = append(calls, update)
 			gotWB = append(gotWB, wb)
 		}
-		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}}
+		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-good"}}
 		_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, onAccept)
 		require.NoError(t, err)
 		require.True(t, allAllowed)
@@ -282,7 +316,7 @@ func TestEvaluatePush_PostAcceptOnlyFiresWhenTheWholePushIsAccepted(t *testing.T
 
 	t.Run("nil onAccept is a safe no-op on a fully accepted push", func(t *testing.T) {
 		t.Parallel()
-		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-good"}}
+		updates := []RefUpdate{{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-good"}}
 		assert.NotPanics(t, func() {
 			_, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, updates, nil)
 			require.NoError(t, err)
@@ -320,7 +354,7 @@ func TestEvaluatePush_EmptyAgentNameNeverMatchesAnEmptyAuthor(t *testing.T) {
 	t.Parallel()
 	const repoName = "acme/widgets"
 	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{Name: "wb-owned", Author: "", State: workbranchstore.StateDraft})
-	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"}
 	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, httpauth.Identity{}, []RefUpdate{update}, nil)
 	require.NoError(t, err)
 	require.Len(t, verdicts, 1)
@@ -352,7 +386,7 @@ func TestEvaluatePush_ZeroIdentityNeverMatchesItsOwnRendering(t *testing.T) {
 	zero := httpauth.Identity{}
 	require.Equal(t, "--", zero.Identifier(), "precondition: a zero identity renders as \"--\", which is what makes this row's author matchable")
 	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{Name: "wb-owned", Author: zero.Identifier(), State: workbranchstore.StateDraft})
-	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"}
 	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, zero, []RefUpdate{update}, nil)
 	require.NoError(t, err)
 	require.Len(t, verdicts, 1)
@@ -379,7 +413,7 @@ func TestEvaluatePush_UnrecognizedStateFailsClosed(t *testing.T) {
 	store := registeredBranch(repoName, "wb-owned", workbranchstore.WorkBranch{
 		Name: "wb-owned", Author: agent.Identifier(), State: workbranchstore.State("some-future-state"),
 	})
-	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/wb-owned"}
+	update := RefUpdate{OldSHA: strings.Repeat("a", 40), NewSHA: strings.Repeat("b", 40), Ref: "refs/heads/loam-reserved/wb-owned"}
 	verdicts, allAllowed, err := EvaluatePush(t.Context(), store, repoName, agent, []RefUpdate{update}, nil)
 	require.NoError(t, err)
 	require.Len(t, verdicts, 1)

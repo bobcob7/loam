@@ -58,3 +58,22 @@ func bareCloneInto(t *testing.T, src, mirrorDir string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(mirrorDir), 0o755))
 	runGit(t, "", "clone", "--quiet", "--bare", src, mirrorDir)
 }
+
+// seedWorkBranchRef relocates an already-cloned mirror's refs/heads/<name>
+// to refnames.WorkBranch(name) -- refs/heads/loam-reserved/<name> -- and
+// DELETES the original, standing in for what `work start` does server-side
+// (internal/handler/workbranch's CreateWorkBranch). The delete is the
+// point: leaving both refs in place would let a Computer that still
+// resolved bare refs/heads/<name> pass every test in this file, which is
+// exactly the regression the reserved namespace must not be able to hide.
+//
+// The fixtures create work branches with ordinary `git branch` / `git
+// checkout -b` in a working repo and bare-clone it, because that is the
+// least ceremony that produces real commits and a real merge base; this
+// helper is what makes the resulting mirror look like a Loam mirror rather
+// than a plain clone.
+func seedWorkBranchRef(t *testing.T, mirrorDir, name string) {
+	t.Helper()
+	runGit(t, "", "--git-dir="+mirrorDir, "update-ref", "refs/heads/loam-reserved/"+name, "refs/heads/"+name)
+	runGit(t, "", "--git-dir="+mirrorDir, "update-ref", "-d", "refs/heads/"+name)
+}
