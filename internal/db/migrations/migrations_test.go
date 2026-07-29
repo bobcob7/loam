@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,4 +155,28 @@ func TestDownUnreachableDSN(t *testing.T) {
 	err := Down(t.Context(), "postgres://localhost:1/nonexistent?sslmode=disable&connect_timeout=1", testLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connecting to migration database")
+}
+
+// TestEmbeddedVersionIsTheHighestEmbeddedMigration pins the number
+// SchemaCheck compares the database against. The expected value is
+// derived independently -- by walking the embed.FS and taking the highest
+// NNNN prefix -- rather than hardcoded, so adding 0003_*.sql moves both
+// sides together and this stays a real assertion instead of a constant
+// that has to be remembered.
+func TestEmbeddedVersionIsTheHighestEmbeddedMigration(t *testing.T) {
+	t.Parallel()
+	entries, err := fs.ReadDir(migrationFiles, migrationsDir)
+	require.NoError(t, err)
+	var want uint64
+	for _, e := range entries {
+		match := migrationFileName.FindStringSubmatch(e.Name())
+		require.NotNilf(t, match, "file %q does not follow the NNNN_name.up.sql/.down.sql convention", e.Name())
+		version, err := strconv.ParseUint(match[1], 10, 64)
+		require.NoError(t, err)
+		want = max(want, version)
+	}
+	require.NotZero(t, want, "expected at least one embedded migration")
+	got, err := embeddedVersion()
+	require.NoError(t, err)
+	assert.Equal(t, uint(want), got)
 }
