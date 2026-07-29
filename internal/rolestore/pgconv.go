@@ -11,3 +11,10 @@ import (
 func uuidFromPG(id pgtype.UUID) uuid.UUID {
 	return uuid.UUID(id.Bytes)
 }
+
+// pgUUID converts a generated uuid.UUID to the pgtype.UUID sqlc's params
+// structs take. Valid is always true: this package only ever passes ids it
+// generated itself (uuid.NewV7) or read back out of a row.
+func pgUUID(id uuid.UUID) pgtype.UUID {
+	return pgtype.UUID{Bytes: id, Valid: true}
+}

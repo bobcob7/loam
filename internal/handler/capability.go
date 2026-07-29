@@ -36,19 +36,47 @@ const (
 	CapabilitySearch            Capability = "search"
 )
 
+// allCapabilities is the fixed vocabulary as a list, in the declaration
+// order above. It is the SINGLE Go-side source of truth for "what the
+// vocabulary contains": Valid, AllCapabilities, internal/handler/meta's
+// admin command filter, and internal/handler/role's CreateRole/UpdateRole
+// validation all derive from this one slice rather than restating the ten
+// members. A second hand-written copy is exactly the failure mode this
+// repo has been bitten by before (a prose inventory that went stale three
+// times), and here it would be worse than stale prose: a copy that lost a
+// member would silently start rejecting a legitimate operation an admin
+// tried to grant.
+//
+// Unexported and never mutated; AllCapabilities hands out a clone so no
+// caller can reorder or truncate the vocabulary for everyone else.
+var allCapabilities = []Capability{
+	CapabilityWorkStart, CapabilityWorkSet, CapabilityWorkRequestReview, CapabilityWorkReply,
+	CapabilityWorkVerdict, CapabilityWorkRead, CapabilityGitClone, CapabilityGitPush,
+	CapabilityGraphQuery, CapabilitySearch,
+}
+
+// AllCapabilities returns the fixed capability vocabulary in full, in the
+// order the constants are declared above. Callers that must enumerate the
+// vocabulary — internal/handler/meta (every command an admin superuser may
+// run) and internal/handler/role (the set an admin may grant, and the list
+// quoted back when a request names something outside it) — use this rather
+// than rebuilding the list, so there is one place a future eleventh
+// operation is added.
+//
+// It returns a fresh slice per call: the vocabulary is fixed, and a caller
+// that sorted or appended to a shared backing array would change what
+// every other caller sees.
+func AllCapabilities() []Capability {
+	return slices.Clone(allCapabilities)
+}
+
 // Valid reports whether c is one of the ten capabilities in the fixed
 // vocabulary above. RequireCapability rejects anything else with
 // errUnknownCapability instead of silently folding it into a permission
-// denial.
+// denial; internal/handler/role rejects it with ErrInvalidArgument rather
+// than storing it.
 func (c Capability) Valid() bool {
-	switch c {
-	case CapabilityWorkStart, CapabilityWorkSet, CapabilityWorkRequestReview, CapabilityWorkReply,
-		CapabilityWorkVerdict, CapabilityWorkRead, CapabilityGitClone, CapabilityGitPush,
-		CapabilityGraphQuery, CapabilitySearch:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(allCapabilities, c)
 }
 
 // errUnknownCapability marks a capability argument outside the fixed
