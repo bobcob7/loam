@@ -34,7 +34,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: loam-e2e-postgres
+    container_name: loam-e2e-postgres${LOAM_E2E_SUFFIX:-}
     environment:
       POSTGRES_USER: loam
       POSTGRES_PASSWORD: loam
@@ -58,7 +58,7 @@ services:
     # (forgesuite/forgejo_integration_test.go's forgejoImage) -- an exact
     # tag this repo makes empirical claims about, never a floating one.
     image: codeberg.org/forgejo/forgejo:9.0.3
-    container_name: loam-e2e-forgejo
+    container_name: loam-e2e-forgejo${LOAM_E2E_SUFFIX:-}
     environment:
       # Same INSTALL_LOCK/sqlite3/OFFLINE_MODE/DISABLE_REGISTRATION shape
       # internal/forgesuite's newForgejoHarness already verified works

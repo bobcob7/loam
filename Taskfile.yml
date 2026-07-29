@@ -352,7 +352,21 @@ tasks:
         set -o pipefail
         repo_root="$(pwd)"
         compose_file="deploy/docker-compose.e2e.yml"
-        compose_project="loam-e2e"
+        # LOAM_E2E_SUFFIX namespaces an ENTIRE run -- compose project,
+        # container names (deploy/docker-compose.e2e.yml interpolates the same
+        # variable) and every host port -- so two runs can proceed at once
+        # from different worktrees or CI jobs. Unset it and everything below
+        # collapses to the original fixed names and ports, which is what the
+        # pre-flight self-heal further down depends on (go-task's shell does
+        # not run an EXIT trap on its own SIGINT interception, so a Ctrl-C'd
+        # run can leak a container or a port; healing that needs a
+        # PREDICTABLE name). Concurrency is therefore opt-in and the
+        # single-developer default is unchanged. Three parallel agents each
+        # running this target with no suffix is exactly the collision that
+        # motivated the variable.
+        compose_project="loam-e2e${LOAM_E2E_SUFFIX:-}"
+        pg_container="loam-e2e-postgres${LOAM_E2E_SUFFIX:-}"
+        forgejo_container="loam-e2e-forgejo${LOAM_E2E_SUFFIX:-}"
         compose() {
           if [ -n "${LOAM_COMPOSE_CMD:-}" ]; then
             $LOAM_COMPOSE_CMD -p "$compose_project" -f "$compose_file" "$@"
@@ -366,7 +380,7 @@ tasks:
         forgejo_port="${LOAM_E2E_FORGEJO_PORT:-13000}"
         export LOAM_E2E_PG_PORT="$pg_port"
         export LOAM_E2E_FORGEJO_PORT="$forgejo_port"
-        server_addr="127.0.0.1:8099"
+        server_addr="127.0.0.1:${LOAM_E2E_SERVER_PORT:-8099}"
         admin_user="admin"
         admin_password="e2e-Loam-Admin-Passw0rd1"
         # A fixed, non-secret AES-256 key -- the same value demo:m2 already
@@ -426,7 +440,7 @@ tasks:
         echo "=== step 1/7: bring up Postgres/pgvector + a real Forgejo (deploy/docker-compose.e2e.yml) ==="
         compose up -d
         pg_deadline=$(( $(date +%s) + 60 ))
-        until docker exec loam-e2e-postgres pg_isready -U loam >/dev/null 2>&1; do
+        until docker exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
           [ "$(date +%s)" -ge "$pg_deadline" ] && { echo "postgres never became ready within 60s" >&2; exit 1; }
           sleep 0.5
         done
@@ -439,10 +453,10 @@ tasks:
         # defaults to root regardless of the image's own service user --
         # confirmed directly while building this task. internal/forgesuite's
         # forgejoExec hits the identical requirement (tcexec.WithUser("git")).
-        docker exec -u git loam-e2e-forgejo forgejo admin user create \
+        docker exec -u git "$forgejo_container" forgejo admin user create \
           --admin --username "$forgejo_admin_user" --password "$forgejo_admin_password" \
           --email "$forgejo_admin_email" --must-change-password=false >/dev/null
-        forgejo_token="$(docker exec -u git loam-e2e-forgejo forgejo admin user generate-access-token \
+        forgejo_token="$(docker exec -u git "$forgejo_container" forgejo admin user generate-access-token \
           -u "$forgejo_admin_user" --token-name e2e --scopes all --raw)"
         curl -sS --fail-with-body -X POST \
           -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
