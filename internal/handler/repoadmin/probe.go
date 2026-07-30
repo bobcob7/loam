@@ -52,7 +52,7 @@ func (h *Handler) ProbeRepo(ctx context.Context, req *connect.Request[adminv1.Pr
 	// is the cheaper, earlier fail-fast the credential never needs to
 	// survive past.
 	if u.User != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: %w: %w", gittransport.ErrUpstreamURLHasUserinfo, handler.ErrInvalidArgument))
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: %w: %w", redactUserinfo(u), gittransport.ErrUpstreamURLHasUserinfo, handler.ErrInvalidArgument))
 	}
 	// host must be derived exactly like EnrollRepo's deriveRepoIdentity
 	// (forgeHostOf, handler.go): both resolve the same credentials.host

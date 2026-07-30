@@ -92,3 +92,37 @@ func TestProbeRepo_LsRemoteFails_FailedPrecondition(t *testing.T) {
 	require.ErrorAs(t, err, &connErr)
 	assert.Equal(t, connect.CodeFailedPrecondition, connErr.Code())
 }
+
+// TestProbeRepo_UpstreamURLHasUserinfo_RejectedBeforeCredentialOrGitCall is
+// loam-ra1k's fail-fast half for ProbeRepo: an upstream URL carrying
+// embedded credentials (user:token@host, or the password-less PAT form
+// "https://<token>@host/path") must be rejected as InvalidArgument before
+// ProbeRepo ever resolves a credential or runs ls-remote -- transport-level
+// rejection (loam-ys1) is necessary but not sufficient, since ProbeRepo's
+// own %w-wrapped RPC error would otherwise hand the raw credential-bearing
+// URL straight back to whoever submitted it, regardless of what
+// gittransport does downstream. The embedded credential must never appear
+// in the returned error's message, in either form.
+func TestProbeRepo_UpstreamURLHasUserinfo_RejectedBeforeCredentialOrGitCall(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		upstreamURL string
+	}{
+		{"username and password", "https://user:leaked-token@example.com/acme/widgets.git"},
+		{"username only, no password (PAT form)", "https://leaked-token@example.com/acme/widgets.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := newTestDeps()
+			h := d.handler(t, "/data")
+			_, err := h.ProbeRepo(t.Context(), probeReq(tt.upstreamURL))
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
+			assert.NotContains(t, err.Error(), "leaked-token", "the rejected URL's embedded credential must never appear in the returned error")
+			assert.Empty(t, d.credentials.GetByHostCalls(), "no credential should be resolved for a URL rejected before host derivation")
+			assert.Empty(t, d.cloner.LsRemoteCalls(), "ls-remote must never run for a URL rejected before it")
+		})
+	}
+}

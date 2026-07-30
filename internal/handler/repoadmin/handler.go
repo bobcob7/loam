@@ -132,7 +132,7 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 		return "", "", fmt.Errorf("parsing upstream url: unparseable")
 	}
 	if u.User != nil {
-		return "", "", gittransport.ErrUpstreamURLHasUserinfo
+		return "", "", fmt.Errorf("upstream url %s: %w", redactUserinfo(u), gittransport.ErrUpstreamURLHasUserinfo)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", "", fmt.Errorf("upstream url (host %s): scheme must be http or https", u.Host)
@@ -188,6 +188,18 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 // ValidateToken doc comment), but that tolerance is scoped to validating
 // the token over the wire -- it never changes what key the token is
 // stored under, so it does not create a second way to reach the same row.
+// redactUserinfo reconstructs u's string form with any embedded userinfo
+// (user, or user:password) cleared, rather than string-replacing the
+// password component -- which fails for the empty-password PAT form
+// "https://<token>@host/path" (no ":" for a naive replace to find) --
+// loam-ra1k. Safe to render in an error message or log line: nothing this
+// package derives from u ever needs the userinfo component itself.
+func redactUserinfo(u *url.URL) string {
+	redacted := *u
+	redacted.User = nil
+	return redacted.String()
+}
+
 func forgeHostOf(u *url.URL) string {
 	if u.Scheme == "http" {
 		return "http://" + u.Host
