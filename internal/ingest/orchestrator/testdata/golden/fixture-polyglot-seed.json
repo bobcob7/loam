@@ -119,17 +119,6 @@
       "kind": "dependency"
     },
     {
-      "from_file": "pkg/report/report.go",
-      "from_line": 9,
-      "from_name": "Summarize",
-      "from_kind": "function",
-      "to_file": "src/validate.ts",
-      "to_line": 9,
-      "to_name": "Validate",
-      "to_kind": "function",
-      "kind": "dependency"
-    },
-    {
       "from_file": "scripts/parity.py",
       "from_line": 8,
       "from_name": "is_even",
@@ -148,17 +137,6 @@
       "to_file": "scripts/parity.py",
       "to_line": 8,
       "to_name": "is_even",
-      "to_kind": "function",
-      "kind": "dependency"
-    },
-    {
-      "from_file": "src/index.ts",
-      "from_line": 7,
-      "from_name": "summarize",
-      "from_kind": "function",
-      "to_file": "pkg/validate/validate.go",
-      "to_line": 12,
-      "to_name": "Validate",
       "to_kind": "function",
       "kind": "dependency"
     },

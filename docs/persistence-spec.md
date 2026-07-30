@@ -156,7 +156,11 @@ The unresolved references the parser emits per file; edges are resolved from the
 (fk → symbols), `kind` (`dependency`). **Recomputed each ingest** by resolving
 `symbol_references` against `symbols` (intra-repo, name-based, approximate).
 `dependents`/`deps` (blast radius) are recursive CTEs over this table; MVP edges never cross
-repos (fan-out only).
+repos (fan-out only) and, since loam-w5g, never cross languages either: the to-side match is
+narrowed to files whose extension maps to the same language as the referencing file (see
+`ResolveGraphEdgeCandidates` in `internal/db/queries/code_graph.sql`), so a name colliding
+across languages (e.g. fixture-polyglot's Go and TypeScript `Validate`) resolves to only the
+same-language edge.
 
 ### symbol_history
 `id`, `symbol_id` (fk → symbols), `commit`, `ref`, `message`. Backs the `history` query;

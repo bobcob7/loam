@@ -97,8 +97,11 @@ cheap enough to keep simple.
 - Per file the parser emits **`symbols`** (functions, types, modules — with file + line) and
   **`symbol_references`** (an unresolved name + kind + line).
 - **Edge resolution** matches references to symbols within the repo (approximate, name-based,
-  intra-repo — no cross-repo edges in the MVP; see README Future Work for SCIP). Produces the
-  dependency `graph_edges`; `deps` / `dependents` (blast radius) are recursive CTEs over them.
+  intra-repo, intra-language — no cross-repo and no cross-language edges; see README Future Work
+  for SCIP). A name colliding across files WITHIN one language can still fan out to more than one
+  edge; a name colliding across languages (e.g. fixture-polyglot's Go and TypeScript `Validate`,
+  docs/testing-spec.md "Fixtures") must not (loam-w5g). Produces the dependency `graph_edges`;
+  `deps` / `dependents` (blast radius) are recursive CTEs over them.
 - **Symbol history** (`history` query) is derived from git for changed files at ingest
   (`git log -L` over the symbol's line range, approximate) and stored.
 
