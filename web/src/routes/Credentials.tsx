@@ -50,12 +50,19 @@ import styles from "./Credentials.module.css";
  * `ListCredentialsResponse`/`SetUpstreamTokenResponse`, and neither message
  * has a token field to cache.
  *
- * KNOWN SERVER BUG (loam-4kz, out of scope here): `SetUpstreamToken` cannot
- * currently reach a plaintext-HTTP forge under the bare `host:port` key
- * `EnrollRepo` derives for it. This screen sends exactly the `host` string
- * the admin types, verbatim, as `SetUpstreamTokenRequest.host` -- it does not
- * reshape, guess at, or otherwise paper over that key, so it does not assume
- * the broken behaviour is correct. The `Host` column below renders
+ * HOST FORMAT (loam-4kz): this screen sends exactly the `host` string the
+ * admin types, verbatim, as `SetUpstreamTokenRequest.host` -- it never
+ * reshapes, defaults, or otherwise papers over it. For the default case
+ * (an https forge) a bare host ("github.com") is all that has ever been
+ * needed. For a plaintext-HTTP, self-hosted forge, the SAME host used for
+ * enrollment's Upstream URL must be typed here WITH its "http://" scheme,
+ * matching what `RepoAdminService.EnrollRepo` derives from that URL
+ * (`internal/handler/repoadmin/handler.go`'s `forgeHostOf`) -- a bare host
+ * still validates here (the server retries once over plain HTTP on an
+ * unambiguous scheme-mismatch signal, `internal/forge/forgejo.go`'s
+ * `ValidateToken`), but it is stored under a different key than a
+ * scheme-qualified enrollment would look up, so it would not be found
+ * again at `EnrollRepo` time. The `Host` column below renders
  * `CredentialStatus.host` as returned by `ListCredentials`, unmodified.
  */
 export function Credentials(): ReactElement {
@@ -155,7 +162,7 @@ export function Credentials(): ReactElement {
               value={host}
               onChange={(event) => setHost(event.target.value)}
               error={hostFieldError}
-              hint='Forge host, e.g. "github.com" or "forgejo.example.com".'
+              hint='Forge host, e.g. "github.com". For a plaintext-HTTP forge, include the scheme: "http://forge.internal:3000".'
             />
           </div>
           <Field

@@ -287,30 +287,26 @@ test.afterAll(() => {
 });
 
 test.describe("proposal decision journey", () => {
-  // EXPECTED-FAIL, blocked on loam-4kz (P1), not a defect in this spec.
+  // loam-4kz (FIXED; this test previously carried a `test.fail()`
+  // annotation documenting it here, scoped inside the test body on
+  // purpose -- at describe scope it would have silently flagged the
+  // stale-verdict test below as expected-to-fail too).
   //
-  // AcceptProposal reaches `POST https://<host>/.../pulls` and dies with
-  // "http: server gave HTTP response to HTTPS client": EnrollRepo stores a
-  // BARE repos.forge_host, and internal/forge/forgejo.go's apiBaseURL
-  // (lines 62-67) honours an explicit scheme but otherwise prepends
+  // AcceptProposal used to reach `POST https://<host>/.../pulls` and die
+  // with "http: server gave HTTP response to HTTPS client": EnrollRepo
+  // stored a BARE repos.forge_host, and internal/forge/forgejo.go's
+  // apiBaseURL honours an explicit scheme but otherwise prepends
   // "https://" unconditionally -- so no repo enrolled through the real
-  // EnrollRepo RPC can have a PR opened against a plaintext-HTTP forge.
-  // Verified directly at that call site, and reproduced independently in a
-  // second flow by loam-li0.11.2 (SetUpstreamToken, same error).
+  // EnrollRepo RPC could have a PR opened against a plaintext-HTTP forge.
+  // Reproduced independently in a second flow by loam-li0.11.2
+  // (SetUpstreamToken, same error).
   //
-  // Annotated rather than left red for the same reason loam-li0.11.2
-  // annotated its own 4kz case: a permanently-red suite stops being read,
-  // and the assertions here are deliberately NOT weakened to manufacture a
-  // pass. test.fail() is self-clearing -- the moment 4kz lands this test
-  // "unexpectedly passes", which fails the suite and forces this annotation
-  // to be removed. Do not delete the annotation without fixing 4kz, and do
-  // not soften the PR-URL assertion to make it green.
+  // Fixed by internal/handler/repoadmin/handler.go's forgeHostOf:
+  // deriveRepoIdentity now derives a scheme-qualified repos.forge_host
+  // for a plain-HTTP upstream (this e2e stack's seeded Forgejo), which
+  // apiBaseURL has always addressed correctly. The assertions below are
+  // unweakened from before the fix.
   test("opening a reviewed proposal from the queue: diff, verdicts, accept, PR URL shown", async ({ page }) => {
-    // Scoped INSIDE this test on purpose: `test.fail()` at describe scope
-    // marks every test in the block, which silently flagged the stale-verdict
-    // test below as expected-to-fail too and turned its genuine pass into a
-    // suite failure.
-    test.fail();
     await page.goto("/proposals");
     await expect(page.getByRole("heading", { name: "Proposals", level: 1 })).toBeVisible();
 

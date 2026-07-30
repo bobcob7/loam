@@ -38,7 +38,12 @@ Work.
 `indexed_branch` (the target branch the derived indexes are built from), `sync_state`
 (`idle`/`syncing`/`error`), `last_synced_at` (null), `sync_error` (null), timestamps.
 - `forge_host` links to `credentials.host` (soft reference; a working credential exists before
-  enrollment).
+  enrollment). `RepoAdminService.EnrollRepo` derives it from `upstream_url`: bare
+  (`host:port`) for the default `https` scheme, scheme-qualified (`http://host:port`) for a
+  plaintext-HTTP upstream -- the one case a bare host cannot be dialled over correctly
+  (`internal/forge`'s `apiBaseURL` always defaults a scheme-less host to `https`). A
+  credential meant to back an enrollment must be set under the identical string; there is no
+  normalization reconciling a mismatched pair (loam-4kz).
 
 ### repo_target_branches
 `repo_id` (fk → repos), `branch`, `ingested_ref` (null), `ingested_at` (null),
@@ -50,9 +55,10 @@ the current index was built with; the ingest planner compares them against the b
 versions to trigger the full-rebuild fallback.
 
 ### credentials
-`id`, `host` (unique, e.g. `github.com`), `token_ciphertext` (bytea, null), `validated`
-(bool), timestamps. The token covers both forge REST calls and git-over-HTTPS transport
-to the upstream (`docs/sync-spec.md`). Secrets encrypted at rest (§Secrets).
+`id`, `host` (unique, e.g. `github.com`, or `http://forge.internal:3000` for a
+plaintext-HTTP forge -- see `repos.forge_host` above), `token_ciphertext` (bytea, null),
+`validated` (bool), timestamps. The token covers both forge REST calls and git-over-HTTPS
+transport to the upstream (`docs/sync-spec.md`). Secrets encrypted at rest (§Secrets).
 
 ### roles
 `id`, `name` (unique), `instructions` (text), `builtin` (bool), timestamps. Built-in `author`

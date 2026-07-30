@@ -81,6 +81,31 @@ func New(credentials credentialStore, validator tokenValidator, errors *handler.
 // ordering would let a replacement token silently INHERIT the previous
 // token's validated=true verdict, which is a credential the operator
 // believes has been checked and has not been.
+//
+// # What "host" means, and the coupling to RepoAdminService.EnrollRepo
+//
+// host is stored VERBATIM as credentials.host, the exact string
+// req.Msg.GetHost() carries after trimming whitespace -- this handler
+// never rewrites, defaults, or normalizes it. That matters because
+// EnrollRepo resolves this same row by an independently-derived host
+// (internal/handler/repoadmin/handler.go's forgeHostOf): bare
+// ("host:port") for an https upstream, scheme-qualified
+// ("http://host:port") for a plain-HTTP one. For a credential meant to
+// back an enrollment, host here must match that derivation exactly, or
+// EnrollRepo's own GetByHost call will not find it -- there is no
+// normalization chokepoint reconciling a mismatched pair (loam-4kz).
+// Getting this right for an https forge needs nothing special (the bare
+// form has always worked); for a plaintext-HTTP forge, host must be the
+// scheme-qualified form.
+//
+// Separately, and only for THIS request's own token-validation call:
+// internal/forge/forgejo.go's ValidateToken tolerates a bare host that
+// turns out to name a plaintext-HTTP forge (a scheme-mismatch retry, on
+// the same signal Go's client itself produces), so a bare host still
+// validates here even against a plaintext forge. That tolerance is
+// scoped to reaching the forge for validation -- it does not change what
+// key the token is stored under, so it is not a second way to satisfy
+// EnrollRepo's lookup.
 func (h *Handler) SetUpstreamToken(ctx context.Context, req *connect.Request[adminv1.SetUpstreamTokenRequest]) (*connect.Response[adminv1.SetUpstreamTokenResponse], error) {
 	if err := requireAdmin(ctx, "setting an upstream token"); err != nil {
 		return nil, h.errors.ToConnectErr(err)

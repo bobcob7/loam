@@ -325,15 +325,19 @@ tasks:
       Every fixture choice mirrors demo:m2/demo:m3's own established
       patterns rather than inventing new ones:
         - The credential row is written directly via `demoenv
-          seed-credential`, exactly as demo:m3 does and for the identical
-          reason (loam-4kz, cmd/demoenv/credential.go's own doc comment):
-          CredentialService.SetUpstreamToken validates through a plain
-          &http.Client{} that prepends "https://" to any scheme-less host,
-          while EnrollRepo resolves credentials by deriveRepoIdentity's
-          BARE host:port -- so for this stack's plaintext-HTTP Forgejo (no
-          TLS is set up here, matching demo:m3's fake forge) no single host
-          string can both validate over the RPC and be found again at
-          enrollment. Going through the RPC here would fail every run.
+          seed-credential`, exactly as demo:m3 does. This predates loam-4kz
+          landing (internal/handler/repoadmin/handler.go's forgeHostOf now
+          derives a scheme-qualified host for a plain-HTTP upstream, and
+          CredentialService.SetUpstreamToken separately tolerates a bare
+          host against a plaintext forge via a scheme-mismatch retry in
+          internal/forge/forgejo.go's ValidateToken), so going through the
+          RPC here would work today -- collapsing to it is tracked
+          alongside cmd/demoenv/credential.go's own note, not done here to
+          keep this bead's Taskfile.yml diff to the one line (`-host`)
+          this fix actually requires: it must be scheme-qualified
+          ("http://127.0.0.1:$forgejo_port"), matching what EnrollRepo
+          now derives from upstream_url, or step 6's enroll journey fails
+          to find this row.
         - The seeded repo is created via Forgejo's own REST API with
           `auto_init: true` (internal/forgesuite's own SeedRepo helper does
           the same), not a git clone+push -- there is nothing this suite's
@@ -514,18 +518,30 @@ tasks:
           "$repo_root/bin/server" >"$server_log" 2>&1 &
         wait_for_http_ok "http://$server_addr/healthz" "server" 60
         echo ""
-        echo "=== step 5/7: seed the encrypted forge credential EnrollRepo resolves by host (loam-4kz; see task desc) ==="
+        echo "=== step 5/7: seed the encrypted forge credential EnrollRepo resolves by host ==="
+        # Scheme-qualified ("http://127.0.0.1:$forgejo_port"), not bare:
+        # upstream_url is http://, and RepoAdminService.EnrollRepo's
+        # deriveRepoIdentity (internal/handler/repoadmin/handler.go's
+        # forgeHostOf, loam-4kz) derives a scheme-qualified host from a
+        # plain-HTTP upstream so forge.Forgejo's apiBaseURL dials it over
+        # http, not https -- this credential row has to be keyed
+        # identically or the enroll journey's own EnrollRepo call (step
+        # 6, web/e2e/enroll.e2e.ts) fails to find it.
         "$repo_root/bin/demoenv" seed-credential -database-url "$database_url" \
-          -host "127.0.0.1:$forgejo_port" -token "$forgejo_token" -encryption-key "$encryption_key"
+          -host "http://127.0.0.1:$forgejo_port" -token "$forgejo_token" -encryption-key "$encryption_key"
         echo ""
         echo "=== step 6/7: run the Playwright admin-journey suite (web/e2e) against the running server ==="
         set +e
         # LOAM_E2E_FORGEJO_HOST/LOAM_E2E_FORGEJO_TOKEN (loam-li0.11.2, additive):
-        # the bare host:port and real access token already generated above,
-        # handed to web/e2e/credentials.e2e.ts so it can submit
-        # SetUpstreamToken for real against the real seeded Forgejo, rather
-        # than only relying on the credential row step 5 seeds out of band
-        # for enrollment's sake.
+        # the bare host:port (deliberately NOT the scheme-qualified form
+        # step 5 now seeds with -- credentials.e2e.ts's whole point is
+        # proving a realistic, bare, admin-typed host still validates
+        # against this stack's plaintext Forgejo, via ValidateToken's
+        # scheme-mismatch retry, loam-4kz) and real access token already
+        # generated above, handed to web/e2e/credentials.e2e.ts so it can
+        # submit SetUpstreamToken for real against the real seeded
+        # Forgejo, rather than only relying on the credential row step 5
+        # seeds out of band for enrollment's sake.
         env LOAM_E2E_BASE_URL="http://$server_addr" LOAM_E2E_ADMIN_USER="$admin_user" \
           LOAM_E2E_ADMIN_PASSWORD="$admin_password" LOAM_E2E_UPSTREAM_URL="$upstream_url" \
           LOAM_E2E_REPO_IDENTIFIER="$repo_identifier" LOAM_E2E_TARGET_BRANCH="$target_branch" \
@@ -1101,12 +1117,15 @@ tasks:
           encrypted so a psql INSERT cannot write it, and
           CredentialService.SetUpstreamToken -- which HAS been registered
           since loam-ofg.15, so the old note here claiming a 404 is stale
-          -- validates through the real forge.Forgejo before it writes.
-          That client prepends "https://" to any scheme-less host, while
-          EnrollRepo resolves credentials by deriveRepoIdentity's BARE
-          u.Host, so for this demo's plaintext-HTTP fake forge no single
-          host string can both validate and be found again at enrollment
-          (loam-4kz). The forge half of that RPC is otherwise ready:
+          -- validates through the real forge.Forgejo before it writes,
+          which is now genuinely reachable for this demo's plaintext-HTTP
+          fake forge (loam-4kz: deriveRepoIdentity/forgeHostOf derives a
+          scheme-qualified host for an http:// upstream, and ValidateToken
+          separately falls back to http for a bare host on a scheme
+          mismatch). Going through the RPC is left as a follow-up rather
+          than done here, to keep this demo's own diff scoped to loam-4kz's
+          fix rather than also restructuring its seeding step. The forge
+          half of that RPC is otherwise ready:
           internal/fakeforge answers the Forgejo-shaped scope probe
           ValidateToken issues (loam-7d2, internal/fakeforge/forgejoapi.go),
           proven by the real *forge.Forgejo in that package's own tests.
@@ -1216,6 +1235,12 @@ tasks:
         encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
         upstream_url="http://$forge_addr/git/$forge_repo.git"
         auth_upstream_url="http://demo:$forge_token@$forge_addr/git/$forge_repo.git"
+        # Scheme-qualified, matching demo:m5's own forge_host convention:
+        # internal/handler/repoadmin/handler.go's forgeHostOf (loam-4kz)
+        # derives this exact form from upstream_url's http:// scheme, and
+        # step 6's real EnrollRepo RPC call resolves the credential seeded
+        # below by that derived host, not the bare forge_addr.
+        forge_host="http://$forge_addr"
         data_dir=""
         workspace=""
         # find_pids/stop_proc locate and stop real OS-level processes by
@@ -1380,26 +1405,31 @@ tasks:
         wait_for_http_ok "http://$http_addr/healthz" "$server_log" "server" 60
         echo ""
         echo "=== step 5/12: store the encrypted forge credential EnrollRepo resolves by host, then confirm CredentialService can see it ==="
+        # Scheme-qualified $forge_host, not the bare $forge_addr: see this
+        # variable's own definition above (loam-4kz).
         "$demoenv_bin" seed-credential -database-url "$database_url" \
-          -host "$forge_addr" -token "$forge_token" -encryption-key "$encryption_key"
-        # The write above is out of band only because SetUpstreamToken
-        # cannot validate a plaintext-HTTP forge under the bare host:port
-        # EnrollRepo resolves by (loam-4kz; see the desc above and
-        # cmd/demoenv/credential.go). The READ is not: this asks the real,
+          -host "$forge_host" -token "$forge_token" -encryption-key "$encryption_key"
+        # The write above is out of band because the token is AES-GCM
+        # encrypted and a psql INSERT cannot produce that ciphertext (see
+        # cmd/demoenv/credential.go's own doc comment) -- not because the
+        # RPC cannot validate this host; ValidateToken now falls back to
+        # http for a bare host against a plaintext forge (loam-4kz), and
+        # this demo could pass $forge_host straight to SetUpstreamToken
+        # instead. The READ below is not out of band: this asks the real,
         # registered CredentialService what it holds for that host, so the
         # seeded row is proven to be the row the shipped service reports --
         # not merely bytes demoenv believes it wrote. It also proves the
         # service is genuinely wired in cmd/server, since the group-level
         # 404 fallback could not produce this body.
-        cred_out="$(credential_rpc GetCredentialStatus "{\"host\":\"$forge_addr\"}")" || {
+        cred_out="$(credential_rpc GetCredentialStatus "{\"host\":\"$forge_host\"}")" || {
           echo "FAIL: GetCredentialStatus was rejected: $cred_out" >&2
           cat "$server_log" >&2
           exit 1
         }
         echo "$cred_out"
         case "$cred_out" in
-          *'"hasToken":true'*) echo "PASS: CredentialService reports a token present for $forge_addr" ;;
-          *) echo "FAIL: CredentialService does not report a token for $forge_addr: $cred_out" >&2; exit 1 ;;
+          *'"hasToken":true'*) echo "PASS: CredentialService reports a token present for $forge_host" ;;
+          *) echo "FAIL: CredentialService does not report a token for $forge_host: $cred_out" >&2; exit 1 ;;
         esac
         case "$cred_out" in
           *"$forge_token"*) echo "FAIL: CredentialService echoed the token back: $cred_out" >&2; exit 1 ;;

@@ -27,38 +27,40 @@ import (
 // LOAM_ENCRYPTION_KEY, and reproducing that ciphertext in SQL would mean
 // reimplementing internal/crypto in shell.
 //
-// # Why not the RPC (the reason changed; the answer did not)
+// # Why not the RPC (the reason changed twice; the answer did not)
 //
 // This comment used to say loam.admin.v1.CredentialService.SetUpstreamToken
 // had no registered handler and 404'd. That stopped being true with
 // loam-ofg.15: the service is implemented in internal/handler/credential
-// and registered in cmd/server. The RPC is still unusable HERE, for a
-// different and narrower reason, filed as loam-4kz:
+// and registered in cmd/server. The RPC then became usable but unable to
+// reach every demo/e2e host that needed it -- loam-4kz:
 //
 // SetUpstreamToken validates before it writes, through the real
 // *forge.Forgejo, and forge's apiBaseURL prepends "https://" to any host
-// string that does not already carry a scheme. The host string is not
-// free: EnrollRepo resolves a credential by deriveRepoIdentity's u.Host,
-// a BARE authority. So for the demo's plaintext-HTTP fake forge the two
-// requirements are mutually exclusive -- the bare host EnrollRepo will
-// look up ("127.0.0.1:<port>") is addressed over https and fails
-// validation with "server gave HTTP response to HTTPS client", while the
-// scheme-bearing host that validates fine ("http://127.0.0.1:<port>")
-// writes a row under a key EnrollRepo never looks up. Serving the fake
-// over TLS instead is not an escape: the server's validator is a plain
-// &http.Client{}, there is no LOAM_* CA knob, and Go ignores
-// SSL_CERT_FILE on darwin.
+// string that does not already carry a scheme. EnrollRepo resolved a
+// credential by deriveRepoIdentity's u.Host, a BARE authority. So for the
+// demo's plaintext-HTTP fake forge the two requirements used to be
+// mutually exclusive -- the bare host EnrollRepo looked up
+// ("127.0.0.1:<port>") was addressed over https and failed validation
+// with "server gave HTTP response to HTTPS client", while the
+// scheme-bearing host that validated fine ("http://127.0.0.1:<port>")
+// wrote a row under a key EnrollRepo never looked up.
 //
-// internal/fakeforge now DOES answer the Forgejo-shaped scope probe
-// ValidateToken issues (internal/fakeforge/forgejoapi.go, loam-7d2), so
-// the forge side of that RPC is genuinely exercisable against the fake --
-// just not under a bare host:port. When loam-4kz lands, demo:m3's step 5
-// collapses into a plain admin RPC like its step 6 and this subcommand
-// can go.
+// loam-4kz is now fixed: deriveRepoIdentity (internal/handler/repoadmin/
+// handler.go's forgeHostOf) derives a scheme-qualified host from a
+// plain-HTTP upstream, matching the form that validates, and
+// ValidateToken separately tolerates a bare host against a plaintext
+// forge via a scheme-mismatch retry. Both requirements can now be met by
+// the SAME "http://127.0.0.1:<port>" string, so the RPC is genuinely
+// usable here too -- demo:m3/demo:m5 and Taskfile.yml's test:e2e target
+// still call this subcommand rather than the RPC, deliberately, to keep
+// loam-4kz's own diff scoped to the fix itself rather than also
+// restructuring every caller's seeding step; collapsing them is tracked
+// as follow-up work, not done in the same change as the fix.
 //
-// Until then, going through internal/credentialstore -- the production
-// store, over the production encryptor -- remains both the only route and
-// the honest one: the row this writes is byte-for-byte the row
+// Going through internal/credentialstore -- the production store, over
+// the production encryptor -- remains both a valid route and the honest
+// one either way: the row this writes is byte-for-byte the row
 // SetUpstreamToken writes.
 func runSeedCredential(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("seed-credential", flag.ContinueOnError)

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bobcob7/loam/internal/credentialstore"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 )
 
@@ -31,6 +32,34 @@ func TestProbeRepo_ListsBranchesAndHead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "main", resp.Msg.GetHead())
 	assert.Equal(t, []string{"main", "release"}, resp.Msg.GetBranches())
+}
+
+// TestProbeRepo_PlaintextHTTPForge_DerivesSameSchemeQualifiedHostAsEnroll
+// is the loam-4kz regression for ProbeRepo's side of the coupling: a
+// credential set for a plaintext-HTTP forge is keyed by the SAME
+// scheme-qualified host EnrollRepo's deriveRepoIdentity derives
+// (forgeHostOf, handler.go). Before this fix, ProbeRepo resolved and
+// passed upstreamURL's BARE u.Host, so it would have looked up (and
+// LsRemote'd against) a different, non-existent credential key than the
+// one an operator actually set.
+func TestProbeRepo_PlaintextHTTPForge_DerivesSameSchemeQualifiedHostAsEnroll(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	const wantHost = "http://127.0.0.1:13030"
+	var sawCredentialHost, sawLsRemoteHost string
+	d.credentials.GetByHostFunc = func(_ context.Context, host string) (credentialstore.Credential, error) {
+		sawCredentialHost = host
+		return credentialstore.Credential{Token: "tok"}, nil
+	}
+	d.cloner.LsRemoteFunc = func(_ context.Context, host, _ string) ([]byte, error) {
+		sawLsRemoteHost = host
+		return []byte("ref: refs/heads/main\tHEAD\nabc\trefs/heads/main\n"), nil
+	}
+	h := d.handler(t, "/data")
+	_, err := h.ProbeRepo(t.Context(), probeReq("http://127.0.0.1:13030/e2eadmin/e2e-repo.git"))
+	require.NoError(t, err)
+	assert.Equal(t, wantHost, sawCredentialHost)
+	assert.Equal(t, wantHost, sawLsRemoteHost)
 }
 
 // TestProbeRepo_EmptyURL_InvalidArgument proves rejection precedes any

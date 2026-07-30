@@ -65,6 +65,48 @@ func TestEnrollRepo_Success_ClonesAndReconcilesInOrderBeforeIdle(t *testing.T) {
 	assert.Equal(t, "main", d.ingest.EnqueueCalls()[0].TargetBranch)
 }
 
+// TestEnrollRepo_PlaintextHTTPForge_UsesSchemeQualifiedHostThroughout is
+// the loam-4kz regression at EnrollRepo's own boundary: for a plain-HTTP
+// upstream, every collaborator EnrollRepo hands a "host" string to --
+// credential resolution, the upstream access check, the clone, and the
+// persisted repos row -- must see the SAME scheme-qualified
+// "http://host:port" form, not the bare "host:port" deriveRepoIdentity
+// produced before this fix (which forge.Forgejo's apiBaseURL would have
+// dialled over https, at a listener that never speaks TLS). Asserting
+// this at all four call sites is deliberate: any one of them silently
+// reverting to the bare host would resurrect the bug for that one
+// collaborator even with the others fixed.
+func TestEnrollRepo_PlaintextHTTPForge_UsesSchemeQualifiedHostThroughout(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	const wantHost = "http://127.0.0.1:13030"
+	var sawCheckerHost, sawCloneHost, sawCredentialHost string
+	d.credentials.GetByHostFunc = func(_ context.Context, host string) (credentialstore.Credential, error) {
+		sawCredentialHost = host
+		return credentialstore.Credential{Token: "tok"}, nil
+	}
+	d.checker.CheckRepoFunc = func(_ context.Context, host, _, _ string) error {
+		sawCheckerHost = host
+		return nil
+	}
+	d.cloner.CloneFunc = func(_ context.Context, host, _, _ string) ([]byte, error) {
+		sawCloneHost = host
+		return nil, nil
+	}
+	var sawCreateRepoHost string
+	d.store.CreateRepoFunc = func(_ context.Context, params reposstore.CreateRepoParams) (reposstore.Repo, error) {
+		sawCreateRepoHost = params.ForgeHost
+		return reposstore.Repo{ID: uuid.New(), Name: params.Name, UpstreamURL: params.UpstreamURL, ForgeHost: params.ForgeHost, IndexedBranch: params.IndexedBranch, SyncState: "idle"}, nil
+	}
+	h := d.handler(t, "/data")
+	_, err := h.EnrollRepo(t.Context(), enrollReq("http://127.0.0.1:13030/e2eadmin/e2e-repo.git", []string{"main"}, "main"))
+	require.NoError(t, err)
+	assert.Equal(t, wantHost, sawCredentialHost, "credential resolution (GetByHost) must use the scheme-qualified host")
+	assert.Equal(t, wantHost, sawCheckerHost, "the upstream access check (CheckRepo) must use the scheme-qualified host")
+	assert.Equal(t, wantHost, sawCloneHost, "the initial clone must use the scheme-qualified host")
+	assert.Equal(t, wantHost, sawCreateRepoHost, "the persisted repos.forge_host must be scheme-qualified, so a later sync/PR call resolves the same credential")
+}
+
 // TestEnrollRepo_InvalidDerivedRepoName_Rejected is the repo-name
 // validation mutation: an upstream_url whose path does not derive a
 // valid two-segment "<group>/<repo_name>" identifier (loam-ofg.16's
