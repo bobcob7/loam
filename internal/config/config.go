@@ -5,10 +5,26 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
 )
+
+// maxIngestWorkers bounds LOAM_INGEST_WORKERS from above. Unlike the sync
+// scheduler's per-cycle git subprocess pair (cmd/server's
+// defaultMaxConcurrentCycles doc comment), an ingest worker is just a
+// goroutine plus a pgx connection borrowed from the shared pool for the
+// duration of a claim/run cycle -- there is no per-worker OS resource
+// (file descriptor, subprocess) that makes a large count immediately
+// dangerous. The ceiling here exists purely to catch an operator's typo
+// (an extra zero, a pasted port number) rather than to protect a hard OS
+// limit: pgx pool's own default MaxConns is max(4, NumCPU), so any
+// setting above a few dozen already outstrips available DB connections
+// and just queues on Acquire, and 256 leaves generous headroom above that
+// for unusually large machines while still refusing a five- or six-digit
+// value outright.
+const maxIngestWorkers = 256
 
 // Config holds the fully validated server configuration decoded from the
 // LOAM_* environment variables in docs/server-spec.md.
@@ -86,6 +102,9 @@ func loadOptional(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if syncInterval <= 0 {
+		return fmt.Errorf("LOAM_SYNC_INTERVAL: %w: got %s, want greater than zero", errSyncIntervalRange, syncInterval)
+	}
 	cfg.SyncInterval = syncInterval
 	prAttribution, err := parseBoolEnv("LOAM_PR_ATTRIBUTION", true)
 	if err != nil {
@@ -97,6 +116,9 @@ func loadOptional(cfg *Config) error {
 	ingestWorkers, err := parseIntEnv("LOAM_INGEST_WORKERS", 2)
 	if err != nil {
 		return err
+	}
+	if ingestWorkers < 1 || ingestWorkers > maxIngestWorkers {
+		return fmt.Errorf("LOAM_INGEST_WORKERS: %w: got %d, want between 1 and %d", errIngestWorkersRange, ingestWorkers, maxIngestWorkers)
 	}
 	cfg.IngestWorkers = ingestWorkers
 	logLevel, err := parseLogLevel(lookupDefault("LOAM_LOG_LEVEL", "info"))

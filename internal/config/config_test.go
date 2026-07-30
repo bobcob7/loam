@@ -153,8 +153,13 @@ func TestLoad_InvalidInput(t *testing.T) {
 		{name: "encryption key bad base64", override: map[string]string{"LOAM_ENCRYPTION_KEY": "not-valid-base64!!"}, wantErr: errInvalidEncryptionKey},
 		{name: "encryption key wrong length", override: map[string]string{"LOAM_ENCRYPTION_KEY": base64.StdEncoding.EncodeToString(make([]byte, 16))}, wantErr: errInvalidEncryptionKey},
 		{name: "unparseable sync interval", override: map[string]string{"LOAM_SYNC_INTERVAL": "not-a-duration"}, wantErr: errInvalidDuration},
+		{name: "zero sync interval", override: map[string]string{"LOAM_SYNC_INTERVAL": "0s"}, wantErr: errSyncIntervalRange},
+		{name: "negative sync interval", override: map[string]string{"LOAM_SYNC_INTERVAL": "-5m"}, wantErr: errSyncIntervalRange},
 		{name: "invalid pr attribution bool", override: map[string]string{"LOAM_PR_ATTRIBUTION": "maybe"}, wantErr: errInvalidBool},
 		{name: "invalid ingest workers int", override: map[string]string{"LOAM_INGEST_WORKERS": "three"}, wantErr: errInvalidInt},
+		{name: "zero ingest workers", override: map[string]string{"LOAM_INGEST_WORKERS": "0"}, wantErr: errIngestWorkersRange},
+		{name: "negative ingest workers", override: map[string]string{"LOAM_INGEST_WORKERS": "-1"}, wantErr: errIngestWorkersRange},
+		{name: "ingest workers above max", override: map[string]string{"LOAM_INGEST_WORKERS": "257"}, wantErr: errIngestWorkersRange},
 		{name: "invalid log level", override: map[string]string{"LOAM_LOG_LEVEL": "verbose"}, wantErr: errInvalidLogLevel},
 		{name: "invalid database url scheme", override: map[string]string{"LOAM_DATABASE_URL": "mysql://localhost/loam"}, wantErr: errInvalidDatabaseURL},
 		{name: "data dir is a regular file", override: map[string]string{"LOAM_DATA_DIR": regularFile.Name()}, wantErr: errDataDirNotWritable},
@@ -167,6 +172,52 @@ func TestLoad_InvalidInput(t *testing.T) {
 			}
 			_, err := Load()
 			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestLoad_SyncIntervalAndIngestWorkersBoundaries exercises the range
+// checks loam-35b added at the values right at and around their edges: 0,
+// 1, the documented upper bound, and one past it. It also asserts on the
+// error message content -- an operator who mistypes one of these two
+// variables needs to learn what they set and what the valid range is, not
+// just that Load failed.
+func TestLoad_SyncIntervalAndIngestWorkersBoundaries(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	tests := []struct {
+		name        string
+		key         string
+		value       string
+		wantErr     error
+		wantErrText string
+	}{
+		{name: "sync interval exactly zero is rejected", key: "LOAM_SYNC_INTERVAL", value: "0s", wantErr: errSyncIntervalRange, wantErrText: "LOAM_SYNC_INTERVAL: sync interval must be positive: got 0s, want greater than zero"},
+		{name: "sync interval negative is rejected", key: "LOAM_SYNC_INTERVAL", value: "-1s", wantErr: errSyncIntervalRange, wantErrText: "LOAM_SYNC_INTERVAL: sync interval must be positive: got -1s, want greater than zero"},
+		{name: "sync interval of 1ns is accepted", key: "LOAM_SYNC_INTERVAL", value: "1ns"},
+		{name: "ingest workers of zero is rejected", key: "LOAM_INGEST_WORKERS", value: "0", wantErr: errIngestWorkersRange, wantErrText: "LOAM_INGEST_WORKERS: ingest workers out of range: got 0, want between 1 and 256"},
+		{name: "ingest workers negative is rejected", key: "LOAM_INGEST_WORKERS", value: "-1", wantErr: errIngestWorkersRange, wantErrText: "LOAM_INGEST_WORKERS: ingest workers out of range: got -1, want between 1 and 256"},
+		{name: "ingest workers of 1 is accepted", key: "LOAM_INGEST_WORKERS", value: "1"},
+		{name: "ingest workers at the max of 256 is accepted", key: "LOAM_INGEST_WORKERS", value: "256"},
+		{name: "ingest workers one past the max is rejected", key: "LOAM_INGEST_WORKERS", value: "257", wantErr: errIngestWorkersRange, wantErrText: "LOAM_INGEST_WORKERS: ingest workers out of range: got 257, want between 1 and 256"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			baseEnv(t, dataDir)
+			t.Setenv(tc.key, tc.value)
+			cfg, err := Load()
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+				if tc.key == "LOAM_SYNC_INTERVAL" {
+					assert.Equal(t, time.Nanosecond, cfg.SyncInterval)
+				}
+				if tc.key == "LOAM_INGEST_WORKERS" {
+					assert.Contains(t, []int{1, 256}, cfg.IngestWorkers)
+				}
+				return
+			}
+			require.ErrorIs(t, err, tc.wantErr)
+			assert.EqualError(t, err, tc.wantErrText)
 		})
 	}
 }

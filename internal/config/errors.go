@@ -11,4 +11,6 @@ var (
 	errInvalidLogLevel      = errors.New("invalid log level")
 	errInvalidDatabaseURL   = errors.New("invalid database URL")
 	errDataDirNotWritable   = errors.New("data directory not writable")
+	errSyncIntervalRange    = errors.New("sync interval must be positive")
+	errIngestWorkersRange   = errors.New("ingest workers out of range")
 )

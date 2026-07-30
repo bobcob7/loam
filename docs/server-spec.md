@@ -24,16 +24,18 @@ variables are prefixed `LOAM_`; durations use Go syntax (`60s`, `5m`).
 | `LOAM_DATABASE_URL` | Postgres DSN (pgx). | yes | — |
 | `LOAM_DATA_DIR` | Root of the server's on-disk state: bare mirrors under `<dir>/mirrors/<group>/<repo_name>.git`, the pre-receive policy socket at `<dir>/hook.sock`. | no | `/var/lib/loam` |
 | `LOAM_ENCRYPTION_KEY` | 32-byte AES-GCM key, base64 — encrypts forge tokens at rest (`docs/persistence-spec.md` → Secrets). | yes | — |
-| `LOAM_SYNC_INTERVAL` | Upstream poll interval per repo (`docs/sync-spec.md`). | no | `60s` |
+| `LOAM_SYNC_INTERVAL` | Upstream poll interval per repo (`docs/sync-spec.md`). Must be a positive duration — zero or negative is rejected at startup, not clamped. | no | `60s` |
 | `LOAM_PR_ATTRIBUTION` | Append the "Proposed via Loam." footer to upstream PR bodies (`docs/sync-spec.md`). | no | `true` |
 | `LOAM_EMBEDDER_URL` | Ollama-compatible embeddings endpoint (`docs/ingestion-spec.md`). | no | `http://localhost:11434` |
 | `LOAM_EMBEDDER_MODEL` | Embedding model; pins the `vector(N)` dimension — changing it forces a full re-embed. | no | `nomic-embed-text` |
-| `LOAM_INGEST_WORKERS` | Ingest worker pool size (cross-repo parallelism; ingest is serialized per repo regardless). | no | `2` |
+| `LOAM_INGEST_WORKERS` | Ingest worker pool size (cross-repo parallelism; ingest is serialized per repo regardless). Must be an integer from 1 to 256 — there is no "disabled" value; 0 and below are rejected at startup rather than silently disabling ingest. | no | `2` |
 | `LOAM_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. | no | `info` |
 
 **Fail fast.** The server validates configuration at startup and exits on the first
 problem: missing required variables, a key that isn't 32 bytes after decoding, an
-unreachable database, an unwritable data dir. A misconfigured server never half-starts.
+unreachable database, an unwritable data dir, or `LOAM_SYNC_INTERVAL` /
+`LOAM_INGEST_WORKERS` outside the range documented in the table above. A
+misconfigured server never half-starts.
 
 Logging is structured JSON on stdout via `slog`; level from `LOAM_LOG_LEVEL`. No log
 files — the platform captures stdout.
