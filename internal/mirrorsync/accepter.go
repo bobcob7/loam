@@ -98,11 +98,17 @@ type AcceptResult struct {
 //  2. opens the upstream pull request from that branch into the work
 //     branch's recorded target, with its title and its description plus
 //     the attribution footer -- UNLESS a PR is already recorded;
-//  3. records that PR's URL and number on the work_branches row.
+//  3. records that PR's URL and number on the work_branches row, alongside
+//     the tip just pushed (accepted_tip, loam-cgg) -- or, when step 2 was
+//     skipped because a PR is already recorded, refreshes ONLY that tip.
 //
 // It is the only writer of work_branches.upstream_pr_number in the tree,
 // and that column is the entire poll set of StorePRPoller (pr_poller.go).
-// Nothing tracks a proposal's PR until this engine records one.
+// Nothing tracks a proposal's PR until this engine records one. It is
+// likewise the only writer of accepted_tip, which
+// internal/handler/proposal's ListProposals compares against a live
+// re-resolve of the same ref to decide docs/web-spec.md's "PR branch is
+// behind the work branch" clause.
 //
 // # Idempotency
 //
@@ -158,6 +164,7 @@ type StoreProposalAccepter struct {
 	recorder    workBranchPRRecorder
 	forge       pullRequestOpener
 	upstream    upstreamRefPusher
+	tips        workBranchTipResolver
 }
 
 // NewStoreProposalAccepter builds a StoreProposalAccepter rooted at
@@ -186,7 +193,11 @@ type StoreProposalAccepter struct {
 // repos.forge_host and that host's stored credential per call
 // (cmd/server/sync.go's forgePRTracker, the same conclusion
 // repoadmin.ForgeChecker and StorePRPoller's own tracker seam reached).
-func NewStoreProposalAccepter(dataDir string, logger *slog.Logger, attribution bool, repos repoByNameLookup, branches workBranchByNameLookup, recorder workBranchPRRecorder, forge pullRequestOpener, upstream upstreamRefPusher) *StoreProposalAccepter {
+// tips resolves the work branch's local tip immediately before the push
+// (typically *gitref.Creator, the same type registerWorkBranchService
+// already wires for ref creation) -- what gets recorded as
+// work_branches.accepted_tip (loam-cgg).
+func NewStoreProposalAccepter(dataDir string, logger *slog.Logger, attribution bool, repos repoByNameLookup, branches workBranchByNameLookup, recorder workBranchPRRecorder, forge pullRequestOpener, upstream upstreamRefPusher, tips workBranchTipResolver) *StoreProposalAccepter {
 	return &StoreProposalAccepter{
 		dataDir:     dataDir,
 		logger:      logger,
@@ -196,6 +207,7 @@ func NewStoreProposalAccepter(dataDir string, logger *slog.Logger, attribution b
 		recorder:    recorder,
 		forge:       forge,
 		upstream:    upstream,
+		tips:        tips,
 	}
 }
 
@@ -230,19 +242,32 @@ func (a *StoreProposalAccepter) AcceptProposal(ctx context.Context, repo RepoID,
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("accepting work branch %s in repo %s: %w", wb.Name, repo, err)
 	}
+	// Resolved BEFORE the push, from the LOCAL mirror ref that push is
+	// about to send upstream unchanged (a create-or-fast-forward push
+	// moves no object, it only copies what is already there): this is
+	// exactly the tip that lands at upstreamBranch, so recording it after
+	// a successful push is recording what was actually accepted, not a
+	// value that could have drifted in between (loam-cgg).
+	tip, err := a.tips.ResolveWorkBranchRef(ctx, string(repo), wb.Name)
+	if err != nil {
+		return AcceptResult{}, fmt.Errorf("resolving the tip of work branch %s in repo %s before pushing: %w", wb.Name, repo, err)
+	}
 	if _, err := a.upstream.Push(ctx, row.ForgeHost, mirrorpath.Dir(a.dataDir, string(repo)), row.UpstreamURL, refspec); err != nil {
 		return AcceptResult{}, fmt.Errorf("pushing work branch %s to %s on %s: %w", wb.Name, upstreamBranch, repo, err)
 	}
-	a.logger.InfoContext(ctx, "pushed proposal branch upstream", "repo", string(repo), "work_branch", wb.Name, "upstream_branch", upstreamBranch)
+	a.logger.InfoContext(ctx, "pushed proposal branch upstream", "repo", string(repo), "work_branch", wb.Name, "upstream_branch", upstreamBranch, "tip", tip)
 	if wb.UpstreamPRNumber != nil {
-		a.logger.InfoContext(ctx, "upstream PR already recorded; fast-forwarded it in place", "repo", string(repo), "work_branch", wb.Name, "pr_number", *wb.UpstreamPRNumber)
+		if _, err := a.recorder.RecordAcceptedTip(ctx, wb.ID, tip); err != nil {
+			return AcceptResult{}, fmt.Errorf("refreshing the accepted tip for work branch %s in repo %s: %w", wb.Name, repo, err)
+		}
+		a.logger.InfoContext(ctx, "upstream PR already recorded; fast-forwarded it in place", "repo", string(repo), "work_branch", wb.Name, "pr_number", *wb.UpstreamPRNumber, "accepted_tip", tip)
 		return AcceptResult{UpstreamBranch: upstreamBranch, PRURL: derefString(wb.UpstreamPRURL), PRNumber: int(*wb.UpstreamPRNumber), CreatedPR: false}, nil
 	}
 	prURL, prNumber, err := a.openPR(ctx, repo, wb, upstreamBranch)
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	if _, err := a.recorder.RecordUpstreamPR(ctx, wb.ID, prURL, int32(prNumber)); err != nil {
+	if _, err := a.recorder.RecordUpstreamPR(ctx, wb.ID, prURL, int32(prNumber), tip); err != nil {
 		if !errors.Is(err, workbranchstore.ErrPRAlreadyRecorded) {
 			return AcceptResult{}, fmt.Errorf("recording PR %s#%d for work branch %s: %w", repo, prNumber, wb.Name, err)
 		}

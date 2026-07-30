@@ -1950,7 +1950,10 @@ var _ workBranchPRRecorder = &workBranchPRRecorderMock{}
 //
 //		// make and configure a mocked workBranchPRRecorder
 //		mockedworkBranchPRRecorder := &workBranchPRRecorderMock{
-//			RecordUpstreamPRFunc: func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error) {
+//			RecordAcceptedTipFunc: func(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the RecordAcceptedTip method")
+//			},
+//			RecordUpstreamPRFunc: func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32, acceptedTip string) (workbranchstore.WorkBranch, error) {
 //				panic("mock out the RecordUpstreamPR method")
 //			},
 //		}
@@ -1960,11 +1963,23 @@ var _ workBranchPRRecorder = &workBranchPRRecorderMock{}
 //
 //	}
 type workBranchPRRecorderMock struct {
+	// RecordAcceptedTipFunc mocks the RecordAcceptedTip method.
+	RecordAcceptedTipFunc func(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error)
+
 	// RecordUpstreamPRFunc mocks the RecordUpstreamPR method.
-	RecordUpstreamPRFunc func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error)
+	RecordUpstreamPRFunc func(ctx context.Context, id uuid.UUID, prURL string, prNumber int32, acceptedTip string) (workbranchstore.WorkBranch, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// RecordAcceptedTip holds details about calls to the RecordAcceptedTip method.
+		RecordAcceptedTip []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// Tip is the tip argument value.
+			Tip string
+		}
 		// RecordUpstreamPR holds details about calls to the RecordUpstreamPR method.
 		RecordUpstreamPR []struct {
 			// Ctx is the ctx argument value.
@@ -1975,31 +1990,76 @@ type workBranchPRRecorderMock struct {
 			PrURL string
 			// PrNumber is the prNumber argument value.
 			PrNumber int32
+			// AcceptedTip is the acceptedTip argument value.
+			AcceptedTip string
 		}
 	}
-	lockRecordUpstreamPR sync.RWMutex
+	lockRecordAcceptedTip sync.RWMutex
+	lockRecordUpstreamPR  sync.RWMutex
+}
+
+// RecordAcceptedTip calls RecordAcceptedTipFunc.
+func (mock *workBranchPRRecorderMock) RecordAcceptedTip(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error) {
+	if mock.RecordAcceptedTipFunc == nil {
+		panic("workBranchPRRecorderMock.RecordAcceptedTipFunc: method is nil but workBranchPRRecorder.RecordAcceptedTip was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		Tip string
+	}{
+		Ctx: ctx,
+		ID:  id,
+		Tip: tip,
+	}
+	mock.lockRecordAcceptedTip.Lock()
+	mock.calls.RecordAcceptedTip = append(mock.calls.RecordAcceptedTip, callInfo)
+	mock.lockRecordAcceptedTip.Unlock()
+	return mock.RecordAcceptedTipFunc(ctx, id, tip)
+}
+
+// RecordAcceptedTipCalls gets all the calls that were made to RecordAcceptedTip.
+// Check the length with:
+//
+//	len(mockedworkBranchPRRecorder.RecordAcceptedTipCalls())
+func (mock *workBranchPRRecorderMock) RecordAcceptedTipCalls() []struct {
+	Ctx context.Context
+	ID  uuid.UUID
+	Tip string
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		Tip string
+	}
+	mock.lockRecordAcceptedTip.RLock()
+	calls = mock.calls.RecordAcceptedTip
+	mock.lockRecordAcceptedTip.RUnlock()
+	return calls
 }
 
 // RecordUpstreamPR calls RecordUpstreamPRFunc.
-func (mock *workBranchPRRecorderMock) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error) {
+func (mock *workBranchPRRecorderMock) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32, acceptedTip string) (workbranchstore.WorkBranch, error) {
 	if mock.RecordUpstreamPRFunc == nil {
 		panic("workBranchPRRecorderMock.RecordUpstreamPRFunc: method is nil but workBranchPRRecorder.RecordUpstreamPR was just called")
 	}
 	callInfo := struct {
-		Ctx      context.Context
-		ID       uuid.UUID
-		PrURL    string
-		PrNumber int32
+		Ctx         context.Context
+		ID          uuid.UUID
+		PrURL       string
+		PrNumber    int32
+		AcceptedTip string
 	}{
-		Ctx:      ctx,
-		ID:       id,
-		PrURL:    prURL,
-		PrNumber: prNumber,
+		Ctx:         ctx,
+		ID:          id,
+		PrURL:       prURL,
+		PrNumber:    prNumber,
+		AcceptedTip: acceptedTip,
 	}
 	mock.lockRecordUpstreamPR.Lock()
 	mock.calls.RecordUpstreamPR = append(mock.calls.RecordUpstreamPR, callInfo)
 	mock.lockRecordUpstreamPR.Unlock()
-	return mock.RecordUpstreamPRFunc(ctx, id, prURL, prNumber)
+	return mock.RecordUpstreamPRFunc(ctx, id, prURL, prNumber, acceptedTip)
 }
 
 // RecordUpstreamPRCalls gets all the calls that were made to RecordUpstreamPR.
@@ -2007,16 +2067,18 @@ func (mock *workBranchPRRecorderMock) RecordUpstreamPR(ctx context.Context, id u
 //
 //	len(mockedworkBranchPRRecorder.RecordUpstreamPRCalls())
 func (mock *workBranchPRRecorderMock) RecordUpstreamPRCalls() []struct {
-	Ctx      context.Context
-	ID       uuid.UUID
-	PrURL    string
-	PrNumber int32
+	Ctx         context.Context
+	ID          uuid.UUID
+	PrURL       string
+	PrNumber    int32
+	AcceptedTip string
 } {
 	var calls []struct {
-		Ctx      context.Context
-		ID       uuid.UUID
-		PrURL    string
-		PrNumber int32
+		Ctx         context.Context
+		ID          uuid.UUID
+		PrURL       string
+		PrNumber    int32
+		AcceptedTip string
 	}
 	mock.lockRecordUpstreamPR.RLock()
 	calls = mock.calls.RecordUpstreamPR
@@ -2179,5 +2241,83 @@ func (mock *pullRequestOpenerMock) FindOpenPRCalls() []struct {
 	mock.lockFindOpenPR.RLock()
 	calls = mock.calls.FindOpenPR
 	mock.lockFindOpenPR.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchTipResolverMock does implement workBranchTipResolver.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchTipResolver = &workBranchTipResolverMock{}
+
+// workBranchTipResolverMock is a mock implementation of workBranchTipResolver.
+//
+//	func TestSomethingThatUsesworkBranchTipResolver(t *testing.T) {
+//
+//		// make and configure a mocked workBranchTipResolver
+//		mockedworkBranchTipResolver := &workBranchTipResolverMock{
+//			ResolveWorkBranchRefFunc: func(ctx context.Context, repo string, name string) (string, error) {
+//				panic("mock out the ResolveWorkBranchRef method")
+//			},
+//		}
+//
+//		// use mockedworkBranchTipResolver in code that requires workBranchTipResolver
+//		// and then make assertions.
+//
+//	}
+type workBranchTipResolverMock struct {
+	// ResolveWorkBranchRefFunc mocks the ResolveWorkBranchRef method.
+	ResolveWorkBranchRefFunc func(ctx context.Context, repo string, name string) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ResolveWorkBranchRef holds details about calls to the ResolveWorkBranchRef method.
+		ResolveWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockResolveWorkBranchRef sync.RWMutex
+}
+
+// ResolveWorkBranchRef calls ResolveWorkBranchRefFunc.
+func (mock *workBranchTipResolverMock) ResolveWorkBranchRef(ctx context.Context, repo string, name string) (string, error) {
+	if mock.ResolveWorkBranchRefFunc == nil {
+		panic("workBranchTipResolverMock.ResolveWorkBranchRefFunc: method is nil but workBranchTipResolver.ResolveWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+		Name: name,
+	}
+	mock.lockResolveWorkBranchRef.Lock()
+	mock.calls.ResolveWorkBranchRef = append(mock.calls.ResolveWorkBranchRef, callInfo)
+	mock.lockResolveWorkBranchRef.Unlock()
+	return mock.ResolveWorkBranchRefFunc(ctx, repo, name)
+}
+
+// ResolveWorkBranchRefCalls gets all the calls that were made to ResolveWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedworkBranchTipResolver.ResolveWorkBranchRefCalls())
+func (mock *workBranchTipResolverMock) ResolveWorkBranchRefCalls() []struct {
+	Ctx  context.Context
+	Repo string
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}
+	mock.lockResolveWorkBranchRef.RLock()
+	calls = mock.calls.ResolveWorkBranchRef
+	mock.lockResolveWorkBranchRef.RUnlock()
 	return calls
 }

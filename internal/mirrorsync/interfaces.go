@@ -18,7 +18,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter upstreamRefPusher workBranchByNameLookup workBranchPRRecorder pullRequestOpener
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter upstreamRefPusher workBranchByNameLookup workBranchPRRecorder pullRequestOpener workBranchTipResolver
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -425,7 +425,29 @@ type workBranchByNameLookup interface {
 // a guarded UPDATE that refuses a second write (see
 // workbranchstore.ErrPRAlreadyRecorded).
 type workBranchPRRecorder interface {
-	RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (workbranchstore.WorkBranch, error)
+	// RecordUpstreamPR writes the url, number, AND accepted tip (loam-cgg)
+	// in one guarded UPDATE, the first-accept leg only: its guard
+	// (upstream_pr_number IS NULL) never fires on a re-accept.
+	RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32, acceptedTip string) (workbranchstore.WorkBranch, error)
+	// RecordAcceptedTip refreshes just the accepted tip, unconditionally --
+	// the re-accept leg (loam-cgg), reached whenever RecordUpstreamPR's
+	// guard has already failed because a PR is already recorded.
+	RecordAcceptedTip(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error)
+}
+
+// workBranchTipResolver resolves a work branch's CURRENT ref SHA in the
+// local bare mirror, defined here at the consumer (loam-cgg).
+// *gitref.Creator satisfies it structurally.
+//
+// StoreProposalAccepter resolves the tip it is about to push, BEFORE the
+// push, and records it as work_branches.accepted_tip -- the value
+// ListProposals later compares against a live re-resolve of the same ref
+// to decide whether a recorded PR's branch has fallen behind
+// (docs/web-spec.md's proposal definition; internal/handler/proposal
+// carries its own, separately-defined copy of this same interface, per
+// this package's own per-consumer convention).
+type workBranchTipResolver interface {
+	ResolveWorkBranchRef(ctx context.Context, repo, name string) (string, error)
 }
 
 // pullRequestOpener is the forge.Provider surface StoreProposalAccepter

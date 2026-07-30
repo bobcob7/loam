@@ -23,6 +23,7 @@ const (
 	acceptTitle       = "Add the widget"
 	acceptDescription = "This adds the widget and wires it up."
 	acceptPRURL       = "https://forge.example.com/acme/widgets/pulls/7"
+	acceptTip         = "0123456789abcdef0123456789abcdef01234567"
 )
 
 // createPRCall records one CreatePR invocation in full, so an assertion
@@ -37,6 +38,14 @@ type recordCall struct {
 	id     uuid.UUID
 	prURL  string
 	number int32
+	tip    string
+}
+
+// tipRefreshCall records one RecordAcceptedTip invocation -- the
+// re-accept-only leg (loam-cgg) that never touches the url/number columns.
+type tipRefreshCall struct {
+	id  uuid.UUID
+	tip string
 }
 
 // pushCall records one upstream push invocation.
@@ -52,12 +61,13 @@ type pushCall struct {
 // moq panicking, because a panic proves only that the test reached a
 // method, never that the guard under test is the reason it did not.
 type acceptHarness struct {
-	accepter *StoreProposalAccepter
-	pushes   *[]pushCall
-	creates  *[]createPRCall
-	finds    *[]createPRCall
-	records  *[]recordCall
-	branch   *workbranchstore.WorkBranch
+	accepter     *StoreProposalAccepter
+	pushes       *[]pushCall
+	creates      *[]createPRCall
+	finds        *[]createPRCall
+	records      *[]recordCall
+	tipRefreshes *[]tipRefreshCall
+	branch       *workbranchstore.WorkBranch
 }
 
 // acceptHarnessOpts configures the one fixture row and the failure each
@@ -82,6 +92,12 @@ type acceptHarnessOpts struct {
 	// call -- the re-read the engine makes after losing the recorded
 	// column to a concurrent accept.
 	rereadBranch *workbranchstore.WorkBranch
+	// resolveErr, when set, is what ResolveWorkBranchRef returns instead of
+	// acceptTip.
+	resolveErr error
+	// recordTipErr, when set, is what RecordAcceptedTip returns (the
+	// re-accept-only leg).
+	recordTipErr error
 }
 
 // acceptBranchFixture is the default work branch every accept test starts
@@ -114,7 +130,7 @@ func newAcceptHarness(t *testing.T, opts acceptHarnessOpts) acceptHarness {
 	if opts.createNum == 0 && opts.createURL == "" {
 		opts.createNum, opts.createURL = 7, acceptPRURL
 	}
-	pushes, creates, finds, records := new([]pushCall), new([]createPRCall), new([]createPRCall), new([]recordCall)
+	pushes, creates, finds, records, tipRefreshes := new([]pushCall), new([]createPRCall), new([]createPRCall), new([]recordCall), new([]tipRefreshCall)
 	reads := 0
 	repos := &repoByNameLookupMock{
 		GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
@@ -171,18 +187,41 @@ func newAcceptHarness(t *testing.T, opts acceptHarnessOpts) acceptHarness {
 		},
 	}
 	recorder := &workBranchPRRecorderMock{
-		RecordUpstreamPRFunc: func(_ context.Context, id uuid.UUID, prURL string, number int32) (workbranchstore.WorkBranch, error) {
-			*records = append(*records, recordCall{id: id, prURL: prURL, number: number})
+		RecordUpstreamPRFunc: func(_ context.Context, id uuid.UUID, prURL string, number int32, tip string) (workbranchstore.WorkBranch, error) {
+			*records = append(*records, recordCall{id: id, prURL: prURL, number: number, tip: tip})
 			if opts.recordErr != nil {
 				return workbranchstore.WorkBranch{}, opts.recordErr
 			}
 			updated := branch
-			updated.UpstreamPRURL, updated.UpstreamPRNumber = &prURL, &number
+			updated.UpstreamPRURL, updated.UpstreamPRNumber, updated.AcceptedTip = &prURL, &number, &tip
+			return updated, nil
+		},
+		RecordAcceptedTipFunc: func(_ context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error) {
+			*tipRefreshes = append(*tipRefreshes, tipRefreshCall{id: id, tip: tip})
+			if opts.recordTipErr != nil {
+				return workbranchstore.WorkBranch{}, opts.recordTipErr
+			}
+			updated := branch
+			updated.AcceptedTip = &tip
 			return updated, nil
 		},
 	}
-	accepter := NewStoreProposalAccepter(acceptDataDir, testLogger(), opts.attribution, repos, branches, recorder, prForge, upstream)
-	return acceptHarness{accepter: accepter, pushes: pushes, creates: creates, finds: finds, records: records, branch: &branch}
+	tips := &workBranchTipResolverMock{
+		ResolveWorkBranchRefFunc: func(_ context.Context, repo, name string) (string, error) {
+			if opts.resolveErr != nil {
+				return "", opts.resolveErr
+			}
+			if repo != acceptRepoName {
+				return "", errors.New("unexpected repo name " + repo)
+			}
+			if name != branch.Name {
+				return "", errors.New("unexpected work branch name " + name)
+			}
+			return acceptTip, nil
+		},
+	}
+	accepter := NewStoreProposalAccepter(acceptDataDir, testLogger(), opts.attribution, repos, branches, recorder, prForge, upstream, tips)
+	return acceptHarness{accepter: accepter, pushes: pushes, creates: creates, finds: finds, records: records, tipRefreshes: tipRefreshes, branch: &branch}
 }
 
 // accept runs the engine against the fixture repo/branch.
@@ -211,6 +250,8 @@ func TestAcceptProposal_PushesTheNamespacedBranchAndOpensThePR(t *testing.T) {
 	assert.Equal(t, h.branch.ID, (*h.records)[0].id)
 	assert.Equal(t, acceptPRURL, (*h.records)[0].prURL)
 	assert.Equal(t, int32(7), (*h.records)[0].number)
+	assert.Equal(t, acceptTip, (*h.records)[0].tip, "the first accept must record the tip it resolved before pushing")
+	assert.Empty(t, *h.tipRefreshes, "a first accept must go through RecordUpstreamPR, never the re-accept-only RecordAcceptedTip")
 	assert.Equal(t, AcceptResult{UpstreamBranch: "loam/wb-9c2f1a", PRURL: acceptPRURL, PRNumber: 7, CreatedPR: true}, result)
 }
 
@@ -247,6 +288,9 @@ func TestAcceptProposal_ReAcceptFastForwardsWithoutOpeningASecondPR(t *testing.T
 	assert.Len(t, *h.records, 1, "a re-accept must not re-record the PR number")
 	assert.Len(t, *h.pushes, 2, "a re-accept must still push, since that push is what fast-forwards the existing PR")
 	assert.Equal(t, (*h.pushes)[0], (*h.pushes)[1], "the re-accept must push the same refspec to the same branch")
+	require.Len(t, *h.tipRefreshes, 1, "a re-accept must refresh the accepted tip through RecordAcceptedTip, not RecordUpstreamPR")
+	assert.Equal(t, h.branch.ID, (*h.tipRefreshes)[0].id)
+	assert.Equal(t, acceptTip, (*h.tipRefreshes)[0].tip)
 }
 
 // TestAcceptProposal_PushIsNeverForced pins the no-force property at the
@@ -293,6 +337,22 @@ func TestUpstreamProposalRefspec_NeverProducesAForceRefspec(t *testing.T) {
 			assert.Equal(t, "loam/"+name, upstreamBranch)
 		})
 	}
+}
+
+// TestAcceptProposal_ATipResolutionFailureNeverPushes proves the tip is
+// resolved BEFORE the push, not after: a mirror the resolver cannot read
+// must abort before anything reaches the upstream transport or the forge,
+// the same "nothing reaches upstream on a failure" ordering the push and
+// CreatePR failure tests below pin for their own steps.
+func TestAcceptProposal_ATipResolutionFailureNeverPushes(t *testing.T) {
+	t.Parallel()
+	resolveErr := errors.New("mirror unreadable")
+	h := newAcceptHarness(t, acceptHarnessOpts{attribution: true, resolveErr: resolveErr})
+	_, err := h.accept(t.Context())
+	require.ErrorIs(t, err, resolveErr)
+	assert.Empty(t, *h.pushes, "a failed tip resolution must never reach the upstream transport")
+	assert.Empty(t, *h.creates)
+	assert.Empty(t, *h.records)
 }
 
 // TestAcceptProposal_APushFailureRecordsNoPR proves the ordering
@@ -538,6 +598,23 @@ func TestAcceptProposal_ARecordFailureThatIsNotTheRaceIsReported(t *testing.T) {
 	h := newAcceptHarness(t, acceptHarnessOpts{attribution: true, recordErr: recordErr})
 	_, err := h.accept(t.Context())
 	require.ErrorIs(t, err, recordErr)
+}
+
+// TestAcceptProposal_ATipRefreshFailureOnReAcceptIsReported proves the
+// re-accept-only leg is not silently swallowed: a RecordAcceptedTip
+// failure on the second accept must surface as an error, the same as an
+// ordinary RecordUpstreamPR failure does on the first.
+func TestAcceptProposal_ATipRefreshFailureOnReAcceptIsReported(t *testing.T) {
+	t.Parallel()
+	recordTipErr := errors.New("connection reset by peer")
+	h := newAcceptHarness(t, acceptHarnessOpts{attribution: true, recordTipErr: recordTipErr})
+	first, err := h.accept(t.Context())
+	require.NoError(t, err)
+	number, url := int32(first.PRNumber), first.PRURL
+	h.branch.UpstreamPRNumber, h.branch.UpstreamPRURL = &number, &url
+
+	_, err = h.accept(t.Context())
+	require.ErrorIs(t, err, recordTipErr)
 }
 
 // TestAcceptProposal_RejectsAnUnsafeWorkBranchName proves a name that

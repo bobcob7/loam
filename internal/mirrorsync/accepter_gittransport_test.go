@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/reposstore"
@@ -151,12 +152,22 @@ func newRealAccepter(t *testing.T, f acceptFixture, wb workbranchstore.WorkBranc
 		},
 	}
 	recorder := &workBranchPRRecorderMock{
-		RecordUpstreamPRFunc: func(_ context.Context, id uuid.UUID, prURL string, number int32) (workbranchstore.WorkBranch, error) {
-			*records = append(*records, recordCall{id: id, prURL: prURL, number: number})
+		RecordUpstreamPRFunc: func(_ context.Context, id uuid.UUID, prURL string, number int32, tip string) (workbranchstore.WorkBranch, error) {
+			*records = append(*records, recordCall{id: id, prURL: prURL, number: number, tip: tip})
+			return wb, nil
+		},
+		RecordAcceptedTipFunc: func(context.Context, uuid.UUID, string) (workbranchstore.WorkBranch, error) {
 			return wb, nil
 		},
 	}
-	return NewStoreProposalAccepter(f.dataDir, testLogger(), true, repos, branches, recorder, prForge, f.transport), creates, records
+	// tips resolves against the SAME real bare mirror the transport pushes
+	// from (f.dataDir), so what this engine records is exactly what a real
+	// `git rev-parse` against refnames.WorkBranch(wb.Name) reports -- no
+	// mock stands in for the tip itself in this file, only for the two
+	// collaborators (repo/branch lookup, PR recording) accepter_test.go
+	// already covers with mocks.
+	tips := gitref.New(f.dataDir)
+	return NewStoreProposalAccepter(f.dataDir, testLogger(), true, repos, branches, recorder, prForge, f.transport, tips), creates, records
 }
 
 // acceptWorkBranch builds a reviewed, unconflicted work branch row for the
