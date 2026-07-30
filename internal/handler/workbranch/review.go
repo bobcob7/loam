@@ -327,7 +327,8 @@ func replyAuthorIdentifier(ctx context.Context) (string, error) {
 // ErrorMapper recognizes. Every case here is a caller-fixable precondition
 // or argument problem; anything else falls through to CodeInternal-and-log,
 // the same "loud failure over silent wrong behavior" choice the rest of this
-// package makes. The ErrNotOpenForReview/ErrNoCurrentRound case wraps err
+// package makes. The ErrNotOpenForReview/ErrNoCurrentRound and
+// ErrNotThreadAuthor cases wrap err
 // alongside handler.ErrFailedPrecondition (Go 1.20+'s multi-%w), rather
 // than discarding it: ErrNotOpenForReview's own wrapping ("work branch is
 // %s: %w") names the actual state, and dropping it left the message
