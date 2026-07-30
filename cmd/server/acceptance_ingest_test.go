@@ -6,15 +6,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
+	"github.com/google/uuid"
+
+	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorsync"
 	"github.com/bobcob7/loam/internal/refnames"
+)
+
+// acceptanceRetryPollTimeout/acceptanceRetryPollInterval bound "the job is
+// retried"'s poll of ingest_jobs.attempts: the production Pool's default
+// backoff (1s base, doubling) means a second attempt lands within a couple
+// of seconds of the first failure, so 20s leaves generous CI slack without
+// letting a genuinely stuck job hang the suite.
+const (
+	acceptanceRetryPollTimeout  = 20 * time.Second
+	acceptanceRetryPollInterval = 200 * time.Millisecond
 )
 
 // registerIngestAndQuerySteps wires the steps ingestion.feature and
@@ -50,6 +66,25 @@ func (h *acceptanceHarness) registerIngestAndQuerySteps(sc *godog.ScenarioContex
 	sc.Step(`^I run a graph query$`, h.stepIRunAGraphQuery)
 	sc.Step(`^the response names the commit the index was built from$`, h.stepResponseNamesTheCommitTheIndexWasBuiltFrom)
 	sc.Step(`^I can tell the results predate the tip of "([^"]*)"$`, h.stepResultsPredateTheTipOf)
+
+	// loam-7d0: three of the four scenarios formerly tagged @wip in
+	// features/ingestion.feature. "Edges reflect the current code even in
+	// unchanged files" stays @wip -- see this file's own note near the
+	// bottom on why that one is not implementable as written.
+	sc.Step(`^I reindex "([^"]*)"$`, h.stepIReindex)
+	sc.Step(`^a full ingest job runs for it$`, h.stepAFullIngestJobRunsForIt)
+	sc.Step(`^once it succeeds, queries reflect the current indexed branch$`, h.stepOnceItSucceedsQueriesReflectTheCurrentIndexedBranch)
+
+	sc.Step(`^ingest jobs have run for enrolled repos$`, h.stepIngestJobsHaveRunForEnrolledRepos)
+	sc.Step(`^I open the Jobs view$`, h.stepIOpenTheJobsView)
+	sc.Step(`^I see each job's repo, status, and timing$`, h.stepISeeEachJobsRepoStatusAndTiming)
+
+	sc.Step(`^"([^"]*)" has been ingested successfully$`, h.stepBranchHasBeenIngestedSuccessfully)
+	sc.Step(`^the next ingestion fails$`, h.stepTheNextIngestionFails)
+	sc.Step(`^the job is shown as failed with its error$`, h.stepTheJobIsShownAsFailedWithItsError)
+	sc.Step(`^graph and search queries still return the previous index$`, h.stepGraphAndSearchQueriesStillReturnThePreviousIndex)
+	sc.Step(`^the reported ingested commit is unchanged$`, h.stepTheReportedIngestedCommitIsUnchanged)
+	sc.Step(`^the job is retried$`, h.stepTheJobIsRetried)
 }
 
 // acceptanceEnvelope is the {ingested, truncated, results} envelope every
@@ -509,6 +544,304 @@ func (h *acceptanceHarness) stepResultsPredateTheTipOf(ctx context.Context, bran
 		return fmt.Errorf("the index is at %s, the same commit as upstream's %s tip: nothing marks the results as stale", ref, branch)
 	}
 	return nil
+}
+
+// --- loam-7d0: "Edges reflect the current code even in unchanged files" ---
+//
+// This scenario stays @wip. It was implemented literally and run: given
+// file "handler.go" references "Login" defined in "auth.go", And only
+// "auth.go" changes to rename "Login" to "Authenticate", a graph query for
+// references to "Authenticate" returned zero rows for handler.go (verified
+// against the real pipeline, not inferred).
+//
+// The reason is structural, not a missing step definition.
+// internal/codegraph.Store.RecomputeGraphEdges resolves graph_edges by
+// joining symbol_references AGAINST symbols BY NAME
+// (internal/db/queries/code_graph.sql's ResolveGraphEdgeCandidates), and
+// `graph refs` (LookupReferencesByName) reads symbol_references directly,
+// also by name -- see that query's own doc comment: "intra-repo,
+// name-based, approximate" (docs/ingestion-spec.md "Edge resolution").
+// handler.go's OWN reference row is written once, at whatever ingest last
+// reparsed handler.go, and holds the literal text "Login". Renaming Login
+// to Authenticate touches only auth.go; diffplan's own incremental
+// contract (TestPlan_Incremental_ClassifiesAddModifyDeleteRename_
+// UnchangedFileNeverAppears, internal/diffplan/plan_test.go) guarantees
+// handler.go is never reparsed for that commit, so its stored reference
+// name never becomes "Authenticate" -- not on an incremental ingest, and
+// not on a full one either, since a full rebuild reparses handler.go's
+// UNCHANGED bytes and extracts the same literal "Login" text again.
+// docs/ingestion-spec.md's own "moved" language ("correct against the
+// current symbol set even when an unchanged file referenced a symbol that
+// MOVED") describes a symbol relocating to a different FILE while keeping
+// its name -- genuinely handled by this name-based join -- not a rename,
+// which is a different operation this schema has no mechanism to track
+// (there is no stable symbol identity across a rename: ReplaceFileSymbols
+// deletes and reinserts with a fresh uuid.NewV7 every time). This is also
+// consistent with internal/ingest/orchestrator's own integration test
+// covering this exact rename fixture
+// (TestIngest_MidFlightReaderSeesThePreviousIndexUntilTheSingleCommit,
+// integration_test.go): it asserts on `symbols` (Login gone, Authenticate
+// present) and never asserts anything about handler.go's edges/references,
+// because there is nothing true to assert there.
+//
+// Per this bead's own guidance (and loam-ofg.18's precedent), the tag
+// stays rather than weakening the scenario or its assertions to pass.
+
+// --- loam-7d0: "The admin can force a reindex" ---
+
+// stepIReindex is "When I reindex X": ensures a mirror exists (mirroring
+// what a real prior enrollment would already have done) and then drives
+// the REAL RepoAdminService.ReindexRepo RPC, never a direct Enqueue.
+func (h *acceptanceHarness) stepIReindex(ctx context.Context, repo string) error {
+	world := worldFrom(ctx)
+	if repo != world.repo() {
+		return fmt.Errorf("scenario reindexes %q but this scenario's repo is %q", repo, world.repo())
+	}
+	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
+		return err
+	}
+	resp, err := h.newRepoAdminServiceClient().ReindexRepo(ctx, connect.NewRequest(&adminv1.ReindexRepoRequest{Repo: repo}))
+	if err != nil {
+		return fmt.Errorf("reindexing %s: %w", repo, err)
+	}
+	if resp.Msg.GetJob().GetKind() != adminv1.IngestKind_INGEST_KIND_FULL {
+		return fmt.Errorf("ReindexRepo enqueued a %s job for %s, want FULL", resp.Msg.GetJob().GetKind(), repo)
+	}
+	world.lastReindexJob = resp.Msg.GetJob()
+	return nil
+}
+
+// stepAFullIngestJobRunsForIt drains the job ReindexRepo enqueued and
+// requires it to have actually succeeded, as kind FULL, for the SAME
+// target branch ReindexRepo's own response named.
+func (h *acceptanceHarness) stepAFullIngestJobRunsForIt(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.lastReindexJob == nil {
+		return fmt.Errorf("no reindex was requested in this scenario yet")
+	}
+	if err := h.ingestHarness.DrainIngestQueue(ctx, mirrorsync.RepoID(world.repo())); err != nil {
+		return fmt.Errorf("draining the ingest queue for %s: %w", world.repo(), err)
+	}
+	var status, kind, jobError string
+	err := h.server.pool.QueryRow(ctx,
+		`SELECT status, kind, COALESCE(error, '') FROM ingest_jobs WHERE repo_id = $1 AND target_branch = $2 ORDER BY queued_at DESC LIMIT 1`,
+		world.repoID, world.lastReindexJob.GetTargetBranch()).Scan(&status, &kind, &jobError)
+	if err != nil {
+		return fmt.Errorf("reading the latest ingest job for %s: %w", world.repo(), err)
+	}
+	if kind != "full" {
+		return fmt.Errorf("latest ingest job for %s is kind %q, want full", world.repo(), kind)
+	}
+	if status != "succeeded" {
+		return fmt.Errorf("the reindex job for %s finished as %q: %s", world.repo(), status, jobError)
+	}
+	return nil
+}
+
+// stepOnceItSucceedsQueriesReflectTheCurrentIndexedBranch reuses
+// stepGraphAndSearchQueriesReflect (acceptance_enrollment_test.go) against
+// ReindexRepo's own named target branch.
+func (h *acceptanceHarness) stepOnceItSucceedsQueriesReflectTheCurrentIndexedBranch(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.lastReindexJob == nil {
+		return fmt.Errorf("no reindex was requested in this scenario yet")
+	}
+	return h.stepGraphAndSearchQueriesReflect(ctx, world.lastReindexJob.GetTargetBranch())
+}
+
+// --- loam-7d0: "Viewing ingest job activity" ---
+
+// stepIngestJobsHaveRunForEnrolledRepos is the Given: it drives one real,
+// successful ingest for this scenario's own repo through the same
+// clone-and-Enqueue-KindFull sequence every other Given in this file uses,
+// so the Jobs view has a genuine row to show.
+func (h *acceptanceHarness) stepIngestJobsHaveRunForEnrolledRepos(ctx context.Context) error {
+	return h.ingestIndexedBranch(ctx, worldFrom(ctx))
+}
+
+// stepIOpenTheJobsView drives the REAL RepoAdminService.ListIngestJobs RPC
+// with no filter, exactly what the web Jobs view itself calls
+// (docs/web-spec.md), and records the page for the following Then.
+func (h *acceptanceHarness) stepIOpenTheJobsView(ctx context.Context) error {
+	world := worldFrom(ctx)
+	resp, err := h.newRepoAdminServiceClient().ListIngestJobs(ctx, connect.NewRequest(&adminv1.ListIngestJobsRequest{}))
+	if err != nil {
+		return fmt.Errorf("listing ingest jobs: %w", err)
+	}
+	world.lastIngestJobs = resp.Msg.GetJobs()
+	return nil
+}
+
+// stepISeeEachJobsRepoStatusAndTiming asserts every returned job names a
+// real repo, a real (non-UNSPECIFIED) status, and a real queued_at timing
+// -- and that this scenario's OWN just-ingested repo is genuinely among
+// them, so this cannot pass against an empty or unrelated page.
+func (h *acceptanceHarness) stepISeeEachJobsRepoStatusAndTiming(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if len(world.lastIngestJobs) == 0 {
+		return fmt.Errorf("the Jobs view returned no jobs")
+	}
+	var sawThisRepo bool
+	for i, job := range world.lastIngestJobs {
+		if job.GetRepo() == "" {
+			return fmt.Errorf("job %d names no repo", i)
+		}
+		if job.GetStatus() == adminv1.IngestStatus_INGEST_STATUS_UNSPECIFIED {
+			return fmt.Errorf("job %d for %s reports no status", i, job.GetRepo())
+		}
+		if job.GetQueuedAt() == "" {
+			return fmt.Errorf("job %d for %s reports no queued_at timing", i, job.GetRepo())
+		}
+		if job.GetRepo() == world.repo() {
+			sawThisRepo = true
+		}
+	}
+	if !sawThisRepo {
+		return fmt.Errorf("the Jobs view did not include this scenario's own repo %s among %d job(s)", world.repo(), len(world.lastIngestJobs))
+	}
+	return nil
+}
+
+// --- loam-7d0: "A failed ingest keeps the previous index" ---
+
+// stepBranchHasBeenIngestedSuccessfully is the Given "X has been ingested
+// successfully" -- the same real ingest stepBranchHasBeenIngested drives,
+// under this scenario's own wording.
+func (h *acceptanceHarness) stepBranchHasBeenIngestedSuccessfully(ctx context.Context, branch string) error {
+	return h.stepBranchHasBeenIngested(ctx, branch)
+}
+
+// stepTheNextIngestionFails deliberately removes the LOCAL bare mirror on
+// disk -- the local-storage analogue of stepUpstreamForgeIsUnreachable
+// (acceptance_sync_test.go), and the exact "mirror missing or invalid"
+// fault internal/ingest/orchestrator's gitReader.ResolveRef already
+// classifies as errMirrorMissing -- then drives a real ingest job for it
+// through the SAME live ingest.Pool every other scenario in this file
+// uses. This is an environment-level fault, not a stubbed collaborator or
+// a hand-written failed row: the orchestrator's own rollback and
+// retry/backoff logic is what is actually being exercised.
+func (h *acceptanceHarness) stepTheNextIngestionFails(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.mirrorDir == "" {
+		return fmt.Errorf("no mirror exists yet for %s to break", world.repo())
+	}
+	ref, err := h.ingestedRef(ctx, world)
+	if err != nil {
+		return err
+	}
+	if ref == "" {
+		return fmt.Errorf("repo %s has no ingested commit recorded yet; nothing to keep", world.repo())
+	}
+	world.ingestedRefBeforeFailure = ref
+	if err := os.RemoveAll(world.mirrorDir); err != nil {
+		return fmt.Errorf("removing the mirror for %s to force a real ingest failure: %w", world.repo(), err)
+	}
+	if err := h.server.ingestPool.Enqueue(ctx, world.repoID, world.targetBranch, ingest.KindIncremental); err != nil {
+		return fmt.Errorf("enqueuing the next ingest for %s: %w", world.repo(), err)
+	}
+	if err := h.ingestHarness.DrainIngestQueue(ctx, mirrorsync.RepoID(world.repo())); err != nil {
+		return fmt.Errorf("draining the ingest queue for %s: %w", world.repo(), err)
+	}
+	var id uuid.UUID
+	var status, jobError string
+	if err := h.server.pool.QueryRow(ctx,
+		`SELECT id, status, COALESCE(error, '') FROM ingest_jobs WHERE repo_id = $1 AND target_branch = $2 ORDER BY queued_at DESC LIMIT 1`,
+		world.repoID, world.targetBranch).Scan(&id, &status, &jobError); err != nil {
+		return fmt.Errorf("reading the latest ingest job for %s: %w", world.repo(), err)
+	}
+	if status != "failed" {
+		return fmt.Errorf("the next ingest for %s finished as %q, want failed (the mirror was deliberately removed): %s", world.repo(), status, jobError)
+	}
+	if jobError == "" {
+		return fmt.Errorf("job %s for %s is failed but recorded no error", id, world.repo())
+	}
+	world.lastFailedJobID = id
+	return nil
+}
+
+// stepTheJobIsShownAsFailedWithItsError re-reads the job through the REAL
+// admin surface (ListIngestJobs), the same RPC the web Jobs view calls,
+// rather than trusting the raw ingest_jobs read stepTheNextIngestionFails
+// already did.
+func (h *acceptanceHarness) stepTheJobIsShownAsFailedWithItsError(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.lastFailedJobID == (uuid.UUID{}) {
+		return fmt.Errorf("no ingest job has failed in this scenario yet")
+	}
+	repo := world.repo()
+	resp, err := h.newRepoAdminServiceClient().ListIngestJobs(ctx, connect.NewRequest(&adminv1.ListIngestJobsRequest{Repo: &repo}))
+	if err != nil {
+		return fmt.Errorf("listing ingest jobs for %s: %w", repo, err)
+	}
+	for _, job := range resp.Msg.GetJobs() {
+		if job.GetId() != world.lastFailedJobID.String() {
+			continue
+		}
+		if job.GetStatus() != adminv1.IngestStatus_INGEST_STATUS_FAILED {
+			return fmt.Errorf("job %s for %s is shown as %s, want FAILED", job.GetId(), repo, job.GetStatus())
+		}
+		if job.GetError() == "" {
+			return fmt.Errorf("job %s for %s is shown as failed but names no error", job.GetId(), repo)
+		}
+		return nil
+	}
+	return fmt.Errorf("the Jobs view does not include job %s for %s", world.lastFailedJobID, repo)
+}
+
+// stepGraphAndSearchQueriesStillReturnThePreviousIndex reuses
+// stepGraphAndSearchReturnResults, which reads ingested_ref FRESH and
+// requires both a graph and a search query to still name it -- exactly
+// "the previous index" this Then names, since the failed ingest never
+// advanced that column.
+func (h *acceptanceHarness) stepGraphAndSearchQueriesStillReturnThePreviousIndex(ctx context.Context) error {
+	return h.stepGraphAndSearchReturnResults(ctx)
+}
+
+// stepTheReportedIngestedCommitIsUnchanged compares the CURRENT
+// ingested_ref against the value stepTheNextIngestionFails captured before
+// deliberately breaking the mirror.
+func (h *acceptanceHarness) stepTheReportedIngestedCommitIsUnchanged(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.ingestedRefBeforeFailure == "" {
+		return fmt.Errorf("no pre-failure ingested ref was recorded for %s", world.repo())
+	}
+	ref, err := h.ingestedRef(ctx, world)
+	if err != nil {
+		return err
+	}
+	if ref != world.ingestedRefBeforeFailure {
+		return fmt.Errorf("ingested_ref for %s changed to %s after the failed ingest, want it unchanged at %s", world.repo(), ref, world.ingestedRefBeforeFailure)
+	}
+	return nil
+}
+
+// stepTheJobIsRetried polls ingest_jobs.attempts for the specific job
+// stepTheNextIngestionFails recorded until it reaches 2 or
+// acceptanceRetryPollTimeout elapses. The mirror is still missing (this
+// scenario never repairs it), so the automatic retry the production
+// Pool's backoff schedules fails again for real, incrementing attempts a
+// second time -- proof of an actual retry, not merely that the row still
+// exists.
+func (h *acceptanceHarness) stepTheJobIsRetried(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.lastFailedJobID == (uuid.UUID{}) {
+		return fmt.Errorf("no ingest job has failed in this scenario yet")
+	}
+	deadline := time.Now().Add(acceptanceRetryPollTimeout)
+	var attempts int
+	for {
+		if err := h.server.pool.QueryRow(ctx,
+			`SELECT attempts FROM ingest_jobs WHERE id = $1`, world.lastFailedJobID).Scan(&attempts); err != nil {
+			return fmt.Errorf("reading attempts for job %s: %w", world.lastFailedJobID, err)
+		}
+		if attempts >= 2 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("job %s for %s was not retried within %s: attempts is still %d", world.lastFailedJobID, world.repo(), acceptanceRetryPollTimeout, attempts)
+		}
+		time.Sleep(acceptanceRetryPollInterval)
+	}
 }
 
 // assertEnvelopeRef checks every ingested entry names repo, target, and

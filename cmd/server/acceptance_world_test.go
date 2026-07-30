@@ -184,6 +184,18 @@ type acceptanceWorld struct {
 	lastEnrolledRepo  *adminv1.EnrolledRepo
 	lastProbeBranches []string
 	lastProbeHead     string
+	// The reindex/Jobs-view/failed-ingest state (acceptance_ingest_test.go,
+	// loam-7d0). lastReindexJob is ReindexRepo's own response job, for "a
+	// full ingest job runs for it" to confirm the SAME target branch
+	// against; lastIngestJobs is the page "I open the Jobs view" most
+	// recently read. ingestedRefBeforeFailure and lastFailedJobID record
+	// the pre-failure baseline and the specific job row a deliberately
+	// broken ingest produced, so "the job is retried"/"is shown as failed"
+	// assert on THIS job rather than merely the latest one for the repo.
+	lastReindexJob           *adminv1.IngestJob
+	lastIngestJobs           []*adminv1.IngestJob
+	ingestedRefBeforeFailure string
+	lastFailedJobID          uuid.UUID
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.
