@@ -90,7 +90,9 @@ CI (`.github/workflows/ci.yml`) runs gofmt, build, vet, test -race, and buf
 lint on every push/PR, on both ubuntu-latest and macos-latest, plus a
 generated-code drift check (fails if `buf generate`/`go generate` produce
 an uncommitted diff, now also covering `web/src/gen` via `go tool buf
-generate --template web/buf.gen.yaml`). A separate `web` job (also both
+generate --template web/buf.gen.yaml`), plus a `go mod tidy` drift check
+(loam-j09k: the generated-code check can't catch a stale require block,
+since nothing it runs rewrites go.mod). A separate `web` job (also both
 ubuntu-latest and macos-latest) runs the admin SPA's own gates — `npm ci`,
 `tsc --noEmit`, `npm test` (vitest), `npm run build` — under `web/`; see
 `docs/web-frontend-spec.md` for the dev-proxy workflow.
