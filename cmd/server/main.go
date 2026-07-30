@@ -338,7 +338,10 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	// own doc comment for why (loam-48y, mirroring this file's own
 	// loam-ofg.18 comment above about STARTUP ordering, in the other
 	// direction).
-	background := multiRunner{ingestPool, syncScheduler}
+	background := newMultiRunner(cfg.Logger,
+		member{name: "ingest pool", runner: ingestPool},
+		member{name: "sync scheduler", runner: syncScheduler},
+	)
 	if onReady != nil {
 		onReady(pool, ingestPool, hookBinaryPath)
 	}
