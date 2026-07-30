@@ -81,6 +81,51 @@ export const test = base;
 export { expect };
 
 /**
+ * Sets a host's upstream token by calling
+ * `CredentialService.SetUpstreamToken` directly over a plain, bare `fetch()`
+ * -- deliberately NOT through Playwright's `page`, `context`, or `request`
+ * fixtures (loam-s6mh).
+ *
+ * Those three are all wired into the running test's trace recording, and
+ * a real credential that passes through any of them shows up in a failure
+ * artefact in triplicate, all confirmed directly by forcing a real
+ * failure and grepping the result (see credentials.e2e.ts's own top-of-file
+ * doc comment for the full repro): the action log
+ * (`fill("<token>")`'s own argument), a DOM snapshot of the input's live
+ * value (a `type="password"` mask is a rendering hint the snapshotter does
+ * not honour -- the value is captured verbatim regardless), and the raw
+ * body of any traced network request. A bare `fetch()` call has no
+ * relationship to Playwright's Chromium instance or any of its
+ * instrumented request contexts, so none of the three ever see it: this
+ * function is how a spec proves a real token's REAL server-side effect
+ * without ever putting the token where a trace/error-context capture could
+ * find it.
+ *
+ * Uses the same admin Basic-auth pair playwright.config.ts hands the
+ * browser via `use.httpCredentials` (env-sourced; see that file for why
+ * the SPA requires it before any JS runs), reconstructed here because this
+ * call bypasses the browser -- and its native credential prompt -- entirely.
+ */
+export async function setUpstreamTokenOutOfBand(host: string, token: string): Promise<{ validated: boolean }> {
+  const baseURL = process.env["LOAM_E2E_BASE_URL"] ?? "http://127.0.0.1:8099";
+  const adminUser = process.env["LOAM_E2E_ADMIN_USER"] ?? "admin";
+  const adminPassword = requireEnv("LOAM_E2E_ADMIN_PASSWORD");
+  const basicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
+  const res = await fetch(`${baseURL}/loam.admin.v1.CredentialService/SetUpstreamToken`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${basicAuth}` },
+    body: JSON.stringify({ host, token }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `setUpstreamTokenOutOfBand: SetUpstreamToken for ${host} returned ${res.status} ${await res.text()}`,
+    );
+  }
+  const body = (await res.json()) as { status?: { validated?: boolean } };
+  return { validated: body.status?.validated ?? false };
+}
+
+/**
  * Polls `RepoAdminService.ListRepos` (over Connect's JSON protocol via a
  * plain POST + `Content-Type: application/json` -- connect-go registers
  * the JSON codec by default and cmd/server passes no HandlerOptions, the

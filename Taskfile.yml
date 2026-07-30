@@ -412,9 +412,32 @@ tasks:
           done
           for stop_pid in $(find_server_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
         }
+        # loam-s6mh: explicitly revokes the seeded Forgejo token before the
+        # compose stack (and the sqlite DB backing it) goes away, rather
+        # than relying only on that teardown to make it unusable. Belt and
+        # suspenders: `compose down -v` already destroys the container's
+        # own storage (deploy/docker-compose.e2e.yml defines no volumes for
+        # the forgejo service, so there is nothing for `-v` to even need to
+        # remove -- the token dies with the container regardless), but this
+        # runs first, while the container is still reachable, so the token
+        # is dead even if compose down is slow, partially fails (its own
+        # `|| true` below would otherwise mask that silently), or a future
+        # change gives the service a volume that outlives `down`. Uses the
+        # admin's password, not the token itself: Forgejo's delete-token
+        # endpoint takes Basic auth, not the bearer token being deleted
+        # (verified directly against a real Forgejo 9.0.3 -- 204, then a
+        # subsequent request with the same token 401s). Best-effort and
+        # silent on failure like the rest of this cleanup -- a run where
+        # the container never came up has no token to revoke either.
+        revoke_forgejo_token() {
+          [ -z "${forgejo_token:-}" ] && return 0
+          curl -sS -o /dev/null -m 5 -u "$forgejo_admin_user:$forgejo_admin_password" -X DELETE \
+            "http://127.0.0.1:$forgejo_port/api/v1/users/$forgejo_admin_user/tokens/e2e" >/dev/null 2>&1 || true
+        }
         cleanup() {
-          echo "=== test:e2e cleanup: stopping server, tearing down compose stack, removing temp dirs ==="
+          echo "=== test:e2e cleanup: stopping server, revoking the seeded forge token, tearing down compose stack, removing temp dirs ==="
           stop_server
+          revoke_forgejo_token
           compose down -v --remove-orphans >/dev/null 2>&1 || true
           [ -n "$data_dir" ] && rm -rf "$data_dir"
           [ -n "$workspace" ] && rm -rf "$workspace"
@@ -456,8 +479,19 @@ tasks:
         docker exec -u git "$forgejo_container" forgejo admin user create \
           --admin --username "$forgejo_admin_user" --password "$forgejo_admin_password" \
           --email "$forgejo_admin_email" --must-change-password=false >/dev/null
+        # loam-s6mh: scoped to the two categories this run actually needs
+        # (write:repository for repo create/push/ValidateToken's scope
+        # probe -- internal/forge/forgejo.go's own doc comment --, plus
+        # write:user, which POST /user/repos itself demands: verified
+        # directly against a real Forgejo 9.0.3, `write:repository` alone
+        # 403s repo creation with "required scope(s): [write:user]") rather
+        # than `all` (full admin/org/package/etc access). This token is
+        # already throwaway -- freshly generated every run, for an
+        # ephemeral container `cleanup` below destroys -- but narrowing the
+        # grant is cheap, additive defence-in-depth against the window
+        # between a leaked artefact and that teardown completing.
         forgejo_token="$(docker exec -u git "$forgejo_container" forgejo admin user generate-access-token \
-          -u "$forgejo_admin_user" --token-name e2e --scopes all --raw)"
+          -u "$forgejo_admin_user" --token-name e2e --scopes write:repository,write:user --raw)"
         curl -sS --fail-with-body -X POST \
           -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
           -d "{\"name\":\"$repo_name\",\"auto_init\":true,\"default_branch\":\"$target_branch\",\"private\":true}" \
