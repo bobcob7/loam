@@ -13,6 +13,7 @@ import (
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/fakeforge"
 	"github.com/bobcob7/loam/internal/gitmergetree"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/mirrorreconcile"
 	"github.com/bobcob7/loam/internal/mirrorsync"
@@ -100,7 +101,8 @@ func newAcceptanceAccepter(srv acceptanceServer, transport *gittransport.Transpo
 	logger := acceptanceLogger()
 	repoStore := reposstore.NewStore(gen.New(srv.pool), logger)
 	workBranchStore := workbranchstore.New(gen.New(srv.pool), logger)
-	return mirrorsync.NewStoreProposalAccepter(srv.dataDir, logger, cfg.PRAttribution, repoStore, workBranchStore, workBranchStore, forgeClient, transport)
+	tips := gitref.New(srv.dataDir)
+	return mirrorsync.NewStoreProposalAccepter(srv.dataDir, logger, cfg.PRAttribution, repoStore, workBranchStore, workBranchStore, forgeClient, transport, tips)
 }
 
 // staticTokenCredentialSource is a minimal credentialSource (gittransport's

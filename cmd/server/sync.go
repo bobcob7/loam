@@ -16,6 +16,7 @@ import (
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/forge"
 	"github.com/bobcob7/loam/internal/gitmergetree"
+	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/mirrorsync"
@@ -322,7 +323,12 @@ func buildProposalAccepter(cfg config.Config, pool *pgxpool.Pool, httpClient *ht
 	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
 	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
-	return mirrorsync.NewStoreProposalAccepter(cfg.DataDir, cfg.Logger, cfg.PRAttribution, repos, workBranches, workBranches, tracker, transport), nil
+	// tips resolves the local tip an accept is about to push, recorded as
+	// work_branches.accepted_tip (loam-cgg) -- the same *gitref.Creator type
+	// registerWorkBranchService wires for work-branch ref creation, rooted
+	// at the same LOAM_DATA_DIR.
+	tips := gitref.New(cfg.DataDir)
+	return mirrorsync.NewStoreProposalAccepter(cfg.DataDir, cfg.Logger, cfg.PRAttribution, repos, workBranches, workBranches, tracker, transport, tips), nil
 }
 
 // buildUpstreamPRCloser constructs the *mirrorsync.StorePRPoller the admin
