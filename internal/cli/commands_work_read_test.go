@@ -245,6 +245,34 @@ func TestRunWorkShow_Success_EncodesFullMetadata(t *testing.T) {
 	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
 	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
 		"description":"adds a login form","state":"reviewable","author":"grace-hopper-3-author"}`, jsonOf(t, encoded))
+	assert.NotContains(t, jsonOf(t, encoded), `"round"`, "no round on the response means the JSON must omit the key entirely, not render a zeroed round")
+}
+
+// TestRunWorkShow_WithReviewRound_IncludesRound proves the opposite side of
+// the absent/present distinction: once GetWorkBranchResponse carries a
+// round, `work show` surfaces its number and requested_by exactly
+// (docs/cli-spec.md -> show's `"round": { "number": 2, "requested_by": "..." }`
+// example), matching Thread.round and Comment.round's naming (loam-ofg.9).
+func TestRunWorkShow_WithReviewRound_IncludesRound(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{
+				WorkBranch: &loamv1.WorkBranch{
+					Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+					Description: "adds a login form", Author: "grace-hopper-3-author",
+					State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
+				},
+				Round: &loamv1.GetWorkBranchResponse_Round{Number: 2, RequestedBy: "grace-hopper-3-author"},
+			}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
+		"description":"adds a login form","state":"reviewable","author":"grace-hopper-3-author",
+		"round":{"number":2,"requested_by":"grace-hopper-3-author"}}`, jsonOf(t, encoded))
 }
 
 // TestRunWorkShow_AcceptedProposal_ReportsItsUpstreamPRURL proves an agent

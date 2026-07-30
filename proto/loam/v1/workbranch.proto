@@ -114,6 +114,25 @@ message GetWorkBranchRequest {
 
 message GetWorkBranchResponse {
   WorkBranch work_branch = 1;
+  // The work branch's current review round. Unset for a branch with no round
+  // yet (e.g. still DRAFT) -- absent, not a zeroed Round, so a caller can
+  // distinguish "no round" from round 0 (docs/cli-spec.md -> "show"). A new
+  // nested message rather than fields on WorkBranch itself, since a round is
+  // this response's view of review state, not a property of the branch row.
+  Round round = 2;
+
+  // A work branch's current review round: the number and who requested it.
+  // Field names and semantics match Thread.round and Comment.round
+  // (proto/loam/v1/common.proto), which loam-ofg.9 added for the same
+  // concept.
+  message Round {
+    // Incremented each time review is requested (docs/persistence-spec.md ->
+    // review_rounds).
+    uint32 number = 1;
+    // Agent identifier of whoever requested this round, or "admin" for an
+    // admin send-back.
+    string requested_by = 2;
+  }
 }
 
 message GetWorkBranchDiffRequest {
