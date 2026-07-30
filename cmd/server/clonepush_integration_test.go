@@ -24,7 +24,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -156,7 +155,7 @@ func startServerWithDataDir(t *testing.T, databaseURL, dataDir string) *runningS
 	cmd := exec.Command(serverBinary)
 	cmd.Env = env
 	cmd.ExtraFiles = []*os.File{listenerFile}
-	var stderr bytes.Buffer
+	var stderr syncBuffer
 	cmd.Stderr = &stderr
 	require.NoError(t, cmd.Start())
 	require.NoError(t, listenerFile.Close()) // the child has its own dup from ExtraFiles

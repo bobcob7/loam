@@ -137,11 +137,38 @@ func newPostgresContainer(t *testing.T) (*postgres.PostgresContainer, string) {
 // path write. A test asserting on log CONTENT (e.g. that a secret never
 // reaches a log line, credential_integration_test.go) must read stdout;
 // reading stderr would find it empty and pass vacuously.
+// syncBuffer is a bytes.Buffer guarded for concurrent use. It exists
+// because os/exec copies a child's stdout/stderr into whatever io.Writer it
+// is handed FROM ITS OWN GOROUTINE, while serverLog() and waitForReady()
+// read the same buffer from the test goroutine -- an unsynchronised
+// bytes.Buffer there is a genuine data race, not a theoretical one. It went
+// unseen because every integration run in this repo used
+// `go test -tags=integration` WITHOUT -race; `task test:integration` does
+// pass -race (its own comment says this tag is exactly where the concurrent
+// code lives), and caught it the first time that gate actually ran
+// (loam-li0.12).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 type runningServer struct {
 	cmd    *exec.Cmd
 	addr   string
-	stdout *bytes.Buffer
-	stderr *bytes.Buffer
+	stdout *syncBuffer
+	stderr *syncBuffer
 }
 
 // shortDataDir returns a fresh, short-named temp directory for
@@ -206,7 +233,7 @@ func startServerWithEnv(t *testing.T, databaseURL string, extraEnv ...string) *r
 	cmd := exec.Command(serverBinary)
 	cmd.Env = env
 	cmd.ExtraFiles = []*os.File{listenerFile}
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr syncBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	require.NoError(t, cmd.Start())
@@ -233,7 +260,7 @@ func startServerWithEnv(t *testing.T, databaseURL string, extraEnv ...string) *r
 // sleep, rather than a tick/hook, is the same honest exemption the
 // previous version of this helper (waitForListening) documented: there is
 // no deterministic hook to drive an external OS process's startup with.
-func waitForReady(t *testing.T, addr string, stderr *bytes.Buffer) {
+func waitForReady(t *testing.T, addr string, stderr *syncBuffer) {
 	t.Helper()
 	client := newIsolatedHTTPClient(t)
 	client.Timeout = 200 * time.Millisecond
