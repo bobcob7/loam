@@ -195,9 +195,9 @@ type acceptanceWorld struct {
 	// fingerprint to check. It is nilled out the moment it is consumed, so a
 	// scenario with two denials in a row (start, then push) can never let
 	// the second "Then" vacuously re-check the first attempt's outcome.
-	lastRoles        []*adminv1.Role
-	customRole       string
-	lastDenialCheck  func() error
+	lastRoles       []*adminv1.Role
+	customRole      string
+	lastDenialCheck func() error
 	// The instructions/whoami orientation state
 	// (acceptance_instructions_test.go, loam-gp31). currentActor is the
 	// agent identity features/instructions.feature's Background names, so
