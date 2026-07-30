@@ -1,7 +1,18 @@
 name: CI
 
-# Gate set (docs/bead-workflow.md, "Gates"): gofmt, go build, go vet, go test
-# -race, go tool buf lint, plus a generated-code drift check. All of these
+# Gate set (docs/bead-workflow.md, "Gates"; docs/testing-spec.md "CI
+# Stages" per-PR row, loam-li0.12): gofmt, go build, go vet, go test -race,
+# go tool buf lint, and a generated-code drift check, all in the `ci` job
+# below; -tags=integration in `integration`; the godog acceptance suite
+# (vs internal/fakeforge) in `acceptance`. Together these three jobs are
+# what Taskfile.yml's `task test` describes as the aggregate PR gate --
+# go-task itself isn't installed on these runners (see Taskfile.yml's own
+# header comment), so each job inlines the bare command `task test` would
+# otherwise shell out to, rather than invoking `task` directly. The
+# nightly-only suites (provider contract vs a REAL Forgejo, e2e smoke,
+# Playwright) are a separate workflow, .github/workflows/nightly.yml, per
+# that same CI Stages table's "tens of minutes" budget vs. per-PR's
+# "minutes." All of the `ci`/`integration`/`acceptance` jobs' commands
 # require CGO_ENABLED=1 and a C compiler: internal/parser binds tree-sitter
 # grammars via cgo (vendored C sources, statically linked — no external
 # tree-sitter system library needed), and `./...` sweeps that package in for
@@ -214,7 +225,14 @@ jobs:
     # needs a Docker-capable host. ubuntu-latest GitHub-hosted runners ship
     # one; macos-latest hosted runners do not, so unlike the `ci` job above
     # this does not run a macOS leg.
+    #
+    # timeout-minutes (loam-li0.12 bead notes, folding in the loam-66a
+    # review's hardening item): in practice bounded by Go's default
+    # 10-minutes-per-test-binary, but the GitHub Actions job-level default
+    # is SIX HOURS, and a hung container wait (e.g. a Docker daemon that
+    # never becomes ready) would otherwise burn all of it before failing.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -230,7 +248,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go test -tags=integration -count=1 ./...
+      - name: go test -tags=integration -race -count=1 ./...
         # Do NOT set TESTCONTAINERS_RYUK_DISABLED here. That env var is a
         # local-podman-only workaround (podman's Docker-compat API can't
         # resolve ryuk's expected `bridge` network); GitHub-hosted runners
@@ -239,6 +257,14 @@ jobs:
         # exactly the failure modes it exists to catch: SIGKILL, a step
         # timeout, or a -timeout panic, none of which run t.Cleanup. See
         # internal/db/migrations/integration_test.go.
+        #
+        # -race (loam-li0.12 bead notes, folding in the loam-66a review's
+        # hardening item): this build tag is exactly where the concurrent
+        # code lives (loam-c94.1's per-repo serialization, loam-giq.9's
+        # state writes), and it's only exercisable against a real database
+        # -- a data race reachable only under -tags=integration would go
+        # unseen if this job ran without -race while the `ci` job's plain
+        # `go test ./... -race` above did not cover it.
         #
         # -count=1 (loam-h3x): the `Set up Go` step above runs with
         # cache: true, and actions/setup-go's cache covers `go env GOCACHE`
@@ -252,7 +278,7 @@ jobs:
         # env/file reads) are unchanged since the last run would replay a
         # cached "ok" and skip starting its container, same false-green
         # hole as Taskfile.yml's test:integration (loam-h3x, loam-ejr).
-        run: go test -tags=integration -count=1 ./...
+        run: go test -tags=integration -race -count=1 ./...
 
       - name: Sweep leaked testcontainers (ryuk failure backstop)
         # Runs even when the test step above failed or the job was
@@ -267,6 +293,69 @@ jobs:
         # ryuk is enabled: TESTCONTAINERS_RYUK_DISABLED would silently
         # disable both backstops at once, which is one more reason not to
         # set it here (see the step above).
+        if: always()
+        run: |
+          leaked="$(docker ps -aq --filter "label=org.testcontainers.reap=true")"
+          if [ -n "$leaked" ]; then
+            echo "::warning::Removing containers left behind by a failed ryuk run: $leaked"
+            docker rm -f $leaked
+          else
+            echo "No leaked testcontainers containers found."
+          fi
+
+  acceptance:
+    name: acceptance tests (godog, fake forge, real Postgres via testcontainers)
+    # docs/testing-spec.md Layer 1 (loam-li0.5) / CI Stages (loam-li0.12):
+    # the godog suite against cmd/server's own in-process run() plus the
+    # compiled `loam` CLI as a real subprocess per actor, run with
+    # internal/fakeforge standing in for the upstream (the real-Forgejo
+    # half of the provider contract is a NIGHTLY-only leg -- see
+    # .github/workflows/nightly.yml -- not this job). This is the exact
+    # command Taskfile.yml's test:acceptance target wraps, and until this
+    # job existed the suite ran on no CI runner at all: `task test` in
+    # Taskfile.yml documents it as part of the per-PR gate, but go-task
+    # itself isn't installed here (see this workflow's other jobs), so
+    # this job is what actually enforces it, in parallel with `ci` and
+    # `integration` above rather than depending on them -- there is no
+    # ordering requirement between the three.
+    #
+    # Real Postgres via testcontainers-go needs a Docker-capable host,
+    # same constraint as `integration` above, so this also does not run a
+    # macOS leg.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -tags=acceptance -count=1 ./cmd/server/... -run TestFeatures -v
+        # Do NOT set TESTCONTAINERS_RYUK_DISABLED here, same reasoning as
+        # the `integration` job above: this runner has a real Docker
+        # daemon, so ryuk works, and disabling it would remove the
+        # backstop for SIGKILL/timeout/panic cases that skip t.Cleanup.
+        #
+        # -count=1, same reasoning as `integration` above and
+        # Taskfile.yml's own test:acceptance comment: the container/server
+        # boot is the thing under test, and Go's test cache can't tell a
+        # stale replayed "ok" apart from a genuine rerun.
+        #
+        # ~@wip is godog's own default tag expression (features/*.feature,
+        # docs/testing-spec.md "@wip as bead acceptance criteria") -- no
+        # extra flag needed here to exclude still-@wip scenarios.
+        run: go test -tags=acceptance -count=1 ./cmd/server/... -run TestFeatures -v
+
+      - name: Sweep leaked testcontainers (ryuk failure backstop)
         if: always()
         run: |
           leaked="$(docker ps -aq --filter "label=org.testcontainers.reap=true")"

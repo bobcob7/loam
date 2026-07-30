@@ -1,0 +1,204 @@
+name: Nightly
+
+# docs/testing-spec.md "CI Stages": the nightly row -- provider contract vs.
+# a REAL Forgejo, e2e smoke, and Playwright, budgeted "tens of minutes" vs.
+# the per-PR gate's "minutes" (.github/workflows/ci.yml). Before this
+# workflow existed, all three ran on no CI runner at all: the only mentions
+# of "Playwright" in ci.yml were inside an unrelated comment, and
+# `task test:contract:forgejo` / `task test:e2e` / `task test:e2e:golden`
+# were developer-machine-only commands -- a gate that reads as enforced but
+# isn't (loam-li0.12).
+#
+# Three independent jobs below, each on its own GitHub-hosted runner (so,
+# unlike a single resource-constrained local host, there is no reason to
+# serialize them): the real-Forgejo half of the provider contract suite
+# (loam-li0.9), the compose-based e2e golden path + conflict/catch-up/
+# re-accept variant (loam-li0.10), and the compose-based Playwright admin
+# journeys (loam-li0.11) -- test:e2e already boots that stack and runs
+# Playwright as its own last step, so there is no separate "Playwright job"
+# to add.
+#
+# go-task is NOT installed on GitHub-hosted runners (see Taskfile.yml's own
+# header comment on why it's deliberately not a pinned go.mod tool). The
+# e2e/e2e:golden jobs below install it explicitly, pinned to a specific
+# version, rather than re-implementing their ~150-line scripted stacks
+# inline in workflow YAML -- Taskfile.yml is the single source of truth for
+# those scripts, and copy-pasting them here would let the two drift apart
+# silently. The contract:forgejo job is a one-line command and is inlined
+# directly instead, matching ci.yml's own convention for simple steps.
+#
+# Triggers: a nightly schedule, workflow_dispatch for an on-demand run, and
+# a `v*` tag push -- docs/testing-spec.md's "Pre-release" stage is defined
+# as "re-run the full nightly set, green required" before a release tag,
+# and this workflow's three jobs ARE that full nightly set, so a tag push
+# reuses them rather than needing a fourth, separate pre-release workflow.
+
+on:
+  schedule:
+    # 07:00 UTC daily. GitHub Actions schedules run on a best-effort basis
+    # and can be delayed under load; there is no per-PR latency requirement
+    # here the way there is for ci.yml, so that slop is acceptable.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  # Scoped by ref (not just workflow name) so a schedule run on main and a
+  # tag-push run on a release tag never contend for the same group; NOT
+  # cancel-in-progress, unlike ci.yml -- a nightly or pre-release run that's
+  # already partway through a ~tens-of-minutes suite should finish and
+  # report, not be cancelled by a second trigger arriving mid-run.
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CGO_ENABLED: "1"
+  # Pinned go-task version (loam-li0.12) -- matches the version already in
+  # use locally when this workflow was written. Bump deliberately, not as a
+  # side effect of an unrelated change.
+  GO_TASK_VERSION: "v3.52.0"
+
+jobs:
+  contract-forgejo:
+    name: provider contract vs real Forgejo (nightly)
+    # loam-li0.9 / internal/forgesuite: the same assertions the per-PR
+    # `acceptance`/`integration` jobs already run against internal/fakeforge
+    # (via the plain `-tags=integration` suite), re-run here against a real
+    # Forgejo 9.0.3 in a container -- Taskfile.yml's test:contract:forgejo
+    # target, inlined directly since it's a single command line. Needs a
+    # Docker-capable host; ubuntu-latest GitHub-hosted runners ship one.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: LOAM_TEST_FORGEJO=1 go test -tags=integration -count=1 ./internal/forgesuite/... -v
+        # LOAM_TEST_FORGEJO=1 is what turns this leg on at all (see
+        # Taskfile.yml's test:contract:forgejo desc): without it the suite
+        # SKIPS with a banner, which is exactly why this leg needs its own
+        # explicit CI job rather than trusting it rides along inside
+        # `-tags=integration` elsewhere. Do NOT set
+        # TESTCONTAINERS_RYUK_DISABLED -- this runner has a real Docker
+        # daemon, same reasoning as ci.yml's `integration`/`acceptance`
+        # jobs. -count=1 for the same reason as those jobs: the container
+        # boot is the thing under test.
+        run: LOAM_TEST_FORGEJO=1 go test -tags=integration -count=1 ./internal/forgesuite/... -v
+
+      - name: Sweep leaked testcontainers (ryuk failure backstop)
+        if: always()
+        run: |
+          leaked="$(docker ps -aq --filter "label=org.testcontainers.reap=true")"
+          if [ -n "$leaked" ]; then
+            echo "::warning::Removing containers left behind by a failed ryuk run: $leaked"
+            docker rm -f $leaked
+          else
+            echo "No leaked testcontainers containers found."
+          fi
+
+  e2e:
+    name: e2e smoke + Playwright admin journeys (nightly)
+    # Taskfile.yml's test:e2e: brings up deploy/docker-compose.e2e.yml
+    # (Postgres/pgvector + a real, seeded Forgejo), builds the real
+    # server/loam/loamhook binaries with the REAL embedded admin SPA
+    # (task build:bin -> web:build), boots the server against that stack,
+    # then runs the Playwright admin-journey suite (web/e2e) against it --
+    # see that task's own desc in Taskfile.yml for the full step-by-step.
+    # This is the ONLY place any of that (including Playwright) runs in
+    # CI. Needs Docker + the `docker compose` plugin (ubuntu-latest ships
+    # both) and Node (for the Playwright browser + suite).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install go-task (pinned; not present on GitHub-hosted runners)
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: task web:e2e:install
+        # Separate step, matching Taskfile.yml's own note on this task:
+        # installs the pinned Playwright Chromium build (+ OS deps via
+        # --with-deps) that test:e2e below requires but deliberately does
+        # not trigger itself.
+        run: task web:e2e:install
+
+      - name: task test:e2e
+        run: task test:e2e
+
+  e2e-golden:
+    name: e2e golden path + conflict/catch-up/re-accept (nightly)
+    # Taskfile.yml's test:e2e:golden: the golden path PLUS the
+    # conflict/catch-up/re-accept variant, scripted directly over the real
+    # compiled CLI + the admin API -- no godog, no Playwright (that is the
+    # `e2e` job above). Reuses the same compose file as `e2e` but under a
+    # distinct compose project name, and this job runs on its own isolated
+    # GitHub-hosted runner regardless, so the two never contend for the
+    # same host the way two concurrent local runs would (see that task's
+    # own desc in Taskfile.yml on namespacing making concurrency legal, not
+    # affordable, on a resource-constrained local host -- not a constraint
+    # this separate runner has). No Node/npm needed here (see that task's
+    # own desc: "there is no Playwright here").
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install go-task (pinned; not present on GitHub-hosted runners)
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: task test:e2e:golden
+        run: task test:e2e:golden
