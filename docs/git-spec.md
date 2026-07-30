@@ -115,7 +115,7 @@ Middleware authorizes the operation before any git process runs:
 
 The mirror's refs fall into two classes:
 
-- **Mirrored refs** — target branches and every other upstream ref. **Read-only to
+- **Mirrored refs** — target branches and tags. **Read-only to
   agents**; owned by upstream sync (upstream-wins). Without this rule, anything writable
   here would silently corrupt the mirror until the next sync clobbered it.
 - **Work-branch refs** — `refs/heads/loam-reserved/<name>` where `<name>` is a registered
@@ -127,11 +127,14 @@ The mirror's refs fall into two classes:
 by Loam itself, and **upstream refs under that path are consequently not mirrored** — the
 mirror fetch excludes the whole subtree structurally, so an upstream branch that happened
 to be named `loam-reserved/…` is simply never carried in. That is the one carve-out from
-"target branches and every other upstream ref" above.
+"target branches and tags" above.
 
-The namespace exists because the mirror fetch is a **pruning** fetch of `+refs/*:refs/*`
-whose argv — including one negative exclusion per *currently registered* work branch — is
-fixed **before** the network operation begins. A work branch created at any point during
+The namespace exists because the mirror fetch is a **pruning** fetch of
+`+refs/heads/*:refs/heads/*` and `+refs/tags/*:refs/tags/*` (`loam-5f3` narrowed this from
+the `git clone --mirror`-equivalent `+refs/*:refs/*`, which also pulled in `refs/pull/*`,
+`refs/notes/*`, and `refs/replace/*` — nothing Loam reads, and the last of which would
+otherwise silently alter object visibility) whose argv — including one negative exclusion
+per *currently registered* work branch — is fixed **before** the network operation begins. A work branch created at any point during
 that fetch is absent from the enumerated exclusions, and its brand-new, purely-local ref
 is therefore a prune candidate; no colliding upstream name is needed. The loss is
 unrecoverable: `work_branches` carries no SHA column and a bare mirror has no reflog, so

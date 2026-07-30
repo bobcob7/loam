@@ -226,6 +226,38 @@ func TestMirrorFetcherExcludesWorkBranchRefFromPrune(t *testing.T) {
 	assert.Equal(t, seedSHA, postSHA, "an upstream deletion of a same-named branch must never prune the excluded work-branch ref")
 }
 
+// TestMirrorFetcherNarrowsPositiveRefspecToBranchesAndTags is loam-5f3's
+// whole point: seed an upstream carrying refs/pull/* and refs/replace/*
+// (namespaces `git clone --mirror`'s own "+refs/*:refs/*" would carry into
+// the mirror) alongside an ordinary tag, fetch, and assert the tag and
+// the target branch arrived while both non-branch/tag namespaces did not.
+// A test that only checked the branch still arrives would have passed
+// just as well before this bead's change -- the branch was never in
+// question; the absence of refs/pull and refs/replace is.
+func TestMirrorFetcherNarrowsPositiveRefspecToBranchesAndTags(t *testing.T) {
+	t.Parallel()
+	srv := newFakeForgeServer(t)
+	const token = "narrow-refspec-test-token"
+	srv.AddToken(token)
+	fetcher, mirrorDir, _ := newRealMirrorFetcher(t, srv, token, nil)
+	const replaceRef = "refs/replace/0000000000000000000000000000000000000001"
+	require.NoError(t, srv.CreateRef(t.Context(), "acme/widgets", "refs/tags/v1", ""))
+	require.NoError(t, srv.CreateRef(t.Context(), "acme/widgets", "refs/pull/1/head", ""))
+	require.NoError(t, srv.CreateRef(t.Context(), "acme/widgets", replaceRef, ""))
+
+	_, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
+	require.NoError(t, err)
+
+	_, err = mirrorRevParse(t, mirrorDir, "refs/heads/main")
+	require.NoError(t, err, "the target branch must still be fetched")
+	_, err = mirrorRevParse(t, mirrorDir, "refs/tags/v1")
+	require.NoError(t, err, "tags must still be fetched")
+	_, err = mirrorRevParse(t, mirrorDir, "refs/pull/1/head")
+	assert.Error(t, err, "refs/pull/* must be absent from the mirror -- it is outside the narrowed positive refspec")
+	_, err = mirrorRevParse(t, mirrorDir, replaceRef)
+	assert.Error(t, err, "refs/replace/* must be absent from the mirror -- it is outside the narrowed positive refspec")
+}
+
 // TestMirrorFetcherProtectsAnUNREGISTEREDReservedRefFromPrune is loam-cmq's
 // whole point, and it is the one test in this file the ENUMERATED
 // exclusions cannot pass.

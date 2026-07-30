@@ -45,7 +45,8 @@ type acceptFixture struct {
 const acceptGitToken = "proposal-accept-token"
 
 // newAcceptFixture seeds the forge, initializes the mirror at
-// mirrorpath.Dir(dataDir, repo), and fetches every upstream ref into it --
+// mirrorpath.Dir(dataDir, repo), and fetches every upstream branch and tag
+// into it --
 // the state an enrolled repo is in before any proposal is accepted.
 func newAcceptFixture(t *testing.T) acceptFixture {
 	t.Helper()
@@ -61,7 +62,7 @@ func newAcceptFixture(t *testing.T) acceptFixture {
 	require.NoError(t, os.MkdirAll(filepath.Dir(mirrorDir), 0o755))
 	out, err := acceptVerificationGit(t, "init", "--bare", "-q", mirrorDir)
 	require.NoErrorf(t, err, "git init --bare: %s", out)
-	_, err = transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{allRefsRefspec})
+	_, err = transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{branchesRefspec, tagsRefspec})
 	require.NoError(t, err)
 	return acceptFixture{
 		srv:         srv,
