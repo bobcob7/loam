@@ -58,6 +58,38 @@
 // removing it (not just weakening a cap) and observing the identical
 // fixture hang under a bounded context instead of returning -- see
 // integration_test.go's guard-removal subtests.
+//
+// # Paths versus nodes (loam-9xx)
+//
+// CYCLE-guarded termination is necessary but was not, on its own,
+// sufficient: UNION ALL in the recursive term enumerates every simple PATH
+// reaching a symbol, not every reachable symbol, and CYCLE bounds path
+// LENGTH, not path COUNT. A dense DAG with zero cycles and zero duplicate
+// edges -- several callers converging on one shared utility symbol, or a
+// diamond -- still produces one row per parallel path, and because each
+// iteration joins against the previous iteration's rows, that multiplies
+// hop over hop: k parallel paths reaching a symbol at depth d become k
+// parallel continuations at depth d+1, so intermediate row counts grow as
+// (branching factor)^depth even though the final, deduplicated answer is
+// small. Dependents/Deps fix this with a node-level SELECT DISTINCT inside
+// the recursive term (internal/db/queries/code_graph.sql), collapsing every
+// arrival at the same (symbol_id, depth) within one iteration to a single
+// row before it feeds the next iteration -- deduplicating reached NODES
+// rather than accumulating PATHS, which is what these queries mean to
+// answer in the first place ("which symbols can reach this one," a set).
+// This is NOT a depth cap and does not change CYCLE's role: a genuine
+// cycle revisits the same symbol_id at a strictly larger depth each pass,
+// so its rows are never literal (symbol_id, depth) duplicates within a
+// single iteration and SELECT DISTINCT has nothing to collapse there --
+// CYCLE alone still terminates it, and SELECT DISTINCT alone would not
+// (TestDependentsCTE_GuardRemovedHangs proves this by removing only CYCLE
+// from an otherwise-identical, DISTINCT-bearing copy of the query and
+// observing the same hang). TestDependentsCTE_DiamondFixture_
+// BoundedIntermediateRows proves the DISTINCT half separately: a fixture
+// with a known combinatorial blast radius (no cycles at all) completes
+// with a bounded intermediate row count, and reverting the recursive
+// term's DISTINCT back to plain UNION ALL makes that row-count assertion
+// fail.
 package codegraph
 
 import (

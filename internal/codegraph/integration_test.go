@@ -459,6 +459,104 @@ func TestDependents_NearestDepthFirst_NotUUIDOrder(t *testing.T) {
 	}
 }
 
+// TestDependentsCTE_DiamondFixture_BoundedIntermediateRows is loam-9xx's
+// proof that the recursive term's node-level "SELECT DISTINCT"
+// (internal/db/queries/code_graph.sql) is not a no-op. It builds a genuine
+// two-layer diamond -- no cycles anywhere, no duplicate edges anywhere --
+// where path-enumeration multiplies the recursive term's OWN row count at
+// every convergence point:
+//
+//	deepest <- mid_0..mid_{midCount-1}        (depth 1: midCount distinct symbols)
+//	mid_i   <- shared, for every i             (depth 2: ONE symbol, reached via
+//	                                             midCount parallel paths)
+//	shared  <- outer_0..outer_{outerCount-1}   (depth 3: outerCount distinct symbols)
+//	outer_j <- top, for every j                (depth 4: ONE symbol, reached via
+//	                                             outerCount parallel paths from
+//	                                             shared and midCount*outerCount
+//	                                             parallel paths from deepest)
+//
+// A correctness-only assertion on Dependents' final result would pass
+// identically whether or not the DISTINCT fix is present, because the
+// query's own trailing "DISTINCT ON (symbol_id)" dedup subquery already
+// collapses the final output regardless -- that is precisely the
+// "duplicating only at the end hides the symptom" failure mode
+// ResolveGraphEdgeCandidates' own comment warns about, one layer up the
+// stack. This test additionally counts the RAW row count the recursive
+// term itself produces (before that trailing dedup), which is exactly
+// where path-enumeration's blowup lives and exactly what a plain UNION ALL
+// recursive term (this test's designed mutation, see the next test's
+// sibling in this bead's report) would fail on.
+func TestDependentsCTE_DiamondFixture_BoundedIntermediateRows(t *testing.T) {
+	t.Parallel()
+	store, pool, repoID := newTestStore(t)
+	ctx, cancel := context.WithTimeout(t.Context(), cycleTestTimeout)
+	defer cancel()
+	const midCount = 5
+	const outerCount = 5
+	deepest := insertSymbol(ctx, t, pool, repoID, "deepest.go", "Deepest")
+	mids := make([]uuid.UUID, midCount)
+	for i := range midCount {
+		mids[i] = insertSymbol(ctx, t, pool, repoID, fmt.Sprintf("mid%d.go", i), fmt.Sprintf("Mid%d", i))
+		insertEdge(ctx, t, pool, repoID, mids[i], deepest)
+	}
+	shared := insertSymbol(ctx, t, pool, repoID, "shared.go", "Shared")
+	for i := range midCount {
+		insertEdge(ctx, t, pool, repoID, shared, mids[i])
+	}
+	outers := make([]uuid.UUID, outerCount)
+	for j := range outerCount {
+		outers[j] = insertSymbol(ctx, t, pool, repoID, fmt.Sprintf("outer%d.go", j), fmt.Sprintf("Outer%d", j))
+		insertEdge(ctx, t, pool, repoID, outers[j], shared)
+	}
+	top := insertSymbol(ctx, t, pool, repoID, "top.go", "Top")
+	for j := range outerCount {
+		insertEdge(ctx, t, pool, repoID, top, outers[j])
+	}
+	// (i) the FINAL answer must be exactly the expected node set, no
+	// symbol appearing more than once -- necessary but not sufficient on
+	// its own, see the doc comment above.
+	deps, truncated, err := store.Dependents(ctx, repoID, "main", deepest, 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	wantIDs := make([]uuid.UUID, 0, midCount+outerCount+2)
+	wantIDs = append(wantIDs, mids...)
+	wantIDs = append(wantIDs, outers...)
+	wantIDs = append(wantIDs, shared, top)
+	gotIDs := symbolIDs(deps)
+	assert.ElementsMatch(t, wantIDs, gotIDs, "Dependents(deepest) must be exactly {mids, shared, outers, top}, once each")
+	assert.Len(t, gotIDs, len(wantIDs), "no symbol may appear more than once in the final result")
+	// (ii) the signal path-enumeration actually fails: the recursive
+	// term's OWN row count, read directly, before the final "DISTINCT ON
+	// (symbol_id)" dedup subquery ever runs. Mirrors the real Dependents
+	// query's recursive term exactly, including loam-9xx's DISTINCT.
+	const recursiveTermOnly = `
+WITH RECURSIVE dependents(symbol_id, depth) AS (
+    SELECT ge.from_symbol_id, 1
+    FROM graph_edges ge
+    WHERE ge.repo_id = $1 AND ge.target_branch = $2 AND ge.to_symbol_id = $3
+  UNION ALL
+    SELECT DISTINCT ge.from_symbol_id, d.depth + 1
+    FROM graph_edges ge
+    JOIN dependents d ON ge.to_symbol_id = d.symbol_id
+    WHERE ge.repo_id = $1 AND ge.target_branch = $2
+) CYCLE symbol_id SET is_cycle USING visited_path
+SELECT count(*) FROM dependents`
+	var rowCount int
+	require.NoError(t, pool.QueryRow(ctx, recursiveTermOnly, repoID, "main", deepest).Scan(&rowCount))
+	// boundedByFix: one row per mid (depth 1) and per outer (depth 3), plus
+	// exactly one row each for shared (depth 2) and top (depth 4) despite
+	// each having several parallel incoming paths -- flat, not compounding.
+	const boundedByFix = midCount + 1 + outerCount + 1
+	// wouldBeUnderPathEnumeration: shared duplicated once per mid at depth
+	// 2 (midCount rows), then every outer AND top duplicated once per
+	// shared-copy/outer-copy at depths 3 and 4 (midCount*outerCount rows
+	// each) -- this is the k^depth growth code_graph.sql's Dependents
+	// comment and this package's doc comment describe.
+	const wouldBeUnderPathEnumeration = midCount + midCount + midCount*outerCount + midCount*outerCount
+	require.Less(t, boundedByFix, wouldBeUnderPathEnumeration, "the fixture must actually be capable of demonstrating a blowup, or this test proves nothing")
+	assert.Equal(t, boundedByFix, rowCount, "the recursive term's own row count must stay flat across the diamond's two convergence points (want %d), not grow toward path-enumeration's %d -- a plain UNION ALL recursive term with no node-level DISTINCT hits the larger number", boundedByFix, wouldBeUnderPathEnumeration)
+}
+
 // TestDependentsCTE_GuardRemovedHangs is the mutation test: it runs the
 // EXACT graph fixture that TestDependentsCycleSafety_MutualRecursion
 // proves terminates correctly, but through a hand-inlined copy of the
@@ -495,10 +593,21 @@ func TestDependentsCTE_GuardRemovedHangs(t *testing.T) {
 	insertEdge(t.Context(), t, pool, repoID, b, a)
 
 	// Identical to the Dependents query in internal/db/queries/code_graph.sql
+	// (INCLUDING loam-9xx's node-level "SELECT DISTINCT" in the recursive
+	// term -- this copy must track that fix, not just the original shape,
+	// to keep proving something about the query production actually runs)
 	// EXCEPT the "CYCLE symbol_id SET is_cycle USING visited_path" clause is
 	// gone and nothing replaces it -- no depth cap, no row cap. If this
 	// still terminated quickly, it would mean the CYCLE clause was never
-	// the thing stopping the real query, i.e. the guard was decorative.
+	// the thing stopping the real query, i.e. the guard was decorative. The
+	// recursive term's DISTINCT does NOT fill in for the missing CYCLE
+	// clause here: this fixture is a 2-node mutual-recursion cycle, so
+	// every iteration produces exactly one candidate row (there is no
+	// parallel-path convergence for DISTINCT to collapse), and the same
+	// symbol_id keeps reappearing at a strictly larger depth each pass --
+	// never a literal (symbol_id, depth) duplicate within one iteration --
+	// so DISTINCT has nothing to remove and this must still hang exactly as
+	// it did before loam-9xx added DISTINCT to the real query.
 	// The LIMIT $4 here is deliberately generous (100000, passed below) and
 	// deliberately NOT a stand-in cycle guard: it sits downstream of the
 	// DISTINCT ON dedup subquery (a blocking sort node, same as the real
@@ -511,7 +620,7 @@ WITH RECURSIVE dependents(symbol_id, depth) AS (
     FROM graph_edges ge
     WHERE ge.repo_id = $1 AND ge.target_branch = $2 AND ge.to_symbol_id = $3
   UNION ALL
-    SELECT ge.from_symbol_id, d.depth + 1
+    SELECT DISTINCT ge.from_symbol_id, d.depth + 1
     FROM graph_edges ge
     JOIN dependents d ON ge.to_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
