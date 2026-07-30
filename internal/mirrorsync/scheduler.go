@@ -317,7 +317,19 @@ func (s *Scheduler) finish(repo RepoID) {
 // property tick's own goroutine-per-repo spawn already gives every
 // enrolled repo, just bounded now across all of them combined.
 func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
+	// defer order matters and is NOT source order: Go runs deferred calls
+	// LIFO, so finish (deferred second) runs before wg.Done (deferred
+	// first) on every exit path, including a panic unwinding through this
+	// function. That preserves the happens-before Scheduler.Tick's
+	// waitIdle barrier depends on (finish, then wg.Done -- see cycle's
+	// doc comment above and Tick's own). Before this, finish was called
+	// un-deferred right before each return: correct on every normal path,
+	// but a panic anywhere in runSteps would skip it entirely while the
+	// deferred wg.Done still ran during unwinding, stranding repo in the
+	// running map forever (loam-qz1). Do not "tidy" these two defers back
+	// into source order -- that silently reintroduces the bug.
 	defer s.wg.Done()
+	defer s.finish(repo)
 	if s.sem != nil {
 		s.sem <- struct{}{}
 		defer func() { <-s.sem }()
@@ -331,13 +343,11 @@ func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
 		if rerr := s.state.ReportError(ctx, repo, err, enqueuedIngest); rerr != nil {
 			s.logger.Error("reporting sync error", "repo", string(repo), "error", rerr)
 		}
-		s.finish(repo)
 		return
 	}
 	if rerr := s.state.ReportIdle(ctx, repo, enqueuedIngest); rerr != nil {
 		s.logger.Error("reporting sync idle", "repo", string(repo), "error", rerr)
 	}
-	s.finish(repo)
 }
 
 // runSteps runs the fixed 5-step Mirror Sync order for repo in order

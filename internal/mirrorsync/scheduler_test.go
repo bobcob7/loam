@@ -423,6 +423,40 @@ func TestScheduler_SyncFailureIsRetriedOnTheNextTick(t *testing.T) {
 	assert.Len(t, h.prs.PollPRsCalls(), 1, "only the successful, second-tick cycle reaches step 5")
 }
 
+// TestScheduler_CycleReleasesGuardEvenOnPanic drives cycle directly,
+// bypassing tick/Run, rather than adding a recover() inside cycle itself
+// (loam-qz1's own notes: cycle deliberately has none -- an unrecovered
+// panic crashing the process is currently the ONLY thing that surfaces a
+// stranded repo, so recovering inside cycle before this fix landed would
+// have traded a loud crash for a silent, permanent one-repo outage; that
+// hardening is loam-lae's job, gated on this bead landing first, not
+// this test's). The test claims the guard and adds to the WaitGroup
+// itself, exactly as tick does before spawning a cycle goroutine, then
+// calls the real, unmodified cycle and recovers the panic one frame up in
+// its own wrapper -- a legitimate place for a recover regardless of what
+// cycle does internally. That exercises cycle's actual defer order
+// end-to-end: if it were reverted to the un-deferred s.finish(repo) this
+// bead replaces, the panic in FetchFunc would skip finish entirely (only
+// the deferred wg.Done would run during unwinding), and the second
+// tryStart below would come back false forever.
+func TestScheduler_CycleReleasesGuardEvenOnPanic(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		panic("collaborator exploded")
+	}
+	require.True(t, h.scheduler.tryStart("repoA"), "precondition: repoA starts unclaimed")
+	h.scheduler.wg.Add(1)
+	func() {
+		defer func() { recover() }()
+		h.scheduler.cycle(ctx, "repoA")
+	}()
+	h.scheduler.waitIdle() // returns immediately: wg.Done must have run despite the panic
+	assert.True(t, h.scheduler.tryStart("repoA"), "repoA must not be stranded in the running map after its cycle panicked")
+}
+
 // TestScheduler_Tick_PropagatesListReposError is loam-hhh's core claim:
 // Tick's error return lets a manual-tick caller tell a ListRepos failure
 // apart from an empty enrollment, unlike the value tick alone (and the
