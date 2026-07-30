@@ -406,8 +406,7 @@ func TestQuery_Dependents_AmbiguousTarget_UnionWithAttribution(t *testing.T) {
 		require.NotNil(t, edge.GetFrom().GetOf(), "an ambiguous target's dependent rows must each name their match in `of` -- a row with no `of` at all is the bug's \"compounding problem\"")
 		assert.Equal(t, "Validate", edge.GetFrom().GetOf().GetSymbol())
 	}
-	// The two rows sharing a dependent (Summarize appears once per resolved
-	// match) must be distinguishable via `of`, not byte-identical.
+	// The two rows sharing a dependent (Summarize appears once per resolved match) must be distinguishable via `of`, not byte-identical.
 	var summarizeOfFiles []string
 	for _, edge := range edges {
 		if edge.GetFrom().GetSymbol() == "Summarize" {
