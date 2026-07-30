@@ -3757,4 +3757,14 @@ tasks:
   proto:breaking:
     desc: Check the schema for breaking changes since the post-reshape baseline (see comment above)
     cmds:
-      - go tool buf breaking --against '.git#ref=22d5ed7'
+      # depth=2000 is load-bearing, not decoration. buf's git input does a
+      # SHALLOW clone of the local .git, and the pinned pre-1.0 baseline
+      # 22d5ed7 is now ~330 commits behind HEAD -- past buf's default depth,
+      # so the checkout inside buf's temp clone fails with
+      #   error: pathspec '22d5ed7' did not match any file(s) known to git
+      # and this target exits non-zero for a reason that has nothing to do
+      # with the proto schema. That was the state on main until loam-1wpa
+      # tripped over it; the target had silently stopped running at all.
+      # If that pathspec error ever returns, the depth needs raising again --
+      # it must exceed the distance from HEAD back to the baseline.
+      - go tool buf breaking --against '.git#ref=22d5ed7,depth=2000'
