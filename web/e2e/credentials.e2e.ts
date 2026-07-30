@@ -1,4 +1,4 @@
-import { e2eEnv, expect, test } from "./fixtures";
+import { e2eEnv, expect, setUpstreamTokenOutOfBand, test } from "./fixtures";
 
 /**
  * The credentials journey (docs/testing-spec.md -> Layer 3 "Admin SPA
@@ -90,20 +90,37 @@ import { e2eEnv, expect, test } from "./fixtures";
  *   token has no alternative, e.g. a header, to carry it out of band). No
  *   change to this spec file closes it.
  *
- *   PROPOSED FIX (not applied here -- a harness-wide concern, not specific
- *   to one spec file): the practical options are (a) a
- *   `page.route()`/`context.route()` interceptor, registered once in
- *   playwright.config.ts or a global setup, that rewrites any `token` field
- *   in a `CredentialService/SetUpstreamToken` request body to a fixed
- *   marker before Playwright's tracing layer ever records it -- this would
- *   need to run early enough to also scrub the DOM-snapshot/action-log
- *   copies, not just the network one, since (2) above shows the leak is
- *   not confined to the network capture; or (b) never run this journey
- *   with a real, live-scoped token in CI -- seed one that is syntactically
- *   valid but already revoked/expired, so a leaked copy is worthless. (a)
- *   is more general and should live in fixtures.ts or playwright.config.ts
- *   once agreed, not duplicated per spec file that happens to submit a
- *   secret.
+ *   FIX APPLIED (loam-s6mh): the real token this file uses is now never
+ *   typed into the browser at all.
+ *     - The "proof of mechanics" test below sets the real token via
+ *       {@link setUpstreamTokenOutOfBand} (./fixtures.ts) -- a bare
+ *       `fetch()` call with no relationship to any Playwright-instrumented
+ *       request context, so none of the three capture points above ever
+ *       see it -- then only loads the page and asserts the rendered
+ *       "Validated" text. This still proves the assertion is real (a real
+ *       server verdict for a real token, rendered by the real UI) without
+ *       putting the token where a trace/error-context capture could find
+ *       it.
+ *     - The "[loam-4kz]" test below never depended on the token's VALUE in
+ *       the first place -- the bug it demonstrates is a host-format defect
+ *       (`apiBaseURL` dialing `https://` at a plaintext listener) that
+ *       fails at the network/dial layer before Forgejo ever inspects the
+ *       Authorization header (see this file's own curl repro above: the
+ *       server log shows a TLS handshake failure, not an auth rejection).
+ *       So it now fills the Token field with a non-secret placeholder
+ *       (`nonSecretProbeToken` below) instead of the real one -- identical
+ *       failure, identical assertions, zero credential value entering the
+ *       DOM.
+ *   Broader-than-this-file options considered and set aside: (a) a
+ *   `page.route()`/`context.route()` interceptor would need to scrub the
+ *   DOM-snapshot/action-log copies too, not just the network one, since (2)
+ *   above shows the leak is not confined to the network capture -- more
+ *   general, but more fragile, and unnecessary once nothing traced ever
+ *   carries the real value; (c) scoping the seeded token to a narrower,
+ *   throwaway-per-run grant and revoking it in `task test:e2e`'s teardown
+ *   is applied at the harness level (Taskfile.yml's `test:e2e`), not here --
+ *   defence-in-depth regardless of this file's own fix, since it bounds
+ *   what a leaked artefact from ANY spec could do, not just this journey's.
  *
  * loam-4kz (KNOWN BUG, verified directly against this exact stack while
  * building this spec -- OUT OF SCOPE, not worked around here): `forge.
@@ -139,6 +156,16 @@ import { e2eEnv, expect, test } from "./fixtures";
  * test starts passing while `test.fail()` is still present, which is the
  * intended forcing function to catch a stale annotation.
  */
+/**
+ * Filled into the "[loam-4kz]" test's Token field below in place of a real
+ * credential (loam-s6mh). That test's bug is a host-format defect --
+ * `apiBaseURL` dials `https://` at a plaintext listener before Forgejo
+ * ever reads the Authorization header -- so no token value, real or fake,
+ * changes its outcome; see this file's own top-of-file "FIX APPLIED" note
+ * for the full reasoning.
+ */
+const nonSecretProbeToken = "loam-s6mh-non-secret-probe-token";
+
 test.describe("credentials journey", () => {
   test("[loam-4kz] setting a valid upstream token for the seeded Forgejo (bare host) shows Validated", async ({
     page,
@@ -167,7 +194,16 @@ test.describe("credentials journey", () => {
     await expect(dialog).toBeVisible();
 
     await dialog.getByLabel("Host").fill(e2eEnv.forgejoHost);
-    await dialog.getByLabel("Token").fill(e2eEnv.forgejoToken);
+    // loam-s6mh: a non-secret placeholder, not e2eEnv.forgejoToken -- see
+    // this file's own top-of-file "FIX APPLIED" note. The bug this test
+    // demonstrates fails at the dial layer over the HOST format alone
+    // (apiBaseURL forces https:// at a plaintext listener), before Forgejo
+    // ever reads the Authorization header, so the token's value cannot
+    // change this test's outcome either way; there is no reason for a real
+    // credential to be the one typed into this field, and every reason not
+    // to (test.fail() means this test's failure is EXPECTED, i.e. its own
+    // artefacts, including error-context.md, are produced on every run).
+    await dialog.getByLabel("Token").fill(nonSecretProbeToken);
     await dialog.getByRole("button", { name: "Save token" }).click();
 
     // The spec-mandated outcome (docs/testing-spec.md: "set token ->
@@ -186,34 +222,47 @@ test.describe("credentials journey", () => {
 
   /**
    * NOT the bead's literal ask, and not a substitute for the test above:
-   * this exists solely to prove the dialog/status-badge mechanics the test
-   * above exercises are real and non-vacuous, by exercising the identical
-   * "fill Host+Token, submit, assert Validated" path against a host format
-   * this stack's plaintext Forgejo can genuinely validate -- an explicit
-   * `http://` scheme, which `apiBaseURL` (internal/forge/forgejo.go) has
-   * always left untouched for exactly this reason ("host may be a bare
-   * domain ... or include a scheme (used by tests pointing at an httptest
-   * server)"). This does not collide with EnrollRepo's own bare-host
-   * credential lookup (loam-4kz's actual scope) because this journey never
-   * calls EnrollRepo at all. If the test above were silently vacuous (e.g.
-   * a matcher missing its call, or an assertion that could never observe
-   * "Validated" at all), this test would be vacuous in the identical way --
-   * it is not: this one genuinely passes today.
+   * this exists solely to prove the status-badge mechanics the test above
+   * exercises are real and non-vacuous, against a host format this stack's
+   * plaintext Forgejo can genuinely validate -- an explicit `http://`
+   * scheme, which `apiBaseURL` (internal/forge/forgejo.go) has always left
+   * untouched for exactly this reason ("host may be a bare domain ... or
+   * include a scheme (used by tests pointing at an httptest server)").
+   * This does not collide with EnrollRepo's own bare-host credential
+   * lookup (loam-4kz's actual scope) because this journey never calls
+   * EnrollRepo at all. If the "Validated" render were silently vacuous
+   * (e.g. a matcher that could never observe it at all), this test would
+   * be vacuous in the identical way -- it is not: this one genuinely
+   * passes today.
+   *
+   * loam-s6mh: sets the token via {@link setUpstreamTokenOutOfBand}
+   * rather than through the dialog's Token field (see this file's own
+   * top-of-file "FIX APPLIED" note) -- this proves the RPC-to-render path
+   * end to end (real backend verdict -> real UI render) without the
+   * dialog's own submit affordance being part of what's under test here;
+   * the dialog's fill-and-submit mechanics for a REJECTED token are still
+   * covered, with a real browser interaction, by the next test below.
    */
   test("proof of mechanics: a scheme-qualified host this stack's Forgejo can reach shows Validated", async ({
     page,
   }) => {
     const host = `http://${e2eEnv.forgejoHost}`;
+    // loam-s6mh: the real token is set directly against the real server
+    // (setUpstreamTokenOutOfBand, ./fixtures.ts) rather than typed into
+    // the dialog's Token field -- see this file's own top-of-file "FIX
+    // APPLIED" note. The RPC's own response is asserted first, so this
+    // still proves the backend genuinely validated a real token before
+    // the UI is asked to do anything at all.
+    const result = await setUpstreamTokenOutOfBand(host, e2eEnv.forgejoToken);
+    expect(result.validated).toBe(true);
+
+    // The remainder is exactly the assertion this test exists for
+    // (docs comment above): a fresh page load renders that real,
+    // server-verified state as "Validated" -- proving the row/badge this
+    // suite's other assertions rely on reflects reality rather than
+    // being vacuously true. Nothing here is stubbed, mocked, or asserted
+    // against anything this test itself set up in the DOM.
     await page.goto("/credentials");
-    await page.getByRole("button", { name: "Set token", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Set upstream token" });
-    await expect(dialog).toBeVisible();
-
-    await dialog.getByLabel("Host").fill(host);
-    await dialog.getByLabel("Token").fill(e2eEnv.forgejoToken);
-    await dialog.getByRole("button", { name: "Save token" }).click();
-
-    await expect(dialog).toBeHidden();
     const row = page.getByRole("row", { name: new RegExp(escapeForRegExp(host)) });
     await expect(row.getByText("Validated")).toBeVisible();
   });
