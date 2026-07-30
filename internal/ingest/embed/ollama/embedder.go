@@ -397,6 +397,37 @@ func IsRetryable(err error) bool {
 	return errors.Is(err, errRequestFailed) || errors.Is(err, errTransientServerError)
 }
 
+// IsPermanent reports whether err is one of this package's own permanent
+// classifications -- a 4xx rejection (errServerError, which subsumes the
+// context-length-exceeded case IsContextLengthExceeded reports on
+// separately for callers that want that specific reason), a malformed 200
+// body, or a returned-vector dimension mismatch -- as opposed to
+// IsRetryable's transient class or an error this package never produced at
+// all.
+//
+// This exists alongside IsRetryable, rather than being spelled as
+// `!IsRetryable(err)`, because that negation is only safe for an error this
+// package actually classified. IsRetryable(err) is already false for any
+// unrelated error (a git-mirror failure, a lock-contention error from
+// another subsystem entirely) simply because none of its two retryable
+// sentinels match -- but that is "we don't recognize this", not "we know
+// it can never succeed". A caller (the ingest retry driver, loam-eean)
+// that treated !IsRetryable as "give up now" would wrongly abandon a
+// transient failure from anywhere else in the pipeline on its very first
+// attempt. IsPermanent answers the narrower, safe question instead: is
+// this SPECIFICALLY one of the failures this package already knows will
+// recur unchanged. It is false both for a transient embedder failure and
+// for an error this package did not produce -- only a caller's own
+// attempts ceiling should end retries in the latter case, not this
+// predicate.
+//
+// Like IsRetryable, ctx errors (context.Canceled, context.DeadlineExceeded)
+// are unclassified: IsPermanent(context.Canceled) is false, since a
+// canceled call is "the caller gave up", not "this input can never embed".
+func IsPermanent(err error) bool {
+	return errors.Is(err, errServerError) || errors.Is(err, errMalformedResponse) || errors.Is(err, errDimensionMismatch)
+}
+
 // IsContextLengthExceeded reports whether err is a permanent rejection
 // because the input text exceeded the embedding model's context window
 // (Embed always sends truncate:false — see embedRequest — so this surfaces

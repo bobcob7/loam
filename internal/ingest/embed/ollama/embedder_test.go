@@ -397,6 +397,110 @@ func TestIsRetryable_ContextErrors_ReturnFalse(t *testing.T) {
 	assert.False(t, IsRetryable(context.DeadlineExceeded), "ctx errors are unclassified; callers must check ctx before consulting IsRetryable")
 }
 
+// TestIsPermanent_ClassifiesEveryPermanentCaseTrue proves IsPermanent
+// agrees with IsRetryable's own permanent bucket for every one of this
+// package's non-retryable classifications: a generic 4xx, the
+// context-length-exceeded 4xx specifically, a malformed 200 body, and a
+// dimension mismatch. Each case is also asserted !IsRetryable so the two
+// predicates are never allowed to agree that something is both.
+func TestIsPermanent_ClassifiesEveryPermanentCaseTrue(t *testing.T) {
+	t.Parallel()
+	t.Run("generic 4xx", func(t *testing.T) {
+		t.Parallel()
+		server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+			return http.StatusBadRequest, `{"error":"invalid request shape"}`
+		})
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		_, err = e.Embed(t.Context(), []string{"hello"})
+		require.Error(t, err)
+		assert.True(t, IsPermanent(err))
+		assert.False(t, IsRetryable(err))
+	})
+	t.Run("context length exceeded", func(t *testing.T) {
+		t.Parallel()
+		server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+			return http.StatusBadRequest, `{"error":"the input length exceeds the context length"}`
+		})
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		_, err = e.Embed(t.Context(), []string{"a very long chunk of text"})
+		require.Error(t, err)
+		assert.True(t, IsPermanent(err), "a context-length rejection must never be retried, so IsPermanent must agree")
+		assert.True(t, IsContextLengthExceeded(err))
+	})
+	t.Run("malformed response", func(t *testing.T) {
+		t.Parallel()
+		server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+			return http.StatusOK, "{not valid json"
+		})
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		_, err = e.Embed(t.Context(), []string{"hello"})
+		require.Error(t, err)
+		assert.True(t, IsPermanent(err))
+	})
+	t.Run("dimension mismatch", func(t *testing.T) {
+		t.Parallel()
+		server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+			resp := embedResponse{Embeddings: [][]float32{make([]float32, 384)}}
+			out, marshalErr := json.Marshal(resp)
+			require.NoError(t, marshalErr)
+			return http.StatusOK, string(out)
+		})
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		_, err = e.Embed(t.Context(), []string{"hello"})
+		require.Error(t, err)
+		assert.True(t, IsPermanent(err))
+	})
+}
+
+// TestIsPermanent_TransientAndUnrelatedErrorsReturnFalse is the
+// mutation-catching counterpart to the test above: without it, an
+// IsPermanent that unconditionally returned true (or that matched on
+// errRequestFailed/errTransientServerError too) would still pass every
+// permanent-case assertion. A transient embedder failure and a plain,
+// unrelated error (e.g. from a different subsystem entirely) must both
+// come back false -- the latter is the exact case IsPermanent's doc
+// comment warns a naive `!IsRetryable(err)` gets wrong, so it is asserted
+// here directly rather than left implicit.
+func TestIsPermanent_TransientAndUnrelatedErrorsReturnFalse(t *testing.T) {
+	t.Parallel()
+	t.Run("unreachable server", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		server.Close()
+		_, err = e.Embed(t.Context(), []string{"hello"})
+		require.Error(t, err)
+		assert.False(t, IsPermanent(err), "a transport failure is transient, not permanent")
+		assert.True(t, IsRetryable(err))
+	})
+	t.Run("transient 5xx", func(t *testing.T) {
+		t.Parallel()
+		server, _ := serveEmbed(t, func(req embedRequest) (int, string) {
+			return http.StatusServiceUnavailable, `{"error":"server busy"}`
+		})
+		e, err := New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+		require.NoError(t, err)
+		_, err = e.Embed(t.Context(), []string{"hello"})
+		require.Error(t, err)
+		assert.False(t, IsPermanent(err))
+	})
+	t.Run("unrelated error this package never produced", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, IsPermanent(errors.New("lock contention in another package")),
+			"an error this package did not classify must not be assumed permanent -- only a caller's own attempts ceiling should end retries for it")
+	})
+	t.Run("ctx errors are unclassified", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, IsPermanent(context.Canceled))
+		assert.False(t, IsPermanent(context.DeadlineExceeded))
+	})
+}
+
 // TestEmbed_SendsTruncateFalse locks in the loam-eg9 decision: Embed must
 // send truncate:false on every request, not rely on the field's zero value
 // happening to match, so an oversized chunk fails loudly via Ollama's error

@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,6 +39,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/db"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
 	"github.com/bobcob7/loam/internal/testdb"
 )
 
@@ -267,6 +270,149 @@ func TestIngestJobRetry_BackoffRequeuesAndSucceeds(t *testing.T) {
 	assert.Equal(t, 2, row.attempts, "two failures before the third, successful attempt")
 	assert.Equal(t, int32(3), calls.Load())
 	assert.GreaterOrEqualf(t, elapsed, backoffBase, "must wait at least one backoff period (%s) before the first retry, took %s", backoffBase, elapsed)
+}
+
+// TestIngestJobRetry_StopsRetryingOnceCeilingReached is loam-eean's core
+// end-to-end proof against real Postgres: an Orchestrator that ALWAYS
+// fails (the "bad credentials", "unparseable file", or -- as this codebase
+// hit in every environment before loam-1dmg gave the e2e stack an embedder
+// -- "the embedder is simply unreachable" case) must stop retrying once
+// WithMaxAttempts's ceiling is reached, rather than cycling the row
+// between 'failed' and 'queued' forever.
+//
+// The observation window after the ceiling is reached (30 backoff periods)
+// is the "prove it stays bounded, not merely reaches the ceiling once"
+// half of this test: with backoffBase this small, an unbounded retry loop
+// (fail()'s behavior before this bead) would have fired many more times
+// and pushed both attempts and calls well past the ceiling within that
+// window. Reverting this bead's ceiling check in fail() (restoring
+// unconditional `go p.scheduleRetry(...)`) makes this assertion fail, not
+// merely the ceiling-reached one above it -- calls.Load() keeps climbing
+// throughout the observation window instead of stopping at the ceiling.
+func TestIngestJobRetry_StopsRetryingOnceCeilingReached(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	repoID := seedRepo(ctx, t, pgPool, "group/ceiling-reached")
+	var calls atomic.Int32
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			calls.Add(1)
+			return Stats{}, errors.New("embedder unreachable: connection refused")
+		},
+	}
+	const backoffBase = 10 * time.Millisecond
+	const ceiling = 2
+	pool := NewPool(testLogger(), pgPool, orch, 1, WithBackoff(backoffBase, backoffBase), WithMaxAttempts(ceiling))
+	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindFull))
+	var jobID uuid.UUID
+	require.NoError(t, pgPool.QueryRow(ctx, `SELECT id FROM ingest_jobs WHERE repo_id = $1`, repoID).Scan(&jobID))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go pool.Run(runCtx)
+	require.Eventually(t, func() bool {
+		return fetchJob(ctx, t, pgPool, jobID).attempts >= ceiling
+	}, 5*time.Second, 10*time.Millisecond, "expected the job to fail up through the ceiling")
+	// Give any wrongly-scheduled retry ample opportunity to fire: 30
+	// backoff periods is far more than an unbounded loop would need to
+	// have already pushed attempts and calls past the ceiling.
+	time.Sleep(30 * backoffBase)
+	row := fetchJob(ctx, t, pgPool, jobID)
+	assert.Equal(t, "failed", row.status, "a job that exhausted its retry ceiling must stay terminally failed, never flip back to queued")
+	assert.Equal(t, ceiling, row.attempts, "attempts must stop climbing exactly at the ceiling")
+	assert.Equal(t, int32(ceiling), calls.Load(), "the orchestrator must never be invoked again once the ceiling is reached")
+}
+
+// TestIngestJobRetry_OneBelowCeilingStillGetsARetryThenSucceeds is the
+// off-by-one companion to the ceiling test above, proven end to end rather
+// than only against the pure abandonReason helper: with the SAME ceiling
+// (3), a job that has failed only twice (attempts=2, one below the
+// ceiling) must still get its third attempt -- and here that third attempt
+// succeeds, so the job reaches status=succeeded rather than being
+// abandoned one attempt early.
+func TestIngestJobRetry_OneBelowCeilingStillGetsARetryThenSucceeds(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	repoID := seedRepo(ctx, t, pgPool, "group/one-below-ceiling")
+	var calls atomic.Int32
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			n := calls.Add(1)
+			if n <= 2 {
+				return Stats{}, errors.New("transient failure")
+			}
+			return Stats{FilesParsed: 1, ChunksEmbedded: 1}, nil
+		},
+	}
+	const backoffBase = 10 * time.Millisecond
+	pool := NewPool(testLogger(), pgPool, orch, 1, WithBackoff(backoffBase, backoffBase), WithMaxAttempts(3))
+	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindFull))
+	var jobID uuid.UUID
+	require.NoError(t, pgPool.QueryRow(ctx, `SELECT id FROM ingest_jobs WHERE repo_id = $1`, repoID).Scan(&jobID))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go pool.Run(runCtx)
+	require.Eventually(t, func() bool {
+		return fetchJob(ctx, t, pgPool, jobID).status == "succeeded"
+	}, 5*time.Second, 10*time.Millisecond, "the third attempt, one below the ceiling, must still be allowed to run and succeed")
+	row := fetchJob(ctx, t, pgPool, jobID)
+	assert.Equal(t, 2, row.attempts, "two recorded failures before the third, successful attempt")
+	assert.Equal(t, int32(3), calls.Load())
+}
+
+// TestIngestJobRetry_PermanentEmbedderFailureNeverRetries proves the other
+// half of loam-eean end to end: a genuinely ollama.IsPermanent-classified
+// failure -- built here from a real ollama.Embedder against an httptest
+// server returning the actual "context length exceeded" 400 body Ollama
+// v0.32.4 sends, per embed/ollama's isContextLengthExceededBody -- must
+// never be retried, even though the backoff is tiny (so a wrongly
+// scheduled retry would fire almost immediately) and the default retry
+// ceiling (10) is nowhere close to being reached at attempts=1.
+//
+// "A model that will never accept the input" (the bead's own DESCRIPTION
+// example) is exactly this case: retrying identical oversized input cannot
+// ever succeed, so spending even one more attempt on it -- let alone
+// climbing toward a ceiling -- is pure waste.
+func TestIngestJobRetry_PermanentEmbedderFailureNeverRetries(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pgPool := newTestPool(ctx, t)
+	repoID := seedRepo(ctx, t, pgPool, "group/permanent-never-retries")
+	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"the input length exceeds the context length"}`))
+	}))
+	t.Cleanup(embedServer.Close)
+	embedder, err := ollama.New(embedServer.URL, "nomic-embed-text", embedServer.Client(), testLogger())
+	require.NoError(t, err)
+	_, permanentErr := embedder.Embed(ctx, []string{"a very long chunk of text"})
+	require.Error(t, permanentErr)
+	require.True(t, ollama.IsPermanent(permanentErr), "test setup must actually produce a permanent-classified error")
+	var calls atomic.Int32
+	orch := &OrchestratorMock{
+		RunFunc: func(ctx context.Context, job Job) (Stats, error) {
+			calls.Add(1)
+			return Stats{}, permanentErr
+		},
+	}
+	const backoffBase = 10 * time.Millisecond
+	pool := NewPool(testLogger(), pgPool, orch, 1, WithBackoff(backoffBase, backoffBase))
+	require.NoError(t, pool.Enqueue(ctx, repoID, "main", KindFull))
+	var jobID uuid.UUID
+	require.NoError(t, pgPool.QueryRow(ctx, `SELECT id FROM ingest_jobs WHERE repo_id = $1`, repoID).Scan(&jobID))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go pool.Run(runCtx)
+	require.Eventually(t, func() bool {
+		return fetchJob(ctx, t, pgPool, jobID).status == "failed"
+	}, 5*time.Second, 10*time.Millisecond, "expected the job to reach status=failed")
+	// Ample time for a wrongly-scheduled retry at this tiny backoff to fire.
+	time.Sleep(30 * backoffBase)
+	row := fetchJob(ctx, t, pgPool, jobID)
+	assert.Equal(t, "failed", row.status, "a permanent failure must stay terminally failed")
+	assert.Equal(t, 1, row.attempts, "a permanent classification must skip retrying on the very first failure, well before any attempts ceiling")
+	assert.Equal(t, int32(1), calls.Load(), "the orchestrator must never be invoked a second time for a permanent failure")
 }
 
 // TestEnqueue_ConcurrentTriggersCoalesceIntoOneFollowUp is the core
