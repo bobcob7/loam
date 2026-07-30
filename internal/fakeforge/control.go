@@ -145,6 +145,31 @@ func (s *Server) CreateCollidingBranch(ctx context.Context, repo, name, fromRef 
 	if !strings.HasPrefix(name, "wb-") {
 		return fmt.Errorf("creating branch %s/%s: %w", repo, name, errInvalidBranch)
 	}
+	return s.createBranchAt(ctx, repo, name, fromRef)
+}
+
+// CreateBranch creates an ORDINARY branch named name at fromRef, or at the
+// repo's default branch tip if fromRef is empty -- CreateCollidingBranch
+// without its "wb-" prefix requirement. It exists for a caller that needs
+// the upstream to simply grow a SECOND ordinary branch (e.g.
+// loam-ofg.12's enrollment.feature "target branches main and release",
+// where release is meant to be an unremarkable second branch sharing
+// main's tip, not a simulated collision with one of Loam's own reserved
+// work-branch refs).
+func (s *Server) CreateBranch(ctx context.Context, repo, name, fromRef string) (err error) {
+	s.logger.Info("fakeforge: create-branch", "repo", repo, "name", name, "from", fromRef)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: create-branch failed", "repo", repo, "name", name, "error", err)
+		}
+	}()
+	return s.createBranchAt(ctx, repo, name, fromRef)
+}
+
+// createBranchAt is the shared body CreateCollidingBranch and CreateBranch
+// both delegate to once their own naming constraint (or lack of one) has
+// been checked.
+func (s *Server) createBranchAt(ctx context.Context, repo, name, fromRef string) error {
 	repoDir := s.repoDir(repo)
 	if err := s.requireRepo(repoDir); err != nil {
 		return fmt.Errorf("creating branch %s/%s: %w", repo, name, err)
