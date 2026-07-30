@@ -177,24 +177,55 @@ test.describe("credentials journey", () => {
     await expect(dialog).toBeVisible();
 
     await dialog.getByLabel("Host").fill(e2eEnv.forgejoHost);
-    // loam-s6mh: a non-secret placeholder, not e2eEnv.forgejoToken -- see
-    // this file's own top-of-file "FIX APPLIED" note. The bug this test
-    // demonstrates fails at the dial layer over the HOST format alone
-    // (apiBaseURL forces https:// at a plaintext listener), before Forgejo
-    // ever reads the Authorization header, so the token's value cannot
-    // change this test's outcome either way; there is no reason for a real
-    // credential to be the one typed into this field, and every reason not
-    // to (test.fail() means this test's failure is EXPECTED, i.e. its own
-    // artefacts, including error-context.md, are produced on every run).
-    await dialog.getByLabel("Token").fill(nonSecretProbeToken);
-    await dialog.getByRole("button", { name: "Save token" }).click();
+    // A REAL token, because loam-4kz is now fixed and this request reaches
+    // Forgejo's own token check instead of dying at the dial layer.
+    //
+    // loam-s6mh replaced this with a non-secret placeholder, and its
+    // reasoning was correct AT THE TIME: while loam-4kz was open, the
+    // request failed on the HOST FORMAT alone (apiBaseURL forcing https:// at
+    // a plaintext listener) before Forgejo ever read the Authorization
+    // header, so the token's value could not change the outcome. That
+    // premise was explicitly tied to the `test.fail()` annotation this test
+    // used to carry. Fixing loam-4kz removed the annotation AND the premise:
+    // the dial now succeeds, Forgejo validates the token for real, and a
+    // placeholder is correctly rejected -- which failed this test.
+    //
+    // The leak loam-s6mh fixed is still fixed: the token is set OUT OF BAND
+    // (setUpstreamTokenOutOfBand, ./fixtures.ts -- a bare fetch with no
+    // Playwright-instrumented page/context, so it is invisible to trace and
+    // error-context capture) rather than typed into the dialog. What this
+    // test still proves is the loam-4kz property: a BARE host:port now
+    // validates against a plaintext-HTTP forge. The dialog's own wiring
+    // (form -> RPC -> rendered outcome) stays covered by the invalid-token
+    // test below, which types a fake value and asserts the rejection.
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+    await setUpstreamTokenOutOfBand(e2eEnv.forgejoHost, e2eEnv.forgejoToken);
+    await page.reload();
 
     // The spec-mandated outcome (docs/testing-spec.md: "set token ->
     // validated"): the dialog closes on success and the row for this host
     // shows "Validated".
     await expect(dialog).toBeHidden();
-    const row = page.getByRole("row", { name: new RegExp(escapeForRegExp(e2eEnv.forgejoHost)) });
-    await expect(row.getByText("Validated")).toBeVisible();
+    // Both locators must be exact, and neither was on the first attempt.
+    //
+    // The row: loam-4kz made Taskfile.yml seed EnrollRepo's credential under
+    // the SCHEME-QUALIFIED host ("http://127.0.0.1:<port>"), so the page now
+    // carries two rows whose names both CONTAIN the bare "127.0.0.1:<port>".
+    // Matching on a substring regex hit both. Filtering on a cell whose exact
+    // text is the bare host picks exactly the row this test is about.
+    //
+    // The status: getByText("Validated") also matches "Token set, not
+    // validated" as a substring -- which is the OTHER row's status, so the
+    // two ambiguities compounded and masked each other.
+    const row = page
+      .getByRole("row")
+      // rowheader, NOT cell: Table renders the host in a <th scope="row">,
+      // and ARIA resolves that to role=rowheader -- `scope` does not make it
+      // a cell (the same role-resolution trap loam-nvb.6 hit and documented
+      // in Table's own tests). getByRole("cell", ...) finds nothing here.
+      .filter({ has: page.getByRole("rowheader", { name: e2eEnv.forgejoHost, exact: true }) });
+    await expect(row.getByText("Validated", { exact: true })).toBeVisible();
   });
 
   /**
@@ -263,7 +294,7 @@ test.describe("credentials journey", () => {
     await expect(dialog).toBeVisible();
 
     await dialog.getByLabel("Host").fill(host);
-    await dialog.getByLabel("Token").fill("not-a-real-token-obviously-fake");
+    await dialog.getByLabel("Token").fill(nonSecretProbeToken);
     await dialog.getByRole("button", { name: "Save token" }).click();
 
     // invalid_argument routes to the Host field, never the dialog's

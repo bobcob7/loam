@@ -340,13 +340,17 @@ test.describe("proposal decision journey", () => {
     await expect(page.getByRole("button", { name: "Copy pull request URL" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Copy upstream branch" })).toBeVisible();
 
-    const prUrlField = page.getByLabel("pull request URL");
+    // getByRole("textbox"), not getByLabel: CopyField renders BOTH a
+    // read-only input and a "Copy <label>" button whose aria-label contains
+    // the same phrase, so getByLabel("pull request URL") matches two
+    // elements and trips Playwright's strict mode.
+    const prUrlField = page.getByRole("textbox", { name: "pull request URL" });
     await expect(prUrlField).not.toHaveValue("");
     const prUrl = await prUrlField.inputValue();
     expect(prUrl, `expected a Forgejo pull-request URL, got ${JSON.stringify(prUrl)}`).toContain("/pulls/");
 
     // upstream_branch is deterministic (docs/sync-spec.md): loam/<work branch>.
-    await expect(page.getByLabel("upstream branch")).toHaveValue(`loam/${approveBranch}`);
+    await expect(page.getByRole("textbox", { name: "upstream branch" })).toHaveValue(`loam/${approveBranch}`);
 
     // Accept succeeded: the dialog closed and the Accept button itself is
     // gone now that the work branch carries an upstream_pr_url (bead note).
