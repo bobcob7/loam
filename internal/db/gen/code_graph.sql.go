@@ -594,14 +594,12 @@ JOIN symbols target
    AND (CASE
             WHEN target.file ~* '\.go$' THEN 'go'
             WHEN target.file ~* '\.py$' THEN 'python'
-            WHEN target.file ~* '\.(ts|mts|cts)$' THEN 'typescript'
-            WHEN target.file ~* '\.tsx$' THEN 'tsx'
+            WHEN target.file ~* '\.(ts|mts|cts|tsx)$' THEN 'typescript'
             WHEN target.file ~* '\.(js|jsx|mjs|cjs)$' THEN 'javascript'
         END) = (CASE
             WHEN sr.file ~* '\.go$' THEN 'go'
             WHEN sr.file ~* '\.py$' THEN 'python'
-            WHEN sr.file ~* '\.(ts|mts|cts)$' THEN 'typescript'
-            WHEN sr.file ~* '\.tsx$' THEN 'tsx'
+            WHEN sr.file ~* '\.(ts|mts|cts|tsx)$' THEN 'typescript'
             WHEN sr.file ~* '\.(js|jsx|mjs|cjs)$' THEN 'javascript'
         END)
 WHERE sr.repo_id = $1 AND sr.target_branch = $2
@@ -649,9 +647,22 @@ type ResolveGraphEdgeCandidatesRow struct {
 // (internal/ingest/orchestrator/testdata/golden) had baked that leak in
 // as "expected" output until loam-w5g re-baselined it. The two CASE
 // expressions below classify a file's language purely from its extension,
-// deliberately mirroring internal/parser/language.go's extensionLanguages
-// map (go, python, typescript incl. .mts/.cts, tsx, javascript incl.
-// .jsx/.mjs/.cjs) -- keep the two in sync if a grammar is added there.
+// over the same extension SET as internal/parser/language.go's
+// extensionLanguages map -- TestGraphEdgeLanguageBucketsCoverEveryGrammar
+// (internal/parser) fails if a grammar is added there without being
+// classified here, because an unclassified extension yields NULL and
+// NULL = NULL is not true, which would silently drop every edge in that
+// language rather than fail loudly.
+//
+// The BUCKETS are deliberately coarser than that map's Language values:
+// .tsx maps to LanguageTSX there because TSX needs its own tree-sitter
+// GRAMMAR, but a .tsx component calling a helper defined in a .ts file is
+// one language for edge-resolution purposes, and splitting them would
+// trade loam-w5g's false positive for a false negative across the most
+// common TypeScript layout there is. Grammar identity and language
+// identity are not the same question. JavaScript stays a separate bucket:
+// name-based matching between .ts and .js is the same approximate
+// cross-ecosystem guess loam-w5g exists to stop.
 // Self-reference (a symbol whose body references its own name, e.g.
 // recursion) is a real, legitimate case and is deliberately NOT excluded
 // here -- it is exactly the shape of self-edge the dependents/deps CTE
