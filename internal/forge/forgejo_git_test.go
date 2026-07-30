@@ -207,6 +207,15 @@ type authenticatingGitHandler struct {
 func (h *authenticatingGitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, password, ok := r.BasicAuth()
 	if !ok || password != h.token {
+		// A real Basic-auth-challenging server (e.g. fakeforge, see
+		// internal/fakeforge/git.go) sends WWW-Authenticate on a 401 --
+		// libcurl (which git's http transport hands off to) only
+		// consults an ambient ~/.netrc for automatic Basic
+		// authentication once it has seen this exact challenge, so a
+		// handler that omitted it would make any isolation test relying
+		// on netrc pass vacuously regardless of whether HOME isolation
+		// actually holds.
+		w.Header().Set("WWW-Authenticate", `Basic realm="forge-test"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}

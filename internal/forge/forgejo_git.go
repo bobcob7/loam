@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -48,9 +49,13 @@ func (f *Forgejo) CheckRepo(ctx context.Context, upstreamURL string) error {
 // or a missing git binary are reported unclassified so callers don't
 // mistake infrastructure trouble for a missing repo.
 func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", upstreamURL)
-	cmd.Env = append(append([]string{}, os.Environ()...), "GIT_TERMINAL_PROMPT=0")
-	cmd.Env = append(cmd.Env, f.gitAuthEnv()...)
+	home, err := os.MkdirTemp("", "loam-forge-probe-*")
+	if err != nil {
+		return fmt.Errorf("creating isolated git environment: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+	cmd := exec.CommandContext(ctx, "git", "-c", "credential.helper=", "ls-remote", upstreamURL)
+	cmd.Env = f.gitAuthEnv(home)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -101,18 +106,93 @@ func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) er
 	return nil
 }
 
-// gitAuthEnv returns the GIT_CONFIG_* environment variables that inject
-// the bound token as a Basic-auth header for a single git invocation
-// (git ≥2.31), per sync-spec.md's askpass-style requirement: the
-// credential is never written to argv (visible via `ps`), never to any
-// git config file, and never to disk. Returns nil when there is no
-// token to inject (e.g. anonymous file:// fixtures in tests).
-func (f *Forgejo) gitAuthEnv() []string {
+// gitAuthEnv returns the full, isolated environment for one lsRemoteProbe
+// git invocation: the bound token injected as a Basic-auth header via
+// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0 (git ≥2.31), per
+// sync-spec.md's askpass-style requirement — the credential is never
+// written to argv (visible via `ps`), never to any git config file, and
+// never to disk — plus isolation from whatever the host machine has
+// configured, ported from internal/gittransport's gitEnv (same defect
+// class documented there: an ambient credential.helper or ~/.netrc
+// silently rescuing a request that was supposed to be validated against
+// only the token under test; here it would mean CheckRepo reports
+// success using the *operator's* stored credentials rather than the
+// bound token).
+//
+// GIT_CONFIG_NOSYSTEM drops the system gitconfig; HOME/XDG_CONFIG_HOME
+// are redirected at home (a fresh, per-invocation temp directory the
+// caller removes when the subprocess returns) so no user-global config
+// is read either; GIT_CONFIG_GLOBAL is pointed at a path inside home
+// that never exists, since git treats that env var, when set, as an
+// authoritative override that wins over HOME — an ambient
+// GIT_CONFIG_GLOBAL would otherwise reintroduce the same risk HOME's
+// redirection closes. credential.helper is cleared via `-c
+// credential.helper=` in lsRemoteProbe's argv (harmless there — it
+// carries no secret) so an inherited GIT_CONFIG_* cannot reintroduce a
+// helper.
+//
+// GIT_CONFIG_COUNT is always set explicitly — 0 when there is no token
+// to inject, never simply omitted — because os.Environ() may already
+// carry an ambient GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n
+// (including a hostile http.extraHeader), and exec.Cmd resolves
+// duplicate env keys by last-value-wins, so appending this override
+// after os.Environ() is what actually neutralises it on the anonymous
+// path. GIT_CONFIG_PARAMETERS is the other ambient channel git reads
+// config from (how git itself propagates `-c` to subprocesses); leaving
+// it set would defeat GIT_CONFIG_COUNT=0 by a different door, so it is
+// cleared unconditionally.
+//
+// GIT_CURL_VERBOSE is dropped from the inherited os.Environ() rather
+// than overridden with "=0": git only presence-checks that one variable
+// (see gittransport's gitEnv doc comment), so "0" and "" both still
+// count as "set" and turn curl tracing on — the only way to guarantee
+// it is off is to remove the key entirely, which dropGitCurlVerbose
+// does before the overrides below are appended. The other GIT_TRACE*
+// variables are ordinary booleans and are safe to override with "0".
+func (f *Forgejo) gitAuthEnv(home string) []string {
+	env := append(dropGitCurlVerbose(os.Environ()),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_PARAMETERS=",
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(home, "unused-global-gitconfig"),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GIT_TRACE=0",
+		"GIT_TRACE_CURL=0",
+		"GIT_TRACE_PACKET=0",
+		"GIT_TRACE_PACK_ACCESS=0",
+		"GIT_TRACE_SETUP=0",
+	)
 	if f.token == "" {
-		return nil
+		return append(env, "GIT_CONFIG_COUNT=0")
 	}
 	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(gitUsername+":"+f.token))
-	return []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=" + header}
+	return append(env,
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0="+header,
+	)
+}
+
+// dropGitCurlVerbose returns environ with any GIT_CURL_VERBOSE entry
+// removed, preserving order otherwise — ported from
+// internal/gittransport's dropGitCurlVerbose (loam-bot5): git
+// presence-checks this variable rather than parsing it as a boolean, so
+// an inherited GIT_CURL_VERBOSE=0 — or even GIT_CURL_VERBOSE="" — still
+// counts as "set" and still turns curl tracing on; only an absent key is
+// guaranteed to leave it off.
+func dropGitCurlVerbose(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "GIT_CURL_VERBOSE" {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
 }
 
 // drainAndClose discards any remaining response body before closing it,
