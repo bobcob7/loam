@@ -67,10 +67,21 @@ func (h *acceptanceHarness) registerIngestAndQuerySteps(sc *godog.ScenarioContex
 	sc.Step(`^the response names the commit the index was built from$`, h.stepResponseNamesTheCommitTheIndexWasBuiltFrom)
 	sc.Step(`^I can tell the results predate the tip of "([^"]*)"$`, h.stepResultsPredateTheTipOf)
 
+	// loam-d2b2: "Edges reflect the current code even in unchanged files"
+	// -- rewritten to assert the dangling-reference property a rename
+	// confined to the defining file genuinely produces. See this file's
+	// own note near the bottom for why the ORIGINAL wording (asserting
+	// unchanged handler.go resolves to the NEW name) was not
+	// implementable, and could not have been made so without inventing an
+	// edge the source does not contain.
+	sc.Step(`^file "([^"]*)" references "([^"]*)" defined in "([^"]*)"$`, h.stepFileReferencesSymbolDefinedIn)
+	sc.Step(`^only "([^"]*)" changes to rename "([^"]*)" to "([^"]*)"$`, h.stepOnlyFileChangesToRename)
+	sc.Step(`^"([^"]*)" advances and is ingested$`, h.stepBranchAdvancesAndIsIngested)
+	sc.Step(`^the stale reference to "([^"]*)" in "([^"]*)" survives the rename$`, h.stepStaleReferenceSurvivesTheRename)
+	sc.Step(`^"([^"]*)" is defined with no references$`, h.stepSymbolIsDefinedWithNoReferences)
+
 	// loam-7d0: three of the four scenarios formerly tagged @wip in
-	// features/ingestion.feature. "Edges reflect the current code even in
-	// unchanged files" stays @wip -- see this file's own note near the
-	// bottom on why that one is not implementable as written.
+	// features/ingestion.feature.
 	sc.Step(`^I reindex "([^"]*)"$`, h.stepIReindex)
 	sc.Step(`^a full ingest job runs for it$`, h.stepAFullIngestJobRunsForIt)
 	sc.Step(`^once it succeeds, queries reflect the current indexed branch$`, h.stepOnceItSucceedsQueriesReflectTheCurrentIndexedBranch)
@@ -546,46 +557,184 @@ func (h *acceptanceHarness) stepResultsPredateTheTipOf(ctx context.Context, bran
 	return nil
 }
 
-// --- loam-7d0: "Edges reflect the current code even in unchanged files" ---
+// --- loam-d2b2: "Edges reflect the current code even in unchanged files" ---
 //
-// This scenario stays @wip. It was implemented literally and run: given
-// file "handler.go" references "Login" defined in "auth.go", And only
-// "auth.go" changes to rename "Login" to "Authenticate", a graph query for
-// references to "Authenticate" returned zero rows for handler.go (verified
-// against the real pipeline, not inferred).
-//
-// The reason is structural, not a missing step definition.
-// internal/codegraph.Store.RecomputeGraphEdges resolves graph_edges by
-// joining symbol_references AGAINST symbols BY NAME
-// (internal/db/queries/code_graph.sql's ResolveGraphEdgeCandidates), and
-// `graph refs` (LookupReferencesByName) reads symbol_references directly,
-// also by name -- see that query's own doc comment: "intra-repo,
-// name-based, approximate" (docs/ingestion-spec.md "Edge resolution").
-// handler.go's OWN reference row is written once, at whatever ingest last
-// reparsed handler.go, and holds the literal text "Login". Renaming Login
-// to Authenticate touches only auth.go; diffplan's own incremental
-// contract (TestPlan_Incremental_ClassifiesAddModifyDeleteRename_
+// loam-7d0 implemented this scenario LITERALLY -- asserting that renaming
+// Login to Authenticate in auth.go ALONE would make unchanged handler.go
+// report a reference to "Authenticate" -- and it failed exactly where the
+// schema predicts: internal/codegraph.Store.RecomputeGraphEdges and
+// `graph refs` (LookupReferencesByName) both resolve by NAME
+// (internal/db/queries/code_graph.sql), and handler.go's own reference row
+// is written once, holding the literal text "Login", at whatever ingest
+// last reparsed it. diffplan's own incremental contract
+// (TestPlan_Incremental_ClassifiesAddModifyDeleteRename_
 // UnchangedFileNeverAppears, internal/diffplan/plan_test.go) guarantees
-// handler.go is never reparsed for that commit, so its stored reference
-// name never becomes "Authenticate" -- not on an incremental ingest, and
-// not on a full one either, since a full rebuild reparses handler.go's
-// UNCHANGED bytes and extracts the same literal "Login" text again.
-// docs/ingestion-spec.md's own "moved" language ("correct against the
-// current symbol set even when an unchanged file referenced a symbol that
-// MOVED") describes a symbol relocating to a different FILE while keeping
-// its name -- genuinely handled by this name-based join -- not a rename,
-// which is a different operation this schema has no mechanism to track
-// (there is no stable symbol identity across a rename: ReplaceFileSymbols
-// deletes and reinserts with a fresh uuid.NewV7 every time). This is also
-// consistent with internal/ingest/orchestrator's own integration test
-// covering this exact rename fixture
-// (TestIngest_MidFlightReaderSeesThePreviousIndexUntilTheSingleCommit,
-// integration_test.go): it asserts on `symbols` (Login gone, Authenticate
-// present) and never asserts anything about handler.go's edges/references,
-// because there is nothing true to assert there.
+// handler.go is never reparsed for a commit that only touches auth.go, so
+// its stored reference text never becomes "Authenticate".
 //
-// Per this bead's own guidance (and loam-ofg.18's precedent), the tag
-// stays rather than weakening the scenario or its assertions to pass.
+// loam-d2b2 corrects the PREMISE, not the mechanism: handler.go on disk
+// still literally says "Login" after that commit -- in Go, an unrenamed
+// caller is broken code, and making the original assertion pass would
+// require the index to invent an edge the source does not contain. That
+// is worse than the staleness it was meant to catch. graph_edges already
+// resolves through symbol identity (from_symbol_id/to_symbol_id, uuid FKs
+// into symbols, 0002_code_intel.up.sql:43-52) -- the name-text lookup
+// this scenario exercises is symbol_references.name feeding edge
+// resolution, not a missing identity layer.
+//
+// What genuinely holds, and what this scenario now asserts instead:
+//   - handler.go's own symbol_references ROW still names "Login" -- its
+//     bytes never changed, so its stored reference text is exactly what
+//     its own source says (stepStaleReferenceSurvivesTheRename). This is
+//     asserted against symbol_references directly, NOT via `loam graph
+//     refs Login`: that CLI path is a genuine dead end here, one this
+//     scenario's own first implementation attempt surfaced. `graph refs`
+//     (internal/handler/graph/resolve.go's symbolExists,
+//     TestQuery_References_SymbolNotFound_LookupReferencesNeverCalled)
+//     checks that the symbol currently resolves to at least one LIVE
+//     definition BEFORE it ever calls LookupReferencesByName -- by
+//     design, so a real, defined-but-unreferenced symbol reads as an
+//     empty result rather than a confusing NotFound. Once auth.go no
+//     longer declares Login, that existence check fails and `graph refs
+//     Login` is NotFound regardless of what symbol_references still
+//     holds, which makes it structurally unable to surface a name with NO
+//     live definition anywhere -- exactly the dangling case this
+//     scenario is about. The row this step reads is the same
+//     symbol_references data `graph refs` would join against if the
+//     symbol still existed; reading it directly is what is left once the
+//     public query surface's own not-found contract rules out the CLI.
+//   - "Login" itself is a dangling reference: ReplaceFileSymbols deletes
+//     and reinserts auth.go's symbols with a fresh uuid.NewV7 every ingest,
+//     so once auth.go no longer declares Login, `graph def Login` is a
+//     real NotFound (the existing "a graph query no longer finds" step,
+//     reused here rather than duplicated).
+//   - "Authenticate" is a real, resolvable symbol with zero references --
+//     the graph telling the truth about a half-finished refactor, which is
+//     exactly when querying it is useful
+//     (stepSymbolIsDefinedWithNoReferences).
+//
+// Scope: Go only, per this bead's own notes. Dynamically-typed languages,
+// where a rename can leave callers legitimately valid via aliasing or
+// re-export, are deferred post-MVP as loam-4rw6.
+func (h *acceptanceHarness) stepFileReferencesSymbolDefinedIn(ctx context.Context, referencingFile, symbol, definingFile string) error {
+	world := worldFrom(ctx)
+	if referencingFile != acceptanceHandlerFile || symbol != acceptanceDefinedSymbol || definingFile != acceptanceAuthFile {
+		return fmt.Errorf("scenario expects %q in %q defined in %q, but this fixture's cross-file reference is %q in %q defined in %q",
+			symbol, referencingFile, definingFile, acceptanceDefinedSymbol, acceptanceHandlerFile, acceptanceAuthFile)
+	}
+	if err := h.ingestIndexedBranch(ctx, world); err != nil {
+		return err
+	}
+	envelope, err := h.runQuery(world, append([]string{"graph", "refs", symbol}, world.scopeArgs()...)...)
+	if err != nil {
+		return fmt.Errorf("querying graph refs %s before the rename: %w", symbol, err)
+	}
+	if !envelopeNamesFile(envelope, referencingFile) {
+		return fmt.Errorf("graph refs %s does not include %s before the rename: %v", symbol, referencingFile, envelope.Results)
+	}
+	return nil
+}
+
+// stepOnlyFileChangesToRename pushes a commit that writes ONLY file's
+// path -- handler.go's own bytes are never part of it, so diffplan's
+// incremental contract guarantees handler.go is never reparsed for this
+// commit, which is the entire premise the rewritten scenario depends on.
+func (h *acceptanceHarness) stepOnlyFileChangesToRename(ctx context.Context, file, from, to string) error {
+	world := worldFrom(ctx)
+	if file != acceptanceAuthFile || from != acceptanceDefinedSymbol || to != acceptanceRenamedSymbol {
+		return fmt.Errorf("scenario renames %q to %q in %q, but this fixture's rename is %q to %q in %q",
+			from, to, file, acceptanceDefinedSymbol, acceptanceRenamedSymbol, acceptanceAuthFile)
+	}
+	return h.forge.AdvanceBranch(ctx, world.repo(), world.targetBranch, fakeforge.AdvanceOptions{
+		Path:    acceptanceAuthFile,
+		Content: []byte(acceptanceRenamedAuthContent),
+		Message: fmt.Sprintf("rename %s to %s", from, to),
+	})
+}
+
+// stepBranchAdvancesAndIsIngested drains the queue a real sync cycle
+// fills after stepOnlyFileChangesToRename's push -- the same
+// fetch-detect-enqueue trigger stepBranchAdvancesAddingAndRemoving uses,
+// never a direct Enqueue -- and requires the resulting ingest to have
+// actually succeeded.
+func (h *acceptanceHarness) stepBranchAdvancesAndIsIngested(ctx context.Context, branch string) error {
+	world := worldFrom(ctx)
+	if branch != world.targetBranch {
+		return fmt.Errorf("scenario advances %q but this repo's target branch is %q", branch, world.targetBranch)
+	}
+	if _, err := h.syncHarness.Tick(ctx); err != nil {
+		return fmt.Errorf("running the sync cycle after %s advanced: %w", branch, err)
+	}
+	if err := h.ingestHarness.DrainIngestQueue(ctx, mirrorsync.RepoID(world.repo())); err != nil {
+		return fmt.Errorf("draining the ingest queue for %s: %w", world.repo(), err)
+	}
+	return h.assertIngestSucceeded(ctx, world)
+}
+
+// stepStaleReferenceSurvivesTheRename asserts handler.go's own
+// symbol_references row still names symbol after the rename, read
+// directly rather than through `loam graph refs`: that public query path
+// requires the symbol to currently resolve to a live definition before it
+// will report anything at all (internal/handler/graph/resolve.go's
+// symbolExists gate), so it cannot surface a dangling name with no
+// definition anywhere -- see this file's own note above this scenario's
+// step block. Reading symbol_references directly is what proves the
+// mechanism the scenario is actually about: handler.go was never
+// reparsed for a commit that only touched auth.go, so its stored
+// reference text is exactly what its own unchanged bytes still say.
+func (h *acceptanceHarness) stepStaleReferenceSurvivesTheRename(ctx context.Context, symbol, file string) error {
+	world := worldFrom(ctx)
+	var count int
+	err := h.server.pool.QueryRow(ctx,
+		`SELECT count(*) FROM symbol_references WHERE repo_id = $1 AND target_branch = $2 AND file = $3 AND name = $4`,
+		world.repoID, world.targetBranch, file, symbol).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("counting symbol_references naming %s in %s for %s: %w", symbol, file, world.repo(), err)
+	}
+	if count == 0 {
+		return fmt.Errorf("no symbol_references row names %s in %s after the rename: the stale reference did not survive", symbol, file)
+	}
+	return nil
+}
+
+// stepSymbolIsDefinedWithNoReferences asserts Authenticate is a real,
+// resolvable symbol (ReplaceFileSymbols inserted it fresh once auth.go was
+// reparsed) with zero references. Zero results at exit 0 is the load-
+// bearing distinction here, not a NotFound: runGraphRefs' own doc comment
+// (internal/cli/commands_graph.go) separates "no such symbol" from
+// "symbol exists, nobody uses it", and this is genuinely the latter --
+// nothing on this branch spells Authenticate except its own definition.
+func (h *acceptanceHarness) stepSymbolIsDefinedWithNoReferences(ctx context.Context, symbol string) error {
+	world := worldFrom(ctx)
+	def, err := h.runQuery(world, append([]string{"graph", "def", symbol}, world.scopeArgs()...)...)
+	if err != nil {
+		return fmt.Errorf("querying graph def %s: %w", symbol, err)
+	}
+	if len(def.Results) == 0 {
+		return fmt.Errorf("graph def %s returned no definitions", symbol)
+	}
+	refs, err := h.runQuery(world, append([]string{"graph", "refs", symbol}, world.scopeArgs()...)...)
+	if err != nil {
+		return fmt.Errorf("querying graph refs %s: %w", symbol, err)
+	}
+	if len(refs.Results) != 0 {
+		return fmt.Errorf("graph refs %s returned %d result(s), want none: %v", symbol, len(refs.Results), refs.Results)
+	}
+	return nil
+}
+
+// envelopeNamesFile reports whether any row in envelope's results names
+// file. Every graph-refs row this file decodes is a generic
+// map[string]any (acceptanceEnvelope's own doc comment), so this reads the
+// "file" field the same way every other assertion in this file does.
+func envelopeNamesFile(envelope acceptanceEnvelope, file string) bool {
+	for _, row := range envelope.Results {
+		if f, _ := row["file"].(string); f == file {
+			return true
+		}
+	}
+	return false
+}
 
 // --- loam-7d0: "The admin can force a reindex" ---
 

@@ -18,13 +18,13 @@ Feature: Code ingestion
     Then after ingestion a graph query finds "Logout"
     And a graph query no longer finds "LegacyLogin"
 
-  @wip
   Scenario: Edges reflect the current code even in unchanged files
     Given file "handler.go" references "Login" defined in "auth.go"
     And only "auth.go" changes to rename "Login" to "Authenticate"
     When "main" advances and is ingested
-    Then a graph query for references to "Authenticate" includes "handler.go"
-    And "Login" is no longer found
+    Then the stale reference to "Login" in "handler.go" survives the rename
+    And a graph query no longer finds "Login"
+    And "Authenticate" is defined with no references
 
   Scenario: The admin can force a reindex
     When I reindex "bobcob7/doc-server"
