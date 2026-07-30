@@ -435,6 +435,20 @@ func TestServe_PushCompletesOnPolicySocketDuringHTTPDrain(t *testing.T) {
 		t.Fatal("the in-flight HTTP request never reached the handler")
 	}
 	cancel() // simulate SIGTERM mid-request
+	// This sleep is deliberate, not a flaky-test smell: hooksocket.Server's
+	// own listener-close goroutine (`go func() { <-ctx.Done(); listener.
+	// Close() }()`) races this test's own goroutine the instant cancel()
+	// returns, and a dial issued too quickly could accidentally beat that
+	// close on scheduling luck alone even on the UNFIXED ordering,
+	// producing a false pass. Giving that goroutine a full 300ms head
+	// start turns "does the socket outlive the HTTP drain" into a
+	// deterministic property of THIS bead's fix (the socket's ctx is
+	// provably never cancelled until httpServer.Shutdown returns, which
+	// cannot happen here until releaseRequest below is closed) rather than
+	// a coin flip against goroutine scheduling -- confirmed by running this
+	// test against the pre-fix ordering, where it fails every time despite
+	// this same delay.
+	time.Sleep(300 * time.Millisecond)
 	req := hooksocket.Request{
 		Repo:  "acme/widgets",
 		Agent: hooksocket.AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
