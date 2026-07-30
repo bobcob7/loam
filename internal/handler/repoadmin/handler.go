@@ -11,6 +11,7 @@ import (
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/reposstore"
 )
@@ -112,16 +113,32 @@ func validRepoName(name string) bool {
 // it as a filesystem-joined or database identifier -- this function
 // accepts any syntactically valid http(s) URL, including one whose path
 // has the wrong shape.
+//
+// None of the returned errors interpolate upstreamURL itself (loam-ra1k):
+// EnrollRepo %w-wraps whatever this returns straight into the RPC error
+// it hands back to the client, so a credential embedded in the URL
+// (rejected explicitly by the u.User != nil check below, via the shared
+// gittransport.ErrUpstreamURLHasUserinfo sentinel -- gittransport's own
+// last-resort rejection at Fetch/Push/Clone/etc. is necessary but not
+// sufficient, since this is the earlier, cheaper choke point for the
+// admin-facing enroll path) would otherwise be handed straight back to
+// whoever submitted the form. *url.Error's own Error() renders as
+// `parse "<raw url>": <reason>`, so even the parse-failure branch must
+// not %w-wrap it; the host is the most that is ever safe to echo, and
+// only once parsing succeeded.
 func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
-		return "", "", fmt.Errorf("parsing upstream url %s: %w", upstreamURL, err)
+		return "", "", fmt.Errorf("parsing upstream url: unparseable")
+	}
+	if u.User != nil {
+		return "", "", gittransport.ErrUpstreamURLHasUserinfo
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", "", fmt.Errorf("upstream url %s: scheme must be http or https", upstreamURL)
+		return "", "", fmt.Errorf("upstream url (host %s): scheme must be http or https", u.Host)
 	}
 	if u.Host == "" {
-		return "", "", fmt.Errorf("upstream url %s: missing host", upstreamURL)
+		return "", "", fmt.Errorf("upstream url: missing host")
 	}
 	path := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
 	return forgeHostOf(u), path, nil
