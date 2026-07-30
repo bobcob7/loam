@@ -120,6 +120,7 @@ func ingestStatusToProto(status string) adminv1.IngestStatus {
 // IngestJob message.
 func toIngestJobProto(record ingest.JobRecord) *adminv1.IngestJob {
 	return &adminv1.IngestJob{
+		Id:           record.ID.String(),
 		Repo:         record.Repo,
 		TargetBranch: record.TargetBranch,
 		Kind:         ingestKindToProto(record.Kind),
