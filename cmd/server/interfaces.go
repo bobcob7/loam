@@ -7,7 +7,7 @@ import (
 	"github.com/bobcob7/loam/internal/reposstore"
 )
 
-//go:generate go tool moq -out moq_test.go . runner closer repoNameLister repoForgeLookup forgeCredentialLookup
+//go:generate go tool moq -out moq_test.go . runner closer repoNameLister repoForgeLookup forgeCredentialLookup credentialLister
 
 // runner is a long-lived background component whose Run blocks until ctx
 // is canceled and, per its own contract, every unit of work it already
@@ -69,6 +69,22 @@ type repoForgeLookup interface {
 // makes. *credentialstore.Store satisfies it structurally, and it is the
 // same seam internal/gittransport already defines at its own consumer for
 // the git half of the same credential.
+//
+// verifyStoredCredentialsDecrypt (credentialcheck.go) reuses this exact
+// interface for a different purpose -- confirming LOAM_ENCRYPTION_KEY can
+// actually open what is already stored, at startup, rather than resolving a
+// token for a sync-cycle PR read -- rather than defining a second, narrower
+// one: the method it needs is identical, and *credentialstore.Store is the
+// only production implementation of either consumer.
 type forgeCredentialLookup interface {
 	GetByHost(ctx context.Context, host string) (credentialstore.Credential, error)
+}
+
+// credentialLister enumerates every host with a credentials row, without
+// decrypting anything -- *credentialstore.Store.ListStatuses satisfies it
+// structurally. verifyStoredCredentialsDecrypt (credentialcheck.go) is the
+// only consumer: it needs the set of hosts that HAVE a stored token before
+// it can attempt a decrypt on each one.
+type credentialLister interface {
+	ListStatuses(ctx context.Context) ([]credentialstore.CredentialStatus, error)
 }
