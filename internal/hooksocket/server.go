@@ -62,7 +62,7 @@ func Listen(socketPath string, store WorkBranchStore, onAccept PostAcceptFunc, l
 // defaultConnDeadline's full production duration. Production (Listen)
 // always passes defaultConnDeadline.
 func listen(socketPath string, store WorkBranchStore, onAccept PostAcceptFunc, logger *slog.Logger, connDeadline time.Duration) (*Server, error) {
-	if err := os.RemoveAll(socketPath); err != nil {
+	if err := removeStaleSocket(socketPath); err != nil {
 		return nil, fmt.Errorf("removing stale policy socket %s: %w", socketPath, err)
 	}
 	listener, err := bindUnixSocket(socketPath)
@@ -70,6 +70,22 @@ func listen(socketPath string, store WorkBranchStore, onAccept PostAcceptFunc, l
 		return nil, fmt.Errorf("binding policy socket %s: %w", socketPath, err)
 	}
 	return &Server{listener: listener, store: store, onAccept: onAccept, logger: logger, connDeadline: connDeadline}, nil
+}
+
+// removeStaleSocket removes a leftover socket file at socketPath, treating
+// a path that does not exist as success (the socket legitimately may not
+// exist on a first start, or after an unclean prior shutdown). It
+// deliberately uses os.Remove rather than os.RemoveAll: socketPath is
+// built from LOAM_DATA_DIR, an operator-supplied value this program does
+// not fully control, so a misconfigured path that resolves to a directory
+// (rather than the expected socket file) must surface as an error here --
+// not be silently, recursively deleted.
+func removeStaleSocket(socketPath string) error {
+	err := os.Remove(socketPath)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // maxSunPathBytes is the tightest widely-deployed sun_path buffer size
