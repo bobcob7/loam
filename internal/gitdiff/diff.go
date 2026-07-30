@@ -12,14 +12,15 @@
 // that sentence does not describe this tree's actual history and should
 // not be read as evidence this plumbing predates loam-fwk.
 //
-// Isolation carried over from internal/gittransport's Transport (the
-// established model in this tree for running a git subprocess safely) and
+// Isolation (loam-ldx: now internal/gitrun's Env/NewCommand, not
+// hand-rolled here -- this package was gitrun's original source, before
+// six further identical copies made the duplication worth extracting) and
 // why: GIT_CONFIG_NOSYSTEM plus a redirected HOME/XDG_CONFIG_HOME/
 // GIT_CONFIG_GLOBAL so no host or user gitconfig is ever read,
 // credential.helper explicitly cleared, GIT_TRACE* forced off via "=0"
-// and GIT_CURL_VERBOSE kept off the explicit allowlist below (git only
-// presence-checks that one, so "=0" would enable it -- see gitEnv), and
-// exec.CommandContext with a WaitDelay so a canceled request's
+// and GIT_CURL_VERBOSE kept off the explicit allowlist (git only
+// presence-checks that one, so "=0" would enable it -- see gitrun.Env),
+// and exec.CommandContext with a WaitDelay so a canceled request's
 // diff against a bare mirror needs no credential (unlike gittransport's
 // own upstream operations), but the config-isolation property is still
 // load-bearing here for a reason gittransport never has to worry about:
@@ -40,12 +41,10 @@
 // however it got set) actually disables it; this package does both:
 // isolates against an ambient source AND passes --no-ext-diff as a second,
 // independent guard against a mirror's own repository-level config ever
-// setting it. Unlike
-// gittransport's own gitEnv, this package's environment is NOT built by
-// appending to os.Environ() -- it is an explicit, minimal list (PATH plus
-// the isolation variables below) -- matching internal/handler/git's
-// gitCommand instead, since this operation, like that one, needs no
-// ambient host environment variable to function and every inherited
+// setting it. Unlike gittransport's own gitEnv, gitrun.Env's environment
+// is NOT built by appending to os.Environ() -- it is an explicit, minimal
+// list (PATH plus the isolation variables) -- since this operation needs
+// no ambient host environment variable to function and every inherited
 // GIT_* variable is a variable this package does not have to reason
 // about.
 //
@@ -66,16 +65,13 @@
 package gitdiff
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/bobcob7/loam/internal/gitrun"
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/refnames"
 	"github.com/bobcob7/loam/internal/workbranchstore"
@@ -105,13 +101,6 @@ var maxDiffBytes = 4 << 20
 // stdout, sized much smaller since git's own error output is always a few
 // lines, never proportional to repository size.
 const maxStderrBytes = 64 << 10
-
-// subprocessWaitDelay mirrors internal/handler/git/subprocess.go's constant
-// of the same name and purpose: how long a canceled invocation's process
-// gets to exit on its own, and how long Wait then waits on its pipes,
-// before Cmd forces them closed -- see that package's own doc comment for
-// the precise (narrower-than-it-sounds) guarantee this actually is.
-const subprocessWaitDelay = 5 * time.Second
 
 // diffTruncatedMarker is appended to a capped diff's text when maxDiffBytes
 // bound, so truncation is visible in the returned string itself -- the only
@@ -293,95 +282,21 @@ type gitOutput struct {
 // even run git (binary missing, context already canceled before start,
 // ...) is returned as err.
 func (c *Computer) run(ctx context.Context, mirrorDir string, args ...string) (gitOutput, error) {
-	home, err := os.MkdirTemp("", "loam-gitdiff-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
-		return gitOutput{}, fmt.Errorf("creating isolated git environment: %w", err)
+		return gitOutput{}, err
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home)
-	outBuf := &cappedBuffer{max: maxDiffBytes}
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = outBuf
-	cmd.Stderr = errBuf
+	defer cleanup()
+	outBuf := gitrun.NewCappedBuffer(maxDiffBytes)
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitrun.Env(home), nil, outBuf, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return gitOutput{stdout: outBuf.buf.Bytes(), truncated: outBuf.overflowed(), exitCode: 0, stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), truncated: outBuf.Overflowed(), exitCode: 0, stderr: errBuf.String()}, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return gitOutput{stdout: outBuf.buf.Bytes(), truncated: outBuf.overflowed(), exitCode: exitErr.ExitCode(), stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), truncated: outBuf.Overflowed(), exitCode: exitErr.ExitCode(), stderr: errBuf.String()}, nil
 	}
 	return gitOutput{}, fmt.Errorf("running git %v: %w", args, runErr)
-}
-
-// gitEnv builds the environment for one git subprocess invocation, an
-// explicit minimal list rather than os.Environ() plus additions -- see
-// package doc comment for why this package follows internal/handler/git's
-// model here rather than internal/gittransport's os.Environ()-based one.
-// GIT_CONFIG_NOSYSTEM plus the redirected HOME/XDG_CONFIG_HOME/
-// GIT_CONFIG_GLOBAL below mean no system, user-global, or ambient
-// GIT_CONFIG_GLOBAL-pointed config is ever read; GIT_PAGER=cat plus the
-// invocation's own --no-pager flag (see run) doubly guard against
-// core.pager ever blocking on a tty this subprocess does not have; the
-// GIT_TRACE* overrides are carried over from gittransport's own gitEnv
-// even though this package injects no credential for them to leak, on
-// the same belt-and-suspenders reasoning gittransport itself documents.
-// GIT_CURL_VERBOSE is deliberately NOT one of the "=0" overrides below:
-// git presence-checks that variable rather than parsing it as a
-// boolean, so setting it to "0" would turn curl tracing ON. Simply
-// leaving it off this explicit allowlist is what actually keeps it
-// off -- unlike gittransport's os.Environ()-based gitEnv, this list is
-// never merged with an ambient environment, so omission here is
-// sufficient by itself.
-func gitEnv(home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
-}
-
-// cappedBuffer is an io.Writer that retains only the first max bytes ever
-// written to it while still reporting every byte written (Write always
-// returns len(p), nil) -- so a subprocess writing to one never blocks on a
-// full pipe waiting for a reader that has stopped consuming, the same
-// hazard a capped io.Reader would introduce. overflowed reports whether
-// more than max bytes were ever written, independent of what the retained
-// buffer itself holds.
-type cappedBuffer struct {
-	buf   bytes.Buffer
-	max   int
-	total int
-}
-
-// Write implements io.Writer.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	c.total += len(p)
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
-}
-
-// overflowed reports whether this buffer ever received more than max bytes
-// total, regardless of how much it retained.
-func (c *cappedBuffer) overflowed() bool {
-	return c.total > c.max
 }
