@@ -715,9 +715,15 @@ func TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes(t *testing.T) 
 // TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup below for that
 // same proof kept as a permanent regression). This test instead asserts
 // the documented, now-safe behavior directly: the second call does not
-// return early, and once it does, it reports it started nothing new,
-// because repoA was still claimed by the first call's cycle at the moment
-// the second call's own tick() ran.
+// return until the first's cycle has actually finished (proven by the
+// 200ms bounded wait below), and once it does, it starts a FRESH cycle
+// for repoA -- not "nothing", because finish() (which frees the per-repo
+// guard) runs strictly before the first cycle's deferred wg.Done(), so by
+// the time driveMu hands off to the second call, repoA is already free
+// again. The serialization claim this test exists to pin is about
+// ORDERING (no second round starts before the first's has fully
+// finished, including its report), not about the second round
+// necessarily finding the repo still busy.
 func TestScheduler_ConcurrentTickBlocksUntilFirstCompletes(t *testing.T) {
 	t.Parallel()
 	h := newHarness("repoA")
@@ -753,18 +759,33 @@ func TestScheduler_ConcurrentTickBlocksUntilFirstCompletes(t *testing.T) {
 	select {
 	case result := <-secondDone:
 		require.NoError(t, result.err)
-		assert.Empty(t, result.started, "repoA was already running under the first call's cycle when the second call's own tick() ran, so it starts nothing new -- it only had to wait its turn")
+		assert.Equal(t, []RepoID{"repoA"}, result.started, "repoA was freed by the first cycle's finish() before driveMu handed off, so the second call's own tick() legitimately starts a fresh cycle for it -- the property under test is that this happens only AFTER the first round fully finished, not that the repo stays busy")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the second Tick call never returned after the first call's in-flight cycle completed")
 	}
-	<-h.outcomes // drain the one cycle's terminal report so it does not leak past the test
+	<-h.outcomes // first cycle's terminal report
+	<-h.outcomes // second cycle's terminal report
 }
 
 // TestScheduler_TickDuringRunSerializesInsteadOfRacing is loam-f75's other
 // named interleaving: a manual Tick call arriving while Run's own tick is
-// still driving a cycle. Same proof shape as
-// TestScheduler_ConcurrentTickBlocksUntilFirstCompletes above, just with
-// Run standing in for the first caller.
+// still driving a cycle. The proof shape matches
+// TestScheduler_ConcurrentTickBlocksUntilFirstCompletes above (a 200ms
+// bounded wait proves Tick does not return early), but the outcome is the
+// OPPOSITE of that test's, for a real, load-bearing reason: Run's
+// driveMu.Lock/Unlock in the select loop wraps only s.tick(ctx) --
+// listing and spawning -- never a wait for the cycle to finish, because
+// Run is fire-and-forget by design (a slow repo must never block the next
+// tick's spawn for every OTHER repo). So driveMu is free again the
+// instant Run has spawned repoA's cycle, well before that cycle
+// completes, and Tick can acquire it immediately. Tick's own tick() then
+// finds repoA still claimed by Run's in-flight cycle (tryStart correctly
+// refuses it) and starts nothing new; its waitIdle() then blocks on the
+// SAME cycle Run started, via the SAME WaitGroup, which is exactly the
+// interleaving loam-f75 named and driveMu was added to make safe: no new
+// Add can race that Wait, because driveMu (held by this Tick call across
+// its own tick()+wait) blocks Run's NEXT tick from adding anything until
+// this call is done.
 func TestScheduler_TickDuringRunSerializesInsteadOfRacing(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -798,11 +819,11 @@ func TestScheduler_TickDuringRunSerializesInsteadOfRacing(t *testing.T) {
 	select {
 	case result := <-tickDone:
 		require.NoError(t, result.err)
-		assert.Empty(t, result.started, "repoA was already running under Run's cycle when Tick's own tick() ran, so it starts nothing new")
+		assert.Empty(t, result.started, "repoA was still claimed by Run's own in-flight cycle when Tick's tick() ran (driveMu released as soon as Run spawned it, not once it finished) -- Tick starts nothing new and its waitIdle just waits out that same cycle")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Tick never returned after Run's in-flight cycle completed")
 	}
-	<-h.outcomes // drain the one cycle's terminal report so it does not leak past the test
+	<-h.outcomes // Run's cycle is the only one that ran; Tick started nothing new
 }
 
 // TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup is
