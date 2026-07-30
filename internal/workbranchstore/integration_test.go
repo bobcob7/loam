@@ -771,7 +771,8 @@ func TestRecordUpstreamPR_WritesTheColumnsAgainstTheRealSchema(t *testing.T) {
 	wb, err := store.Create(ctx, repoID, "wb-accept-1", "main", "grace-hopper-3-author")
 	require.NoError(t, err)
 	require.Nil(t, wb.UpstreamPRNumber, "precondition: a fresh work branch has no recorded PR")
-	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7)
+	require.Nil(t, wb.AcceptedTip, "precondition: a fresh work branch has no recorded accepted tip")
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7, "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b")
 	require.NoError(t, err)
 	reread, err := store.Get(ctx, wb.ID)
 	require.NoError(t, err)
@@ -779,6 +780,8 @@ func TestRecordUpstreamPR_WritesTheColumnsAgainstTheRealSchema(t *testing.T) {
 	assert.Equal(t, int32(7), *reread.UpstreamPRNumber)
 	require.NotNil(t, reread.UpstreamPRURL)
 	assert.Equal(t, "https://example.com/g/r/pulls/7", *reread.UpstreamPRURL)
+	require.NotNil(t, reread.AcceptedTip, "accepted_tip must round-trip through the real 0004 column, not stay NULL")
+	assert.Equal(t, "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", *reread.AcceptedTip)
 }
 
 // TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard is proposal
@@ -793,9 +796,9 @@ func TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard(t *testing.T) {
 	store, repoID := newTestStore(t)
 	wb, err := store.Create(ctx, repoID, "wb-accept-2", "main", "grace-hopper-3-author")
 	require.NoError(t, err)
-	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7)
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	require.NoError(t, err)
-	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/99", 99)
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/99", 99, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	require.ErrorIs(t, err, ErrPRAlreadyRecorded)
 	reread, err := store.Get(ctx, wb.ID)
 	require.NoError(t, err)
@@ -803,6 +806,41 @@ func TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard(t *testing.T) {
 	assert.Equal(t, int32(7), *reread.UpstreamPRNumber, "the second write must not overwrite the recorded PR")
 	require.NotNil(t, reread.UpstreamPRURL)
 	assert.Equal(t, "https://example.com/g/r/pulls/7", *reread.UpstreamPRURL)
+	require.NotNil(t, reread.AcceptedTip)
+	assert.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *reread.AcceptedTip, "accepted_tip rides the same guarded UPDATE, so the refused second write must not advance it either")
+}
+
+// TestRecordAcceptedTip_RefreshesTheTipAgainstTheRealSchema covers the
+// re-accept leg (loam-cgg), the one accept path RecordUpstreamPR's
+// upstream_pr_number IS NULL guard refuses by design. Its UPDATE is
+// unconditional, so unlike the guarded write above it MUST advance the
+// tip on a branch that already carries a PR -- and must leave the
+// recorded url/number pair alone while doing it.
+func TestRecordAcceptedTip_RefreshesTheTipAgainstTheRealSchema(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-accept-4", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	_, err = store.RecordUpstreamPR(ctx, wb.ID, "https://example.com/g/r/pulls/7", 7, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	require.NoError(t, err)
+	_, err = store.RecordAcceptedTip(ctx, wb.ID, "cccccccccccccccccccccccccccccccccccccccc")
+	require.NoError(t, err)
+	reread, err := store.Get(ctx, wb.ID)
+	require.NoError(t, err)
+	require.NotNil(t, reread.AcceptedTip)
+	assert.Equal(t, "cccccccccccccccccccccccccccccccccccccccc", *reread.AcceptedTip, "a re-accept must advance the tip, or the branch stays wrongly excluded from the proposal queue")
+	require.NotNil(t, reread.UpstreamPRNumber)
+	assert.Equal(t, int32(7), *reread.UpstreamPRNumber, "refreshing the tip must not disturb the recorded PR")
+}
+
+// TestRecordAcceptedTip_UnknownIDIsNotFound keeps the unconditional
+// UPDATE's zero-row case classified, matching the guarded write's.
+func TestRecordAcceptedTip_UnknownIDIsNotFound(t *testing.T) {
+	t.Parallel()
+	store, _ := newTestStore(t)
+	_, err := store.RecordAcceptedTip(t.Context(), uuid.Must(uuid.NewV7()), "dddddddddddddddddddddddddddddddddddddddd")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 // TestRecordUpstreamPR_UnknownIDIsNotFound proves the other zero-row cause
@@ -810,7 +848,7 @@ func TestRecordUpstreamPR_SecondWriteIsRefusedByTheRealGuard(t *testing.T) {
 func TestRecordUpstreamPR_UnknownIDIsNotFound(t *testing.T) {
 	t.Parallel()
 	store, _ := newTestStore(t)
-	_, err := store.RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://example.com/g/r/pulls/7", 7)
+	_, err := store.RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://example.com/g/r/pulls/7", 7, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 	require.ErrorIs(t, err, ErrNotFound)
 	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
 }

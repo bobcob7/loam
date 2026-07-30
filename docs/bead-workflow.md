@@ -47,6 +47,14 @@ This doc defines *the loop that gets a bead from ready to closed*.
    (+ `go tool buf generate` if protos changed), and the godog acceptance
    scenarios once that harness exists (`loam-li0` epic). Un-@wip'd scenarios
    pass; nothing else regresses.
+7. **Typecheck the build-tagged trees**, even when you are not running their
+   suites: `go vet -tags=integration ./...` and `go vet -tags=acceptance ./...`.
+   Neither starts a container, so both are affordable under the resource
+   constraints that normally keep a subagent off the tagged suites — and an
+   untagged `go build ./...` cannot see these files at all. Any change to an
+   exported signature a `_test.go` under a build tag calls (`loam-cgg` widened
+   `workbranchstore.RecordUpstreamPR` and broke four call sites in
+   `integration_test.go`) is otherwise invisible until a full tagged run.
 
 ### 3. Review — separate subagent (Opus)
 
