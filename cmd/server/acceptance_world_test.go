@@ -252,6 +252,51 @@ type acceptanceWorld struct {
 	// this file and acceptance_ingest_test.go already use for the PRIMARY
 	// repo work unmodified against it too.
 	secondRepo *acceptanceWorld
+	// The credentials state (acceptance_credentials_test.go, loam-317m).
+	// credentialHostFor maps a scenario's literal, Gherkin-level host name
+	// (e.g. "github.com") to the actual reachable host string this
+	// suite's credentials proxy resolves credentials by -- populated only
+	// by steps that stand up a WORKING credential for that literal name;
+	// see credentialHost's own doc comment for how a never-mapped literal
+	// is handled. lastCredentialHost is the actual host string the most
+	// recent CredentialService call in this scenario used, for a
+	// following Then step that needs to re-read status but has no host
+	// argument of its own (e.g. "the credential is rejected as invalid").
+	// lastCredentialStatus/lastCredentialErr are the most recent
+	// SetUpstreamToken/GetCredentialStatus outcome; lastSubmittedToken is
+	// the literal token text a rejection scenario submitted, checked
+	// against the error message to prove it was never echoed back.
+	credentialHostFor    map[string]string
+	lastCredentialHost   string
+	lastCredentialStatus *adminv1.CredentialStatus
+	lastCredentialErr    error
+	lastSubmittedToken   string
+}
+
+// credentialHost resolves stated (a scenario's literal Gherkin host name)
+// to the actual host string CredentialService calls should use: the
+// working proxy an earlier Given/When mapped it to, if any, otherwise
+// stated itself unchanged. The fallback is deliberate, not a missing case:
+// "Credentials are scoped per host" names a second host that must stay
+// genuinely unconfigured, and using it exactly as written -- never
+// silently redirected to whatever working host this scenario's OTHER
+// literal was mapped to -- is what lets that scenario prove scoping.
+func (w *acceptanceWorld) credentialHost(stated string) string {
+	if actual, ok := w.credentialHostFor[stated]; ok {
+		return actual
+	}
+	return stated
+}
+
+// rememberCredentialHost records that stated (a Gherkin literal host name)
+// resolves, for the rest of this scenario, to actual (a genuinely
+// reachable proxy host) -- called only by steps that just proved actual
+// is a working credential's host, never by a pure status read.
+func (w *acceptanceWorld) rememberCredentialHost(stated, actual string) {
+	if w.credentialHostFor == nil {
+		w.credentialHostFor = map[string]string{}
+	}
+	w.credentialHostFor[stated] = actual
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.

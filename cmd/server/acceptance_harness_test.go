@@ -263,4 +263,5 @@ func (h *acceptanceHarness) initializeScenario(sc *godog.ScenarioContext) {
 	h.registerRoleSteps(sc)
 	h.registerEnrollmentSteps(sc)
 	h.registerInstructionsSteps(sc)
+	h.registerCredentialsSteps(sc)
 }
