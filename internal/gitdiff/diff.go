@@ -16,9 +16,10 @@
 // established model in this tree for running a git subprocess safely) and
 // why: GIT_CONFIG_NOSYSTEM plus a redirected HOME/XDG_CONFIG_HOME/
 // GIT_CONFIG_GLOBAL so no host or user gitconfig is ever read,
-// credential.helper explicitly cleared, GIT_TRACE*/GIT_CURL_VERBOSE forced
-// off, and exec.CommandContext with a WaitDelay so a canceled request's
-// context kills the subprocess rather than leaving it running. A LOCAL
+// credential.helper explicitly cleared, GIT_TRACE* forced off via "=0"
+// and GIT_CURL_VERBOSE kept off the explicit allowlist below (git only
+// presence-checks that one, so "=0" would enable it -- see gitEnv), and
+// exec.CommandContext with a WaitDelay so a canceled request's
 // diff against a bare mirror needs no credential (unlike gittransport's
 // own upstream operations), but the config-isolation property is still
 // load-bearing here for a reason gittransport never has to worry about:
@@ -325,10 +326,16 @@ func (c *Computer) run(ctx context.Context, mirrorDir string, args ...string) (g
 // GIT_CONFIG_GLOBAL-pointed config is ever read; GIT_PAGER=cat plus the
 // invocation's own --no-pager flag (see run) doubly guard against
 // core.pager ever blocking on a tty this subprocess does not have; the
-// GIT_TRACE*/GIT_CURL_VERBOSE overrides are carried over from
-// gittransport's own gitEnv even though this package injects no credential
-// for them to leak, on the same belt-and-suspenders reasoning gittransport
-// itself documents.
+// GIT_TRACE* overrides are carried over from gittransport's own gitEnv
+// even though this package injects no credential for them to leak, on
+// the same belt-and-suspenders reasoning gittransport itself documents.
+// GIT_CURL_VERBOSE is deliberately NOT one of the "=0" overrides below:
+// git presence-checks that variable rather than parsing it as a
+// boolean, so setting it to "0" would turn curl tracing ON. Simply
+// leaving it off this explicit allowlist is what actually keeps it
+// off -- unlike gittransport's os.Environ()-based gitEnv, this list is
+// never merged with an ambient environment, so omission here is
+// sufficient by itself.
 func gitEnv(home string) []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -342,7 +349,6 @@ func gitEnv(home string) []string {
 		"GIT_PAGER=cat",
 		"GIT_TRACE=0",
 		"GIT_TRACE_CURL=0",
-		"GIT_CURL_VERBOSE=0",
 		"GIT_TRACE_PACKET=0",
 		"GIT_TRACE_PACK_ACCESS=0",
 		"GIT_TRACE_SETUP=0",

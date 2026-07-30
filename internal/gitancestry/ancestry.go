@@ -237,7 +237,6 @@ func gitEnv(home, extraObjectDir string) []string {
 		"GIT_PAGER=cat",
 		"GIT_TRACE=0",
 		"GIT_TRACE_CURL=0",
-		"GIT_CURL_VERBOSE=0",
 		"GIT_TRACE_PACKET=0",
 		"GIT_TRACE_PACK_ACCESS=0",
 		"GIT_TRACE_SETUP=0",

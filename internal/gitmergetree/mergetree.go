@@ -284,9 +284,12 @@ func classifyRunErr(ctx context.Context, runErr error, stdout []byte, stderr str
 // it could change this check's verdict from one developer machine to
 // another. GIT_PAGER=cat plus the invocation's own --no-pager doubly
 // guard against core.pager blocking on a tty this subprocess does not
-// have; the GIT_TRACE*/GIT_CURL_VERBOSE overrides are carried over from
+// have; the GIT_TRACE* overrides are carried over from
 // internal/gittransport's gitEnv on the same belt-and-suspenders
 // reasoning, even though this package injects no credential to leak.
+// GIT_CURL_VERBOSE is deliberately not one of them: git only
+// presence-checks that variable, so "=0" would turn curl tracing on;
+// leaving it off this explicit allowlist is what keeps it off.
 func gitEnv(home string) []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -300,7 +303,6 @@ func gitEnv(home string) []string {
 		"GIT_PAGER=cat",
 		"GIT_TRACE=0",
 		"GIT_TRACE_CURL=0",
-		"GIT_CURL_VERBOSE=0",
 		"GIT_TRACE_PACKET=0",
 		"GIT_TRACE_PACK_ACCESS=0",
 		"GIT_TRACE_SETUP=0",

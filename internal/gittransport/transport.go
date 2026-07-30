@@ -263,7 +263,9 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 // is read either; credential.helper is separately cleared via a `-c`
 // flag in run's argv (harmless there -- it carries no secret) so an
 // inherited GIT_CONFIG_* cannot reintroduce a helper. The git tracing
-// knobs are explicitly forced off so an inherited
+// knobs are explicitly forced off (GIT_CURL_VERBOSE by removing it from
+// the child's environment entirely rather than setting it, since git
+// only presence-checks that one -- see below) so an inherited
 // GIT_TRACE/GIT_CURL_VERBOSE/GIT_TRACE_CURL cannot print the injected
 // Authorization header -- and therefore the token -- to stderr, where it
 // would otherwise land in a returned error or a log line; scrubSecrets
@@ -278,6 +280,16 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 // close. A path that does not exist is read by git the same way a
 // missing ~/.gitconfig is: silently, as "no global config."
 //
+// GIT_CURL_VERBOSE is dropped from the inherited os.Environ() rather
+// than overridden with "=0": unlike every other GIT_TRACE* variable
+// here, git only presence-checks GIT_CURL_VERBOSE (see
+// http_options() in git's http.c) rather than parsing it as a
+// boolean, so "0" and "" both still count as "set" and both turn
+// curl tracing ON -- the exact opposite of this function's intent.
+// The only way to guarantee it is off is to make sure the key is
+// absent from the child's environment altogether, which is what
+// dropGitCurlVerbose does before the overrides below are appended.
+//
 // authHeaderValue is the base64(user:pass) half of "Authorization:
 // Basic <...>", injected via GIT_CONFIG_COUNT/GIT_CONFIG_KEY_0/
 // GIT_CONFIG_VALUE_0 (git >= 2.31): environment, never argv (a `-c
@@ -287,7 +299,7 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 // once the subprocess exits). Empty authHeaderValue injects no header
 // at all, for an anonymous operation.
 func gitEnv(home, authHeaderValue string) []string {
-	env := append(os.Environ(),
+	env := append(dropGitCurlVerbose(os.Environ()),
 		"GIT_CONFIG_NOSYSTEM=1",
 		// GIT_CONFIG_PARAMETERS is the OTHER ambient channel git reads
 		// config from, alongside GIT_CONFIG_COUNT below -- it is how git
@@ -310,7 +322,6 @@ func gitEnv(home, authHeaderValue string) []string {
 		"SSH_ASKPASS=",
 		"GIT_TRACE=0",
 		"GIT_TRACE_CURL=0",
-		"GIT_CURL_VERBOSE=0",
 		"GIT_TRACE_PACKET=0",
 		"GIT_TRACE_PACK_ACCESS=0",
 		"GIT_TRACE_SETUP=0",
@@ -335,11 +346,29 @@ func gitEnv(home, authHeaderValue string) []string {
 	)
 }
 
+// dropGitCurlVerbose returns environ with any GIT_CURL_VERBOSE entry
+// removed, preserving order otherwise. git presence-checks this
+// variable rather than parsing it as a boolean (see gitEnv's doc
+// comment), so an inherited GIT_CURL_VERBOSE=0 -- or even
+// GIT_CURL_VERBOSE="" -- still counts as "set" and still turns curl
+// tracing on; only an absent key is guaranteed to leave it off.
+func dropGitCurlVerbose(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "GIT_CURL_VERBOSE" {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
+}
+
 // scrubSecrets returns s with every occurrence of each non-empty value
 // in secrets replaced by a fixed marker, so a failing invocation's
 // returned output/error can never carry the token even if git itself
-// echoed it somehow. Belt and suspenders alongside gitEnv's explicit
-// GIT_TRACE*/GIT_CURL_VERBOSE=0 overrides, which stop git from producing
+// echoed it somehow. Belt and suspenders alongside gitEnv's GIT_TRACE*
+// overrides and GIT_CURL_VERBOSE removal, which stop git from producing
 // that trace in the first place.
 func scrubSecrets(s string, secrets ...string) string {
 	for _, secret := range secrets {

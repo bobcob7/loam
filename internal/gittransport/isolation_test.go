@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,4 +120,82 @@ func TestTransport_NeutralizesAmbientGitConfigParametersOnAnonymousCall(t *testi
 	mirrorDir := newBareMirror(t)
 	_, err := transport.Fetch(t.Context(), "", mirrorDir, upstreamURL, []string{"+refs/heads/*:refs/heads/*"})
 	require.Error(t, err, "an anonymous fetch against a token-gated repo must fail -- it must NEVER be rescued by a hostile ambient GIT_CONFIG_PARAMETERS the parent process happens to have set")
+}
+
+// TestDropGitCurlVerbose_RemovesTheKeyRegardlessOfValue pins loam-bot5:
+// unlike every other GIT_TRACE* variable, git only presence-checks
+// GIT_CURL_VERBOSE (verified empirically against git 2.50.1: an
+// otherwise-identical `git ls-remote` over http emits "http.c:889 ==
+// Info:" trace lines with GIT_CURL_VERBOSE=0 set that are absent when the
+// variable is unset entirely), so "0" and "" both still count as "set"
+// and both turn curl tracing ON. gitEnv used to append "GIT_CURL_VERBOSE=0"
+// after os.Environ(), which had exactly that inverted effect. This test
+// exercises dropGitCurlVerbose directly against a slice carrying the
+// variable with several different values, none of which git would treat
+// as "off": if the old "=0" override line were ever reintroduced instead
+// of the removal, this would still see a GIT_CURL_VERBOSE key survive
+// (with whatever value dropGitCurlVerbose received or was appended after
+// it) and fail.
+func TestDropGitCurlVerbose_RemovesTheKeyRegardlessOfValue(t *testing.T) {
+	t.Parallel()
+	for _, hostileValue := range []string{"0", "", "1", "true"} {
+		environ := []string{"PATH=/usr/bin", "GIT_CURL_VERBOSE=" + hostileValue, "HOME=/home/whoever"}
+		filtered := dropGitCurlVerbose(environ)
+		for _, kv := range filtered {
+			name, _, _ := strings.Cut(kv, "=")
+			assert.NotEqual(t, "GIT_CURL_VERBOSE", name, "GIT_CURL_VERBOSE must be absent, not merely reset to a falsy value -- git presence-checks it rather than parsing a boolean")
+		}
+		assert.Len(t, filtered, 2, "only the two unrelated entries should survive")
+	}
+}
+
+// TestTransport_GitEnvNeverCarriesGitCurlVerbose pins the same guarantee
+// one level up, at the exact function the bug lived in: gitEnv's returned
+// environment -- built from os.Environ() plus overrides -- must never
+// contain a GIT_CURL_VERBOSE key, even when the ambient environment this
+// process happens to run under carries a hostile GIT_CURL_VERBOSE=0 (the
+// exact value the bead's reporter demonstrated turns tracing on). If
+// gitEnv ever goes back to appending "GIT_CURL_VERBOSE=0" as one of its
+// own overrides -- which last-value-wins ordering would make win over the
+// ambient ""-cleared entry too -- this test would still catch it, since
+// it asserts on the key's absence, not on any particular value.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_GitEnvNeverCarriesGitCurlVerbose(t *testing.T) {
+	t.Setenv("GIT_CURL_VERBOSE", "0")
+	env := gitEnv(t.TempDir(), "")
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		assert.NotEqual(t, "GIT_CURL_VERBOSE", name, "gitEnv must never emit a GIT_CURL_VERBOSE key -- git presence-checks it, so any value (including \"0\", inherited or overridden) turns curl tracing on")
+	}
+}
+
+// TestTransport_LsRemoteNeverEmitsCurlTraceUnderHostileAmbientGitCurlVerbose
+// is the end-to-end version of the two tests above: it reproduces, via a
+// real `git ls-remote` subprocess against a real (fakeforge) HTTP git
+// server, the exact defect loam-bot5 reports -- with the parent process's
+// own environment carrying GIT_CURL_VERBOSE=0 (set via t.Setenv, standing
+// in for whatever ambient value the host running this component happens
+// to have), a real git invocation must produce no curl trace output at
+// all. Before the fix this failed: gitEnv's own "GIT_CURL_VERBOSE=0"
+// override, appended after the ambient os.Environ() copy, still counted
+// as "set" to git and the combined output carried "== Info:" trace lines.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_LsRemoteNeverEmitsCurlTraceUnderHostileAmbientGitCurlVerbose(t *testing.T) {
+	requireGit(t)
+	t.Setenv("GIT_CURL_VERBOSE", "0")
+	const token = "curl-verbose-test-token"
+	srv, _ := newFakeForgeServer(t)
+	srv.AddToken(token)
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
+	upstreamURL := srv.GitURL("acme/widgets")
+	host := hostOf(t, upstreamURL)
+	transport := New(&staticCredentialSource{token: token}, newGitCredsConverter(), testLogger())
+	out, err := transport.LsRemote(t.Context(), host, upstreamURL)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "== Info:", "curl trace output must never appear -- an ambient GIT_CURL_VERBOSE=0 must not survive into the git subprocess's environment")
+	assert.NotContains(t, string(out), "http.c:", "curl trace output must never appear -- an ambient GIT_CURL_VERBOSE=0 must not survive into the git subprocess's environment")
 }
