@@ -614,3 +614,81 @@ func (mock *upstreamPRCloserMock) ClosePRAndCleanupCalls() []struct {
 	mock.lockClosePRAndCleanup.RUnlock()
 	return calls
 }
+
+// Ensure, that workBranchTipResolverMock does implement workBranchTipResolver.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchTipResolver = &workBranchTipResolverMock{}
+
+// workBranchTipResolverMock is a mock implementation of workBranchTipResolver.
+//
+//	func TestSomethingThatUsesworkBranchTipResolver(t *testing.T) {
+//
+//		// make and configure a mocked workBranchTipResolver
+//		mockedworkBranchTipResolver := &workBranchTipResolverMock{
+//			ResolveWorkBranchRefFunc: func(ctx context.Context, repo string, name string) (string, error) {
+//				panic("mock out the ResolveWorkBranchRef method")
+//			},
+//		}
+//
+//		// use mockedworkBranchTipResolver in code that requires workBranchTipResolver
+//		// and then make assertions.
+//
+//	}
+type workBranchTipResolverMock struct {
+	// ResolveWorkBranchRefFunc mocks the ResolveWorkBranchRef method.
+	ResolveWorkBranchRefFunc func(ctx context.Context, repo string, name string) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ResolveWorkBranchRef holds details about calls to the ResolveWorkBranchRef method.
+		ResolveWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockResolveWorkBranchRef sync.RWMutex
+}
+
+// ResolveWorkBranchRef calls ResolveWorkBranchRefFunc.
+func (mock *workBranchTipResolverMock) ResolveWorkBranchRef(ctx context.Context, repo string, name string) (string, error) {
+	if mock.ResolveWorkBranchRefFunc == nil {
+		panic("workBranchTipResolverMock.ResolveWorkBranchRefFunc: method is nil but workBranchTipResolver.ResolveWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+		Name: name,
+	}
+	mock.lockResolveWorkBranchRef.Lock()
+	mock.calls.ResolveWorkBranchRef = append(mock.calls.ResolveWorkBranchRef, callInfo)
+	mock.lockResolveWorkBranchRef.Unlock()
+	return mock.ResolveWorkBranchRefFunc(ctx, repo, name)
+}
+
+// ResolveWorkBranchRefCalls gets all the calls that were made to ResolveWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedworkBranchTipResolver.ResolveWorkBranchRefCalls())
+func (mock *workBranchTipResolverMock) ResolveWorkBranchRefCalls() []struct {
+	Ctx  context.Context
+	Repo string
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}
+	mock.lockResolveWorkBranchRef.RLock()
+	calls = mock.calls.ResolveWorkBranchRef
+	mock.lockResolveWorkBranchRef.RUnlock()
+	return calls
+}
