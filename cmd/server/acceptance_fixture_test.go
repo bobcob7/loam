@@ -61,6 +61,22 @@ const (
 	acceptanceAuthFile    = "auth.go"
 	acceptanceHandlerFile = "handler.go"
 	acceptanceDocFile     = "docs/AUTH.md"
+	// acceptanceAdminFile is pushed only by loam-kywt's "an ambiguous
+	// symbol returns every match" scenario: a SECOND Go definition of
+	// acceptanceDefinedSymbol, in a different file of the SAME repo and
+	// the SAME language, so an ambiguous match is proven within one
+	// language rather than by internal/testfixture's cross-language Go/
+	// TypeScript Validate pair (which loam-w5g's edge-resolution fix
+	// deliberately keeps UNlinked -- see acceptanceAdminContent's own
+	// doc comment).
+	acceptanceAdminFile = "admin.go"
+	// acceptanceExtraLoginCallers is how many additional callers of
+	// acceptanceDefinedSymbol loam-kywt's truncation scenario pushes on
+	// top of handler.go's own Handle, so the dependents of Login
+	// genuinely exceed a --limit of 5 (1 + 6 = 7 dependents) rather than
+	// the query having room to spare -- a truncation scenario that never
+	// crosses its own limit would pass vacuously (this bead's own NOTES).
+	acceptanceExtraLoginCallers = 6
 )
 
 // acceptanceUpstreamFiles returns the initial commit's tree for repo.
@@ -188,5 +204,34 @@ func Authenticate(username, password string) bool {
 // direction.
 func LegacyLogin(username string) bool {
 	return strings.TrimSpace(username) != ""
+}
+`
+
+// acceptanceAdminContent defines a SECOND, independent acceptanceDefinedSymbol
+// ("Login") in a different Go file of the same repo -- what "An ambiguous
+// symbol returns every match" pushes on top of the Background's own
+// auth.go/handler.go. Deliberately a different signature (token, not
+// username/password) from acceptanceAuthContent's Login: nothing about
+// this fixture depends on the two bodies agreeing, only on there being two
+// distinct definitions for a name lookup to find, and this repo's content
+// is never `+"`go build`"+`-checked by the ingest pipeline (Tree-sitter parses
+// each file independently).
+//
+// This is deliberately Go, not internal/testfixture's cross-language Go/
+// TypeScript Validate pair: loam-w5g narrowed graph_edges resolution to
+// stay INTRA-language, so proving ambiguity with a cross-language pair
+// would conflate two different properties -- LookupSymbolsByName's name
+// lookup (language-agnostic, exercised here) and ResolveGraphEdgeCandidates'
+// edge resolution (intra-language since loam-w5g, exercised by "Finding
+// what depends on a target" instead). Keeping them on separate fixtures is
+// what keeps the two scenarios from contradicting each other.
+const acceptanceAdminContent = `// Package app is the acceptance suite's upstream fixture.
+package app
+
+// Login authenticates an administrator session by a bearer token instead
+// of a username/password pair, so a name lookup for "Login" over this
+// repo's Go code genuinely has two independent definitions to return.
+func Login(token string) bool {
+	return token != ""
 }
 `

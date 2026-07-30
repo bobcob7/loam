@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,29 @@ func (h *acceptanceHarness) registerIngestAndQuerySteps(sc *godog.ScenarioContex
 	sc.Step(`^graph and search queries still return the previous index$`, h.stepGraphAndSearchQueriesStillReturnThePreviousIndex)
 	sc.Step(`^the reported ingested commit is unchanged$`, h.stepTheReportedIngestedCommitIsUnchanged)
 	sc.Step(`^the job is retried$`, h.stepTheJobIsRetried)
+
+	// loam-kywt: the eight scenarios formerly tagged @wip in
+	// features/code-intelligence.feature. See this file's own section
+	// below (search "loam-kywt") for the fixture helpers these lean on.
+	sc.Step(`^"([^"]*)" is defined in both "([^"]*)" and "([^"]*)"$`, h.stepSymbolIsDefinedInBothFiles)
+	sc.Step(`^I get both definitions$`, h.stepIGetBothDefinitions)
+	sc.Step(`^each result names the definition it belongs to$`, h.stepEachResultNamesTheDefinitionItBelongsTo)
+	sc.Step(`^I ask for the dependents of a widely used symbol with a limit of (\d+)$`, h.stepIAskForTheDependentsOfAWidelyUsedSymbolWithALimit)
+	sc.Step(`^at most (\d+) results are returned$`, h.stepAtMostNResultsAreReturned)
+	sc.Step(`^the response indicates it was truncated$`, h.stepTheResponseIndicatesItWasTruncated)
+	sc.Step(`^I ask the graph for references to "([^"]*)"$`, h.stepIAskTheGraphForReferencesTo)
+	sc.Step(`^I get every location that references it$`, h.stepIGetEveryLocationThatReferencesIt)
+	sc.Step(`^I ask the graph for the dependents of "([^"]*)"$`, h.stepIAskTheGraphForTheDependentsOf)
+	sc.Step(`^I get the code that would be affected by changing it$`, h.stepIGetTheCodeThatWouldBeAffectedByChangingIt)
+	sc.Step(`^I run a query without specifying a scope$`, h.stepIRunAQueryWithoutSpecifyingAScope)
+	sc.Step(`^it is scoped to "([^"]*)"$`, h.stepItIsScopedTo)
+	sc.Step(`^I search across all enrolled repos$`, h.stepISearchAcrossAllEnrolledRepos)
+	sc.Step(`^results may come from any enrolled repo$`, h.stepResultsMayComeFromAnyEnrolledRepo)
+	sc.Step(`^I run a graph query across all enrolled repos$`, h.stepIRunAGraphQueryAcrossAllEnrolledRepos)
+	sc.Step(`^each repo's results are returned independently$`, h.stepEachReposResultsAreReturnedIndependently)
+	sc.Step(`^a usage in one repo is not linked to a definition in another$`, h.stepAUsageInOneRepoIsNotLinkedToADefinitionInAnother)
+	sc.Step(`^I am not inside a repo directory$`, h.stepIAmNotInsideARepoDirectory)
+	sc.Step(`^the query is rejected as a usage error$`, h.stepTheQueryIsRejectedAsAUsageError)
 }
 
 // acceptanceEnvelope is the {ingested, truncated, results} envelope every
@@ -110,7 +134,8 @@ type acceptanceEnvelope struct {
 		Ref    string `json:"ref"`
 		At     string `json:"at"`
 	} `json:"ingested"`
-	Results []map[string]any `json:"results"`
+	Truncated bool             `json:"truncated"`
+	Results   []map[string]any `json:"results"`
 }
 
 // ingestIndexedBranch is the shared "this repo's indexed branch is now in
@@ -991,6 +1016,491 @@ func (h *acceptanceHarness) stepTheJobIsRetried(ctx context.Context) error {
 		}
 		time.Sleep(acceptanceRetryPollInterval)
 	}
+}
+
+// --- loam-kywt: the eight scenarios formerly tagged @wip in
+// features/code-intelligence.feature ---
+//
+// STATIC CLASSIFICATION (this bead's own NOTES, recorded before any code
+// here was written): all 8 scenarios had every step undefined. Once wired,
+// none of them needed new production behavior -- internal/handler/graph,
+// internal/cli/commands_graph.go, and internal/handler/search already
+// implement ambiguous-match attribution (`of`), truncation, deps/
+// dependents, and multi-repo `--all` fan-out in full; see this bead's own
+// report for the two scenarios (loam-w5g's intra-language dependents, and
+// the ambiguous-symbol scenario's intra- vs cross-language distinction)
+// that needed care in how the FIXTURE was built, not in production code.
+
+// stepSymbolIsDefinedInBothFiles is "An ambiguous symbol returns every
+// match"'s Given: it pushes acceptanceAdminContent -- a SECOND, intra-
+// language (Go) definition of symbol -- on top of the Background's own
+// auth.go, then reingests via the same push-tick-drain-assert sequence
+// stepOnlyFileChangesToRename/stepBranchAdvancesAndIsIngested already use
+// for loam-d2b2's rename scenario.
+func (h *acceptanceHarness) stepSymbolIsDefinedInBothFiles(ctx context.Context, symbol, fileA, fileB string) error {
+	world := worldFrom(ctx)
+	if symbol != acceptanceDefinedSymbol || fileA != acceptanceAuthFile || fileB != acceptanceAdminFile {
+		return fmt.Errorf("scenario expects %q defined in both %q and %q, but this fixture's second definition is %q in both %q and %q",
+			symbol, fileA, fileB, acceptanceDefinedSymbol, acceptanceAuthFile, acceptanceAdminFile)
+	}
+	if err := h.forge.AdvanceBranch(ctx, world.repo(), world.targetBranch, fakeforge.AdvanceOptions{
+		Path:    acceptanceAdminFile,
+		Content: []byte(acceptanceAdminContent),
+		Message: fmt.Sprintf("add a second %s definition in %s", symbol, fileB),
+	}); err != nil {
+		return fmt.Errorf("advancing %s upstream to add %s: %w", world.targetBranch, fileB, err)
+	}
+	return h.stepBranchAdvancesAndIsIngested(ctx, world.targetBranch)
+}
+
+// stepIGetBothDefinitions asserts `graph def Login` returned EXACTLY the
+// two known definitions -- auth.go's and admin.go's -- not merely a
+// non-empty result: two results that both happened to be auth.go would
+// still be "more than one" while proving nothing about the second file the
+// scenario just pushed.
+func (h *acceptanceHarness) stepIGetBothDefinitions(ctx context.Context) error {
+	world := worldFrom(ctx)
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph def output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) != 2 {
+		return fmt.Errorf("graph def %s returned %d result(s), want exactly 2 (auth.go's and admin.go's): %s", acceptanceDefinedSymbol, len(envelope.Results), world.lastCLI.stdout)
+	}
+	files := map[string]bool{}
+	for _, row := range envelope.Results {
+		file, _ := row["file"].(string)
+		files[file] = true
+	}
+	if !files[acceptanceAuthFile] || !files[acceptanceAdminFile] {
+		return fmt.Errorf("graph def %s definitions are from %v, want both %s and %s", acceptanceDefinedSymbol, files, acceptanceAuthFile, acceptanceAdminFile)
+	}
+	return nil
+}
+
+// stepEachResultNamesTheDefinitionItBelongsTo asserts every row of the
+// last graph def response carries an `of` disambiguator naming exactly
+// its OWN file and symbol (docs/cli-spec.md's Ambiguity paragraph: "each
+// result row naming its match in `of`") -- internal/handler/graph's
+// toLocation sets Of to matchInfoFor(the row's own resolved symbol) when
+// the target is ambiguous, so a row whose `of` is missing, or names a
+// different file/symbol than the row itself, is exactly the regression
+// this step exists to catch.
+func (h *acceptanceHarness) stepEachResultNamesTheDefinitionItBelongsTo(ctx context.Context) error {
+	world := worldFrom(ctx)
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph def output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("graph def %s returned no results to check attribution on", acceptanceDefinedSymbol)
+	}
+	for i, row := range envelope.Results {
+		file, _ := row["file"].(string)
+		symbol, _ := row["symbol"].(string)
+		of, ok := row["of"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("result %d names no \"of\" disambiguator: %v", i, row)
+		}
+		ofFile, _ := of["file"].(string)
+		ofSymbol, _ := of["symbol"].(string)
+		if ofFile != file || ofSymbol != symbol {
+			return fmt.Errorf("result %d is {file:%q,symbol:%q} but its own of={file:%q,symbol:%q}: it does not name the definition it belongs to", i, file, symbol, ofFile, ofSymbol)
+		}
+	}
+	return nil
+}
+
+// stepIAskForTheDependentsOfAWidelyUsedSymbolWithALimit is "Results are
+// capped with a truncation indicator"'s own When -- the scenario has no
+// separate Given, so the fixture setup (making Login genuinely widely
+// used) happens here: acceptanceExtraLoginCallers new Go files are pushed,
+// each calling Login once, on top of handler.go's own existing call, so
+// the dependents of Login exceed limit before the query even runs. A
+// truncation scenario whose target never crossed its own limit would pass
+// vacuously (this bead's own NOTES call this out by name).
+func (h *acceptanceHarness) stepIAskForTheDependentsOfAWidelyUsedSymbolWithALimit(ctx context.Context, limitStr string) error {
+	world := worldFrom(ctx)
+	for i := 1; i <= acceptanceExtraLoginCallers; i++ {
+		path := fmt.Sprintf("caller%d.go", i)
+		content := fmt.Sprintf(`package app
+
+// Caller%d is one of several additional Login callers this scenario adds
+// so the dependents of Login genuinely exceed the requested --limit.
+func Caller%d() bool {
+	return Login("caller%d", "secret")
+}
+`, i, i, i)
+		if err := h.forge.AdvanceBranch(ctx, world.repo(), world.targetBranch, fakeforge.AdvanceOptions{
+			Path:    path,
+			Content: []byte(content),
+			Message: fmt.Sprintf("add Login caller %d", i),
+		}); err != nil {
+			return fmt.Errorf("advancing %s to add caller %d: %w", world.targetBranch, i, err)
+		}
+	}
+	if err := h.stepBranchAdvancesAndIsIngested(ctx, world.targetBranch); err != nil {
+		return err
+	}
+	_, err := h.runQuery(world, append([]string{"graph", "dependents", acceptanceDefinedSymbol, "--limit", limitStr}, world.scopeArgs()...)...)
+	return err
+}
+
+// stepAtMostNResultsAreReturned asserts the last query's result count is
+// within limit, and non-zero: zero results would also satisfy "at most N"
+// while proving nothing about truncation.
+func (h *acceptanceHarness) stepAtMostNResultsAreReturned(ctx context.Context, limitStr string) error {
+	world := worldFrom(ctx)
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		return fmt.Errorf("parsing limit %q: %w", limitStr, err)
+	}
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph dependents output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("the query returned no results at all, so truncation cannot be observed: %s", world.lastCLI.stdout)
+	}
+	if len(envelope.Results) > limit {
+		return fmt.Errorf("the query returned %d results, want at most %d", len(envelope.Results), limit)
+	}
+	return nil
+}
+
+// stepTheResponseIndicatesItWasTruncated asserts the envelope's own
+// `truncated` field is true -- not merely that the result count happened
+// to equal the limit, which a coincidentally-sized result set could also
+// satisfy without the server ever having cut anything.
+func (h *acceptanceHarness) stepTheResponseIndicatesItWasTruncated(ctx context.Context) error {
+	world := worldFrom(ctx)
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph dependents output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if !envelope.Truncated {
+		return fmt.Errorf("the response did not report truncated:true despite exceeding the requested limit: %s", world.lastCLI.stdout)
+	}
+	return nil
+}
+
+// stepIAskTheGraphForReferencesTo is "Finding references to a symbol"'s
+// When.
+func (h *acceptanceHarness) stepIAskTheGraphForReferencesTo(ctx context.Context, symbol string) error {
+	world := worldFrom(ctx)
+	_, err := h.runQuery(world, append([]string{"graph", "refs", symbol}, world.scopeArgs()...)...)
+	return err
+}
+
+// stepIGetEveryLocationThatReferencesIt asserts the references response
+// includes the fixture's one KNOWN reference site (handler.go's call to
+// Login, the same cross-file relationship loam-d2b2's rename scenario
+// exercises) and that every returned row is a genuine location: a real
+// file, a positive line, and a non-empty symbol name.
+func (h *acceptanceHarness) stepIGetEveryLocationThatReferencesIt(ctx context.Context) error {
+	world := worldFrom(ctx)
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph refs output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("graph refs %s returned no results, but %s is known to reference it", acceptanceDefinedSymbol, acceptanceHandlerFile)
+	}
+	if !envelopeNamesFile(envelope, acceptanceHandlerFile) {
+		return fmt.Errorf("graph refs %s does not include the known reference site %s: %v", acceptanceDefinedSymbol, acceptanceHandlerFile, envelope.Results)
+	}
+	for i, row := range envelope.Results {
+		file, _ := row["file"].(string)
+		line, _ := row["line"].(float64)
+		symbol, _ := row["symbol"].(string)
+		if file == "" {
+			return fmt.Errorf("reference %d names no file: %v", i, row)
+		}
+		if line <= 0 {
+			return fmt.Errorf("reference %d names no line: %v", i, row)
+		}
+		if symbol == "" {
+			return fmt.Errorf("reference %d names no symbol: %v", i, row)
+		}
+	}
+	return nil
+}
+
+// stepIAskTheGraphForTheDependentsOf is "Finding what depends on a
+// target"'s When. The scenario names the FILE (auth.go); production's
+// dependents query resolves by symbol name (LookupSymbolsByName, no
+// file-target lookup path exists), so this queries acceptanceDefinedSymbol
+// -- the symbol this fixture's auth.go is known to define -- which is
+// exactly what "changing auth.go" means in a fixture where Login is its
+// only externally-referenced declaration.
+//
+// This deliberately stays single-repo, single-language: loam-w5g narrowed
+// graph_edges resolution (ResolveGraphEdgeCandidates) to stay intra-
+// language, and writing this scenario against a cross-language fixture
+// (internal/testfixture's Go/TypeScript Validate pair) would have re-
+// pinned the exact cross-language leak that fix removed -- see this
+// bead's own report.
+func (h *acceptanceHarness) stepIAskTheGraphForTheDependentsOf(ctx context.Context, target string) error {
+	world := worldFrom(ctx)
+	if target != acceptanceAuthFile {
+		return fmt.Errorf("scenario asks for the dependents of %q, but this fixture only relates dependents to %q (whose defining symbol is %q)", target, acceptanceAuthFile, acceptanceDefinedSymbol)
+	}
+	_, err := h.runQuery(world, append([]string{"graph", "dependents", acceptanceDefinedSymbol}, world.scopeArgs()...)...)
+	return err
+}
+
+// stepIGetTheCodeThatWouldBeAffectedByChangingIt asserts the dependents
+// response names handler.go's Handle specifically -- the one function
+// this fixture knows depends on Login -- not merely that some result came
+// back.
+func (h *acceptanceHarness) stepIGetTheCodeThatWouldBeAffectedByChangingIt(ctx context.Context) error {
+	world := worldFrom(ctx)
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph dependents output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("graph dependents %s returned no results, but %s's Handle is known to depend on it", acceptanceDefinedSymbol, acceptanceHandlerFile)
+	}
+	var sawHandle bool
+	for _, row := range envelope.Results {
+		file, _ := row["file"].(string)
+		symbol, _ := row["symbol"].(string)
+		if file == acceptanceHandlerFile && symbol == "Handle" {
+			sawHandle = true
+		}
+	}
+	if !sawHandle {
+		return fmt.Errorf("graph dependents %s does not include %s's Handle: %v", acceptanceDefinedSymbol, acceptanceHandlerFile, envelope.Results)
+	}
+	return nil
+}
+
+// stepIRunAQueryWithoutSpecifyingAScope is shared by "Queries default to
+// the current repo" and "A query without a resolvable scope is rejected"
+// -- both scenarios use this exact sentence, so one step serves both, with
+// the outcome (success vs. usage error) left for each scenario's own Then
+// to assert on. It deliberately never appends --repo/--all (unlike
+// runQuery's scopeArgs helper, which would defeat the whole point), and
+// runs from world.queryDir() so "I am not inside a repo directory" (which
+// clears world.clonePath) genuinely changes where this executes. A
+// non-zero exit is not itself an error here: it is the expected outcome
+// for the rejection scenario.
+func (h *acceptanceHarness) stepIRunAQueryWithoutSpecifyingAScope(ctx context.Context) error {
+	world := worldFrom(ctx)
+	world.lastCLI = h.runLoamCLIIn(world, world.queryDir(), "graph", "def", acceptanceDefinedSymbol)
+	return nil
+}
+
+// stepItIsScopedTo asserts the last query succeeded and its `ingested`
+// envelope names exactly the given repo -- proving the CLI's directory-
+// based scope inference genuinely resolved to it, not merely that the
+// command exited 0.
+func (h *acceptanceHarness) stepItIsScopedTo(ctx context.Context, repo string) error {
+	world := worldFrom(ctx)
+	if world.lastCLI.exitCode != 0 {
+		return fmt.Errorf("loam graph def exited %d, want 0\nstdout: %s\nstderr: %s", world.lastCLI.exitCode, world.lastCLI.stdout, world.lastCLI.stderr)
+	}
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph def output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Ingested) == 0 {
+		return fmt.Errorf("the response named no repo its index was built from: %s", world.lastCLI.stdout)
+	}
+	for i, in := range envelope.Ingested {
+		if in.Repo != repo {
+			return fmt.Errorf("ingested[%d].repo is %q, want %q (the inferred current repo)", i, in.Repo, repo)
+		}
+	}
+	return nil
+}
+
+// acceptanceSecondRepoGroup/acceptanceSecondRepoName name the SECOND
+// enrolled repo "Searching across all repos" and "Graph fan-out does not
+// link repos in the MVP" both need: a single-repo scan of either would
+// pass vacuously with nothing to fan out over or keep independent (this
+// bead's own NOTES call this out explicitly for the truncation and
+// fan-out scenarios).
+const (
+	acceptanceSecondRepoGroup = "bobcob7"
+	acceptanceSecondRepoName  = "doc-server-second"
+)
+
+// ensureSecondEnrolledRepo enrolls and fully ingests a second repo, seeded
+// with the SAME fixture content as the primary one (acceptanceUpstreamFiles
+// parameterizes only the README's own text by repo name, so both repos
+// resolve the same symbols and match the same search query), lazily --
+// idempotent within one scenario -- via the exact same
+// seedUpstreamRepo/insertRepoRow/ingestIndexedBranch sequence the
+// Background uses for the primary repo, just against an independent
+// *acceptanceWorld. Recorded on world.secondRepo for the Then steps to
+// read and for afterScenario's teardownSecondRepo to clean up
+// (acceptance_world_test.go).
+func (h *acceptanceHarness) ensureSecondEnrolledRepo(ctx context.Context, world *acceptanceWorld) (*acceptanceWorld, error) {
+	if world.secondRepo != nil {
+		return world.secondRepo, nil
+	}
+	second := &acceptanceWorld{
+		workspace:    world.workspace,
+		repoGroup:    acceptanceSecondRepoGroup,
+		repoName:     acceptanceSecondRepoName,
+		targetBranch: "main",
+		agentName:    world.agentName,
+		agentID:      world.agentID,
+		agentRole:    world.agentRole,
+	}
+	if err := h.seedUpstreamRepo(ctx, second); err != nil {
+		return nil, err
+	}
+	repoID, err := h.insertRepoRow(ctx, second)
+	if err != nil {
+		return nil, err
+	}
+	second.repoID = repoID
+	if err := h.ingestIndexedBranch(ctx, second); err != nil {
+		return nil, err
+	}
+	world.secondRepo = second
+	return second, nil
+}
+
+// stepISearchAcrossAllEnrolledRepos is "Searching across all repos"'s own
+// When: it enrolls the second repo first (the scenario has no separate
+// Given), then searches with --all -- never scopeArgs(), which would
+// infer a single repo from the clone and defeat the point.
+func (h *acceptanceHarness) stepISearchAcrossAllEnrolledRepos(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if _, err := h.ensureSecondEnrolledRepo(ctx, world); err != nil {
+		return err
+	}
+	_, err := h.runQuery(world, "search", "how is authentication handled", "--all")
+	return err
+}
+
+// stepResultsMayComeFromAnyEnrolledRepo asserts the search response
+// genuinely includes chunks from BOTH enrolled repos -- not merely a
+// non-empty result set, which a single-repo response would also satisfy.
+func (h *acceptanceHarness) stepResultsMayComeFromAnyEnrolledRepo(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.secondRepo == nil {
+		return fmt.Errorf("no second repo was enrolled in this scenario yet")
+	}
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last search output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("search --all returned no results")
+	}
+	repos := map[string]bool{}
+	for _, row := range envelope.Results {
+		repo, _ := row["repo"].(string)
+		repos[repo] = true
+	}
+	if !repos[world.repo()] || !repos[world.secondRepo.repo()] {
+		return fmt.Errorf("search --all returned results from %v, want results from both %s and %s", repos, world.repo(), world.secondRepo.repo())
+	}
+	return nil
+}
+
+// stepIRunAGraphQueryAcrossAllEnrolledRepos is "Graph fan-out does not
+// link repos in the MVP"'s own When: enrolls the second repo (both repos
+// share the same fixture content, so Login is ambiguous ACROSS repos too,
+// resolving once per repo -- resolveSymbols' own per-repo loop,
+// internal/handler/graph/resolve.go), then asks for Login's dependents
+// with --all.
+func (h *acceptanceHarness) stepIRunAGraphQueryAcrossAllEnrolledRepos(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if _, err := h.ensureSecondEnrolledRepo(ctx, world); err != nil {
+		return err
+	}
+	_, err := h.runQuery(world, "graph", "dependents", acceptanceDefinedSymbol, "--all")
+	return err
+}
+
+// stepEachReposResultsAreReturnedIndependently asserts the dependents
+// response includes results attributed to BOTH enrolled repos.
+func (h *acceptanceHarness) stepEachReposResultsAreReturnedIndependently(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.secondRepo == nil {
+		return fmt.Errorf("no second repo was enrolled in this scenario yet")
+	}
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph dependents output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if len(envelope.Results) == 0 {
+		return fmt.Errorf("graph dependents %s --all returned no results", acceptanceDefinedSymbol)
+	}
+	repos := map[string]bool{}
+	for _, row := range envelope.Results {
+		repo, _ := row["repo"].(string)
+		repos[repo] = true
+	}
+	if !repos[world.repo()] || !repos[world.secondRepo.repo()] {
+		return fmt.Errorf("graph dependents %s --all returned results from %v, want independent results from both %s and %s", acceptanceDefinedSymbol, repos, world.repo(), world.secondRepo.repo())
+	}
+	return nil
+}
+
+// stepAUsageInOneRepoIsNotLinkedToADefinitionInAnother asserts the
+// dependents response, grouped by repo, holds EXACTLY the one dependent
+// each repo's own fixture actually has (handler.go's Handle) -- not just
+// "some" rows per repo. This fixture's two repos share identical content,
+// so a cross-repo leak would plausibly show up as an inflated or
+// misattributed count (e.g. a repo reporting more than its own one known
+// dependent, or a symbol/file this fixture never wrote), rather than as
+// an obviously-wrong single result -- an exact-count check is what makes
+// that observable from the CLI's own JSON output.
+func (h *acceptanceHarness) stepAUsageInOneRepoIsNotLinkedToADefinitionInAnother(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.secondRepo == nil {
+		return fmt.Errorf("no second repo was enrolled in this scenario yet")
+	}
+	var envelope acceptanceEnvelope
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &envelope); err != nil {
+		return fmt.Errorf("decoding the last graph dependents output: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	countByRepo := map[string]int{}
+	for _, row := range envelope.Results {
+		repo, _ := row["repo"].(string)
+		file, _ := row["file"].(string)
+		symbol, _ := row["symbol"].(string)
+		if file != acceptanceHandlerFile || symbol != "Handle" {
+			return fmt.Errorf("unexpected dependent %s in %s (repo %s): this fixture's only known Login dependent in either repo is handler.go's Handle", symbol, file, repo)
+		}
+		countByRepo[repo]++
+	}
+	if countByRepo[world.repo()] != 1 || countByRepo[world.secondRepo.repo()] != 1 {
+		return fmt.Errorf("dependents of %s by repo = %v, want exactly 1 in each of %s and %s -- a cross-repo link would inflate or misattribute this count", acceptanceDefinedSymbol, countByRepo, world.repo(), world.secondRepo.repo())
+	}
+	return nil
+}
+
+// stepIAmNotInsideARepoDirectory clears world.clonePath, so
+// world.queryDir() (and therefore stepIRunAQueryWithoutSpecifyingAScope)
+// falls back to world.workspace -- a plain tmpdir with no enclosing git
+// clone, exactly what internal/cli's ResolveRepo (via `git rev-parse
+// --show-toplevel`) needs to genuinely fail rather than resolve into the
+// Background's own clone. Nothing later in this scenario depends on
+// clonePath, so clearing it is safe.
+func (h *acceptanceHarness) stepIAmNotInsideARepoDirectory(ctx context.Context) error {
+	worldFrom(ctx).clonePath = ""
+	return nil
+}
+
+// stepTheQueryIsRejectedAsAUsageError asserts the last query exited
+// exactly 2 -- docs/cli-spec.md's own documented code for an unresolvable
+// scope ("exit 2 on an unknown subquery or unresolvable scope") -- not
+// merely "non-zero", which would also accept exit 3 (not-found) or a
+// crash and miss the specific failure mode this scenario is about.
+func (h *acceptanceHarness) stepTheQueryIsRejectedAsAUsageError(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.lastCLI.exitCode != 2 {
+		return fmt.Errorf("loam graph def exited %d, want 2 (usage error for an unresolvable scope)\nstdout: %s\nstderr: %s", world.lastCLI.exitCode, world.lastCLI.stdout, world.lastCLI.stderr)
+	}
+	return nil
 }
 
 // assertEnvelopeRef checks every ingested entry names repo, target, and
