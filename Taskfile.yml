@@ -668,6 +668,549 @@ tasks:
         echo "=== step 8/8: done (cleanup runs on EXIT regardless of the result above) ==="
         exit "$playwright_status"
 
+  test:e2e:golden:
+    desc: >-
+      Layer 3 (docs/testing-spec.md "Layer 3 -- End-to-End" -> "Golden-path
+      smoke"; loam-li0.10). The golden path PLUS the conflict/catch-up/
+      re-accept variant, scripted directly over the real compiled CLI + the
+      admin API -- no godog, no Playwright (that is test:e2e). REUSES the
+      same compose stack test:e2e uses (deploy/docker-compose.e2e.yml --
+      Postgres/pgvector + a real, pinned Forgejo; loam-li0.11.1) rather than
+      standing up a second one, namespaced the identical way via
+      LOAM_E2E_SUFFIX/LOAM_E2E_PG_PORT/LOAM_E2E_FORGEJO_PORT so the two
+      targets never collide when given the same suffix -- though on a
+      resource-constrained host only one e2e stack should actually be
+      running at a time regardless of namespacing (namespacing makes
+      concurrency legal, not affordable). It boots its OWN server + fake
+      embedder pair on LOAM_E2E_SERVER_PORT/LOAM_E2E_EMBED_PORT (same
+      variable names as test:e2e, a different process): unlike test:e2e's
+      Playwright suite, which sets LOAM_SYNC_INTERVAL=1h specifically so the
+      scheduler cannot fire mid-assertion, THIS target's own assertions
+      *depend* on the real mirrorsync.Scheduler firing -- conflict
+      detection and PR-merge -> complete both only ever happen on a live
+      sync tick -- so it runs a short interval and polls the resulting state
+      instead (the same pattern demo:m5 already established, with a real,
+      bounded deadline on every poll -- never a fixed sleep).
+
+      One work branch runs the whole arc, the way demo:m5's own design
+      rationale explains (see that target's own desc): ADMIN enrolls the
+      seeded Forgejo repo for real (RepoAdminService.EnrollRepo -- loam-4kz
+      is what makes this reachable at all over the stack's plaintext-HTTP
+      Forgejo: EnrollRepo derives a scheme-qualified forge_host from an
+      http:// upstream and forge.Forgejo's ValidateToken tolerates the bare
+      host a credential is more naturally seeded under) -> AUTHOR clones,
+      starts a work branch, commits a new package plus a README edit that
+      will later conflict, pushes through /git/* and the real pre-receive
+      hook, and requests review -> REVIEWER approves in round 1 -> ADMIN
+      accepts (ProposalService.AcceptProposal opens a real PR on Forgejo;
+      loam-1dmg -- cmd/demoenv embed hosting internal/fakeembed -- is what
+      makes the ingest step 17 depends on able to succeed at all in this
+      stack) -> the PR is read back from FORGEJO'S OWN REST surface, never
+      from Loam's opinion of it -> the target branch is advanced with a
+      real, ordinary git push straight at Forgejo (never through Loam,
+      never through any control API -- this stack's upstream is real) so it
+      conflicts with the accepted branch's own README edit -> one live sync
+      tick resets the branch to draft (conflict 'reset') and the accept is
+      independently proven refused afterwards -> the AUTHOR catches up with
+      a real push through /git/* and the real pre-receive hook, asserting
+      the merge genuinely conflicted first (never a fixture that
+      auto-merges and passes vacuously) -> the branch is restored to
+      reviewable with round 2 opened by the SERVER, no request-review call
+      -> the REVIEWER re-approves -> ADMIN accepts AGAIN, which must
+      fast-forward the SAME pull request rather than open a second one ->
+      the pull request is merged ON FORGEJO directly (POST
+      .../pulls/<n>/merge with Do=merge, a real forge-side merge, never
+      through Loam) -> one more live sync tick flips the branch complete ->
+      graph and search resolve the merged code at the merge commit and
+      report it as the new ingested_ref.
+
+      Every assertion is decoded and checked by cmd/demoenv's check-*
+      subcommands, or a scalar SQL read for the handful of fields no RPC
+      exposes (a conflict flag, a review round's requested_by) -- never
+      grepped; see cmd/demoenv/check.go's and proposal.go's own header
+      comments for why a grep-based assertion here would pass for the wrong
+      reason. Needs the Go toolchain, git, curl, and a Docker (or
+      Docker-API-compatible) daemon with the `docker compose` plugin or the
+      standalone `docker-compose` binary (LOAM_COMPOSE_CMD to force one) --
+      node/npm are NOT needed, there is no Playwright here.
+    cmds:
+      - task: build:bin
+      - |
+        set -u
+        set -o pipefail
+        repo_root="$(pwd)"
+        compose_file="deploy/docker-compose.e2e.yml"
+        # A distinct compose PROJECT name from test:e2e's ("loam-e2e...")
+        # even under the same LOAM_E2E_SUFFIX, so `docker compose ps`/logs
+        # scoped by project never conflate the two targets' runs. The
+        # CONTAINERS themselves are still named by
+        # deploy/docker-compose.e2e.yml's fixed container_name +
+        # LOAM_E2E_SUFFIX regardless of project -- exactly like test:e2e --
+        # which is why running both targets with the same suffix
+        # concurrently is still not safe; see this target's own desc.
+        compose_project="loam-e2e-golden${LOAM_E2E_SUFFIX:-}"
+        pg_container="loam-e2e-postgres${LOAM_E2E_SUFFIX:-}"
+        forgejo_container="loam-e2e-forgejo${LOAM_E2E_SUFFIX:-}"
+        compose() {
+          if [ -n "${LOAM_COMPOSE_CMD:-}" ]; then
+            $LOAM_COMPOSE_CMD -p "$compose_project" -f "$compose_file" "$@"
+          elif docker compose version >/dev/null 2>&1; then
+            docker compose -p "$compose_project" -f "$compose_file" "$@"
+          else
+            docker-compose -p "$compose_project" -f "$compose_file" "$@"
+          fi
+        }
+        pg_port="${LOAM_E2E_PG_PORT:-15432}"
+        forgejo_port="${LOAM_E2E_FORGEJO_PORT:-13000}"
+        export LOAM_E2E_PG_PORT="$pg_port"
+        export LOAM_E2E_FORGEJO_PORT="$forgejo_port"
+        server_addr="127.0.0.1:${LOAM_E2E_SERVER_PORT:-8199}"
+        embed_port="${LOAM_E2E_EMBED_PORT:-11634}"
+        embed_addr="127.0.0.1:$embed_port"
+        admin_user="admin"
+        admin_password="e2e-golden-Loam-Admin-Passw0rd1"
+        # A fixed, non-secret AES-256 key -- the same value test:e2e and
+        # demo:m2 already commit to this file for the identical purpose (a
+        # valid LOAM_ENCRYPTION_KEY for a throwaway local run).
+        encryption_key="nMjGBpIoO1n40SGBc7WQEnT/FHff/dpDkHu5cB527fg="
+        forgejo_admin_user="e2egolden"
+        forgejo_admin_password="e2e-golden-Forgejo-Admin-Passw0rd1"
+        forgejo_admin_email="e2egolden@example.invalid"
+        repo_name="e2e-golden-repo"
+        repo_identifier="$forgejo_admin_user/$repo_name"
+        target_branch="main"
+        author_name="ada-lovelace"
+        author_id="1"
+        author_role="author"
+        author_identifier="$author_name-$author_id-$author_role"
+        reviewer_name="grace-hopper"
+        reviewer_id="2"
+        reviewer_role="reviewer"
+        reviewer_identifier="$reviewer_name-$reviewer_id-$reviewer_role"
+        proposal_title="Add pkg/session, the golden path's stateful package"
+        proposal_description="Adds StartSession and documents it. Raised so there is a real proposal to accept, conflict, catch up, and merge."
+        demoenv_bin="$repo_root/bin/demoenv"
+        loam_bin="$repo_root/bin/loam"
+        data_dir=""
+        workspace=""
+        author_ws=""
+        reviewer_ws=""
+        find_server_pids() {
+          pgrep -f "$repo_root/bin/server" 2>/dev/null || true
+        }
+        stop_server() {
+          stop_pids="$(find_server_pids)"
+          [ -z "$stop_pids" ] && return 0
+          for stop_pid in $stop_pids; do /bin/kill -TERM "$stop_pid" 2>/dev/null || true; done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_server_pids)" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_server_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
+        }
+        find_embed_pids() {
+          pgrep -f "$demoenv_bin embed" 2>/dev/null || true
+        }
+        stop_embed() {
+          stop_pids="$(find_embed_pids)"
+          [ -z "$stop_pids" ] && return 0
+          for stop_pid in $stop_pids; do /bin/kill -TERM "$stop_pid" 2>/dev/null || true; done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_embed_pids)" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_embed_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
+        }
+        revoke_forgejo_token() {
+          [ -z "${forgejo_token:-}" ] && return 0
+          curl -sS -o /dev/null -m 5 -u "$forgejo_admin_user:$forgejo_admin_password" -X DELETE \
+            "http://127.0.0.1:$forgejo_port/api/v1/users/$forgejo_admin_user/tokens/e2e-golden" >/dev/null 2>&1 || true
+        }
+        cleanup() {
+          echo "=== test:e2e:golden cleanup: stopping server, revoking the seeded forge token, stopping fake embedder, tearing down compose stack, removing temp dirs ==="
+          stop_server
+          revoke_forgejo_token
+          stop_embed
+          compose down -v --remove-orphans >/dev/null 2>&1 || true
+          [ -n "$data_dir" ] && rm -rf "$data_dir"
+          [ -n "$workspace" ] && rm -rf "$workspace"
+          [ -n "$author_ws" ] && rm -rf "$author_ws"
+          [ -n "$reviewer_ws" ] && rm -rf "$reviewer_ws"
+        }
+        trap cleanup EXIT
+        echo "=== test:e2e:golden pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        compose down -v --remove-orphans >/dev/null 2>&1 || true
+        stop_server
+        stop_embed
+        wait_for_http_ok() {
+          poll_url="$1"; poll_label="$2"; poll_timeout="${3:-60}"
+          poll_start=$(date +%s)
+          while true; do
+            poll_code=$(curl -s -o /dev/null -w '%{http_code}' "$poll_url" 2>/dev/null || echo "000")
+            [ "$poll_code" = "200" ] && { echo "$poll_label ready (HTTP 200 from $poll_url)"; return 0; }
+            if [ "$(( $(date +%s) - poll_start ))" -ge "$poll_timeout" ]; then
+              echo "$poll_label never became ready within ${poll_timeout}s" >&2
+              return 1
+            fi
+            sleep 0.2
+          done
+        }
+        echo ""
+        echo "=== step 1/17: bring up Postgres/pgvector + a real Forgejo (deploy/docker-compose.e2e.yml, reused from test:e2e/loam-li0.11.1) ==="
+        compose up -d
+        pg_deadline=$(( $(date +%s) + 60 ))
+        until docker exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
+          [ "$(date +%s)" -ge "$pg_deadline" ] && { echo "postgres never became ready within 60s" >&2; exit 1; }
+          sleep 0.5
+        done
+        echo "postgres ready on 127.0.0.1:$pg_port"
+        wait_for_http_ok "http://127.0.0.1:$forgejo_port/api/v1/version" "forgejo" 90
+        echo ""
+        echo "=== step 2/17: seed the admin user, an access token, and one auto-initialized repo on the real Forgejo ==="
+        docker exec -u git "$forgejo_container" forgejo admin user create \
+          --admin --username "$forgejo_admin_user" --password "$forgejo_admin_password" \
+          --email "$forgejo_admin_email" --must-change-password=false >/dev/null
+        forgejo_token="$(docker exec -u git "$forgejo_container" forgejo admin user generate-access-token \
+          -u "$forgejo_admin_user" --token-name e2e-golden --scopes write:repository,write:user --raw)"
+        curl -sS --fail-with-body -X POST \
+          -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$repo_name\",\"auto_init\":true,\"default_branch\":\"$target_branch\",\"private\":true}" \
+          "http://127.0.0.1:$forgejo_port/api/v1/user/repos" >/dev/null
+        upstream_url="http://127.0.0.1:$forgejo_port/$repo_identifier.git"
+        auth_upstream_url="http://$forgejo_admin_user:$forgejo_token@127.0.0.1:$forgejo_port/$repo_identifier.git"
+        forge_api="http://127.0.0.1:$forgejo_port/api/v1/repos/$repo_identifier/pulls"
+        forge_host="http://127.0.0.1:$forgejo_port"
+        echo "seeded $repo_identifier at $upstream_url"
+        echo ""
+        echo "=== step 3/17: build cmd/demoenv (test-support tool; NOT one of the shipped binaries) ==="
+        go build -o bin/demoenv ./cmd/demoenv
+        echo ""
+        echo "=== step 4/17: boot the fake embedder (cmd/demoenv embed, internal/fakeembed -- loam-1dmg) ==="
+        workspace="$(mktemp -d /tmp/loam-e2e-golden-ws.XXXXXX)"
+        embed_log="$workspace/embed.log"
+        "$demoenv_bin" embed -addr "$embed_addr" -model nomic-embed-text >"$embed_log" 2>&1 &
+        wait_for_http_ok "http://$embed_addr/" "fake embedder" 60
+        echo ""
+        echo "=== step 5/17: boot the real server binary with a SHORT sync interval -- this target's own assertions need the scheduler to actually fire (unlike test:e2e's Playwright leg, which suppresses it) ==="
+        data_dir="$(mktemp -d /tmp/loam-e2e-golden-data.XXXXXX)"
+        author_ws="$(mktemp -d /tmp/loam-e2e-golden-author.XXXXXX)"
+        reviewer_ws="$(mktemp -d /tmp/loam-e2e-golden-reviewer.XXXXXX)"
+        server_log="$workspace/server.log"
+        database_url="postgres://loam:loam@127.0.0.1:$pg_port/loam?sslmode=disable"
+        env PATH="$PATH" LOAM_HTTP_ADDR="$server_addr" LOAM_ADMIN_USER="$admin_user" \
+          LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
+          LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
+          LOAM_SYNC_INTERVAL=2s LOAM_INGEST_WORKERS=2 \
+          LOAM_EMBEDDER_URL="http://$embed_addr" LOAM_EMBEDDER_MODEL=nomic-embed-text \
+          "$repo_root/bin/server" >"$server_log" 2>&1 &
+        wait_for_http_ok "http://$server_addr/healthz" "server" 60
+        echo ""
+        echo "=== step 6/17: seed the encrypted forge credential EnrollRepo resolves by host (loam-4kz) ==="
+        "$demoenv_bin" seed-credential -database-url "$database_url" \
+          -host "$forge_host" -token "$forgejo_token" -encryption-key "$encryption_key"
+        echo ""
+        proposal_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$server_addr/loam.admin.v1.ProposalService/$1"
+        }
+        repo_rpc() {
+          curl -sS --fail-with-body -u "admin:$admin_password" \
+            -H 'Content-Type: application/json' -d "$2" \
+            "http://$server_addr/loam.admin.v1.RepoAdminService/$1"
+        }
+        forge_api_get() {
+          curl -sS --fail-with-body -H "Authorization: token $forgejo_token" "$1"
+        }
+        psql_scalar() {
+          docker exec "$pg_container" psql -U loam -d loam -tAc "$1" | tr -d '[:space:]'
+        }
+        assert_equal() {
+          if [ "$2" != "$3" ]; then
+            echo "FAIL: $1: got \"$2\", want \"$3\"" >&2
+            exit 1
+          fi
+          echo "PASS: $1 ($3)"
+        }
+        author_cwd="$author_ws"
+        reviewer_cwd="$reviewer_ws"
+        author_cli() {
+          ( cd "$author_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$server_addr" \
+              LOAM_AGENT_NAME="$author_name" LOAM_AGENT_ID="$author_id" LOAM_AGENT_ROLE="$author_role" \
+              "$loam_bin" "$@" )
+        }
+        reviewer_cli() {
+          ( cd "$reviewer_cwd" && env PATH="$PATH" LOAM_SERVER_URL="http://$server_addr" \
+              LOAM_AGENT_NAME="$reviewer_name" LOAM_AGENT_ID="$reviewer_id" LOAM_AGENT_ROLE="$reviewer_role" \
+              "$loam_bin" "$@" )
+        }
+        # wait_for_state/wait_for_conflict/wait_for_ingest are demo:m5's own
+        # polling helpers, verbatim in behaviour and for the reasons its own
+        # comments give (Taskfile.yml's demo:m5): every state polled here is
+        # monotone for the transition being awaited, and repos.sync_state
+        # itself is unusable for this because it CYCLES under a live
+        # scheduler (loam-4q2) -- these instead poll the ONE signal that
+        # cannot race for each claim.
+        wait_for_state() {
+          state_wb="$1"; state_want="$2"; state_label="$3"; state_timeout="${4:-90}"
+          state_start=$(date +%s)
+          while true; do
+            state_got="$(author_cli work show "$repo_identifier" "$state_wb" 2>/dev/null | "$demoenv_bin" field -name state 2>/dev/null || true)"
+            if [ "$state_got" = "$state_want" ]; then
+              echo "PASS: $state_label (state=$state_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - state_start ))" -ge "$state_timeout" ]; then
+              echo "FAIL: $state_label: $state_wb is in state \"$state_got\" after ${state_timeout}s, want \"$state_want\"" >&2
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 0.5
+          done
+        }
+        wait_for_conflict() {
+          conflict_wb="$1"; conflict_want="$2"; conflict_label="$3"; conflict_timeout="${4:-90}"
+          conflict_start=$(date +%s)
+          while true; do
+            conflict_got="$(psql_scalar "SELECT conflict FROM work_branches WHERE name = '$conflict_wb';")"
+            if [ "$conflict_got" = "$conflict_want" ]; then
+              echo "PASS: $conflict_label (conflict=$conflict_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - conflict_start ))" -ge "$conflict_timeout" ]; then
+              echo "FAIL: $conflict_label: $conflict_wb carries conflict \"$conflict_got\" after ${conflict_timeout}s, want \"$conflict_want\"" >&2
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 0.5
+          done
+        }
+        wait_for_ingest() {
+          ingest_want="$1"; ingest_label="$2"; ingest_timeout="${3:-240}"
+          ingest_start=$(date +%s)
+          while true; do
+            ingest_got="$(psql_scalar "SELECT coalesce(ingested_ref, '') FROM repo_target_branches WHERE branch = '$target_branch' AND repo_id = (SELECT id FROM repos WHERE name = '$repo_identifier');")"
+            if [ "$ingest_got" = "$ingest_want" ]; then
+              echo "PASS: $ingest_label (ingested_ref=$ingest_want)"
+              return 0
+            fi
+            if [ "$(( $(date +%s) - ingest_start ))" -ge "$ingest_timeout" ]; then
+              echo "FAIL: $ingest_label: ingested_ref is \"$ingest_got\" after ${ingest_timeout}s, want \"$ingest_want\"" >&2
+              repo_rpc ListIngestJobs "{\"repo\":\"$repo_identifier\",\"page\":{\"limit\":50}}" >&2 || true
+              cat "$server_log" >&2
+              return 1
+            fi
+            sleep 1
+          done
+        }
+        echo "=== step 7/17: ADMIN -- enroll the seeded Forgejo repo through the real RepoAdminService.EnrollRepo RPC ==="
+        enroll_out="$(repo_rpc EnrollRepo "{\"upstream_url\":\"$upstream_url\",\"target_branches\":[\"$target_branch\"],\"indexed_branch\":\"$target_branch\"}")"
+        echo "$enroll_out"
+        assert_equal "EnrollRepo created the repos row under the derived <group>/<repo_name> identifier" \
+          "$(psql_scalar "SELECT name FROM repos WHERE upstream_url = '$upstream_url';")" "$repo_identifier"
+        assert_equal "EnrollRepo recorded the scheme-qualified forge_host for this plaintext-HTTP forge (loam-4kz)" \
+          "$(psql_scalar "SELECT forge_host FROM repos WHERE upstream_url = '$upstream_url';")" "$forge_host"
+        echo ""
+        echo "=== step 8/17: AUTHOR ($author_identifier) -- clone, start the proposal work branch, commit, push, request review ==="
+        author_cli clone "$repo_identifier" "$target_branch"
+        author_clone="$author_ws/$repo_name"
+        if [ ! -d "$author_clone" ]; then
+          echo "FAIL: the author's clone was not created at $author_clone" >&2
+          exit 1
+        fi
+        git -C "$author_clone" config user.email "$author_identifier@example.invalid"
+        git -C "$author_clone" config user.name "$author_name"
+        start_out="$(author_cli work start "$repo_identifier" "$target_branch")"
+        echo "$start_out"
+        proposal_wb="$(printf '%s' "$start_out" | "$demoenv_bin" field -name name)"
+        echo "proposal work branch: $proposal_wb"
+        printf '%s' "$proposal_description" | author_cli work set "$repo_identifier" "$proposal_wb" --title "$proposal_title"
+        git -C "$author_clone" checkout -q -b "$proposal_wb"
+        mkdir -p "$author_clone/pkg/session"
+        "$demoenv_bin" fixture-file -name session > "$author_clone/pkg/session/session.go"
+        "$demoenv_bin" fixture-file -name proposal-readme > "$author_clone/README.md"
+        git -C "$author_clone" add pkg/session/session.go README.md
+        git -C "$author_clone" commit --quiet -m "feat(session): add StartSession"
+        if ! push_out="$(git -C "$author_clone" push origin "$proposal_wb" 2>&1)"; then
+          echo "$push_out"
+          echo "FAIL: the author's push to their own work branch was rejected" >&2
+          exit 1
+        fi
+        echo "$push_out"
+        echo "PASS: the author pushed to their own work branch through /git/* and the real pre-receive hook"
+        author_cli work request-review "$repo_identifier" "$proposal_wb"
+        echo ""
+        echo "=== step 9/17: REVIEWER ($reviewer_identifier) -- approve the proposal, opening round 1's verdict ==="
+        reviewer_cli clone "$repo_identifier" "$proposal_wb"
+        reviewer_clone="$reviewer_ws/$repo_name"
+        reviewer_cwd="$reviewer_clone"
+        reviewer_cli work verdict "$repo_identifier" "$proposal_wb" --outcome approve
+        verdicts_1="$(reviewer_cli work verdicts "$repo_identifier" "$proposal_wb")"
+        echo "$verdicts_1"
+        printf '%s' "$verdicts_1" | "$demoenv_bin" check-verdicts -label "round 1 carries a current approve verdict" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale false
+        echo ""
+        echo "=== step 10/17: ADMIN -- the proposal queue, then the FIRST AcceptProposal (opens a real PR on Forgejo) ==="
+        queue_1="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_1"
+        printf '%s' "$queue_1" | "$demoenv_bin" check-proposals -label "the approved proposal is queued, with no PR yet" \
+          -count 1 -want-names "$proposal_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_REVIEWED -approver "$reviewer_identifier" -round 1
+        accept_1="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_identifier\",\"work_branch\":\"$proposal_wb\"}")"
+        echo "$accept_1"
+        pr_url="$(printf '%s' "$accept_1" | "$demoenv_bin" field -name prUrl)"
+        upstream_branch="$(printf '%s' "$accept_1" | "$demoenv_bin" field -name upstreamBranch)"
+        pr_number="${pr_url##*/}"
+        assert_equal "the accept pushed the namespaced upstream branch" "$upstream_branch" "loam/$proposal_wb"
+        assert_equal "the PR number was recorded on the work branch" \
+          "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
+        prs_1="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_1"
+        printf '%s' "$prs_1" | "$demoenv_bin" check-prs -label "the PR appears on Forgejo -- exactly one, from loam/$proposal_wb into $target_branch, attributing Loam and only Loam" \
+          -count 1 -number "$pr_number" -url "$pr_url" \
+          -head "loam/$proposal_wb" -base "$target_branch" -state open -merged false \
+          -title "$proposal_title" -description "$proposal_description" \
+          -deny-body "$author_identifier,$reviewer_identifier,$author_name,admin"
+        echo ""
+        echo "=== step 11/17: advance the upstream target branch ON FORGEJO -- a real, ordinary git push, never through Loam -- so it conflicts with the accepted proposal's README edit ==="
+        advance_dir="$(mktemp -d /tmp/loam-e2e-golden-advance.XXXXXX)"
+        before_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        git clone -q "$auth_upstream_url" "$advance_dir"
+        git -C "$advance_dir" config user.email "upstream-maintainer@example.invalid"
+        git -C "$advance_dir" config user.name "upstream-maintainer"
+        "$demoenv_bin" fixture-file -name upstream-readme > "$advance_dir/README.md"
+        git -C "$advance_dir" add README.md
+        git -C "$advance_dir" commit --quiet -m "docs: rewrite the README heading upstream"
+        git -C "$advance_dir" push -q origin "$target_branch"
+        rm -rf "$advance_dir"
+        advanced_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        if [ "$advanced_ref" = "$before_ref" ]; then
+          echo "FAIL: the upstream advance left $target_branch at $before_ref: it never moved, so no conflict could arise" >&2
+          exit 1
+        fi
+        echo "upstream $target_branch advanced $before_ref -> $advanced_ref (a real push straight to Forgejo)"
+        echo ""
+        echo "=== step 12/17: one live sync tick reacts -- the accepted proposal is reset to draft, and accepting it again is refused ==="
+        wait_for_conflict "$proposal_wb" reset "the accepted proposal was demoted: conflict 'reset'"
+        wait_for_state "$proposal_wb" draft "the accepted proposal was reset to draft"
+        queue_2="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_2"
+        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch leaves the proposal queue" \
+          -count 0 -deny-names "$proposal_wb"
+        if reject_out="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_identifier\",\"work_branch\":\"$proposal_wb\"}" 2>&1)"; then
+          echo "$reject_out"
+          echo "FAIL: AcceptProposal accepted a conflict-reset draft branch" >&2
+          exit 1
+        fi
+        echo "$reject_out"
+        case "$reject_out" in
+          *failed_precondition*) echo "PASS: AcceptProposal refuses a branch that is not reviewed (failed_precondition)" ;;
+          *) echo "FAIL: expected a failed_precondition from AcceptProposal, got the above" >&2; exit 1 ;;
+        esac
+        echo ""
+        echo "=== step 13/17: AUTHOR -- catch up with a real push through /git/* and the real pre-receive hook ==="
+        git -C "$author_clone" checkout -q "$proposal_wb"
+        git -C "$author_clone" fetch -q origin "$target_branch"
+        if git -C "$author_clone" merge --no-edit -q FETCH_HEAD >/dev/null 2>&1; then
+          echo "FAIL: merging $target_branch into $proposal_wb succeeded cleanly -- there was no conflict to catch up from" >&2
+          exit 1
+        fi
+        catch_conflicts="$(git -C "$author_clone" diff --name-only --diff-filter=U)"
+        if [ "$catch_conflicts" != "README.md" ]; then
+          echo "FAIL: git reported conflicts in [$catch_conflicts], want exactly [README.md]" >&2
+          exit 1
+        fi
+        echo "PASS: the merge genuinely conflicted in README.md; the author resolves it"
+        "$demoenv_bin" fixture-file -name caught-up-readme > "$author_clone/README.md"
+        git -C "$author_clone" add README.md
+        git -C "$author_clone" commit --quiet -m "merge $target_branch into $proposal_wb, resolving README.md"
+        if ! catch_push="$(git -C "$author_clone" push origin "$proposal_wb" 2>&1)"; then
+          echo "$catch_push"
+          echo "FAIL: the author's catch-up push was rejected. Catch-up detection only ever runs on a push that" >&2
+          echo "      reached the real pre-receive hook, so a rejected push means nothing downstream can be true." >&2
+          exit 1
+        fi
+        echo "$catch_push"
+        wait_for_conflict "$proposal_wb" none "the catch-up push cleared the proposal's conflict flag"
+        wait_for_state "$proposal_wb" reviewable "the catch-up push restored the proposal to reviewable"
+        assert_equal "the SERVER opened round 2 for the restored branch -- no request-review call was made or needed" \
+          "$(psql_scalar "SELECT number || '/' || requested_by FROM review_rounds WHERE work_branch_id = (SELECT id FROM work_branches WHERE name = '$proposal_wb') ORDER BY number DESC LIMIT 1;")" \
+          "2/server"
+        stale_verdicts="$(reviewer_cli work verdicts "$repo_identifier" "$proposal_wb")"
+        echo "$stale_verdicts"
+        printf '%s' "$stale_verdicts" | "$demoenv_bin" check-verdicts -label "the round-1 approve went stale when round 2 opened" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 1 -stale true
+        echo ""
+        echo "=== step 14/17: REVIEWER re-approves in round 2; ADMIN accepts AGAIN -- must fast-forward the SAME pull request ==="
+        reviewer_cli work verdict "$repo_identifier" "$proposal_wb" --outcome approve
+        verdicts_2="$(reviewer_cli work verdicts "$repo_identifier" "$proposal_wb")"
+        echo "$verdicts_2"
+        printf '%s' "$verdicts_2" | "$demoenv_bin" check-verdicts -label "the re-review is recorded in round 2 and is current" \
+          -count 1 -reviewer "$reviewer_identifier" -outcome approve -round 2 -stale false
+        wait_for_state "$proposal_wb" reviewed "the re-approved proposal is reviewed again"
+        queue_3="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_3"
+        printf '%s' "$queue_3" | "$demoenv_bin" check-proposals -label "the caught-up, re-approved proposal is queued again, still carrying its original PR" \
+          -count 1 -want-names "$proposal_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_REVIEWED -pr-url "$pr_url" \
+          -approver "$reviewer_identifier" -round 2
+        accept_2="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_identifier\",\"work_branch\":\"$proposal_wb\"}")"
+        echo "$accept_2"
+        pr_url_2="$(printf '%s' "$accept_2" | "$demoenv_bin" field -name prUrl)"
+        assert_equal "the second accept returned the SAME pull request URL" "$pr_url_2" "$pr_url"
+        assert_equal "the recorded PR number never changed" \
+          "$(psql_scalar "SELECT upstream_pr_number FROM work_branches WHERE name = '$proposal_wb';")" "$pr_number"
+        upstream_wb_sha_2="$(git ls-remote "$auth_upstream_url" "refs/heads/loam/$proposal_wb" | cut -f1)"
+        mirror_wb_sha="$(git --git-dir="$data_dir/mirrors/$repo_identifier.git" rev-parse "refs/heads/loam-reserved/$proposal_wb")"
+        assert_equal "the second accept fast-forwarded loam/$proposal_wb to the caught-up tip" "$upstream_wb_sha_2" "$mirror_wb_sha"
+        prs_2="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_2"
+        printf '%s' "$prs_2" | "$demoenv_bin" check-prs -label "two accepts, ONE pull request on Forgejo -- no second PR was opened" \
+          -count 1 -number "$pr_number" -url "$pr_url" -head "loam/$proposal_wb" -base "$target_branch" \
+          -state open -merged false -description "$proposal_description"
+        echo ""
+        echo "=== step 15/17: the pull request MERGES on Forgejo directly -- a REAL forge-side merge, never through Loam ==="
+        curl -sS --fail-with-body -X POST -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
+          -d '{"Do":"merge"}' \
+          "http://127.0.0.1:$forgejo_port/api/v1/repos/$repo_identifier/pulls/$pr_number/merge" >/dev/null
+        echo "merged PR #$pr_number on Forgejo directly (POST .../pulls/$pr_number/merge with Do=merge -- not through Loam)"
+        merged_ref="$(git ls-remote "$auth_upstream_url" "refs/heads/$target_branch" | cut -f1)"
+        if [ "$merged_ref" = "$advanced_ref" ]; then
+          echo "FAIL: upstream $target_branch did not move on the merge" >&2
+          exit 1
+        fi
+        echo "upstream $target_branch moved $advanced_ref -> $merged_ref (the merge commit)"
+        prs_3="$(forge_api_get "$forge_api?state=all&limit=50")"
+        echo "$prs_3"
+        printf '%s' "$prs_3" | "$demoenv_bin" check-prs -label "Forgejo reports the pull request merged" \
+          -count 1 -number "$pr_number" -state closed -merged true
+        echo ""
+        echo "=== step 16/17: nothing here writes work_branches.state -- one more live sync tick completes the branch ==="
+        wait_for_state "$proposal_wb" complete "the merged pull request completed the work branch"
+        queue_4="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
+        echo "$queue_4"
+        printf '%s' "$queue_4" | "$demoenv_bin" check-proposals -label "a completed branch leaves the proposal queue for good" \
+          -count 0 -deny-names "$proposal_wb"
+        echo ""
+        echo "=== step 17/17: the merged code reaches the index; graph and search resolve it at the merge commit ==="
+        wait_for_ingest "$merged_ref" "the merge commit is what the index was built from"
+        jobs_out="$(repo_rpc ListIngestJobs "{\"repo\":\"$repo_identifier\",\"page\":{\"limit\":50}}")"
+        echo "$jobs_out"
+        printf '%s' "$jobs_out" | "$demoenv_bin" check-jobs -label "every ingest job this run enqueued succeeded" -min-jobs 1 -all-succeeded
+        def_out="$(author_cli graph def StartSession --repo "$repo_identifier")"
+        echo "$def_out"
+        printf '%s' "$def_out" | "$demoenv_bin" check-envelope -label "graph def StartSession resolves at the merge commit, reporting it as the new ingested_ref" \
+          -ref "$merged_ref" -repo "$repo_identifier" -target "$target_branch" \
+          -min-results 1 -want-files "pkg/session/session.go" -want-symbols "StartSession"
+        search_query="$("$demoenv_bin" fixture-file -name search-query)"
+        search_out="$(author_cli search "$search_query" --repo "$repo_identifier")"
+        echo "$search_out"
+        printf '%s' "$search_out" | "$demoenv_bin" check-envelope -label "search ranks the merged session chunk first" \
+          -ref "$merged_ref" -repo "$repo_identifier" -target "$target_branch" \
+          -min-results 1 -first-file "pkg/session/session.go"
+        echo ""
+        echo "=== test:e2e:golden complete: golden path + conflict/catch-up/re-accept variant, against the real compiled binaries and a real Forgejo ==="
+
   demo:m1:
     desc: >-
       Demo M1 (loam-ejr): run the store integration suite (loam-li0.6,
