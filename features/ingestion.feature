@@ -26,19 +26,16 @@ Feature: Code ingestion
     Then a graph query for references to "Authenticate" includes "handler.go"
     And "Login" is no longer found
 
-  @wip
   Scenario: The admin can force a reindex
     When I reindex "bobcob7/doc-server"
     Then a full ingest job runs for it
     And once it succeeds, queries reflect the current indexed branch
 
-  @wip
   Scenario: Viewing ingest job activity
     Given ingest jobs have run for enrolled repos
     When I open the Jobs view
     Then I see each job's repo, status, and timing
 
-  @wip
   Scenario: A failed ingest keeps the previous index
     Given "main" has been ingested successfully
     When the next ingestion fails
