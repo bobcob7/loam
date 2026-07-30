@@ -78,14 +78,25 @@ In order, failing fast at each step:
    acquisition (including its own readiness ping) while `AfterConnect` errors —
    connecting the pool before migrating would deadlock permanently on a virgin
    database (`internal/db/pool.go`'s `NewPool` doc comment).
-3. **Reconcile mirrors**: for every enrolled repo, idempotently rewrite the pre-receive
+3. **Verify the encryption key against stored credentials**: for every host with a
+   stored token, attempt to decrypt it with the just-loaded `LOAM_ENCRYPTION_KEY`.
+   Unlike the four checks above, this cannot run from configuration alone — it needs
+   a row to test the key against — which is why it runs here, immediately after the
+   pool connects, rather than as a fifth item in that list. A key that cannot decrypt
+   an existing row exits the process rather than starting: without this,
+   `CredentialService.GetCredentialStatus`/`ListCredentials` report every such host as
+   present and validated (`has_token`/`validated` never decrypt anything — see their
+   own doc comments), while every real use of the credential — `EnrollRepo`, git
+   fetch/push, mirror-sync PR creation — fails. A fresh database with no credentials
+   yet is unaffected: there is nothing to verify.
+4. **Reconcile mirrors**: for every enrolled repo, idempotently rewrite the pre-receive
    hook stub and `receive.denyNonFastForwards` / `receive.denyDeletes` config
    (`docs/git-spec.md`). A mirror missing from disk is re-cloned by the next sync cycle
    (it is derived state; Postgres is the record of enrollment).
-4. **Re-queue orphaned jobs**: `ingest_jobs` stuck in `running` (a previous crash) are
+5. **Re-queue orphaned jobs**: `ingest_jobs` stuck in `running` (a previous crash) are
    reset to `queued` — safe because ingest is transactional, so a crashed job left no
    partial index.
-5. Start the policy socket, sync scheduler, worker pool, and HTTP listener — in that
+6. Start the policy socket, sync scheduler, worker pool, and HTTP listener — in that
    order, so git pushes are never accepted while the policy socket is down.
 
 ## Shutdown

@@ -344,3 +344,69 @@ func (mock *forgeCredentialLookupMock) GetByHostCalls() []struct {
 	mock.lockGetByHost.RUnlock()
 	return calls
 }
+
+// Ensure, that credentialListerMock does implement credentialLister.
+// If this is not the case, regenerate this file with moq.
+var _ credentialLister = &credentialListerMock{}
+
+// credentialListerMock is a mock implementation of credentialLister.
+//
+//	func TestSomethingThatUsescredentialLister(t *testing.T) {
+//
+//		// make and configure a mocked credentialLister
+//		mockedcredentialLister := &credentialListerMock{
+//			ListStatusesFunc: func(ctx context.Context) ([]credentialstore.CredentialStatus, error) {
+//				panic("mock out the ListStatuses method")
+//			},
+//		}
+//
+//		// use mockedcredentialLister in code that requires credentialLister
+//		// and then make assertions.
+//
+//	}
+type credentialListerMock struct {
+	// ListStatusesFunc mocks the ListStatuses method.
+	ListStatusesFunc func(ctx context.Context) ([]credentialstore.CredentialStatus, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ListStatuses holds details about calls to the ListStatuses method.
+		ListStatuses []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+		}
+	}
+	lockListStatuses sync.RWMutex
+}
+
+// ListStatuses calls ListStatusesFunc.
+func (mock *credentialListerMock) ListStatuses(ctx context.Context) ([]credentialstore.CredentialStatus, error) {
+	if mock.ListStatusesFunc == nil {
+		panic("credentialListerMock.ListStatusesFunc: method is nil but credentialLister.ListStatuses was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+	}{
+		Ctx: ctx,
+	}
+	mock.lockListStatuses.Lock()
+	mock.calls.ListStatuses = append(mock.calls.ListStatuses, callInfo)
+	mock.lockListStatuses.Unlock()
+	return mock.ListStatusesFunc(ctx)
+}
+
+// ListStatusesCalls gets all the calls that were made to ListStatuses.
+// Check the length with:
+//
+//	len(mockedcredentialLister.ListStatusesCalls())
+func (mock *credentialListerMock) ListStatusesCalls() []struct {
+	Ctx context.Context
+} {
+	var calls []struct {
+		Ctx context.Context
+	}
+	mock.lockListStatuses.RLock()
+	calls = mock.calls.ListStatuses
+	mock.lockListStatuses.RUnlock()
+	return calls
+}

@@ -9,9 +9,13 @@
 // see internal/db/pool.go's NewPool doc comment: a pool built before
 // migrations have created the pgvector extension deadlocks permanently on a
 // virgin database; this is the ordering loam-ut9 filed against the spec
-// text, fixed alongside this wiring); reconcile every enrolled repo's bare
-// mirror (Startup step 3, loam-ofg.19/.18: idempotently copy the real
-// pre-receive hook binary (cmd/loamhook) into place and set the
+// text, fixed alongside this wiring); verify LOAM_ENCRYPTION_KEY can decrypt
+// every already-stored credential (loam-0ab, credentialcheck.go: a wrong key
+// otherwise makes CredentialService.GetCredentialStatus/ListCredentials
+// report a perfectly healthy credential that every real use then fails to
+// decrypt); reconcile every enrolled repo's bare mirror (Startup step 3,
+// loam-ofg.19/.18: idempotently copy the real pre-receive hook binary
+// (cmd/loamhook) into place and set the
 // receive.denyNonFastForwards/receive.denyDeletes config, docs/git-spec.md
 // "Enforcement Mechanics"); build the ingest worker pool and re-queue any
 // ingest_jobs orphaned by a prior crash (Startup step 4); then start the
@@ -258,6 +262,10 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	}
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
+		return err
+	}
+	if err := verifyEncryptionKeyAgainstStoredCredentials(ctx, cfg, pool); err != nil {
+		pool.Close()
 		return err
 	}
 	hookBinaryPath, err := loamhookBinaryPath(os.Executable, os.Stat)
