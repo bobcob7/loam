@@ -1170,6 +1170,32 @@ tasks:
           -state open -merged false -description "$proposal_description"
         echo ""
         echo "=== step 15/17: the pull request MERGES on Forgejo directly -- a REAL forge-side merge, never through Loam ==="
+        # Forgejo recomputes a PR's own "mergeable" flag ASYNCHRONOUSLY after
+        # a push updates its head (observed directly while building this
+        # target: calling .../merge immediately after the second accept's
+        # fast-forward push 405'd -- "Method Not Allowed" -- because
+        # mergeable was still false; polling GET .../pulls/<n> a moment
+        # later showed it flip to true with no further action taken). A
+        # fixed sleep here would be exactly the wrong fix (the bead's own
+        # "no arbitrary sleeps" rule): this polls the real field Forgejo
+        # itself exposes, bounded, so a genuine merge-conflict regression
+        # still fails loudly via the FAIL/exit 1 below rather than hanging.
+        wait_for_mergeable() {
+          mergeable_start=$(date +%s)
+          while true; do
+            mergeable_body="$(forge_api_get "http://127.0.0.1:$forgejo_port/api/v1/repos/$repo_identifier/pulls/$pr_number")"
+            case "$mergeable_body" in
+              *'"mergeable":true'*) echo "PASS: Forgejo reports PR #$pr_number mergeable, before this target attempts the merge"; return 0 ;;
+            esac
+            if [ "$(( $(date +%s) - mergeable_start ))" -ge 30 ]; then
+              echo "FAIL: PR #$pr_number never reported mergeable=true within 30s" >&2
+              echo "$mergeable_body" >&2
+              exit 1
+            fi
+            sleep 0.5
+          done
+        }
+        wait_for_mergeable
         curl -sS --fail-with-body -X POST -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
           -d '{"Do":"merge"}' \
           "http://127.0.0.1:$forgejo_port/api/v1/repos/$repo_identifier/pulls/$pr_number/merge" >/dev/null
