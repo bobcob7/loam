@@ -204,6 +204,18 @@ type acceptanceWorld struct {
 	// process-wide LOAM_PR_ATTRIBUTION every other scenario in this suite
 	// depends on (see newAcceptanceAccepterWithAttribution).
 	accepterOverride *mirrorsync.StoreProposalAccepter
+	// secondRepo is the SECOND enrolled-and-ingested repo loam-kywt's
+	// "Searching across all repos" and "Graph fan-out does not link repos
+	// in the MVP" scenarios need to prove real cross-repo behavior rather
+	// than a single-repo scan that would pass vacuously (this bead's own
+	// NOTES call out exactly this trap). Built by ensureSecondEnrolledRepo
+	// (acceptance_ingest_test.go), lazily and at most once per scenario;
+	// nil for every scenario that never needs one. It is a full,
+	// independent *acceptanceWorld (its own repo/mirror/ingest state) so
+	// the same seedUpstreamRepo/insertRepoRow/ingestIndexedBranch helpers
+	// this file and acceptance_ingest_test.go already use for the PRIMARY
+	// repo work unmodified against it too.
+	secondRepo *acceptanceWorld
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.
@@ -393,7 +405,40 @@ func (h *acceptanceHarness) afterScenario(ctx context.Context, _ *godog.Scenario
 	if world.upstreamSeeded {
 		_ = h.forge.RemoveRepo(teardownCtx, world.repo())
 	}
+	if world.secondRepo != nil {
+		if err := h.teardownSecondRepo(teardownCtx, world.secondRepo); err != nil {
+			return ctx, err
+		}
+	}
 	return ctx, nil
+}
+
+// teardownSecondRepo mirrors afterScenario's own primary-repo teardown
+// (mirror removal, an ingest drain before the delete, the repos row
+// delete, and the fake-forge repo removal) for world.secondRepo -- a
+// second, fully independent repo some scenarios enroll alongside the
+// primary one (see acceptanceWorld.secondRepo's own doc comment). Without
+// this, a scenario that used ensureSecondEnrolledRepo would leak a repos
+// row and a fake-forge repo past its own scenario boundary, and the next
+// scenario naming acceptanceSecondRepoGroup/acceptanceSecondRepoName would
+// collide on repos_name_key exactly as described in afterScenario's own
+// doc comment for the primary repo.
+func (h *acceptanceHarness) teardownSecondRepo(ctx context.Context, second *acceptanceWorld) error {
+	if second.mirrorDir != "" {
+		_ = os.RemoveAll(second.mirrorDir)
+	}
+	if second.repoID != (uuid.UUID{}) {
+		if err := h.ingestHarness.DrainIngestQueue(ctx, mirrorsync.RepoID(second.repo())); err != nil {
+			return fmt.Errorf("draining the ingest queue before removing the second repo %s: %w", second.repo(), err)
+		}
+		if _, err := h.server.pool.Exec(ctx, `DELETE FROM repos WHERE id = $1`, second.repoID); err != nil {
+			return fmt.Errorf("removing the second repo's repos row for %s: %w", second.repo(), err)
+		}
+	}
+	if second.upstreamSeeded {
+		_ = h.forge.RemoveRepo(ctx, second.repo())
+	}
+	return nil
 }
 
 // acceptanceTeardownTimeout bounds afterScenario's ingest drain and repos
