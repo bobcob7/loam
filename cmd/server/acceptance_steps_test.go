@@ -50,6 +50,11 @@ func (h *acceptanceHarness) registerCloneAndPushSteps(sc *godog.ScenarioContext)
 	sc.Step(`^a clone whose git configuration carries no agent identity$`, h.stepACloneWithNoAgentIdentity)
 	sc.Step(`^I push from it$`, h.stepIPushFromIt)
 	sc.Step(`^the push is rejected$`, h.stepThePushIsRejected)
+	sc.Step(`^I push a branch that is not a registered work branch$`, h.stepIPushABranchThatIsNotARegisteredWorkBranch)
+	sc.Step(`^the work branch "([^"]*)" belongs to another agent$`, h.stepTheWorkBranchBelongsToAnotherAgent)
+	sc.Step(`^I push to "([^"]*)"$`, h.stepIPushToNamedBranch)
+	sc.Step(`^I have rewritten the history of "([^"]*)" locally$`, h.stepIHaveRewrittenTheHistoryOfLocally)
+	sc.Step(`^I force push$`, h.stepIForcePush)
 }
 
 // stepRepoIsEnrolled seeds world's upstream repo on the shared fake forge
@@ -289,6 +294,95 @@ func (h *acceptanceHarness) stepACloneWithNoAgentIdentity(ctx context.Context) e
 func (h *acceptanceHarness) stepIPushFromIt(ctx context.Context) error {
 	world := worldFrom(ctx)
 	return world.writeCommitAndPush("no-identity-change.txt", "no identity", "acceptance: no identity", "HEAD:"+refnames.WorkBranch(world.workBranch))
+}
+
+// stepIPushABranchThatIsNotARegisteredWorkBranch pushes the clone's HEAD to
+// a plain refs/heads/ ref that names no registered work branch of this
+// repo -- docs/git-spec.md "Ref Policy (push)" rule 1's "unknown ref"
+// rejection for a brand-new ref (RefUpdate.OldSHA all-zero, since the ref
+// does not exist in the mirror at all: internal/refpolicy's
+// unknownOrReadOnlyVerdict picks the "create one with 'work start'" reason
+// on exactly that condition). The explicit destination refspec is the same
+// technique stepIPushToTheTargetBranch and stepIPushFromIt already use, so
+// this reaches the named ref regardless of what remote.origin.push maps a
+// bare `git push` to.
+func (h *acceptanceHarness) stepIPushABranchThatIsNotARegisteredWorkBranch(ctx context.Context) error {
+	world := worldFrom(ctx)
+	h.ensureCloned(world)
+	return world.writeCommitAndPush("unregistered-branch-change.txt", "unregistered branch attempt", "acceptance: push to an unregistered branch", "HEAD:refs/heads/not-a-registered-work-branch")
+}
+
+// acceptanceAnotherAgentAuthor is a work_branches.author value guaranteed to
+// differ from any clone-and-push.feature scenario's own agentIdentifier()
+// (acceptance_world_test.go) -- always shaped "<agentName>-<agentID>-author"
+// for this file's single-actor scenarios. It stands in for "another agent"
+// without needing a real, parseable LOAM_AGENT_* identity: the only thing
+// internal/refpolicy.evaluateOne does with work_branches.author is compare
+// it, as a string, against the pushing agent's own httpauth.Identity.
+// Identifier().
+const acceptanceAnotherAgentAuthor = "someone-else-1-author"
+
+// stepTheWorkBranchBelongsToAnotherAgent seeds a SECOND work_branches row --
+// name, distinct from world's own Background-seeded branch -- owned by an
+// author that is not this scenario's acting agent: docs/git-spec.md "Ref
+// Policy (push)" rule 2, "only the author may push". No mirror ref is
+// created for it. internal/refpolicy.evaluateOne's author check runs
+// against the Postgres row alone, before any git-level existence or
+// fast-forward check, so a push CREATING this ref (old_sha all-zero) is
+// rejected on ownership just as surely as one updating an existing ref
+// would be -- there is no need to also build the ref in the bare mirror for
+// this scenario to exercise the real rule.
+func (h *acceptanceHarness) stepTheWorkBranchBelongsToAnotherAgent(ctx context.Context, name string) error {
+	world := worldFrom(ctx)
+	return h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", acceptanceAnotherAgentAuthor)
+}
+
+// stepIPushToNamedBranch pushes the clone's HEAD to a NAMED work branch's
+// reserved ref path explicitly (refnames.WorkBranch(name)), regardless of
+// which branch the clone is actually checked out on -- the same explicit-
+// refspec technique stepIPushFromIt already uses. It backs both "Only the
+// author may push to a work branch" (name belongs to another agent, per
+// stepTheWorkBranchBelongsToAnotherAgent above) and "A terminal work branch
+// rejects pushes" (name is this scenario's own branch, forced into a
+// terminal state by acceptance_review_test.go's
+// stepTheWorkBranchNamedIsInState, which is already wired into this suite
+// via registerReviewSteps and shares this exact Gherkin sentence -- "the
+// work branch \"...\" is in state \"...\"" -- so no new step is needed for
+// that Given at all).
+func (h *acceptanceHarness) stepIPushToNamedBranch(ctx context.Context, name string) error {
+	world := worldFrom(ctx)
+	h.ensureCloned(world)
+	return world.writeCommitAndPush(name+"-push-attempt.txt", "push attempt to "+name, "acceptance: push attempt to "+name, "HEAD:"+refnames.WorkBranch(name))
+}
+
+// stepIHaveRewrittenTheHistoryOfLocally amends the clone's current HEAD
+// commit -- same parent (none: it is the fixture's own root commit), new
+// commit SHA -- so it is no longer a fast-forward of the branch's current
+// tip on the server. "When I force push" is what exercises the
+// consequence: docs/git-spec.md's own Enforcement Mechanics section
+// attributes force-push rejection to STOCK GIT's receive.
+// denyNonFastForwards (internal/mirrorreconcile.ReconcileMirror sets it on
+// every mirror), explicitly NOT to internal/refpolicy's rules 1-3 -- this
+// step's name is unused beyond documenting which branch the amend targets;
+// the clone is always checked out on exactly one branch.
+func (h *acceptanceHarness) stepIHaveRewrittenTheHistoryOfLocally(ctx context.Context, name string) error {
+	world := worldFrom(ctx)
+	h.ensureCloned(world)
+	if out, err := runPlainGit(world.clonePath, "commit", "--amend", "--quiet", "--no-edit", "--allow-empty"); err != nil {
+		return fmt.Errorf("amending local history of %s: %w\n%s", name, err, out)
+	}
+	return nil
+}
+
+// stepIForcePush force-pushes the clone's (now rewritten) HEAD to its own
+// work branch's reserved ref path, bypassing git's own local fast-forward
+// check with --force so the push actually reaches the server rather than
+// being refused client-side before any network round trip.
+func (h *acceptanceHarness) stepIForcePush(ctx context.Context) error {
+	world := worldFrom(ctx)
+	out, err := runPlainGit(world.clonePath, "push", "--force", "origin", "HEAD:"+refnames.WorkBranch(world.workBranch))
+	world.lastGitOutput, world.lastGitErr = out, err
+	return nil
 }
 
 // stepThePushIsRejected is the generic push-rejection assertion several

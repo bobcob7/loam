@@ -24,18 +24,15 @@ Feature: Cloning and pushing work
     When I push to the target branch "main"
     Then the push is rejected as read-only
 
-  @wip
   Scenario: Pushes cannot create branches
     When I push a branch that is not a registered work branch
     Then the push is rejected
 
-  @wip
   Scenario: Only the author may push to a work branch
     Given the work branch "wb-4d21aa" belongs to another agent
     When I push to "wb-4d21aa"
     Then the push is rejected
 
-  @wip
   Scenario: A terminal work branch rejects pushes
     Given the work branch "wb-9c2f1a" is in state "closed"
     When I push to "wb-9c2f1a"
