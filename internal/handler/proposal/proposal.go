@@ -495,7 +495,7 @@ func mapRepoStoreErr(err error, context string) error {
 // err: this is the choice already made (and left alone) when workbranch.go's
 // mapWorkBranchStoreErr was fixed for ErrIllegalTransition above, and it is
 // the right one here too. Unlike ErrIllegalTransition, err's own wrapping
-// for a not-found ((GetByName's "getting work branch %s/%s: %w" or the
+// for a not-found (GetByName's "getting work branch %s/%s: %w" or the
 // guarded transition's "%s work branch %s: %w" in store.go) names the
 // row's internal UUID or repo ID, not the repo/branch name pair context
 // already carries -- so preserving it would not add a diagnosable cause,

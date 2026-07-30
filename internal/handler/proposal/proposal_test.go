@@ -680,6 +680,42 @@ func TestCloseWorkBranch_StoreRefusesTerminalBranch_FailedPrecondition(t *testin
 	assert.Empty(t, d.prCloser.ClosePRAndCleanupCalls(), "a refused close must not close the upstream PR")
 }
 
+// TestCloseWorkBranch_TerminalState_MessageNamesIllegalTransition is
+// loam-blc's and loam-dq0o's acceptance test mirrored a third time for
+// mapWorkBranchStoreErr's close path (loam-c4ab): it used to substitute a
+// hand-written "the work branch has already reached a terminal state"
+// message for err entirely, so errors.Is(mapped,
+// workbranchstore.ErrIllegalTransition) was false even though the rendered
+// text read fine. err already names the work branch id (workbranchstore's
+// own "%s work branch %s: %w" wrapping), so the mapped error must preserve
+// it -- both in the rendered message (the CLI prints connectErr.Message()
+// directly, per docs/cli-spec.md -> Exit Codes & Errors) and via errors.Is,
+// which callers may still match on.
+func TestCloseWorkBranch_TerminalState_MessageNamesIllegalTransition(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	// The stub names a FRESH random UUID, distinct from testWorkBranchID --
+	// not "wb-9c2f1a"/"acme/widgets" -- and that choice is what lets this
+	// test fail at all: the handler's own context prefix ("closing work
+	// branch acme/widgets/wb-9c2f1a") never contains this id, so a stub
+	// naming it cannot separate "err was preserved" from "only the bare
+	// sentinel was wrapped".
+	staleID := uuid.New()
+	d.workBranches.CloseFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("closing work branch %s: %w", staleID, workbranchstore.ErrIllegalTransition)
+	}
+	_, err := d.handler().CloseWorkBranch(adminCtx(t), connect.NewRequest(&adminv1.CloseWorkBranchRequest{
+		Repo: "acme/widgets", WorkBranch: "wb-9c2f1a", Body: "too late",
+	}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), staleID.String(), "the message must name WHICH work branch the store refused -- the store's own wrapping appears nowhere in the handler's own context prefix, so only preserving err can put it there")
+	assert.Contains(t, connectErr.Message(), workbranchstore.ErrIllegalTransition.Error(), "and the sentinel's own text must survive, not just terminate in a hand-written substitute message")
+	assert.ErrorIs(t, err, workbranchstore.ErrIllegalTransition, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 // TestCloseWorkBranch_EmptyBody_InvalidArgument: close_reason is what the
 // author is told, so closing without one is refused rather than recorded as
 // an empty string.
