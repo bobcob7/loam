@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -14,6 +17,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bobcob7/loam/internal/hooksocket"
+	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
 // newTrackedRunner builds a runnerMock (moq-generated in moq_test.go, per
@@ -79,10 +85,41 @@ func newTestListener(t *testing.T) net.Listener {
 // checking the channel is empty) and "serve returned within a bound" (by
 // selecting on the channel with a timeout) without sleeping to guess at
 // timing.
-func runServeAsync(ctx context.Context, stop context.CancelFunc, listener net.Listener, httpServer *http.Server, background runner, db closer, grace time.Duration) <-chan error {
+func runServeAsync(ctx context.Context, stop context.CancelFunc, listener net.Listener, httpServer *http.Server, background runner, policySocket runner, db closer, grace time.Duration) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, stop, testLogger(), listener, httpServer, background, db, grace) }()
+	go func() {
+		done <- serve(ctx, stop, testLogger(), listener, httpServer, background, policySocket, db, grace)
+	}()
 	return done
+}
+
+// shortTempDir returns a fresh, short-named temp directory, sidestepping
+// t.TempDir()'s test-name-encoding path length -- a hooksocket unix
+// socket's sun_path is limited to ~104 bytes (internal/hooksocket/
+// server.go's bindUnixSocket doc comment), and this file's own test names
+// are long enough to blow that budget through t.TempDir(). Mirrors
+// internal/hooksocket/e2e_test.go's own identical helper, duplicated here
+// because that one is unexported in a different package.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "servetest")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// fakeWorkBranchStore is a trivial hooksocket.WorkBranchStore, keyed
+// "repoName/branchName" -- mirrors internal/hooksocket/e2e_test.go's own
+// identical fixture, duplicated here because that package's moq-generated
+// WorkBranchStoreMock (moq_test.go) is unexported and not importable from
+// this package.
+type fakeWorkBranchStore map[string]workbranchstore.WorkBranch
+
+func (f fakeWorkBranchStore) GetWorkBranch(_ context.Context, repoName, branchName string) (workbranchstore.WorkBranch, error) {
+	if wb, ok := f[repoName+"/"+branchName]; ok {
+		return wb, nil
+	}
+	return workbranchstore.WorkBranch{}, fmt.Errorf("branch %s/%s: %w", repoName, branchName, workbranchstore.ErrNotFound)
 }
 
 // TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains is the
@@ -104,9 +141,10 @@ func TestServe_ShutdownClosesListenerAndDatabaseAfterBackgroundDrains(t *testing
 	httpServer := &http.Server{Handler: http.NewServeMux()}
 	release := make(chan struct{})
 	background, backgroundFinished := newTrackedRunner(func(ctx context.Context) { <-release })
+	policySocket, _ := newTrackedRunner(nil)
 	db, dbClosed := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, 5*time.Second)
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, 5*time.Second)
 
 	cancel() // simulate SIGTERM/SIGINT
 
@@ -148,10 +186,11 @@ func TestServe_AbandonsBackgroundWaitAfterGracePeriodElapses(t *testing.T) {
 	listener := newTestListener(t)
 	httpServer := &http.Server{Handler: http.NewServeMux()}
 	background, _ := newTrackedRunner(func(ctx context.Context) { <-make(chan struct{}) }) // never returns
+	policySocket, _ := newTrackedRunner(nil)
 	db, dbClosed := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	const grace = 100 * time.Millisecond
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, grace)
 
 	cancel()
 
@@ -173,9 +212,10 @@ func TestServe_StartsBackgroundComponentBeforeReturning(t *testing.T) {
 	listener := newTestListener(t)
 	httpServer := &http.Server{Handler: http.NewServeMux()}
 	background, _ := newTrackedRunner(nil) // nil: blocks on ctx.Done(), per newTrackedRunner's doc comment
+	policySocket, _ := newTrackedRunner(nil)
 	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, time.Second)
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, time.Second)
 	cancel()
 	select {
 	case err := <-done:
@@ -184,6 +224,7 @@ func TestServe_StartsBackgroundComponentBeforeReturning(t *testing.T) {
 		t.Fatal("serve did not return")
 	}
 	assert.NotEmpty(t, background.RunCalls(), "serve must start the background component")
+	assert.NotEmpty(t, policySocket.RunCalls(), "serve must start the policy socket")
 }
 
 // TestServe_DrainsInFlightHTTPRequestOnShutdown is this bead's own named
@@ -213,6 +254,7 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	})
 	httpServer := &http.Server{Handler: mux}
 	background, _ := newTrackedRunner(nil)
+	policySocket, _ := newTrackedRunner(nil)
 	db, _ := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	// loam-ofg.21 widened these to 30s/20s, misattributing the package's
@@ -229,7 +271,7 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	// runners while still failing fast, not after a real 30s hang, if
 	// draining ever regresses.
 	const grace = 5 * time.Second
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, grace)
 
 	type result struct {
 		status int
@@ -279,6 +321,155 @@ func TestServe_DrainsInFlightHTTPRequestOnShutdown(t *testing.T) {
 	}
 }
 
+// TestServe_PolicySocketOutlivesHTTPDrain is loam-48y's discriminating
+// proof that the policy socket closes AFTER httpServer.Shutdown returns,
+// not merely "both eventually close" -- a property a pre-fix serve, which
+// cancelled the policy socket's context at the same instant as the
+// shutdown signal (alongside httpServer.Shutdown starting, not after it
+// finishes), would satisfy just as well. It holds a real HTTP request
+// open across the shutdown signal, exactly as
+// TestServe_DrainsInFlightHTTPRequestOnShutdown does, and asserts the
+// policy socket's tracked runner has NOT finished while that request is
+// still draining -- the moment that assertion would go false is exactly
+// the bug this bead exists to fix -- then asserts it DOES finish once the
+// request is released and Shutdown can return. See
+// TestServe_PushCompletesOnPolicySocketDuringHTTPDrain below for the
+// corresponding proof against a real hooksocket.Server and a real
+// in-flight push, rather than a mock runner.
+func TestServe_PolicySocketOutlivesHTTPDrain(t *testing.T) {
+	t.Parallel()
+	listener := newTestListener(t)
+	addr := listener.Addr().String()
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	})
+	httpServer := &http.Server{Handler: mux}
+	background, _ := newTrackedRunner(nil)
+	policySocket, policySocketFinished := newTrackedRunner(nil)
+	db, _ := newTrackedCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	const grace = 5 * time.Second
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, grace)
+	client := newIsolatedHTTPClient(t)
+	go func() {
+		resp, err := client.Get("http://" + addr + "/slow")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight HTTP request never reached the handler")
+	}
+	cancel() // simulate SIGTERM mid-request, exactly like a git push draining over HTTP
+	select {
+	case err := <-done:
+		t.Fatalf("serve returned (err=%v) before the HTTP request drained", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	assert.False(t, policySocketFinished(), "the policy socket must still be running while an HTTP request is still draining -- closing it now is exactly the bug loam-48y fixes")
+	close(releaseRequest)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after both HTTP and the policy socket drained")
+	}
+	assert.True(t, policySocketFinished(), "the policy socket must close once HTTP has finished draining")
+}
+
+// TestServe_PushCompletesOnPolicySocketDuringHTTPDrain is loam-48y's
+// user-visible acceptance proof: a real internal/hooksocket.Server, wired
+// through serve exactly as run() (main.go) wires production's, must still
+// accept and correctly answer a NEW connection -- standing in for a
+// pre-receive hook subprocess dialing the socket mid-push -- while an
+// unrelated HTTP request is still draining after the shutdown signal has
+// already fired. Before loam-48y's reordering, the policy socket's
+// listener would already be closed by this point (its context was the
+// same one cancelled the instant the signal arrived), so this same dial
+// would fail with a connection error and the simulated push would be
+// forced to fail closed -- exactly docs/server-spec.md's Shutdown
+// scenario this bead exists to fix, proven here against the real
+// server/client wire protocol rather than a mock.
+func TestServe_PushCompletesOnPolicySocketDuringHTTPDrain(t *testing.T) {
+	t.Parallel()
+	dataDir := shortTempDir(t)
+	socketPath := filepath.Join(dataDir, "hook.sock")
+	store := fakeWorkBranchStore{
+		"acme/widgets/wb-good": {Name: "wb-good", Author: "alice-agent-1-author", State: workbranchstore.StateDraft},
+	}
+	policySocket, err := hooksocket.Listen(socketPath, store, nil, testLogger())
+	require.NoError(t, err)
+	listener := newTestListener(t)
+	addr := listener.Addr().String()
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	})
+	httpServer := &http.Server{Handler: mux}
+	background, _ := newTrackedRunner(nil)
+	db, _ := newTrackedCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	const grace = 5 * time.Second
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, grace)
+	client := newIsolatedHTTPClient(t)
+	go func() {
+		resp, httpErr := client.Get("http://" + addr + "/slow")
+		if httpErr == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight HTTP request never reached the handler")
+	}
+	cancel() // simulate SIGTERM mid-request
+	// This sleep is deliberate, not a flaky-test smell: hooksocket.Server's
+	// own listener-close goroutine (`go func() { <-ctx.Done(); listener.
+	// Close() }()`) races this test's own goroutine the instant cancel()
+	// returns, and a dial issued too quickly could accidentally beat that
+	// close on scheduling luck alone even on the UNFIXED ordering,
+	// producing a false pass. Giving that goroutine a full 300ms head
+	// start turns "does the socket outlive the HTTP drain" into a
+	// deterministic property of THIS bead's fix (the socket's ctx is
+	// provably never cancelled until httpServer.Shutdown returns, which
+	// cannot happen here until releaseRequest below is closed) rather than
+	// a coin flip against goroutine scheduling -- confirmed by running this
+	// test against the pre-fix ordering, where it fails every time despite
+	// this same delay.
+	time.Sleep(300 * time.Millisecond)
+	req := hooksocket.Request{
+		Repo:  "acme/widgets",
+		Agent: hooksocket.AgentIdentity{Name: "alice", ID: "agent-1", Role: "author"},
+		Updates: []hooksocket.RefUpdateWire{
+			{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("1", 40), Ref: "refs/heads/loam-reserved/wb-good"},
+		},
+	}
+	resp, callErr := hooksocket.Call(socketPath, req, 2*time.Second, 5*time.Second)
+	require.NoError(t, callErr, "a push arriving on the policy socket while HTTP is still draining must complete, not be rejected by an already-closed socket")
+	assert.True(t, resp.Accepted, "the simulated push should have been accepted by policy")
+	close(releaseRequest)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after both HTTP and the policy socket drained")
+	}
+	_, dialErr := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	assert.Error(t, dialErr, "the policy socket must actually be closed once serve has returned")
+}
+
 // TestServe_ServeFailureCallsStopSoBackgroundStillDrains is the
 // discriminating proof that the Serve-failure branch's stop() call is
 // load-bearing, not incidental: stop is the SAME context.CancelFunc that
@@ -298,11 +489,12 @@ func TestServe_ServeFailureCallsStopSoBackgroundStillDrains(t *testing.T) {
 	require.NoError(t, listener.Close()) // Serve on this listener fails immediately
 	httpServer := &http.Server{Handler: http.NewServeMux()}
 	background, backgroundFinished := newTrackedRunner(nil)
+	policySocket, _ := newTrackedRunner(nil)
 	db, dbClosed := newTrackedCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // safety net only; serve calling stop (== cancel) is what this test is actually proving
 	const grace = 2 * time.Second
-	done := runServeAsync(ctx, cancel, listener, httpServer, background, db, grace)
+	done := runServeAsync(ctx, cancel, listener, httpServer, background, policySocket, db, grace)
 
 	select {
 	case err := <-done:

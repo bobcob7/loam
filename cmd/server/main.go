@@ -331,11 +331,18 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	}
 	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath)
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
-	background := multiRunner{ingestPool, policyServer, syncScheduler}
+	// policyServer is deliberately NOT a member of this multiRunner: serve
+	// (serve.go) closes it separately, strictly after httpServer.Shutdown
+	// returns, rather than tearing it down alongside ingestPool and
+	// syncScheduler the instant the shutdown signal arrives -- see serve's
+	// own doc comment for why (loam-48y, mirroring this file's own
+	// loam-ofg.18 comment above about STARTUP ordering, in the other
+	// direction).
+	background := multiRunner{ingestPool, syncScheduler}
 	if onReady != nil {
 		onReady(pool, ingestPool, hookBinaryPath)
 	}
-	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, pool, defaultShutdownGrace)
+	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, policyServer, pool, defaultShutdownGrace)
 }
 
 // loamhookBinaryPathName is the filename this process expects to find its
