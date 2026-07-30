@@ -101,11 +101,14 @@ In order, failing fast at each step:
 
 ## Shutdown
 
-On SIGTERM: stop accepting HTTP and policy-socket connections, let in-flight requests
-and the current sync/ingest jobs drain (bounded by a grace period, default `30s`), then
-exit. Jobs that don't finish in time are killed and follow the crash path — re-queued on
-next startup. Nothing requires cleanup beyond that; all durable state is in Postgres and
-the mirrors.
+On SIGTERM: stop accepting new HTTP connections and let in-flight HTTP requests drain
+first; only once that drain completes does the policy socket stop accepting — the
+mirror image of Startup step 6's ordering, so a push already in flight over HTTP can
+still reach the policy socket for the whole time its request is draining, instead of
+finding it closed out from under it. The current sync/ingest jobs drain alongside HTTP
+(bounded by the same grace period, default `30s`), then exit. Jobs that don't finish in
+time are killed and follow the crash path — re-queued on next startup. Nothing requires
+cleanup beyond that; all durable state is in Postgres and the mirrors.
 
 ## Health
 
