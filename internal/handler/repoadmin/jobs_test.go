@@ -56,11 +56,12 @@ func TestListIngestJobs_ConvertsFilterAndRecords(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
 	queuedAt := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	jobID := uuid.New()
 	d.jobs.ListJobsFunc = func(_ context.Context, filter ingest.ListJobsFilter, _, _ int32) ([]ingest.JobRecord, int64, error) {
 		assert.Equal(t, "acme/widgets", filter.Repo)
 		assert.Equal(t, "running", filter.Status)
 		return []ingest.JobRecord{{
-			ID: uuid.New(), Repo: "acme/widgets", TargetBranch: "main",
+			ID: jobID, Repo: "acme/widgets", TargetBranch: "main",
 			Kind: ingest.KindIncremental, Status: "running", Attempts: 2,
 			QueuedAt: queuedAt,
 		}}, 1, nil
@@ -73,6 +74,7 @@ func TestListIngestJobs_ConvertsFilterAndRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetJobs(), 1)
 	job := resp.Msg.GetJobs()[0]
+	assert.Equal(t, jobID.String(), job.GetId())
 	assert.Equal(t, "acme/widgets", job.GetRepo())
 	assert.Equal(t, "main", job.GetTargetBranch())
 	assert.Equal(t, adminv1.IngestKind_INGEST_KIND_INCREMENTAL, job.GetKind())

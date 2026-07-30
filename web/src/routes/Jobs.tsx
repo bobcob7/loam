@@ -115,16 +115,17 @@ export function formatTimestamp(value: string): string {
 }
 
 /**
- * IngestJob carries no job id on the wire (proto/loam/admin/v1/repo_admin.proto
- * -- contrast internal/ingest.JobRecord.ID, a uuid.UUID that never crosses
- * the RPC boundary), so the closest thing to a stable identity a screen can
- * build is the tuple that (repo, target branch, kind, queued_at) -- two
- * distinct jobs for the same repo/branch/kind enqueued in the same instant
- * would collide, but that is the wire format's limitation, not a gap this
- * screen can paper over.
+ * IngestJob's own `id` (proto/loam/admin/v1/repo_admin.proto field 10,
+ * sourced from internal/ingest.JobRecord.ID, a uuid.UUID) is the row's
+ * actual stable identity, and every job this screen renders comes from
+ * ListIngestJobs, which always populates it (internal/handler/repoadmin
+ * jobs.go's toIngestJobProto). Prior to loam-1wpa, IngestJob carried no id
+ * across the wire at all, so this screen keyed rows on the tuple
+ * (repo, target branch, kind, queued_at) -- two distinct jobs for the same
+ * repo/branch/kind enqueued in the same instant collided under that key.
  */
 export function jobRowKey(job: IngestJob): string {
-  return `${job.repo}:${job.targetBranch}:${job.kind}:${job.queuedAt}`;
+  return job.id;
 }
 
 type StatusFilterValue = "" | "queued" | "running" | "succeeded" | "failed";

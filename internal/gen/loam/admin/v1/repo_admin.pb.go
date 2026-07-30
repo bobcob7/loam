@@ -923,9 +923,19 @@ type IngestJob struct {
 	// Error detail when status is FAILED; empty otherwise.
 	Error string `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
 	// RFC 3339 timestamps; started/finished empty until they occur.
-	QueuedAt      string `protobuf:"bytes,7,opt,name=queued_at,json=queuedAt,proto3" json:"queued_at,omitempty"`
-	StartedAt     string `protobuf:"bytes,8,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt    string `protobuf:"bytes,9,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	QueuedAt   string `protobuf:"bytes,7,opt,name=queued_at,json=queuedAt,proto3" json:"queued_at,omitempty"`
+	StartedAt  string `protobuf:"bytes,8,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt string `protobuf:"bytes,9,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	// ingest_jobs.id (a UUID), the job's stable identity. Empty on a
+	// ReindexRepo response (the enqueue path this handler uses is a
+	// coalescing no-op/insert that does not report back which row it
+	// touched -- internal/ingest.Pool.Enqueue); always populated on
+	// ListIngestJobs results, which read the row back from ingest_jobs
+	// directly (internal/ingest.JobRecord.ID). Added by loam-1wpa: without
+	// this, the web Jobs view had no wire-safe way to key rows uniquely
+	// (repo:target_branch:kind:queued_at collides for two jobs of the same
+	// repo/branch/kind queued in the same instant).
+	Id            string `protobuf:"bytes,10,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1019,6 +1029,13 @@ func (x *IngestJob) GetStartedAt() string {
 func (x *IngestJob) GetFinishedAt() string {
 	if x != nil {
 		return x.FinishedAt
+	}
+	return ""
+}
+
+func (x *IngestJob) GetId() string {
+	if x != nil {
+		return x.Id
 	}
 	return ""
 }
@@ -1368,7 +1385,7 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\x0ftarget_branches\x18\x02 \x03(\tR\x0etargetBranches\x12%\n" +
 	"\x0eindexed_branch\x18\x03 \x01(\tR\rindexedBranch\"L\n" +
 	"\x19SetTargetBranchesResponse\x12/\n" +
-	"\x04repo\x18\x01 \x01(\v2\x1b.loam.admin.v1.EnrolledRepoR\x04repo\"\xb7\x02\n" +
+	"\x04repo\x18\x01 \x01(\v2\x1b.loam.admin.v1.EnrolledRepoR\x04repo\"\xc7\x02\n" +
 	"\tIngestJob\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12#\n" +
 	"\rtarget_branch\x18\x02 \x01(\tR\ftargetBranch\x12-\n" +
@@ -1380,7 +1397,9 @@ const file_loam_admin_v1_repo_admin_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\b \x01(\tR\tstartedAt\x12\x1f\n" +
 	"\vfinished_at\x18\t \x01(\tR\n" +
-	"finishedAt\"(\n" +
+	"finishedAt\x12\x0e\n" +
+	"\x02id\x18\n" +
+	" \x01(\tR\x02id\"(\n" +
 	"\x12ReindexRepoRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\"A\n" +
 	"\x13ReindexRepoResponse\x12*\n" +

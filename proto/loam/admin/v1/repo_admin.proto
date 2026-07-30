@@ -157,6 +157,16 @@ message IngestJob {
   string queued_at = 7;
   string started_at = 8;
   string finished_at = 9;
+  // ingest_jobs.id (a UUID), the job's stable identity. Empty on a
+  // ReindexRepo response (the enqueue path this handler uses is a
+  // coalescing no-op/insert that does not report back which row it
+  // touched -- internal/ingest.Pool.Enqueue); always populated on
+  // ListIngestJobs results, which read the row back from ingest_jobs
+  // directly (internal/ingest.JobRecord.ID). Added by loam-1wpa: without
+  // this, the web Jobs view had no wire-safe way to key rows uniquely
+  // (repo:target_branch:kind:queued_at collides for two jobs of the same
+  // repo/branch/kind queued in the same instant).
+  string id = 10;
 }
 
 message ReindexRepoRequest {

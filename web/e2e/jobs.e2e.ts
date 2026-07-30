@@ -74,12 +74,14 @@ test.describe("jobs journey", () => {
     // repo is anywhere past QUEUED -- RUNNING, or already terminal --
     // inserts a genuinely SEPARATE second row, not a reuse of the first.
     // `queued_at DESC` ordering (internal/ingest/list.go's ListJobs) is
-    // therefore not a stable way to pick "the" row up front, and
-    // IngestJob carries no id across the wire (loam-1wpa), so this spec
-    // does not claim to know which physical row is "the one Reindex
-    // enqueued" -- only that a real FULL ingest job for this repo,
-    // triggered into existence by this test's own click, genuinely
-    // reaches SUCCEEDED. Requiring SUCCEEDED (not "SUCCEEDED or FAILED")
+    // therefore not a stable way to pick "the" row up front. IngestJob now
+    // carries an id (loam-1wpa), but ReindexRepo's own response never gets
+    // one back (Pool.Enqueue coalesces onto an existing queued row without
+    // reporting which row it touched), so this spec still cannot name which
+    // physical row is "the one Reindex enqueued" from the click alone --
+    // only that a real FULL ingest job for this repo, triggered into
+    // existence by this test's own click, genuinely reaches SUCCEEDED.
+    // Requiring SUCCEEDED (not "SUCCEEDED or FAILED")
     // is loam-1dmg's whole point: task test:e2e now boots a real fake
     // embedder (cmd/demoenv embed) and points LOAM_EMBEDDER_URL at it, so
     // a FAILED terminal state here would mean the fix regressed, not that

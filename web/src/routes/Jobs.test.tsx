@@ -124,20 +124,43 @@ describe("jobRowKey", () => {
   // once-rendered test never exercises. The only direct way to prove the
   // key is actually unique is to call it and compare the strings, which is
   // what this does.
-  it("differs for two jobs that share everything except queuedAt", () => {
-    const base = {
-      repo: "acme/widgets",
-      targetBranch: "main",
-      kind: IngestKind.FULL,
-      status: IngestStatus.RUNNING,
-      attempts: 1,
-      error: "",
-      startedAt: "",
-      finishedAt: "",
-    };
-    const first = create(IngestJobSchema, { ...base, queuedAt: "2026-07-20T10:00:00Z" });
-    const second = create(IngestJobSchema, { ...base, queuedAt: "2026-07-19T09:00:00Z" });
+  //
+  // loam-1wpa's own bug: before it, this screen keyed rows on
+  // `repo:targetBranch:kind:queuedAt` because IngestJob carried no id on the
+  // wire. That tuple collides for two jobs sharing repo/branch/kind queued
+  // in the same instant -- exactly the fixture pair below, which differs
+  // ONLY in `id`. This test proves both halves: the retired tuple key
+  // genuinely collides on this pair, and `jobRowKey` (now keying on `id`)
+  // does not.
+  const base = {
+    repo: "acme/widgets",
+    targetBranch: "main",
+    kind: IngestKind.FULL,
+    status: IngestStatus.RUNNING,
+    attempts: 1,
+    error: "",
+    queuedAt: "2026-07-20T10:00:00Z",
+    startedAt: "",
+    finishedAt: "",
+  };
+  const oldTupleKey = (job: { repo: string; targetBranch: string; kind: IngestKind; queuedAt: string }): string =>
+    `${job.repo}:${job.targetBranch}:${job.kind}:${job.queuedAt}`;
+
+  it("collides under the retired repo:targetBranch:kind:queuedAt key when only id differs", () => {
+    const first = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
+    const second = create(IngestJobSchema, { ...base, id: "22222222-2222-2222-2222-222222222222" });
+    expect(oldTupleKey(first)).toBe(oldTupleKey(second));
+  });
+
+  it("differs for two jobs that share everything except id", () => {
+    const first = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
+    const second = create(IngestJobSchema, { ...base, id: "22222222-2222-2222-2222-222222222222" });
     expect(jobRowKey(first)).not.toBe(jobRowKey(second));
+  });
+
+  it("returns the job's own id", () => {
+    const job = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
+    expect(jobRowKey(job)).toBe("11111111-1111-1111-1111-111111111111");
   });
 });
 
@@ -212,16 +235,17 @@ describe("Jobs", () => {
   });
 
   it("renders two jobs sharing a repo, branch and kind as two distinct, correctly-labelled rows", async () => {
-    // repo/targetBranch/kind are identical on purpose -- only queuedAt
-    // differs (IngestJob carries no id on the wire; see jobRowKey's
-    // comment). This is a rendering-layer companion to the direct
-    // `jobRowKey` uniqueness test above, not a substitute for it: a broken
-    // row key does NOT cost this test a `<tr>` (React still renders every
-    // array element on a single pass, key collisions or not -- it only
-    // warns), so what this actually guards is that two same-repo jobs stay
-    // independently, correctly labelled next to each other, which a
-    // fixture pair that already differed by kind or repo would not
-    // meaningfully exercise.
+    // repo/targetBranch/kind are identical on purpose -- only id and
+    // queuedAt differ, matching what ListIngestJobs actually returns for
+    // two distinct jobs of the same repo/branch/kind (jobs.go's
+    // toIngestJobProto always populates id from JobRecord.ID). This is a
+    // rendering-layer companion to the direct `jobRowKey` tests above, not
+    // a substitute for them: a broken row key does NOT cost this test a
+    // `<tr>` (React still renders every array element on a single pass,
+    // key collisions or not -- it only warns), so what this actually
+    // guards is that two same-repo jobs stay independently, correctly
+    // labelled next to each other, which a fixture pair that already
+    // differed by kind or repo would not meaningfully exercise.
     const shared = {
       repo: "acme/widgets",
       targetBranch: "main",
@@ -235,8 +259,18 @@ describe("Jobs", () => {
       router.service(RepoAdminService, {
         listIngestJobs: () => ({
           jobs: [
-            { ...shared, status: IngestStatus.RUNNING, queuedAt: "2026-07-20T10:00:00Z" },
-            { ...shared, status: IngestStatus.SUCCEEDED, queuedAt: "2026-07-19T09:00:00Z" },
+            {
+              ...shared,
+              id: "11111111-1111-1111-1111-111111111111",
+              status: IngestStatus.RUNNING,
+              queuedAt: "2026-07-20T10:00:00Z",
+            },
+            {
+              ...shared,
+              id: "22222222-2222-2222-2222-222222222222",
+              status: IngestStatus.SUCCEEDED,
+              queuedAt: "2026-07-19T09:00:00Z",
+            },
           ],
           pageInfo: { total: 2 },
         }),
