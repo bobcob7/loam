@@ -72,6 +72,13 @@ var ErrMirrorMissing = errors.New("gitref: bare mirror missing or invalid on dis
 // validates `from` against that table, not against the mirror.
 var ErrTargetMissing = errors.New("gitref: target branch not found in mirror")
 
+// ErrRefMissing indicates the named work-branch ref does not exist in the
+// mirror -- ResolveWorkBranchRef's own "no such ref" outcome, kept
+// distinct from ErrTargetMissing (CreateWorkBranchRef's identically-shaped
+// failure for a TARGET branch, not a work branch) so a caller cannot
+// confuse the two kinds of missing ref by matching the wrong sentinel.
+var ErrRefMissing = errors.New("gitref: work-branch ref not found in mirror")
+
 // ErrRefExists indicates the work-branch ref already exists in the mirror.
 // The create is deliberately guarded rather than an unconditional
 // update-ref: a work branch's ref must be created once, at its base
@@ -153,6 +160,32 @@ func (c *Creator) DeleteWorkBranchRef(ctx context.Context, repoName, name string
 		return fmt.Errorf("deleting %s in %s: %s", ref, repoName, summarize(out.stderr))
 	}
 	return nil
+}
+
+// ResolveWorkBranchRef returns the commit SHA refnames.WorkBranch(name)
+// currently points to in repoName's bare mirror -- read live from git, the
+// same way every other SHA this codebase needs is read (never cached; see
+// workbranchstore.WorkBranch's own doc comment: "this struct only carries
+// the pointer at the ref"). Its production caller is loam-cgg: both
+// StoreProposalAccepter, which resolves the tip it is about to push
+// upstream before recording it as work_branches.accepted_tip, and
+// ListProposals, which resolves the branch's CURRENT tip to compare
+// against that recorded value when deciding whether a recorded PR's
+// branch is behind.
+//
+// It performs no write -- ref itself may have been created by a PRIOR
+// call to CreateWorkBranchRef, but this method never creates, moves, or
+// deletes anything.
+func (c *Creator) ResolveWorkBranchRef(ctx context.Context, repoName, name string) (string, error) {
+	mirrorDir := mirrorpath.Dir(c.dataDir, repoName)
+	sha, err := c.resolve(ctx, mirrorDir, refnames.WorkBranch(name))
+	if err != nil {
+		if errors.Is(err, ErrTargetMissing) {
+			return "", fmt.Errorf("resolving work branch %s in %s: %w", name, repoName, ErrRefMissing)
+		}
+		return "", fmt.Errorf("resolving work branch %s in %s: %w", name, repoName, err)
+	}
+	return sha, nil
 }
 
 // resolve returns ref's current commit SHA, classifying `git rev-parse
