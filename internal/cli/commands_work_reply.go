@@ -2,17 +2,17 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-// newWorkReplyFlags builds the flag.FlagSet for `loam work reply [repo]
+// newWorkReplyFlags builds the pflag.FlagSet for `loam work reply [repo]
 // [work-branch] --thread <thread-id>`, plus the parsed --thread value.
-func newWorkReplyFlags() (*flag.FlagSet, *string) {
+func newWorkReplyFlags() (*pflag.FlagSet, *string) {
 	fs := newFlagSet("work reply")
 	thread := fs.String("thread", "", "the thread to reply to")
 	return fs, thread

@@ -14,6 +14,20 @@ questions are tracked at the end.
 The binary is invoked as `loam`. Configuration is entirely through environment variables
 (see below) — the CLI has **no global flags**.
 
+### Argument Ordering
+
+Flags may appear **anywhere** on the command line relative to positional arguments — before
+them, after them, or interspersed. `loam work set acme/repo wb-1 --title "New title"` and
+`loam work set --title "New title" acme/repo wb-1` are equivalent. This is the guarantee
+implied but never stated by synopses elsewhere in this document that show flags trailing
+positionals (e.g. `work set [repo] [work-branch] [--title <title>]`); it holds for every
+command, not just the ones whose synopsis happens to put flags last.
+
+A recognized flag that requires a value but has none following it (e.g. a bare trailing
+`--title` with nothing after it) is a usage error (exit `2`) — it is never silently
+reinterpreted as consuming the next positional argument as that flag's value. `--` ends
+flag parsing: every token after it is a literal positional, even one that starts with `-`.
+
 ### Workspace
 
 The CLI operates within a **workspace** — the directory it is run from. The workspace holds

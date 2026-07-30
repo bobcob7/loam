@@ -184,6 +184,34 @@ func TestRunWorkSet_DescriptionOnly_Success(t *testing.T) {
 	assert.Equal(t, "a new description", capturedReq.GetDescription(), "a trailing newline from stdin must be trimmed")
 }
 
+// TestRunWorkSet_TitleFlagMissingValue_RejectsRatherThanConsumingRepo pins
+// the exact defect the first splitArgs implementation shipped: "work set
+// acme/repo --title" (no value after --title) must be a loud parse error,
+// never a silent reinterpretation of "acme/repo" as the title followed by
+// falling back to workspace inference for repo. noResolveWorkspace makes
+// any such fallback fail loudly too, so this fails on either mechanism if
+// the defect ever returns.
+func TestRunWorkSet_TitleFlagMissingValue_RejectsRatherThanConsumingRepo(t *testing.T) {
+	t.Parallel()
+	called := false
+	client := &WorkBranchClientMock{
+		UpdateWorkBranchFunc: func(context.Context, *connect.Request[loamv1.UpdateWorkBranchRequest]) (*connect.Response[loamv1.UpdateWorkBranchResponse], error) {
+			called = true
+			return nil, errors.New("must not be called")
+		},
+	}
+	var encoded any
+	deps := workTestDeps(client, noResolveWorkspace(), "", &encoded)
+
+	err := runWorkSet(t.Context(), deps, []string{"acme/repo", "--title"})
+	require.Error(t, err)
+	var ue *usageError
+	assert.ErrorAs(t, err, &ue)
+	assert.Contains(t, err.Error(), "flag needs an argument: --title")
+	assert.False(t, called, "work set must reject before calling UpdateWorkBranch when --title has no value")
+	assert.Nil(t, encoded)
+}
+
 func TestRunWorkSet_NeitherTitleNorStdin_ExitsUsageWithoutCallingServer(t *testing.T) {
 	t.Parallel()
 	called := false

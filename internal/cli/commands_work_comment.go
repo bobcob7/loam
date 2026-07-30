@@ -2,10 +2,10 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
@@ -22,10 +22,10 @@ type commentFlags struct {
 	discard *string
 }
 
-// newWorkCommentFlags builds the flag.FlagSet for `loam work comment
+// newWorkCommentFlags builds the pflag.FlagSet for `loam work comment
 // [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>]
 // [--edit <staged-id>] [--discard <staged-id>]`, plus the parsed values.
-func newWorkCommentFlags() (*flag.FlagSet, *commentFlags) {
+func newWorkCommentFlags() (*pflag.FlagSet, *commentFlags) {
 	fs := newFlagSet("work comment")
 	f := &commentFlags{
 		file:    fs.String("file", "", "anchor the new thread to this file"),

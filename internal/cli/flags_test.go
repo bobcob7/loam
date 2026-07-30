@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"flag"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,7 +113,11 @@ func TestParseCommandArgs_ValuelessTrailingFlag_ReturnsError(t *testing.T) {
 	title := fs.String("title", "", "")
 	positional, err := parseCommandArgs(fs, []string{"acme/repo", "--title"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "flag needs an argument: -title")
+	// pflag's ValueRequiredError always prints the long form with both
+	// dashes, even though this is a `-title` (single-dash) miss under the
+	// old stdlib flag package's naming — a real behavioural difference from
+	// splitArgs, which formatted this as "-title" (see NOTES on loam-3yp).
+	assert.Contains(t, err.Error(), "flag needs an argument: --title")
 	assert.Nil(t, positional)
 	assert.Empty(t, *title)
 }
@@ -157,27 +161,27 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
-		build func() *flag.FlagSet
+		build func() *pflag.FlagSet
 		want  []flagExpectation
 	}{
-		{"work list", func() *flag.FlagSet { fs, _ := newWorkListFlags(); return fs }, []flagExpectation{
+		{"work list", func() *pflag.FlagSet { fs, _ := newWorkListFlags(); return fs }, []flagExpectation{
 			{"repo", ""}, {"author", ""}, {"target", ""},
 			{"awaiting-review", "false"}, {"state", "reviewable"}, {"limit", "100"},
 		}},
-		{"work set", func() *flag.FlagSet { fs, _ := newWorkSetFlags(); return fs }, []flagExpectation{{"title", ""}}},
-		{"work comments", func() *flag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }, []flagExpectation{{"staged", "false"}}},
-		{"work comment", func() *flag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }, []flagExpectation{
+		{"work set", func() *pflag.FlagSet { fs, _ := newWorkSetFlags(); return fs }, []flagExpectation{{"title", ""}}},
+		{"work comments", func() *pflag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }, []flagExpectation{{"staged", "false"}}},
+		{"work comment", func() *pflag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }, []flagExpectation{
 			{"file", ""}, {"line", "0"}, {"resolve", ""}, {"edit", ""}, {"discard", ""},
 		}},
-		{"work reply", func() *flag.FlagSet { fs, _ := newWorkReplyFlags(); return fs }, []flagExpectation{{"thread", ""}}},
-		{"work verdict", func() *flag.FlagSet { fs, _ := newWorkVerdictFlags(); return fs }, []flagExpectation{{"outcome", ""}}},
-		{"graph def", func() *flag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags("graph def"); return fs }, []flagExpectation{
+		{"work reply", func() *pflag.FlagSet { fs, _ := newWorkReplyFlags(); return fs }, []flagExpectation{{"thread", ""}}},
+		{"work verdict", func() *pflag.FlagSet { fs, _ := newWorkVerdictFlags(); return fs }, []flagExpectation{{"outcome", ""}}},
+		{"graph def", func() *pflag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags("graph def"); return fs }, []flagExpectation{
 			{"repo", ""}, {"all", "false"}, {"file", ""}, {"limit", "50"},
 		}},
-		{"graph refs", func() *flag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags("graph refs"); return fs }, []flagExpectation{
+		{"graph refs", func() *pflag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags("graph refs"); return fs }, []flagExpectation{
 			{"repo", ""}, {"all", "false"}, {"file", ""}, {"limit", "50"},
 		}},
-		{"search", func() *flag.FlagSet { fs, _, _, _ := newSearchFlags(); return fs }, []flagExpectation{
+		{"search", func() *pflag.FlagSet { fs, _, _, _ := newSearchFlags(); return fs }, []flagExpectation{
 			{"repo", ""}, {"all", "false"}, {"limit", "10"},
 		}},
 	}
@@ -186,7 +190,7 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 			t.Parallel()
 			fs := tt.build()
 			got := map[string]string{}
-			fs.VisitAll(func(f *flag.Flag) { got[f.Name] = f.DefValue })
+			fs.VisitAll(func(f *pflag.Flag) { got[f.Name] = f.DefValue })
 			want := map[string]string{}
 			for _, w := range tt.want {
 				want[w.name] = w.defVal

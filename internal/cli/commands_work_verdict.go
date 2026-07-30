@@ -2,18 +2,18 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-// newWorkVerdictFlags builds the flag.FlagSet for `loam work verdict
+// newWorkVerdictFlags builds the pflag.FlagSet for `loam work verdict
 // [repo] [work-branch] --outcome <approve|disapprove|neutral>`, plus the
 // parsed --outcome value.
-func newWorkVerdictFlags() (*flag.FlagSet, *string) {
+func newWorkVerdictFlags() (*pflag.FlagSet, *string) {
 	fs := newFlagSet("work verdict")
 	outcome := fs.String("outcome", "", "approve, disapprove, or neutral")
 	return fs, outcome

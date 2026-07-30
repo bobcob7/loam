@@ -2,12 +2,12 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
@@ -119,9 +119,9 @@ func runWorkStart(ctx context.Context, deps *Deps, args []string) error {
 	return deps.encoder.Encode(workStartOutput{Repo: wb.GetRepo(), Name: wb.GetName(), Target: wb.GetTarget(), State: workBranchStateString(wb.GetState())})
 }
 
-// newWorkSetFlags builds the flag.FlagSet for `loam work set [repo]
+// newWorkSetFlags builds the pflag.FlagSet for `loam work set [repo]
 // [work-branch] [--title <title>]`, plus the parsed --title value.
-func newWorkSetFlags() (fs *flag.FlagSet, title *string) {
+func newWorkSetFlags() (fs *pflag.FlagSet, title *string) {
 	fs = newFlagSet("work set")
 	title = fs.String("title", "", "new title for the work branch")
 	return fs, title

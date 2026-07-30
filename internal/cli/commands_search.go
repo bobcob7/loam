@@ -2,19 +2,19 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-// newSearchFlags builds the flag.FlagSet for `loam search <query> [--repo
+// newSearchFlags builds the pflag.FlagSet for `loam search <query> [--repo
 // <repo>] [--all] [--limit <n>]` (see docs/cli-spec.md -> RAG queries
 // (search)), plus the parsed --repo/--all/--limit values. --limit caps the
 // number of returned chunks (default 10).
-func newSearchFlags() (fs *flag.FlagSet, repo *string, all *bool, limit *int) {
+func newSearchFlags() (fs *pflag.FlagSet, repo *string, all *bool, limit *int) {
 	fs = newFlagSet("search")
 	repo = fs.String("repo", "", "target a specific enrolled repo")
 	all = fs.Bool("all", false, "search across all enrolled repos")

@@ -2,21 +2,21 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-// newGraphQueryFlags builds the flag.FlagSet shared by every `loam graph
+// newGraphQueryFlags builds the pflag.FlagSet shared by every `loam graph
 // <subquery> <target> [--repo <repo>] [--all] [--file <path>] [--limit
 // <n>]` subquery (see docs/cli-spec.md -> Graph DB queries), plus the
 // parsed --repo/--all/--file/--limit values. --file narrows an ambiguous
 // symbol target to one file's definition; --limit caps result rows
 // (default 50).
-func newGraphQueryFlags(name string) (fs *flag.FlagSet, repo *string, all *bool, file *string, limit *int) {
+func newGraphQueryFlags(name string) (fs *pflag.FlagSet, repo *string, all *bool, file *string, limit *int) {
 	fs = newFlagSet(name)
 	repo = fs.String("repo", "", "target a specific enrolled repo")
 	all = fs.Bool("all", false, "query across all enrolled repos")

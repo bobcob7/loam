@@ -2,10 +2,10 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
@@ -38,11 +38,11 @@ type workListFlags struct {
 	limit          *int
 }
 
-// newWorkListFlags builds the flag.FlagSet for `loam work list [--repo
+// newWorkListFlags builds the pflag.FlagSet for `loam work list [--repo
 // <repo>] [--author <id>] [--target <branch>] [--awaiting-review] [--state
 // <state>] [--limit <n>]` (see docs/cli-spec.md -> work list), plus the
 // parsed values.
-func newWorkListFlags() (*flag.FlagSet, *workListFlags) {
+func newWorkListFlags() (*pflag.FlagSet, *workListFlags) {
 	fs := newFlagSet("work list")
 	f := &workListFlags{
 		repo:           fs.String("repo", "", "limit to one enrolled repo"),
@@ -309,9 +309,9 @@ func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
 
 // --- work comments ---
 
-// newWorkCommentsFlags builds the flag.FlagSet for `loam work comments
+// newWorkCommentsFlags builds the pflag.FlagSet for `loam work comments
 // [repo] [work-branch] [--staged]`, plus the parsed --staged value.
-func newWorkCommentsFlags() (*flag.FlagSet, *bool) {
+func newWorkCommentsFlags() (*pflag.FlagSet, *bool) {
 	fs := newFlagSet("work comments")
 	staged := fs.Bool("staged", false, "return the caller's staged comments instead of published threads")
 	return fs, staged
