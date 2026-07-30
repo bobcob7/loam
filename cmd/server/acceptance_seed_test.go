@@ -38,6 +38,23 @@ import (
 // fabricated URL here would make the whole Mirror Sync cycle
 // unexercisable.
 //
+// forge_host carries an explicit "http://" scheme rather than
+// h.forgeHost's bare host:port, matching loam-0l9m's workaround
+// (Taskfile.yml's demo:m5) for the same mismatch: internal/forge's
+// apiBaseURL defaults a scheme-less host to https, but the shared
+// fakeforge instance serves plain HTTP, so a bare host here would make
+// every production code path that binds a *forge.Forgejo to this row
+// (cmd/server/sync.go's forgePRTracker.provider, reached from
+// ProposalService.CloseWorkBranch's best-effort upstream PR close) dial
+// TLS against a listener that never speaks it. This harness's OWN
+// transport/accepter/syncHarness never read this column for that purpose
+// -- they resolve credentials through staticTokenCredentialSource, which
+// ignores the host argument entirely -- so the scheme addition changes
+// nothing for git fetch/push/clone/ls-remote, only for the one
+// credential lookup keyed by this exact string (see the matching
+// UpsertToken call below and credentials' doc comment on
+// acceptanceHarness).
+//
 // That step and "I have started the work branch ..."
 // (insertWorkBranchRow, seedBareMirrorWithBranches, below) are two
 // separate Gherkin steps, not one call, since neither is a
@@ -46,10 +63,14 @@ import (
 // a driver call in the actor sense, and clone-and-push.feature's own
 // Background lists them as two Given lines.
 func (h *acceptanceHarness) insertRepoRow(ctx context.Context, world *acceptanceWorld) (uuid.UUID, error) {
+	forgeHost := "http://" + h.forgeHost
+	if _, err := h.credentials.UpsertToken(ctx, forgeHost, acceptanceForgeToken); err != nil {
+		return uuid.UUID{}, fmt.Errorf("seeding credential for forge host %s: %w", forgeHost, err)
+	}
 	repoID := uuid.Must(uuid.NewV7())
 	_, err := h.server.pool.Exec(ctx,
 		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch) VALUES ($1, $2, $3, $4, $5)`,
-		repoID, world.repo(), world.upstreamURL, h.forgeHost, world.targetBranch)
+		repoID, world.repo(), world.upstreamURL, forgeHost, world.targetBranch)
 	if err != nil {
 		return uuid.UUID{}, fmt.Errorf("seeding repos row for %s: %w", world.repo(), err)
 	}

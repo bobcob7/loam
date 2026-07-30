@@ -38,7 +38,6 @@ Feature: Cloning and pushing work
     When I push to "wb-9c2f1a"
     Then the push is rejected
 
-  @wip
   Scenario: Force pushes are rejected
     Given I have rewritten the history of "wb-9c2f1a" locally
     When I force push

@@ -7,9 +7,11 @@ import (
 	"testing"
 
 	"github.com/cucumber/godog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/config"
 	"github.com/bobcob7/loam/internal/credentialstore"
+	"github.com/bobcob7/loam/internal/crypto"
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/fakeforge"
 	"github.com/bobcob7/loam/internal/gitmergetree"
@@ -45,6 +47,19 @@ type acceptanceHarness struct {
 	syncHarness   *testsched.SyncHarness
 	ingestHarness *testsched.IngestHarness
 	accepter      *mirrorsync.StoreProposalAccepter
+	// credentials is the SAME production *credentialstore.Store type the
+	// real server's own composition root builds (cmd/server/sync.go's
+	// buildUpstreamPRCloser/buildProposalAccepter/buildSyncScheduler each
+	// build one over cfg.EncryptionKey), over this suite's shared live
+	// pool. It exists so insertRepoRow (acceptance_seed_test.go) can seed
+	// the encrypted credentials row those production code paths resolve a
+	// repo's forge_host through -- the ONE piece of production wiring this
+	// harness cannot substitute a static token for, since it is reached
+	// only via the real server process's own RPC handlers (e.g.
+	// ProposalService.CloseWorkBranch's best-effort upstream PR close),
+	// never via this harness's own accepter/transport/syncHarness, which
+	// all use staticTokenCredentialSource instead.
+	credentials *credentialstore.Store
 	// prAttribution is the loaded LOAM_PR_ATTRIBUTION value the server and
 	// the harness's own accepter were both built with, so the step that
 	// asserts an upstream PR's body predicts the SAME body the running
@@ -62,6 +77,8 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 	forge.AddToken(acceptanceForgeToken)
 	forgeClient := fakeforge.NewClient(forgeBaseURL, acceptanceForgeToken)
 	transport := gittransport.New(staticTokenCredentialSource{token: acceptanceForgeToken}, forgeClient, acceptanceLogger())
+	encryptor, err := crypto.NewEncryptor(cfg.EncryptionKey)
+	require.NoError(t, err)
 	return &acceptanceHarness{
 		t:             t,
 		server:        srv,
@@ -76,6 +93,7 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 		ingestHarness: testsched.NewIngestHarness(srv.ingestPool),
 		accepter:      newAcceptanceAccepter(srv, transport, forgeClient, cfg),
 		prAttribution: cfg.PRAttribution,
+		credentials:   credentialstore.New(srv.pool, encryptor, acceptanceLogger()),
 	}
 }
 
