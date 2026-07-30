@@ -389,23 +389,38 @@ func (h *acceptanceHarness) stepIForcePush(ctx context.Context) error {
 // clone-and-push.feature scenarios share (the more specific rejection-
 // reason scenarios use their own dedicated Then step, e.g.
 // stepThePushIsRejectedAsReadOnly). A non-zero exit is necessary but not
-// sufficient: it also requires the output carry a `remote: loam:`-prefixed
-// reason (docs/git-spec.md's "Ref Policy (push)" rejection-reasons table
-// -- every documented reason is `loam:`-prefixed and, per git's own
-// smart-HTTP client behavior, arrives on the pushing side as "remote:
-// loam: ..."), so a push that fails for some unrelated reason (a broken
-// fixture, a network error, git rejecting a non-fast-forward on its own
-// before ever reaching Loam's pre-receive hook) cannot be mistaken for a
-// genuine policy rejection.
+// sufficient: docs/git-spec.md's "Enforcement Mechanics" section names TWO
+// distinct, legitimate rejection channels, and a genuine policy rejection
+// must carry the fingerprint of one of them, so a push that fails for some
+// unrelated reason (a broken fixture, a network error) cannot be mistaken
+// for either:
+//
+//   - Loam's own pre-receive hook (the ref-policy table: read-only ref,
+//     unknown ref, wrong ref path, not the author, terminal state), whose
+//     reasons are `loam:`-prefixed and, per git's own smart-HTTP client
+//     behavior, arrive on the pushing side as "remote: loam: ...".
+//   - STOCK GIT's own receive.denyNonFastForwards/receive.denyDeletes
+//     (mirrorreconcile.ReconcileMirror sets both on every mirror),
+//     explicitly carved out by that same doc section as separate from
+//     Loam's pre-receive rules ("force pushes and ref deletions are
+//     rejected by git itself, with git's own messages") -- so it is never
+//     `loam:`-prefixed and an earlier version of this step wrongly
+//     treated it as an "unrelated reason" rather than the second
+//     legitimate channel it is. "Force pushes are rejected" is exactly
+//     this case: git's own message reads "remote: error: denying
+//     non-fast-forward ...".
 func (h *acceptanceHarness) stepThePushIsRejected(ctx context.Context) error {
 	world := worldFrom(ctx)
 	if world.lastGitErr == nil {
 		return fmt.Errorf("push succeeded, want rejection\n%s", world.lastGitOutput)
 	}
-	if !strings.Contains(world.lastGitOutput, "remote: loam:") {
-		return fmt.Errorf("push failed, but not with a loam policy rejection:\n%s", world.lastGitOutput)
+	if strings.Contains(world.lastGitOutput, "remote: loam:") {
+		return nil
 	}
-	return nil
+	if strings.Contains(world.lastGitOutput, "denying non-fast-forward") || strings.Contains(world.lastGitOutput, "denying ref deletion") {
+		return nil
+	}
+	return fmt.Errorf("push failed, but not with a recognized Loam or stock-git policy rejection:\n%s", world.lastGitOutput)
 }
 
 // ensureCloned clones world's repo at its own work branch via the compiled
