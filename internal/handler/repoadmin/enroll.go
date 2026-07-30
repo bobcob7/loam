@@ -91,7 +91,13 @@ func (h *Handler) EnrollRepo(ctx context.Context, req *connect.Request[adminv1.E
 		return nil, h.errors.ToConnectErr(fmt.Errorf("enroll repo: %w: %w", err, handler.ErrInvalidArgument))
 	}
 	if !validRepoName(name) {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("enroll repo: upstream_url %s does not derive a valid <group>/<repo_name> identifier: %w", upstreamURL, handler.ErrInvalidArgument))
+		// upstream_url itself is deliberately not interpolated here
+		// (loam-ra1k): deriveRepoIdentity already rejects any URL
+		// carrying userinfo before this point, but echoing the raw URL
+		// back to the client regardless is the exact shape of leak this
+		// bead closes, so host (never credential-bearing) stands in for
+		// it.
+		return nil, h.errors.ToConnectErr(fmt.Errorf("enroll repo: upstream_url (host %s) does not derive a valid <group>/<repo_name> identifier: %w", host, handler.ErrInvalidArgument))
 	}
 	cred, err := h.credentials.GetByHost(ctx, host)
 	if err != nil {

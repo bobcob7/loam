@@ -137,6 +137,41 @@ func TestEnrollRepo_InvalidDerivedRepoName_Rejected(t *testing.T) {
 	}
 }
 
+// TestEnrollRepo_UpstreamURLHasUserinfo_RejectedBeforeCredentialCheckOrClone
+// is loam-ra1k's fail-fast half at EnrollRepo's own entry point: an
+// upstream URL carrying embedded credentials (user:token@host, or the
+// password-less PAT form "https://<token>@host/path") must be rejected as
+// InvalidArgument before EnrollRepo resolves a credential, runs CheckRepo,
+// or creates the repos row -- transport-level rejection (loam-ys1) is
+// necessary but not sufficient, since EnrollRepo would otherwise persist
+// UpstreamURL verbatim (CreateRepoParams) and %w-wrap the raw URL straight
+// into the RPC error it hands back. The embedded credential must never
+// appear in the returned error's message, in either form.
+func TestEnrollRepo_UpstreamURLHasUserinfo_RejectedBeforeCredentialCheckOrClone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		upstreamURL string
+	}{
+		{"username and password", "https://user:leaked-token@example.com/acme/widgets.git"},
+		{"username only, no password (PAT form)", "https://leaked-token@example.com/acme/widgets.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := newTestDeps()
+			h := d.handler(t, "/data")
+			_, err := h.EnrollRepo(t.Context(), enrollReq(tt.upstreamURL, []string{"main"}, "main"))
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
+			assert.NotContains(t, err.Error(), "leaked-token", "the rejected URL's embedded credential must never appear in the returned error")
+			assert.Empty(t, d.credentials.GetByHostCalls(), "no credential should be resolved for a URL rejected before host derivation")
+			assert.Empty(t, d.checker.CheckRepoCalls(), "the upstream access check must never run for a URL rejected before it")
+			assert.Empty(t, d.store.CreateRepoCalls(), "a rejected URL must never reach CreateRepo, let alone persist the credential")
+		})
+	}
+}
+
 // TestEnrollRepo_IndexedBranchNotInTargetBranches_Rejected proves the
 // "indexed_branch must be one of target_branches" invariant
 // (docs/web-spec.md -> RepoAdminService EnrollRepo) before any store call.

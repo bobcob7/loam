@@ -13,9 +13,20 @@ import (
 	"strings"
 )
 
-// errUpstreamURLHasUserinfo is returned when an upstream URL carries
-// embedded credentials (user:token@host), rejected by validateUpstreamURL.
-var errUpstreamURLHasUserinfo = errors.New("upstream URL must not carry userinfo")
+// ErrUpstreamURLHasUserinfo indicates an upstream URL carries embedded
+// credentials (user:token@host), rejected by validateUpstreamURL.
+// Exported (loam-ra1k) so internal/handler/repoadmin can errors.Is against
+// this single sentinel at ProbeRepo and EnrollRepo, rather than
+// duplicating the "does this URL carry credentials" check: this package
+// is still the last-resort choke point for anything that slips past that
+// earlier validation, including a repo enrolled with userinfo before
+// either validation existed -- repos.upstream_url still carries the
+// credential, and every scheduled sync tick for that repo fails here
+// instead, wrapped up through internal/mirrorsync into repos.sync_error.
+// Either way the remedy is the same, so the message says so once here:
+// remove the embedded credential from the upstream URL and rely on the
+// host's configured credential (internal/credentialstore) instead.
+var ErrUpstreamURLHasUserinfo = errors.New("gittransport: upstream URL must not carry userinfo; remove the embedded credential and rely on the host's configured credential instead")
 
 // validateUpstreamURL rejects an upstreamURL carrying userinfo
 // (user:token@host) before it ever reaches exec.Command args. A credential
@@ -52,10 +63,10 @@ var errUpstreamURLHasUserinfo = errors.New("upstream URL must not carry userinfo
 func validateUpstreamURL(upstreamURL string) error {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
-		return fmt.Errorf("%w: unparseable", errUpstreamURLHasUserinfo)
+		return fmt.Errorf("%w: unparseable", ErrUpstreamURLHasUserinfo)
 	}
 	if u.User != nil {
-		return fmt.Errorf("%w (host %s)", errUpstreamURLHasUserinfo, u.Host)
+		return fmt.Errorf("%w (host %s)", ErrUpstreamURLHasUserinfo, u.Host)
 	}
 	return nil
 }

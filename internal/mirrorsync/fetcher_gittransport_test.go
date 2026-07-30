@@ -303,3 +303,33 @@ func TestMirrorFetcherProtectsAnUNREGISTEREDReservedRefFromPrune(t *testing.T) {
 	_, err = mirrorRevParse(t, mirrorDir, "refs/heads/wb-brandnew")
 	assert.Error(t, err, "control: the identical ref OUTSIDE the reserved namespace is pruned, so this fetch really does prune")
 }
+
+// TestMirrorFetcherFetch_UpstreamURLHasUserinfo_SurfacesActionableRepoNamedError
+// is loam-ra1k's part (b) proven end-to-end through a REAL
+// gittransport.Transport, standing in for repos.upstream_url still
+// carrying a credential from before loam-ys1's transport-level rejection
+// existed: repos.ResolveRepo (staticRepoResolver here) hands MirrorFetcher
+// exactly that stored URL on every scheduled sync tick, precisely as
+// internal/mirrorsync/scheduler.go's runSteps does in production, with no
+// probe/enroll-time validation in the way to have caught it earlier.
+// Transport's own validateUpstreamURL rejects the fetch before any git
+// subprocess or network call, so no fakeforge server or credential is
+// needed here at all -- the point is what Fetch's returned error contains:
+// the repo name (mirrorsync's own "fetching repo %s"/"mirror-fetching repo
+// %s" wraps, the same text an admin sees via GetRepo/ListRepos'
+// sync.error, per loam-ra1k's audit of internal/mirrorsync/state's
+// Reporter.ReportError, which persists err.Error() verbatim) and the
+// shared, actionable gittransport.ErrUpstreamURLHasUserinfo sentinel --
+// never the embedded credential itself.
+func TestMirrorFetcherFetch_UpstreamURLHasUserinfo_SurfacesActionableRepoNamedError(t *testing.T) {
+	t.Parallel()
+	const poisoned = "https://user:leaked-token@forge.example.invalid/acme/widgets.git"
+	transport := gittransport.New(&staticCredentialSource{token: "unused"}, fakeforge.NewClient("", ""), testLogger())
+	resolver := &staticRepoResolver{host: "forge.example.invalid", upstreamURL: poisoned}
+	fetcher := NewMirrorFetcher(t.TempDir(), transport, resolver)
+	_, err := fetcher.Fetch(t.Context(), RepoID("acme/widgets"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, gittransport.ErrUpstreamURLHasUserinfo)
+	assert.Contains(t, err.Error(), "acme/widgets", "the error must name the repo so an admin scanning sync_error across every enrolled repo knows which one to fix")
+	assert.NotContains(t, err.Error(), "leaked-token", "a pre-existing row's embedded credential must never leak into the sync error an admin sees")
+}

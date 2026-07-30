@@ -12,6 +12,7 @@ import (
 	"connectrpc.com/connect"
 
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 )
 
@@ -34,8 +35,24 @@ func (h *Handler) ProbeRepo(ctx context.Context, req *connect.Request[adminv1.Pr
 		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: empty upstream_url: %w", handler.ErrInvalidArgument))
 	}
 	u, err := url.Parse(upstreamURL)
+	// upstream_url is deliberately never interpolated into an error
+	// message below this point (loam-ra1k): this handles the raw string
+	// straight back to whoever submitted it, and on the parse-failure
+	// branch specifically, *url.Error's own Error() renders as
+	// `parse "<raw url>": <reason>`, so even wrapping err via %w would
+	// leak it -- err is discarded on purpose, not %w-wrapped.
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: upstream_url %s is not a valid http(s) URL: %w", upstreamURL, handler.ErrInvalidArgument))
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: upstream_url is not a valid http(s) URL: %w", handler.ErrInvalidArgument))
+	}
+	// u.User != nil rejects an upstream URL carrying embedded credentials
+	// (user:token@host) before it ever reaches an RPC error string or a
+	// git subprocess. gittransport.Transport (h.cloner below) rejects the
+	// same shape via this identical sentinel, but only after this method
+	// has already derived host and called credentials.GetByHost -- this
+	// is the cheaper, earlier fail-fast the credential never needs to
+	// survive past.
+	if u.User != nil {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: %w: %w", redactUserinfo(u), gittransport.ErrUpstreamURLHasUserinfo, handler.ErrInvalidArgument))
 	}
 	// host must be derived exactly like EnrollRepo's deriveRepoIdentity
 	// (forgeHostOf, handler.go): both resolve the same credentials.host
@@ -53,11 +70,15 @@ func (h *Handler) ProbeRepo(ctx context.Context, req *connect.Request[adminv1.Pr
 	}
 	out, err := h.cloner.LsRemote(ctx, host, upstreamURL)
 	if err != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: %w: %w", upstreamURL, err, handler.ErrFailedPrecondition))
+		// host, not upstreamURL, per this file's leading comment on the
+		// parse-validation branch above (loam-ra1k): even though this
+		// point is unreachable with a userinfo-bearing upstreamURL now,
+		// nothing here should rely on that ordering to stay leak-free.
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: %w: %w", host, err, handler.ErrFailedPrecondition))
 	}
 	branches, head, err := parseLsRemote(out)
 	if err != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: parsing ls-remote output: %w", upstreamURL, err))
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: parsing ls-remote output: %w", host, err))
 	}
 	return connect.NewResponse(&adminv1.ProbeRepoResponse{Branches: branches, Head: head}), nil
 }

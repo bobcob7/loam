@@ -404,7 +404,7 @@ func TestValidateUpstreamURL_NeverEchoesTheCredential(t *testing.T) {
 			t.Parallel()
 			err := validateUpstreamURL(tt.url)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, errUpstreamURLHasUserinfo)
+			assert.ErrorIs(t, err, ErrUpstreamURLHasUserinfo)
 			assert.NotContains(t, err.Error(), secret, "the rejected URL's embedded credential must never appear in the error")
 		})
 	}
@@ -451,7 +451,7 @@ func TestTransport_RejectsUpstreamURLWithUserinfo(t *testing.T) {
 			transport := New(credStore, gitCreds, testLogger())
 			_, err := tt.call(transport)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, errUpstreamURLHasUserinfo)
+			assert.ErrorIs(t, err, ErrUpstreamURLHasUserinfo)
 			assert.NotContains(t, err.Error(), "leaked-token", "the rejected URL's embedded credential must never appear in the returned error")
 		})
 	}
