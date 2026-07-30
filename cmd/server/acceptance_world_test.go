@@ -196,6 +196,14 @@ type acceptanceWorld struct {
 	lastIngestJobs           []*adminv1.IngestJob
 	ingestedRefBeforeFailure string
 	lastFailedJobID          uuid.UUID
+	// accepterOverride is a scenario-scoped *mirrorsync.StoreProposalAccepter
+	// acceptProposalForReal uses INSTEAD OF the harness's whole-suite
+	// h.accepter when set -- built by "the server is configured without PR
+	// attribution" (features/sync.feature, acceptance_sync_test.go) so that
+	// one scenario can exercise the PRAttribution knob without touching the
+	// process-wide LOAM_PR_ATTRIBUTION every other scenario in this suite
+	// depends on (see newAcceptanceAccepterWithAttribution).
+	accepterOverride *mirrorsync.StoreProposalAccepter
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.

@@ -36,14 +36,12 @@ Feature: Upstream sync
     When the forge is reachable again and the next sync runs
     Then the repo's sync status is healthy
 
-  @wip
   Scenario: Accepting pushes a namespaced branch upstream
     Given a proposal in state "reviewed" with one "approve" verdict
     When I accept it
     Then a branch prefixed "loam/" is pushed to the upstream forge
     And the upstream PR is opened from that branch into "main"
 
-  @wip
   Scenario: The PR body attributes Loam and only Loam
     Given a proposal in state "reviewed" with one "approve" verdict
     When I accept it
@@ -51,7 +49,6 @@ Feature: Upstream sync
     And it ends with a footer attributing the PR to Loam
     And no agent identity appears in the body
 
-  @wip
   Scenario: PR attribution can be disabled
     Given the server is configured without PR attribution
     And a proposal in state "reviewed" with one "approve" verdict

@@ -59,6 +59,13 @@ func (h *acceptanceHarness) registerSyncSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^an accepted work branch whose upstream PR has merged$`, h.stepAnAcceptedWorkBranchWhosePRHasMerged)
 	sc.Step(`^the work branch is in state "([^"]*)"$`, h.stepTheWorkBranchIsInState)
 	sc.Step(`^the "([^"]*)" branch is removed from the upstream forge$`, h.stepBranchIsRemovedFromUpstream)
+	sc.Step(`^a branch prefixed "([^"]*)" is pushed to the upstream forge$`, h.stepABranchPrefixedIsPushedToTheUpstreamForge)
+	sc.Step(`^the upstream PR is opened from that branch into "([^"]*)"$`, h.stepTheUpstreamPRIsOpenedFromThatBranchInto)
+	sc.Step(`^the PR body is the work branch's description$`, h.stepThePRBodyIsTheWorkBranchsDescription)
+	sc.Step(`^it ends with a footer attributing the PR to Loam$`, h.stepItEndsWithAFooterAttributingThePRToLoam)
+	sc.Step(`^no agent identity appears in the body$`, h.stepNoAgentIdentityAppearsInTheBody)
+	sc.Step(`^the server is configured without PR attribution$`, h.stepTheServerIsConfiguredWithoutPRAttribution)
+	sc.Step(`^the PR body is the work branch's description alone$`, h.stepThePRBodyIsTheWorkBranchsDescriptionAlone)
 }
 
 // stepIAmSignedInAsAdmin is the Background row every admin-facing feature
@@ -481,6 +488,179 @@ func (h *acceptanceHarness) stepBranchIsRemovedFromUpstream(ctx context.Context,
 		if strings.HasPrefix(ref, "refs/heads/"+prefix) {
 			return fmt.Errorf("upstream still has %s", ref)
 		}
+	}
+	return nil
+}
+
+// stepABranchPrefixedIsPushedToTheUpstreamForge asserts loam-cgg's rewritten
+// accept path really did push the work branch's own tip to a NAMESPACED
+// upstream branch (docs/sync-spec.md's reserved "loam/" prefix), checked
+// from two independent sources: the accept's own report
+// (world.lastAcceptUpstreamBranch) and a live, authenticated ls-remote
+// against the forge -- so a handler that only claimed to push, without the
+// transport call actually landing the object upstream, fails here rather
+// than passing on a value this harness merely cached.
+//
+// The upstream SHA is also compared against the mirror's OWN work-branch
+// ref, read fresh rather than from a value latched before this accept: the
+// tip StoreProposalAccepter records as accepted_tip is resolved
+// immediately before the push (internal/mirrorsync/accepter.go, loam-cgg),
+// so what landed upstream must be exactly what the mirror holds right now,
+// not merely "some commit that used to be the tip".
+func (h *acceptanceHarness) stepABranchPrefixedIsPushedToTheUpstreamForge(ctx context.Context, prefix string) error {
+	world := worldFrom(ctx)
+	want := prefix + world.workBranch
+	if world.lastAcceptUpstreamBranch != want {
+		return fmt.Errorf("the accept reported upstream branch %q, want the namespaced %q", world.lastAcceptUpstreamBranch, want)
+	}
+	upstreamSHA, err := h.upstreamRefSHA(ctx, world, "refs/heads/"+want)
+	if err != nil {
+		return fmt.Errorf("upstream branch %s was never created: %w", want, err)
+	}
+	mirrorSHA, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
+	if err != nil {
+		return fmt.Errorf("reading the mirror's %s: %w", refnames.WorkBranch(world.workBranch), err)
+	}
+	if upstreamSHA != mirrorSHA {
+		return fmt.Errorf("upstream %s is at %s, want the work branch's own tip %s", want, upstreamSHA, mirrorSHA)
+	}
+	return nil
+}
+
+// stepTheUpstreamPRIsOpenedFromThatBranchInto asserts the forge holds
+// exactly one open pull request (theOneUpstreamPR: the whole forge record,
+// not merely what Loam believes it opened) from the namespaced branch this
+// scenario's own prior step just proved was pushed, into target, and that
+// its number matches the one recorded on the work branch row -- the same
+// "read from the side that owns it" discipline
+// stepAnUpstreamPRIsCreatedWithAGeneratedBranchName (admin-proposals.feature)
+// applies, for this feature file's own wording.
+func (h *acceptanceHarness) stepTheUpstreamPRIsOpenedFromThatBranchInto(ctx context.Context, target string) error {
+	world := worldFrom(ctx)
+	pr, err := h.theOneUpstreamPR(world)
+	if err != nil {
+		return err
+	}
+	want := "loam/" + world.workBranch
+	if pr.HeadBranch != want || pr.TargetBranch != target || pr.State != "open" {
+		return fmt.Errorf("the forge's pull request is %+v, want an open one from %s into %s", pr, want, target)
+	}
+	if pr.Number != world.upstreamPRNumber {
+		return fmt.Errorf("the forge's pull request is #%d, but the work branch records #%d", pr.Number, world.upstreamPRNumber)
+	}
+	return nil
+}
+
+// stepThePRBodyIsTheWorkBranchsDescription asserts the upstream PR's body
+// STARTS WITH the work branch's own description, read from the row rather
+// than a harness literal. It is deliberately a prefix check, not equality:
+// this feature file's next two steps ("it ends with a footer ..." and "no
+// agent identity appears ...") are what pin the rest of the body down, so
+// together the three steps make the same two-sided equality claim
+// stepTheProposedTitleAndDescriptionAreTheBranchsOwn makes in one step for
+// admin-proposals.feature -- split across sentences here because that is
+// how this feature file's own Gherkin phrases it.
+func (h *acceptanceHarness) stepThePRBodyIsTheWorkBranchsDescription(ctx context.Context) error {
+	world := worldFrom(ctx)
+	_, description, err := h.workBranchProposalText(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	pr, err := h.theOneUpstreamPR(world)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(pr.Description, description) {
+		return fmt.Errorf("the upstream PR's body %q does not start with the work branch's own description %q", pr.Description, description)
+	}
+	return nil
+}
+
+// stepItEndsWithAFooterAttributingThePRToLoam asserts the body is EXACTLY
+// the description plus a blank line plus acceptanceAttributionFooter --
+// equality, not containment, so a footer buried mid-body or a body with
+// trailing junk after it cannot pass.
+func (h *acceptanceHarness) stepItEndsWithAFooterAttributingThePRToLoam(ctx context.Context) error {
+	world := worldFrom(ctx)
+	_, description, err := h.workBranchProposalText(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	pr, err := h.theOneUpstreamPR(world)
+	if err != nil {
+		return err
+	}
+	want := description + "\n\n" + acceptanceAttributionFooter
+	if pr.Description != want {
+		return fmt.Errorf("the upstream PR's body is %q, want %q", pr.Description, want)
+	}
+	return nil
+}
+
+// stepNoAgentIdentityAppearsInTheBody asserts the body names none of the
+// identities this scenario actually used -- the author, the reviewer, the
+// author's bare name, and the literal "admin" -- the same identity set
+// stepTheProposedTitleAndDescriptionAreTheBranchsOwn checks, reproduced
+// here rather than shared: docs/sync-spec.md's own claim ("agent
+// attribution is already carried by the commit authors in git history") is
+// this file's subject, not merely a side effect of the title/description
+// check that file makes.
+func (h *acceptanceHarness) stepNoAgentIdentityAppearsInTheBody(ctx context.Context) error {
+	world := worldFrom(ctx)
+	pr, err := h.theOneUpstreamPR(world)
+	if err != nil {
+		return err
+	}
+	for _, identity := range []string{world.author.identifier(), world.reviewer.identifier(), world.author.name, "admin"} {
+		if strings.Contains(pr.Description, identity) {
+			return fmt.Errorf("the upstream PR's body names %q; agent attribution belongs in the commit authors, not the PR body", identity)
+		}
+	}
+	return nil
+}
+
+// stepTheServerIsConfiguredWithoutPRAttribution builds a scenario-scoped
+// *mirrorsync.StoreProposalAccepter with attribution off and records it as
+// world.accepterOverride, for acceptProposalForReal ("I accept it") to use
+// INSTEAD of the harness's own whole-suite h.accepter.
+//
+// A per-scenario accepter, not a process-wide env flip, is the only safe
+// way to reach this: TestFeatures builds ONE shared in-process server for
+// the whole suite and reads LOAM_PR_ATTRIBUTION exactly once, before that
+// server boots (acceptanceConfig) -- flipping it mid-suite would race every
+// other scenario's own accept against whichever value happened to be set
+// when its own tick ran. What this DOES exercise for real is the
+// production knob itself: attribution is a plain bool captured at
+// NewStoreProposalAccepter construction (see its own doc comment,
+// "captured at construction rather than read per call"), and this
+// constructs the exact same production type, over the same live pool and
+// transport, differing only in that one bool -- precisely how
+// cmd/server/sync.go's buildProposalAccepter would construct it if
+// LOAM_PR_ATTRIBUTION were false.
+func (h *acceptanceHarness) stepTheServerIsConfiguredWithoutPRAttribution(ctx context.Context) error {
+	world := worldFrom(ctx)
+	world.accepterOverride = newAcceptanceAccepterWithAttribution(h.server, h.transport, h.forgeClient, false)
+	return nil
+}
+
+// stepThePRBodyIsTheWorkBranchsDescriptionAlone asserts the body is EXACTLY
+// the work branch's own description, byte for byte -- no attribution
+// footer, no trailing newline, nothing appended -- proving the
+// accepterOverride built above (attribution off) actually reached
+// mirrorsync.prBody rather than the footer merely being absent by
+// coincidence.
+func (h *acceptanceHarness) stepThePRBodyIsTheWorkBranchsDescriptionAlone(ctx context.Context) error {
+	world := worldFrom(ctx)
+	_, description, err := h.workBranchProposalText(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	pr, err := h.theOneUpstreamPR(world)
+	if err != nil {
+		return err
+	}
+	if pr.Description != description {
+		return fmt.Errorf("the upstream PR's body is %q, want the work branch's own description %q alone (PR attribution is disabled)", pr.Description, description)
 	}
 	return nil
 }
