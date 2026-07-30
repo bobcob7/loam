@@ -171,11 +171,14 @@ func (s *Server) tokenHasPRScope(token string) bool {
 func (s *Server) newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle(gitPathPrefix+"/", s.authenticatedGitHandler())
-	// The one Forgejo-REST-shaped route, consumed by the REAL
+	// The Forgejo-REST-shaped PR-lifecycle routes, consumed by the REAL
 	// *forge.Forgejo rather than by *fakeforge.Client — see forgejoapi.go
-	// for why both surfaces exist and why this one stops at the scope
-	// probe.
+	// for why both surfaces exist and exactly how much of Forgejo's own
+	// pulls API this one models.
 	mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls", s.handleForgejoCreatePull)
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls", s.handleForgejoListPulls)
+	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{index}", s.handleForgejoGetPull)
+	mux.HandleFunc("PATCH /api/v1/repos/{owner}/{repo}/pulls/{index}", s.handleForgejoPatchPull)
 	mux.HandleFunc("POST /provider/validate-token", s.handleValidateToken)
 	mux.HandleFunc("POST /provider/create-pr", s.handleCreatePR)
 	mux.HandleFunc("POST /provider/pr-state", s.handleGetPRState)
