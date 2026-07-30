@@ -76,9 +76,15 @@ first build fails on this.
 task generate   # regenerate proto (buf) + moq mocks — do this after editing proto/*.proto or an Iface
 task build      # web:build (real SPA -> web/dist) + go build ./... + restore web/dist placeholders (loam-nvb.15)
 task build:bin  # build server, loam, and loamhook binaries side by side into bin/ (loam-mce)
-task test       # go test ./... -race
+task test       # per-PR gate: lint + go test ./... -race + test:integration + test:acceptance (loam-li0.12)
 task lint       # gofmt -l . (must be empty) + go tool buf lint
 task proto:breaking  # pre-1.0 breaking-change check against the pinned baseline (see Taskfile.yml)
+
+task test:integration        # //go:build integration suite, real Postgres via testcontainers (needs Docker)
+task test:acceptance         # godog acceptance suite vs internal/fakeforge (needs Docker)
+task test:contract:forgejo   # NIGHTLY-only: provider contract vs a REAL Forgejo (LOAM_TEST_FORGEJO=1, needs Docker)
+task test:e2e                # NIGHTLY-only: compose e2e smoke + Playwright admin journeys (needs Docker; see task desc)
+task test:e2e:golden         # NIGHTLY-only: compose e2e golden path + conflict/catch-up/re-accept (needs Docker)
 
 task web:install   # npm ci in web/
 task web:generate  # go tool buf generate --template web/buf.gen.yaml -- refresh web/src/gen after a proto/ change
@@ -86,16 +92,25 @@ task web:build     # tsc --noEmit + vite build -> web/dist (real output; see tas
 task web:test      # npm test (vitest run) in web/
 ```
 
-CI (`.github/workflows/ci.yml`) runs gofmt, build, vet, test -race, and buf
-lint on every push/PR, on both ubuntu-latest and macos-latest, plus a
-generated-code drift check (fails if `buf generate`/`go generate` produce
-an uncommitted diff, now also covering `web/src/gen` via `go tool buf
-generate --template web/buf.gen.yaml`), plus a `go mod tidy` drift check
-(loam-j09k: the generated-code check can't catch a stale require block,
-since nothing it runs rewrites go.mod). A separate `web` job (also both
-ubuntu-latest and macos-latest) runs the admin SPA's own gates — `npm ci`,
-`tsc --noEmit`, `npm test` (vitest), `npm run build` — under `web/`; see
-`docs/web-frontend-spec.md` for the dev-proxy workflow.
+CI is two workflows. `.github/workflows/ci.yml` is the per-PR gate: the
+`ci` job (gofmt, build, vet, test -race, buf lint, a generated-code drift
+check that fails if `buf generate`/`go generate` produce an uncommitted
+diff — covering `internal/gen`, `moq_test.go`, and, via `go tool buf
+generate --template web/buf.gen.yaml`, `web/src/gen` too — and a `go mod
+tidy` drift check, which the generated-code check cannot subsume because
+nothing it runs rewrites `go.mod`, loam-j09k), the `web` job (admin SPA
+install/typecheck/test/build — `npm ci`, `tsc --noEmit`, `npm test`,
+`npm run build`, on both ubuntu-latest and macos-latest; see
+`docs/web-frontend-spec.md` for the dev-proxy workflow), the `integration`
+job (`-tags=integration -race`, real Postgres via testcontainers), and the
+`acceptance` job (godog vs internal/fakeforge, real Postgres via
+testcontainers) — together these enforce what `task test` describes as one
+aggregate, since go-task itself isn't installed on these runners (each job
+inlines the bare command instead of shelling out to `task`).
+`.github/workflows/nightly.yml` runs the "tens of minutes" suites on a
+schedule (+ workflow_dispatch + `v*` tag push): the provider contract vs a
+real Forgejo, the compose e2e smoke, and the Playwright admin journeys
+(docs/testing-spec.md "CI Stages").
 
 ## Architecture Overview
 
