@@ -549,21 +549,32 @@ tasks:
           -H "Authorization: token $forgejo_token" -H 'Content-Type: application/json' \
           -d "{\"name\":\"$repo_name\",\"auto_init\":true,\"default_branch\":\"$target_branch\",\"private\":true}" \
           "http://127.0.0.1:$forgejo_port/api/v1/user/repos" >/dev/null
-        # A second commit with ~800KB across 200 files, pushed on top of
-        # auto_init's own commit -- not padding, load-bearing. Measured
-        # directly while building the enroll journey spec: a bare 1-commit
-        # auto_init repo clones over loopback in ~110ms total, most of
-        # which is Forgejo's own smart-HTTP request handling rather than
-        # transfer time, leaving too narrow (and too variable) a
-        # sync_state=syncing window for web/e2e/enroll.e2e.ts's
-        # observeSyncState poll to reliably catch -- confirmed by a raw
-        # curl-loop trace showing the window at ~100-150ms wide starting
-        # after EnrollRepo's preceding CheckRepo probe and DB insert. This
-        # widens it to a comfortably observable size without an artificial
-        # delay anywhere.
+        # A second commit with ~80KB across 20 files, pushed on top of
+        # auto_init's own commit -- not padding, load-bearing, though
+        # smaller than it once was (loam-ply2 shrank this from 800KB/200
+        # files). A bare 1-commit auto_init repo clones over loopback in
+        # ~110ms total, most of which is Forgejo's own smart-HTTP request
+        # handling rather than transfer time, leaving too narrow (and too
+        # variable) a sync_state=syncing window for
+        # web/e2e/enroll.e2e.ts's observeSyncState poll to reliably catch
+        # -- confirmed by a raw curl-loop trace showing the window at
+        # ~100-150ms wide starting after EnrollRepo's preceding CheckRepo
+        # probe and DB insert. This still widens it well past that floor
+        # (empirically: 3/3 runs at this size caught it during loam-ply2's
+        # own verification), but no longer needs to guarantee a catch --
+        # that observation became a soft, best-effort one (see
+        # web/e2e/enroll.e2e.ts's header comment), with the actual
+        # syncing-then-idle sequence proven deterministically at
+        # internal/handler/repoadmin/enroll_test.go instead. Shrinking
+        # further is possible but untested; this size keeps a comfortable
+        # margin over the ~110ms floor while cutting this step's own
+        # wall-clock roughly in half to two-thirds versus 200 files
+        # (measured directly: ~2.5s at 200 files vs ~1-3.5s at 20 files,
+        # both against the same local Docker daemon -- high run-to-run
+        # variance either way, but a consistent reduction).
         seed_content_dir="$(mktemp -d /tmp/loam-e2e-seed-content.XXXXXX)"
         git clone -q "http://$forgejo_admin_user:$forgejo_token@127.0.0.1:$forgejo_port/$repo_identifier.git" "$seed_content_dir"
-        for content_i in $(seq 1 200); do head -c 4096 /dev/urandom > "$seed_content_dir/file_$content_i.bin"; done
+        for content_i in $(seq 1 20); do head -c 4096 /dev/urandom > "$seed_content_dir/file_$content_i.bin"; done
         git -C "$seed_content_dir" add -A
         git -C "$seed_content_dir" -c user.email=e2e-seed@example.invalid -c user.name=e2e-seed \
           commit -q -m "e2e: bulk content so the initial clone is reliably observable as syncing"
