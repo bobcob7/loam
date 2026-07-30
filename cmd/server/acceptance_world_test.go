@@ -175,6 +175,19 @@ type acceptanceWorld struct {
 	// step's decoded `loam instructions` response.
 	configuredRoleInstructions string
 	lastInstructions           acceptanceInstructionsOutput
+	// The instructions/whoami orientation state
+	// (acceptance_instructions_test.go, loam-gp31). currentActor is the
+	// agent identity features/instructions.feature's Background names, so
+	// every When step in that file knows who is asking without repeating
+	// identity per scenario; lastWhoami is the decoded `loam whoami`
+	// response. unreachableServerURL, when non-empty, overrides
+	// h.server.baseURL in runLoamAs -- set only by "the server is
+	// unreachable" so "whoami works without contacting the server" can
+	// prove no RPC reached anywhere reachable, while every other scenario
+	// in this suite keeps talking to the real in-process server.
+	currentActor         acceptanceActor
+	lastWhoami           acceptanceWhoamiOutput
+	unreachableServerURL string
 	// The enrollment state (acceptance_enrollment_test.go, loam-ofg.12).
 	// lastEnrolledRepo is the most recent EnrolledRepo this scenario
 	// observed -- an EnrollRepo/SetTargetBranches response or a plain
