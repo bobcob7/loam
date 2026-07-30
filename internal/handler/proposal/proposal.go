@@ -455,11 +455,17 @@ func pageLimitOffset(page *loamv1.Page) (int32, int32) {
 // AcceptProposal above), falls through to CodeInternal-and-log: an
 // unrecognized failure must be loud, never quietly recast as the admin's
 // fault.
+//
+// err is formatted with %w, not %v: the earlier %v left the text intact
+// but broke the chain -- errors.Is(mapped, forge.ErrInvalidToken) was
+// false -- the same defect loam-blc, loam-dq0o, and loam-c4ab fixed
+// elsewhere, here in its %v variant rather than a dropped argument
+// (loam-jv8f).
 func mapAcceptErr(err error, context string) error {
 	switch {
 	case errors.Is(err, forge.ErrInvalidToken), errors.Is(err, forge.ErrInsufficientScope),
 		errors.Is(err, forge.ErrNoWriteAccess), errors.Is(err, forge.ErrRepoNotFound):
-		return fmt.Errorf("%s: the forge refused the request (%v): %w", context, err, handler.ErrFailedPrecondition)
+		return fmt.Errorf("%s: the forge refused the request (%w): %w", context, err, handler.ErrFailedPrecondition)
 	case errors.Is(err, workbranchstore.ErrNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	default:

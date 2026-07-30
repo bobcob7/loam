@@ -526,10 +526,16 @@ func mapRefWriterErr(err error, context string) error {
 // Codes & Errors), so leaving both causes to print the same generic string
 // would mislead an operator; before is the work branch's state as read
 // BEFORE the attempted transition (resolveWorkBranch), which is everything
-// needed to tell them apart without a second query.
+// needed to tell them apart without a second query. err is wrapped
+// alongside the hand-written message and handler.ErrFailedPrecondition
+// (Go 1.20+'s multi-%w), rather than discarded: err already names the
+// work branch id and the attempted verb (workbranchstore's own "%s work
+// branch %s: %w" wrapping), and dropping it left errors.Is(mapped,
+// workbranchstore.ErrIllegalTransition) false -- the same defect loam-blc
+// and loam-dq0o fixed elsewhere in this file (loam-jv8f).
 func mapRequestReviewErr(err error, before workbranchstore.WorkBranch, context string) error {
 	if errors.Is(err, workbranchstore.ErrIllegalTransition) {
-		return fmt.Errorf("%s: %s: %w", context, requestReviewPreconditionMessage(before), handler.ErrFailedPrecondition)
+		return fmt.Errorf("%s: %s: %w: %w", context, requestReviewPreconditionMessage(before), err, handler.ErrFailedPrecondition)
 	}
 	return mapWorkBranchStoreErr(err, context)
 }
