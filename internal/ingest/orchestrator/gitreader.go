@@ -8,18 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
-)
 
-// subprocessWaitDelay mirrors internal/gitdiff's and internal/diffplan's
-// constant of the same name: how long a canceled invocation's process gets
-// to exit on its own before Cmd forces its pipes closed.
-const subprocessWaitDelay = 5 * time.Second
+	"github.com/bobcob7/loam/internal/gitrun"
+)
 
 // maxStderrBytes caps captured stderr the same way internal/gitdiff and
 // internal/diffplan do -- git's own error output is a few lines, never
@@ -60,12 +54,13 @@ var errBatchProtocol = errors.New("orchestrator: unparseable git cat-file --batc
 // submodule gitlink is recognized and skipped rather than fetched as if it
 // were a blob.
 //
-// The git plumbing (isolated --git-dir, no ext-diff, an explicit minimal
-// environment, a WaitDelay on cancellation) is carried over from
-// internal/gitdiff and internal/diffplan, which established it empirically;
-// see internal/diffplan's package doc comment for the full rationale of
-// each flag. It is duplicated rather than imported because neither package
-// exports any of it.
+// The git plumbing (isolated --git-dir, an explicit minimal environment, a
+// WaitDelay on cancellation) is internal/gitrun (loam-ldx): this package
+// used to carry its own copy, established empirically by internal/gitdiff
+// and internal/diffplan and duplicated here because neither exported any
+// of it -- gitrun is what now owns launching and environment isolation for
+// every one of that duplicated copy's call sites; see its own package doc
+// comment for the full rationale.
 type gitReader struct {
 	logger *slog.Logger
 }
@@ -287,75 +282,25 @@ func (r *gitReader) run(ctx context.Context, mirrorDir string, args ...string) (
 // can silently operate on an enclosing repository instead of failing),
 // isolated from the host and user gitconfig, optionally feeding it stdin.
 func (r *gitReader) runWithStdin(ctx context.Context, mirrorDir string, stdin []byte, args ...string) (gitOutput, error) {
-	home, err := os.MkdirTemp("", "loam-ingest-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
 		return gitOutput{}, fmt.Errorf("creating isolated git environment: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home)
+	defer cleanup()
+	var stdinReader io.Reader
 	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
+		stdinReader = bytes.NewReader(stdin)
 	}
 	var outBuf bytes.Buffer
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = &outBuf
-	cmd.Stderr = errBuf
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitrun.Env(home), stdinReader, &outBuf, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return gitOutput{stdout: outBuf.Bytes(), exitCode: 0, stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), exitCode: 0, stderr: errBuf.String()}, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return gitOutput{stdout: outBuf.Bytes(), exitCode: exitErr.ExitCode(), stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), exitCode: exitErr.ExitCode(), stderr: errBuf.String()}, nil
 	}
 	return gitOutput{}, fmt.Errorf("running git %v: %w", args, runErr)
-}
-
-// gitEnv builds the environment for one git subprocess invocation --
-// identical in shape and rationale to internal/gitdiff's and
-// internal/diffplan's own gitEnv: an explicit minimal list (never
-// os.Environ() plus additions), so no system, user-global, or
-// ambient-pointed gitconfig is ever read.
-func gitEnv(home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
-}
-
-// cappedBuffer is an io.Writer retaining only the first max bytes ever
-// written, matching internal/gitdiff's and internal/diffplan's own -- used
-// here only for stderr, never for stdout, since every stdout this package
-// reads must be read in full to be parsed correctly.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-// Write implements io.Writer, always reporting every byte written (so a
-// subprocess never blocks on a full pipe) while retaining only the first
-// max bytes.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
 }
