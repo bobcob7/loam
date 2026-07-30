@@ -68,9 +68,13 @@ server-wide, default `60s`; see `docs/server-spec.md`). Syncs are
 **serialized per repo** — the same pattern as
 ingest jobs — and one sync cycle runs, in order:
 
-1. **Fetch** all upstream refs into the mirror, forced, with pruning —
+1. **Fetch** upstream branches and tags into the mirror, forced, with pruning —
    upstream-wins, always: a diverged or force-pushed upstream ref simply
    replaces the mirror's copy, and a branch deleted upstream is pruned.
+   Nothing outside those two namespaces is fetched — no `refs/pull/*`,
+   `refs/notes/*`, `refs/replace/*`, or any other upstream ref — since nothing
+   in Loam reads them, and `refs/replace/*` would silently alter object
+   visibility if it were (`loam-5f3`).
    **Registered work-branch refs are excluded from the fetch refspec** — they
    are Loam's own refs and must never be clobbered even if upstream grows a
    branch with a colliding name.

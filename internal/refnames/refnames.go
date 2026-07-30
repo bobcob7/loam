@@ -8,9 +8,11 @@
 // MIRROR as server-owned. Work-branch refs live there -- refs/heads/loam-
 // reserved/wb-9c2f1a -- rather than at refs/heads/wb-9c2f1a, because the
 // mirror fetch (internal/mirrorsync.MirrorFetcher) is a forced, PRUNING
-// fetch of "+refs/*:refs/*" whose argv, including one negative exclusion
-// per currently registered work branch, is fixed before the network
-// operation begins. A work branch created at any point during that fetch
+// fetch of "+refs/heads/*:refs/heads/*" and "+refs/tags/*:refs/tags/*"
+// (loam-5f3; formerly the git-clone---mirror-equivalent "+refs/*:refs/*")
+// whose argv, including one negative exclusion per currently registered
+// work branch, is fixed before the network operation begins. A work
+// branch created at any point during that fetch
 // -- seconds to minutes on a large repo -- is not in the exclusion list,
 // so its brand-new ref is a prune candidate. Verified against real git
 // 2.50.1: a purely-local refs/heads/wb-brandnew that never existed

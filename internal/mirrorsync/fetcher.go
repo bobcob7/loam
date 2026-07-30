@@ -11,33 +11,50 @@ import (
 	"github.com/bobcob7/loam/internal/refnames"
 )
 
-// allRefsRefspec is the wildcard positive refspec MirrorFetcher pairs with
-// a negative exclusion per registered work-branch ref (docs/sync-spec.md
-// -> Mirror Sync step 1). The leading '+' is NOT what makes a diverged or
-// force-pushed upstream ref win here: gittransport.Transport.Fetch already
-// passes the git-level --force flag unconditionally, which (per
-// git-fetch(1) -f/--force) overrides the non-fast-forward check for every
-// refspec regardless of a per-refspec '+' -- dropping the '+' leaves every
-// integration test in this package green; only the refspec-string unit
-// tests catch it. The '+' is kept anyway because it is what
-// docs/sync-spec.md's DESIGN mandates verbatim and it is exactly the
-// refspec `git clone --mirror` itself uses, so intent stays correct even
-// if Transport ever stops passing --force: belt-and-suspenders notation,
-// not the forcing mechanism. The sharper unconditional flag actually in
-// play is --prune, which is safe to run unconditionally here only because
-// git scopes pruning to the refspec's own destination namespace -- a ref
-// a negative exclusion removes from the refspec is never a prune
-// candidate either, exactly as it is never a fetch candidate.
-const allRefsRefspec = "+refs/*:refs/*"
+// branchesRefspec and tagsRefspec are the two positive refspecs
+// MirrorFetcher pairs with a negative exclusion per registered work-branch
+// ref (docs/sync-spec.md -> Mirror Sync step 1): every upstream branch and
+// every upstream tag, and nothing outside those two namespaces -- no
+// refs/pull/*, refs/notes/*, refs/replace/*, or any other upstream ref
+// (loam-5f3 narrowed this from the git-clone---mirror-equivalent
+// "+refs/*:refs/*" wildcard this constant used to hold single-handedly;
+// see buildFetchRefspecs for why). The leading '+' on each is NOT what
+// makes a diverged or force-pushed upstream ref win here:
+// gittransport.Transport.Fetch already passes the git-level --force flag
+// unconditionally, which (per git-fetch(1) -f/--force) overrides the
+// non-fast-forward check for every refspec regardless of a per-refspec
+// '+' -- dropping the '+' leaves every integration test in this package
+// green; only the refspec-string unit tests catch it. The '+' is kept
+// anyway because it is what docs/sync-spec.md's DESIGN mandates verbatim
+// and it is the same leading '+' `git clone --mirror` itself uses on its
+// own (broader) refs/*:refs/* refspec, so intent stays correct even if
+// Transport ever stops passing --force: belt-and-suspenders notation, not
+// the forcing mechanism. The sharper unconditional flag actually in play
+// is --prune, which is safe to run unconditionally here only because git
+// scopes pruning to each refspec's own destination namespace -- a ref a
+// negative exclusion removes from one of these refspecs is never a prune
+// candidate either, exactly as it is never a fetch candidate, and a ref
+// outside both destination namespaces entirely (a refs/pull/* ref, say)
+// was never a prune candidate to begin with, since neither refspec's
+// destination reaches it.
+const (
+	branchesRefspec = "+refs/heads/*:refs/heads/*"
+	tagsRefspec     = "+refs/tags/*:refs/tags/*"
+)
 
 // MirrorFetcher is the production Fetcher (docs/sync-spec.md -> Mirror
 // Sync step 1; docs/git-spec.md -> Ref Policy "Work-branch refs"; owned by
-// bead giq.2): a forced, pruning fetch of every upstream ref into a repo's
-// bare mirror, upstream-wins, with every currently registered work-branch
-// ref excluded from the refspec so a same-named upstream branch can never
-// clobber one of Loam's own. The exclusion list is recomputed from
-// work_branches immediately before every call to Fetch, since branches
-// come and go between sync ticks.
+// bead giq.2): a forced, pruning fetch of every upstream branch and tag
+// into a repo's bare mirror, upstream-wins, with every currently
+// registered work-branch ref excluded from the refspec so a same-named
+// upstream branch can never clobber one of Loam's own. Nothing outside
+// refs/heads/* and refs/tags/* is fetched (loam-5f3): no refs/pull/*,
+// refs/notes/*, or refs/replace/* -- nothing in loam consumes any of
+// those, and refs/replace/* in particular would otherwise silently alter
+// object visibility in the mirror, since git applies replace refs
+// transparently. The exclusion list is recomputed from work_branches
+// immediately before every call to Fetch, since branches come and go
+// between sync ticks.
 //
 // MirrorFetcher builds refspecs and turns gittransport's returned
 // --porcelain output back into a FetchResult; it never shells out to git
@@ -93,17 +110,27 @@ func (f *MirrorFetcher) mirrorDir(repo RepoID) string {
 	return mirrorpath.Dir(f.dataDir, string(repo))
 }
 
-// buildFetchRefspecs returns the wildcard positive refspec, the structural
-// exclusion of Loam's whole reserved ref namespace, and then one negative
-// exclusion per name in workBranches (docs/git-spec.md -> Ref Policy).
-// Excluding a ref this way means the fetch never considers it for this
-// invocation at all -- not "fetch then restore" -- so it survives both an
-// upstream force-push of a same-named branch and an upstream deletion,
-// since neither ever reaches this ref. Tags and every other upstream ref
-// are covered by the wildcard unconditionally: docs/sync-spec.md's Mirror
-// Sync step 1 says "fetch all upstream refs", with no carve-out for tags
-// or any refs/pull/*-style namespace, and none appears anywhere else in
-// docs/sync-spec.md or docs/git-spec.md either.
+// buildFetchRefspecs returns the two positive refspecs (every upstream
+// branch, every upstream tag), the structural exclusion of Loam's whole
+// reserved ref namespace, and then one negative exclusion per name in
+// workBranches (docs/git-spec.md -> Ref Policy). Excluding a ref this way
+// means the fetch never considers it for this invocation at all -- not
+// "fetch then restore" -- so it survives both an upstream force-push of a
+// same-named branch and an upstream deletion, since neither ever reaches
+// this ref. Nothing outside refs/heads/* and refs/tags/* is fetched at
+// all: docs/sync-spec.md's Mirror Sync step 1 says "fetch upstream
+// branches and tags", not every upstream ref. That is narrower than this
+// function used to be (loam-5f3): it previously paired a single
+// "+refs/*:refs/*" wildcard -- byte-identical to what `git clone --mirror`
+// configures -- with the same two negative mechanisms below, which also
+// pulled in refs/pull/*, refs/notes/*, refs/replace/*, and every other
+// upstream namespace. Nothing in loam reads any of those; they only cost
+// a 5000+-ref advertisement on every agent clone over /git/*, unbounded
+// mirror growth from PR refs pinning objects against gc, and -- the sharp
+// one -- refs/replace/* silently altering object visibility, since git
+// applies replace refs transparently. Re-widening is cheap if loam ever
+// needs to read an upstream PR ref directly rather than through the forge
+// REST API.
 //
 // TWO MECHANISMS, DELIBERATELY. The enumerated per-branch exclusions are
 // the SEMANTIC rule -- they say, ref by ref, which refs Loam owns, and
@@ -120,10 +147,14 @@ func (f *MirrorFetcher) mirrorDir(repo RepoID) string {
 // fires: work_branches carries no SHA column and a bare mirror has no
 // reflog, so the row survives pointing at a ref that no longer exists
 // (loam-cmq). No amount of re-listing closes that window; a namespace
-// glob does, for every work-branch ref that will ever exist.
+// glob does, for every work-branch ref that will ever exist. Both
+// mechanisms live entirely under refs/heads/ (ReservedNamespace is
+// "refs/heads/loam-reserved/"), so narrowing the positive side to
+// refs/heads/*+refs/tags/* changes neither: they still land inside the
+// branchesRefspec destination exactly as before.
 func buildFetchRefspecs(workBranches []string) []string {
-	refspecs := make([]string, 0, len(workBranches)+2)
-	refspecs = append(refspecs, allRefsRefspec, refnames.ReservedExclusionRefspec)
+	refspecs := make([]string, 0, len(workBranches)+3)
+	refspecs = append(refspecs, branchesRefspec, tagsRefspec, refnames.ReservedExclusionRefspec)
 	for _, name := range workBranches {
 		refspecs = append(refspecs, "^"+refnames.WorkBranch(name))
 	}

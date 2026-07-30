@@ -3,22 +3,46 @@ package mirrorsync
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildFetchRefspecsNoWorkBranchesReturnsOnlyWildcard(t *testing.T) {
+func TestBuildFetchRefspecsNoWorkBranchesReturnsOnlyPositiveRefspecs(t *testing.T) {
 	t.Parallel()
 	refspecs := buildFetchRefspecs(nil)
-	assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*"}, refspecs)
+	assert.Equal(t, []string{"+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*", "^refs/heads/loam-reserved/*"}, refspecs)
 }
 
 func TestBuildFetchRefspecsAddsOneNegativeExclusionPerWorkBranch(t *testing.T) {
 	t.Parallel()
 	refspecs := buildFetchRefspecs([]string{"wb-1", "wb-2"})
-	assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1", "^refs/heads/loam-reserved/wb-2"}, refspecs)
+	assert.Equal(t, []string{"+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1", "^refs/heads/loam-reserved/wb-2"}, refspecs)
+}
+
+// TestBuildFetchRefspecsExcludesEveryNonHeadsNonTagsNamespace is the
+// narrowing loam-5f3 makes real: the wildcard "+refs/*:refs/*" this
+// function used to return would fetch refs/pull/*, refs/notes/*, and
+// refs/replace/* too. Asserting the exact returned slice (as the two
+// tests above do) already proves those strings are gone from the
+// positive side; this test names the specific upstream namespaces the
+// narrowing was for, so a regression back to a broader glob (e.g.
+// "+refs/*:refs/*" or "+refs/**:refs/**") is caught by name rather than
+// only by incidental slice-equality.
+func TestBuildFetchRefspecsExcludesEveryNonHeadsNonTagsNamespace(t *testing.T) {
+	t.Parallel()
+	refspecs := buildFetchRefspecs(nil)
+	for _, positive := range refspecs[:2] {
+		assert.True(t, strings.HasPrefix(positive, "+refs/heads/") || strings.HasPrefix(positive, "+refs/tags/"),
+			"positive refspec %q must target only refs/heads/* or refs/tags/*", positive)
+	}
+	for _, excludedNamespace := range []string{"refs/pull/", "refs/notes/", "refs/replace/", "refs/merge-requests/"} {
+		for _, spec := range refspecs {
+			assert.NotContains(t, spec, excludedNamespace, "refspec %q must not reference %s", spec, excludedNamespace)
+		}
+	}
 }
 
 func TestParsePorcelainFetchParsesFastForward(t *testing.T) {
@@ -144,7 +168,7 @@ func TestMirrorFetcherFetchBuildsRefspecsAndParsesResult(t *testing.T) {
 			assert.Equal(t, "forge.example.com", host)
 			assert.Equal(t, "/data/mirrors/acme/widgets.git", mirrorDir)
 			assert.Equal(t, "https://forge.example.com/acme/widgets.git", upstreamURL)
-			assert.Equal(t, []string{"+refs/*:refs/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1"}, refspecs)
+			assert.Equal(t, []string{"+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*", "^refs/heads/loam-reserved/*", "^refs/heads/loam-reserved/wb-1"}, refspecs)
 			return []byte("  8e9302dc2468c98d4c4ed30341b2eb3d90d0ac12 8c9a25ef69308c445dc914c7485e411a7312a167 refs/heads/main\n"), nil
 		},
 	}

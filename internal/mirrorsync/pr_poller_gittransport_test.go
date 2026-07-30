@@ -83,7 +83,7 @@ func TestPollPRsDeletesOnlyTheProposalBranchUpstream(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(mirrorDir), 0o755))
 	out, err := pollVerificationGit(t, "init", "--bare", "-q", mirrorDir)
 	require.NoErrorf(t, err, "git init --bare: %s", out)
-	_, err = transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{allRefsRefspec})
+	_, err = transport.Fetch(t.Context(), host, mirrorDir, upstreamURL, []string{branchesRefspec, tagsRefspec})
 	require.NoError(t, err)
 	mainSHA, err := mirrorRevParse(t, mirrorDir, "refs/heads/main")
 	require.NoError(t, err)

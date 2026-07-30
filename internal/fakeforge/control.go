@@ -170,25 +170,51 @@ func (s *Server) CreateBranch(ctx context.Context, repo, name, fromRef string) (
 // both delegate to once their own naming constraint (or lack of one) has
 // been checked.
 func (s *Server) createBranchAt(ctx context.Context, repo, name, fromRef string) error {
+	return s.createRefAt(ctx, repo, "refs/heads/"+name, fromRef)
+}
+
+// CreateRef creates an arbitrary ref -- any path, not just refs/heads/ --
+// at fromRef, or at the repo's default branch tip if fromRef is empty. It
+// exists for tests that need to seed an upstream namespace none of the
+// branch/PR helpers above reach, such as refs/pull/<n>/head or
+// refs/replace/<sha>, to prove the mirror fetch does NOT carry a given
+// namespace in (loam-5f3 narrowed MirrorFetcher's positive refspec to
+// refs/heads/* + refs/tags/*, specifically to exclude namespaces like
+// these).
+func (s *Server) CreateRef(ctx context.Context, repo, ref, fromRef string) (err error) {
+	s.logger.Info("fakeforge: create-ref", "repo", repo, "ref", ref, "from", fromRef)
+	defer func() {
+		if err != nil {
+			s.logger.Warn("fakeforge: create-ref failed", "repo", repo, "ref", ref, "error", err)
+		}
+	}()
+	return s.createRefAt(ctx, repo, ref, fromRef)
+}
+
+// createRefAt is the shared body createBranchAt and CreateRef both
+// delegate to: it resolves fromRef (or the repo's default branch tip when
+// fromRef is empty) and points destRef at that commit, creating destRef if
+// it does not already exist.
+func (s *Server) createRefAt(ctx context.Context, repo, destRef, fromRef string) error {
 	repoDir := s.repoDir(repo)
 	if err := s.requireRepo(repoDir); err != nil {
-		return fmt.Errorf("creating branch %s/%s: %w", repo, name, err)
+		return fmt.Errorf("creating ref %s/%s: %w", repo, destRef, err)
 	}
 	ref := fromRef
 	if ref == "" {
 		out, err := s.runGit(ctx, "", "--git-dir="+repoDir, "symbolic-ref", "HEAD")
 		if err != nil {
-			return fmt.Errorf("creating branch %s/%s: resolving default branch: %w", repo, name, err)
+			return fmt.Errorf("creating ref %s/%s: resolving default branch: %w", repo, destRef, err)
 		}
 		ref = strings.TrimSpace(string(out))
 	}
 	out, err := s.runGit(ctx, "", "--git-dir="+repoDir, "rev-parse", ref)
 	if err != nil {
-		return fmt.Errorf("creating branch %s/%s: resolving %s: %w", repo, name, ref, err)
+		return fmt.Errorf("creating ref %s/%s: resolving %s: %w", repo, destRef, ref, err)
 	}
 	sha := strings.TrimSpace(string(out))
-	if _, err := s.runGit(ctx, "", "--git-dir="+repoDir, "update-ref", "refs/heads/"+name, sha); err != nil {
-		return fmt.Errorf("creating branch %s/%s: %w", repo, name, err)
+	if _, err := s.runGit(ctx, "", "--git-dir="+repoDir, "update-ref", destRef, sha); err != nil {
+		return fmt.Errorf("creating ref %s/%s: %w", repo, destRef, err)
 	}
 	return nil
 }
