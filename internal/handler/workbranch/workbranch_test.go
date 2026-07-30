@@ -492,6 +492,48 @@ func TestUpdateWorkBranch_TerminalState_ReturnsFailedPrecondition(t *testing.T) 
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
 }
 
+// TestUpdateWorkBranch_TerminalState_MessageNamesIllegalTransition is
+// loam-blc's acceptance test mirrored for mapWorkBranchStoreErr: it used to
+// wrap only handler.ErrFailedPrecondition and discard
+// workbranchstore.ErrIllegalTransition, so the message an agent or operator
+// saw ended in the generic "handler: failed precondition" with nothing
+// naming which work branch or transition was actually rejected. err already
+// names the work branch id (workbranchstore's own "%s work branch %s: %w"
+// wrapping in transitionErr), so the mapped error must preserve it -- both
+// in the rendered message (the CLI prints connectErr.Message() directly,
+// per docs/cli-spec.md -> Exit Codes & Errors) and via errors.Is, which
+// callers may still match on.
+func TestUpdateWorkBranch_TerminalState_MessageNamesIllegalTransition(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	// The stub names the work branch's ID (a fresh random UUID, distinct
+	// from sampleWorkBranchID), not "wb-9c2f1a"/"bobcob7/doc-server" -- and
+	// that choice is what lets this test fail at all: the handler's own
+	// context prefix ("updating work branch bobcob7/doc-server/wb-9c2f1a")
+	// never contains the id, so a stub naming it cannot separate "err was
+	// preserved" from "only the bare sentinel was wrapped".
+	//
+	// It is also the realistic failure: workbranchstore's transitionErr
+	// produces "setting title/description on work branch <id>: illegal
+	// work branch state transition" (store.go's transitionErr), and naming
+	// WHICH work branch and transition failed is the entire point of
+	// loam-dq0o (mirroring loam-blc).
+	workBranches.SetTitleDescriptionFunc = func(_ context.Context, id uuid.UUID, _, _ string) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("setting title/description on work branch %s: %w", id, workbranchstore.ErrIllegalTransition)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkSet}, &buf)
+	title := "New title"
+	_, err := h.UpdateWorkBranch(agentCtx(t, "author"), connect.NewRequest(&loamv1.UpdateWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a", Title: &title}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), "setting title/description on work branch", "the message must name WHICH transition was attempted -- the store's own wrapping appears nowhere in the handler's own context prefix, so only preserving err can put it there")
+	assert.Contains(t, connectErr.Message(), workbranchstore.ErrIllegalTransition.Error(), "and the sentinel's own text must survive, not just terminate in the generic \"handler: failed precondition\"")
+	assert.ErrorIs(t, err, workbranchstore.ErrIllegalTransition, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 // TestUpdateWorkBranch_NotFound_ReturnsCodeNotFound proves
 // workbranchstore.ErrNotFound (a distinct sentinel from
 // ErrIllegalTransition) maps to CodeNotFound, not CodeFailedPrecondition --

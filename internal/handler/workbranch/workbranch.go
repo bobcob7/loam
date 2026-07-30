@@ -439,13 +439,22 @@ func mapRepoStoreErr(err error, context string) error {
 // and (for UpdateState's reviewable transitions) "title/description not
 // yet set" -- the store's guarded UPDATE checks both in the same atomic
 // statement, so this handler cannot and does not try to tell them apart;
-// both are a failed precondition from the caller's point of view.
+// both are a failed precondition from the caller's point of view. err is
+// wrapped alongside handler.ErrFailedPrecondition (Go 1.20+'s multi-%w),
+// rather than discarded: err already names the work branch id and the
+// attempted verb (workbranchstore's own "%s work branch %s: %w"
+// wrapping in transitionErr), and dropping it left the message an
+// operator or agent sees terminate in the generic "handler: failed
+// precondition" with nothing pointing at the actual cause -- exactly the
+// defect loam-blc fixed for mapDiffComputerErr, reproduced here
+// (loam-dq0o). errors.Is(mapped, workbranchstore.ErrIllegalTransition) and
+// errors.Is(mapped, handler.ErrFailedPrecondition) both still hold.
 func mapWorkBranchStoreErr(err error, context string) error {
 	switch {
 	case errors.Is(err, workbranchstore.ErrNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	case errors.Is(err, workbranchstore.ErrIllegalTransition):
-		return fmt.Errorf("%s: %w", context, handler.ErrFailedPrecondition)
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
 	}
