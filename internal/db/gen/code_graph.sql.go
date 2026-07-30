@@ -124,7 +124,7 @@ WITH RECURSIVE dependents(symbol_id, depth) AS (
     FROM graph_edges ge
     WHERE ge.repo_id = $1 AND ge.target_branch = $2 AND ge.to_symbol_id = $3
   UNION ALL
-    SELECT ge.from_symbol_id, d.depth + 1
+    SELECT DISTINCT ge.from_symbol_id, d.depth + 1
     FROM graph_edges ge
     JOIN dependents d ON ge.to_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
@@ -196,6 +196,38 @@ type DependentsRow struct {
 // rows existed" on its own, and the caller must not be left to confuse
 // "exactly limit results" with "truncated at limit" (docs/cli-spec.md's
 // `truncated` envelope field depends on that distinction).
+//
+// loam-9xx FIX: the recursive term's SELECT DISTINCT is a NODE-level dedup,
+// not a cycle guard and not a depth cap -- it is orthogonal to both. UNION
+// ALL alone enumerates every simple PATH reaching a symbol, not every
+// reachable symbol: the CYCLE clause bounds path LENGTH (a branch may not
+// revisit a symbol_id already on its own path), but says nothing about path
+// COUNT, so a dense DAG with zero cycles and zero duplicate edges -- a
+// diamond, or several callers sharing one utility function -- still makes
+// every one of those parallel simple paths a separate row. Because the
+// CYCLE-guarded recursion joins the SAME working table forward each
+// iteration, that multiplies: k parallel paths converging on one symbol at
+// depth d turn into k parallel paths continuing from it at depth d+1, so
+// intermediate row counts grow as (branching factor)^depth even though the
+// final answer -- the SET of reachable symbols -- never did. SELECT
+// DISTINCT on the recursive term's own output (symbol_id, depth) collapses
+// every one of those k arrivals at one symbol IN THE SAME ITERATION down to
+// a single row before it becomes next iteration's join input, so the
+// multiplication does not compound hop over hop. This is deduping REACHED
+// NODES rather than accumulating PATHS -- exactly what dependents/deps
+// conceptually answer ("which symbols can reach this one," a set, not a
+// bag of routes) -- and it does not touch the CYCLE clause, which remains
+// the sole thing preventing a genuine cycle (e.g. two-function mutual
+// recursion) from recursing forever: a true cycle re-visits the SAME
+// symbol_id at a strictly LARGER depth each time round, so its
+// (symbol_id, depth) rows are never literal duplicates within one
+// iteration and DISTINCT has nothing to collapse there -- see this
+// package's TestDependentsCTE_GuardRemovedHangs, which still hangs with
+// CYCLE removed even though this DISTINCT is present, and
+// TestDependentsCTE_DiamondFixture_BoundedIntermediateRows, which proves
+// DISTINCT is the thing bounding a dense DAG's intermediate row count (its
+// mutation -- reverting to plain UNION ALL -- fails that test's row-count
+// assertion, not by timeout).
 func (q *Queries) Dependents(ctx context.Context, arg DependentsParams) ([]DependentsRow, error) {
 	rows, err := q.db.Query(ctx, dependents,
 		arg.RepoID,
@@ -236,7 +268,7 @@ WITH RECURSIVE deps(symbol_id, depth) AS (
     FROM graph_edges ge
     WHERE ge.repo_id = $1 AND ge.target_branch = $2 AND ge.from_symbol_id = $3
   UNION ALL
-    SELECT ge.to_symbol_id, d.depth + 1
+    SELECT DISTINCT ge.to_symbol_id, d.depth + 1
     FROM graph_edges ge
     JOIN deps d ON ge.from_symbol_id = d.symbol_id
     WHERE ge.repo_id = $1 AND ge.target_branch = $2
@@ -272,10 +304,11 @@ type DepsRow struct {
 
 // Forward blast radius: every symbol the target symbol transitively
 // depends on, walking graph_edges forwards from from_symbol_id = target
-// toward to_symbol_id. Same CYCLE-clause termination guard, dedup-by-
-// minimum-depth, depth-first ordering, and limit+1-for-truncation-
-// detection convention as Dependents above, mirrored in the opposite
-// direction; see that query's comment for the full rationale.
+// toward to_symbol_id. Same CYCLE-clause termination guard, loam-9xx's
+// node-level SELECT DISTINCT (see Dependents' comment for the full
+// rationale -- it applies identically here, mirrored in the opposite
+// direction), dedup-by-minimum-depth, depth-first ordering, and
+// limit+1-for-truncation-detection convention as Dependents above.
 func (q *Queries) Deps(ctx context.Context, arg DepsParams) ([]DepsRow, error) {
 	rows, err := q.db.Query(ctx, deps,
 		arg.RepoID,
