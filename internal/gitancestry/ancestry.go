@@ -56,16 +56,14 @@
 package gitancestry
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/bobcob7/loam/internal/gitrun"
 )
 
 // maxStderrBytes caps retained stderr for a failed check, matching
@@ -73,11 +71,6 @@ import (
 // this package classifies on is a single short line, retained solely so a
 // failure message can quote what git actually said.
 const maxStderrBytes = 8 << 10
-
-// subprocessWaitDelay bounds how long a canceled invocation's git process
-// may keep this call's pipes open after the context kills it, matching
-// internal/gitmergetree, internal/gitdiff, and internal/diffplan.
-const subprocessWaitDelay = 5 * time.Second
 
 // errCheckFailed is the sentinel every "the check itself did not run"
 // outcome wraps -- an unresolvable rev, a missing mirror, a git that
@@ -167,23 +160,18 @@ func summarize(stderr string) string {
 // failure -- so only a failure to run git at all, or a context canceled
 // before or during the run, comes back as err.
 func (c *Checker) run(ctx context.Context, mirrorDir, extraObjectDir string, args ...string) (exitCode int, stderr string, err error) {
-	home, err := os.MkdirTemp("", "loam-gitancestry-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
 		return 0, "", fmt.Errorf("%w: creating isolated git environment: %w", errCheckFailed, err)
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home, extraObjectDir)
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = nil
-	cmd.Stderr = errBuf
+	defer cleanup()
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitEnv(home, extraObjectDir), nil, nil, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return 0, errBuf.buf.String(), nil
+		return 0, errBuf.String(), nil
 	}
-	return classifyRunErr(ctx, runErr, errBuf.buf.String(), args)
+	return classifyRunErr(ctx, runErr, errBuf.String(), args)
 }
 
 // classifyRunErr decides what a failed cmd.Run means. Split out of run so
@@ -211,57 +199,19 @@ func classifyRunErr(ctx context.Context, runErr error, stderr string, args []str
 	return 0, "", fmt.Errorf("%w: running git %v: %w", errCheckFailed, args, runErr)
 }
 
-// gitEnv builds the environment for one git subprocess invocation, an
-// explicit minimal list rather than os.Environ() plus additions -- the
-// same shape and rationale as internal/gitmergetree's, internal/gitdiff's,
-// and internal/diffplan's own gitEnv. GIT_CONFIG_NOSYSTEM plus the
-// redirected HOME/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL mean no system,
-// user-global, or ambient GIT_CONFIG_GLOBAL-pointed config is ever read.
-//
-// extraObjectDir, when non-empty, is exposed as
+// gitEnv builds the environment for one git subprocess invocation:
+// internal/gitrun.Env's own isolation (loam-ldx folded this package's
+// former hand-rolled copy into that shared package -- see its doc
+// comment), plus extraObjectDir when non-empty, exposed as
 // GIT_ALTERNATE_OBJECT_DIRECTORIES -- an ADDITIONAL object store, so the
 // mirror's own objects (the target tip) stay visible; see the package doc
 // comment. It is omitted entirely when empty rather than set to "", which
 // git treats as an empty alternates list either way but which would put a
 // meaningless variable in the environment of every non-quarantine caller.
 func gitEnv(home, extraObjectDir string) []string {
-	env := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
+	env := gitrun.Env(home)
 	if extraObjectDir != "" {
 		env = append(env, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+extraObjectDir)
 	}
 	return env
-}
-
-// cappedBuffer is an io.Writer retaining only the first max bytes ever
-// written, matching internal/gitmergetree's and internal/gitdiff's own
-// cappedBuffer.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-// Write implements io.Writer.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
 }
