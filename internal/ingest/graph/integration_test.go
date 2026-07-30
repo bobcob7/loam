@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -269,10 +270,17 @@ func graphEdges(t *testing.T, repoID uuid.UUID) []edgeRow {
 //
 // fixture-polyglot's "Validate" is deliberately ambiguous by design
 // (pkg/validate/validate.go's and src/validate.ts's own doc comments): a Go
-// export and a TypeScript export share the name. Both report.go (Go, calls
-// validate.Validate) and index.ts (TS, calls Validate) therefore fan out to
-// BOTH same-named definitions -- docs/cli-spec.md's "ambiguous target is
-// data, not an error" applied to edges, not just to `graph def` lookups.
+// export and a TypeScript export share the name. Edge resolution must NOT
+// merge them -- report.go (Go) reaches only the Go Validate and index.ts
+// (TS) only the TypeScript one, which is precisely what internal/testfixture's
+// package doc says the pair exists to prove. Until loam-w5g this test
+// asserted the opposite, expecting each caller to fan out to BOTH
+// definitions and citing docs/cli-spec.md's "ambiguous target is data, not
+// an error"; that rule governs ambiguity WITHIN a language (two same-named
+// Go symbols are both real candidates), not across a language boundary,
+// where a Go function cannot call a TypeScript one at all. This test and
+// the orchestrator golden were the two places that had the leak pinned as
+// expected output.
 // is_even/is_odd's mutual recursion (scripts/parity.py) proves a same-file
 // cycle resolves in both directions. validate.go's TrimSpace reference and
 // validate.ts's trim reference are stdlib/built-in calls with no matching
@@ -298,19 +306,20 @@ func TestIngestFiles_FixturePolyglot_GraphEdgesResolvedEndToEnd(t *testing.T) {
 
 	want := []edgeRow{
 		{fromFile: "pkg/report/report.go", fromName: "Summarize", toFile: "pkg/validate/validate.go", toName: "Validate"},
-		{fromFile: "pkg/report/report.go", fromName: "Summarize", toFile: "src/validate.ts", toName: "Validate"},
 		{fromFile: "scripts/parity.py", fromName: "is_even", toFile: "scripts/parity.py", toName: "is_odd"},
 		{fromFile: "scripts/parity.py", fromName: "is_odd", toFile: "scripts/parity.py", toName: "is_even"},
-		{fromFile: "src/index.ts", fromName: "summarize", toFile: "pkg/validate/validate.go", toName: "Validate"},
 		{fromFile: "src/index.ts", fromName: "summarize", toFile: "src/validate.ts", toName: "Validate"},
 	}
 	assert.Equal(t, int64(len(want)), stats.EdgesRecomputed, "Stats.EdgesRecomputed must report the exact edge count RecomputeGraphEdges inserted")
 	got := graphEdges(t, repoID)
-	assert.Equal(t, want, got, "graph_edges must hold exactly these 6 rows: Validate's cross-language ambiguity fanning out to 2 edges per caller, is_even/is_odd's mutual recursion in both directions, and nothing for TrimSpace/trim")
+	assert.Equal(t, want, got, "graph_edges must hold exactly these 4 rows: each Validate caller resolving to its OWN language's definition, is_even/is_odd's mutual recursion in both directions, and nothing for TrimSpace/trim")
 
 	for _, edge := range got {
 		assert.NotEqual(t, "TrimSpace", edge.toName, "TrimSpace is a stdlib call with no matching symbols row -- it must never appear as an edge target")
 		assert.NotEqual(t, "trim", edge.toName, "trim is a built-in method call with no matching symbols row -- it must never appear as an edge target")
+		crossed := strings.HasSuffix(edge.fromFile, ".go") && strings.HasSuffix(edge.toFile, ".ts") ||
+			strings.HasSuffix(edge.fromFile, ".ts") && strings.HasSuffix(edge.toFile, ".go")
+		assert.False(t, crossed, "no edge may cross a language boundary (loam-w5g): %s %s -> %s %s", edge.fromFile, edge.fromName, edge.toFile, edge.toName)
 	}
 
 	// Re-running IngestFiles over the identical file set (as a second ingest
