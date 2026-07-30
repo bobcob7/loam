@@ -48,7 +48,6 @@ Feature: Deciding on proposals
     Then the work branch is in state "closed"
     And the reason is recorded on the work branch
 
-  @wip
   Scenario: Closing a work branch closes its upstream PR
     Given a work branch in state "reviewed" whose upstream PR has been created
     When I close it with a reason
