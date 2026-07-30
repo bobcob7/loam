@@ -167,6 +167,14 @@ type acceptanceWorld struct {
 	// nothing. stepTheUpstreamPRMerges still fails loudly against a zero
 	// value (fakeforge has no PR #0) rather than passing vacuously.
 	upstreamPRNumber int
+	// The roles/instructions state (acceptance_roles_test.go, loam-ofg.11).
+	// configuredRoleInstructions is the instructions text the "the ... role
+	// has instructions configured" Given set on a role via the admin
+	// RoleService, for "it receives the reviewer instructions" to compare
+	// the CLI's response against; lastInstructions is that later When
+	// step's decoded `loam instructions` response.
+	configuredRoleInstructions string
+	lastInstructions           acceptanceInstructionsOutput
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.

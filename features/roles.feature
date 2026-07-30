@@ -12,7 +12,6 @@ Feature: Roles and authorization
     When I list roles
     Then a built-in "author" role and a built-in "reviewer" role exist
 
-  @wip
   Scenario: A role's instructions reach its agents
     Given the "reviewer" role has instructions configured
     When a "reviewer" agent asks for its instructions
