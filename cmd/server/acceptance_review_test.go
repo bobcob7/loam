@@ -261,11 +261,15 @@ func (h *acceptanceHarness) registerReviewSteps(sc *godog.ScenarioContext) {
 // positional argument always wins"), and the staging area lands under
 // <workspace>/.loam/staging keyed by the acting agent's own identifier.
 func (h *acceptanceHarness) runLoamAs(world *acceptanceWorld, actor acceptanceActor, stdin string, args ...string) loamCLIResult {
+	serverURL := h.server.baseURL
+	if world.unreachableServerURL != "" {
+		serverURL = world.unreachableServerURL
+	}
 	cmd := exec.Command(h.loamBinary, args...)
 	cmd.Dir = world.workspace
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
-		"LOAM_SERVER_URL=" + h.server.baseURL,
+		"LOAM_SERVER_URL=" + serverURL,
 		"LOAM_AGENT_NAME=" + actor.name,
 		"LOAM_AGENT_ID=" + actor.id,
 		"LOAM_AGENT_ROLE=" + actor.role,
