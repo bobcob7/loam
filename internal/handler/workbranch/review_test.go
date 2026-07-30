@@ -447,6 +447,39 @@ func TestSubmitVerdict_RejectedResolve_PublishesNothing(t *testing.T) {
 	assert.Equal(t, connect.CodePermissionDenied, connectCode(t, err))
 }
 
+// TestSubmitVerdict_NotThreadAuthor_MessageNamesAuthorAndActor is loam-jhyo's
+// acceptance test for mapPublishErr's ErrNotThreadAuthor case: it used to
+// wrap only handler.ErrPermissionDenied and discard err, dropping the actual
+// author and actor names (reviewstore's own "thread %s was opened by %s,
+// not %s: %w" wrapping) -- precisely the diagnostic a caller wants, and the
+// same defect TestReplyToThread_NotThreadAuthor_MessageNamesAuthorAndActor
+// covers for mapThreadStoreErr. author and actor are fresh random uuids
+// rather than any value already present in the request or the handler's own
+// context string, so the message assertions cannot be satisfied textually
+// by that prefix alone -- they only pass if err itself survives the wrap.
+func TestSubmitVerdict_NotThreadAuthor_MessageNamesAuthorAndActor(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	threadID := uuid.New()
+	author := uuid.NewString()
+	actor := uuid.NewString()
+	publisher.PublishFunc = func(context.Context, reviewpublish.Request) (reviewpublish.Result, error) {
+		return reviewpublish.Result{}, fmt.Errorf("thread %s was opened by %s, not %s: %w", threadID, author, actor, reviewstore.ErrNotThreadAuthor)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, reviewCaps, &buf)
+	req := submitRequest(loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE)
+	req.ResolveThreadIds = []string{threadID.String()}
+	_, err := h.SubmitVerdict(agentCtx(t, "reviewer"), connect.NewRequest(req))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), author, "the actual author must survive -- it used to be discarded in favor of only the generic permission-denied text")
+	assert.Contains(t, connectErr.Message(), actor, "the actual actor must survive too")
+	assert.ErrorIs(t, err, reviewstore.ErrNotThreadAuthor, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrPermissionDenied)
+}
+
 // --- ReplyToThread ---
 
 // TestReplyToThread_AgentLackingWorkReply_Denied proves the gate runs before

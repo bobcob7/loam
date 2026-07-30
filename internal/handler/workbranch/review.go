@@ -338,7 +338,7 @@ func mapPublishErr(err error, context string) error {
 	case errors.Is(err, reviewpublish.ErrNotOpenForReview), errors.Is(err, reviewstore.ErrNoCurrentRound):
 		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
 	case errors.Is(err, reviewstore.ErrNotThreadAuthor):
-		return fmt.Errorf("%s: only a thread's author may resolve it: %w", context, handler.ErrPermissionDenied)
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrPermissionDenied)
 	case errors.Is(err, reviewstore.ErrThreadNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	case errors.Is(err, workbranchstore.ErrNotFound):
