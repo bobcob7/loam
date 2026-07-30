@@ -188,6 +188,13 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 // ValidateToken doc comment), but that tolerance is scoped to validating
 // the token over the wire -- it never changes what key the token is
 // stored under, so it does not create a second way to reach the same row.
+func forgeHostOf(u *url.URL) string {
+	if u.Scheme == "http" {
+		return "http://" + u.Host
+	}
+	return u.Host
+}
+
 // redactUserinfo reconstructs u's string form with any embedded userinfo
 // (user, or user:password) cleared, rather than string-replacing the
 // password component -- which fails for the empty-password PAT form
@@ -198,13 +205,6 @@ func redactUserinfo(u *url.URL) string {
 	redacted := *u
 	redacted.User = nil
 	return redacted.String()
-}
-
-func forgeHostOf(u *url.URL) string {
-	if u.Scheme == "http" {
-		return "http://" + u.Host
-	}
-	return u.Host
 }
 
 // stringOrEmpty dereferences s, or returns "" for a nil pointer -- the
