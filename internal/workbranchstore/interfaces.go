@@ -45,5 +45,6 @@ type querier interface {
 	CompleteWorkBranch(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 	MarkWorkBranchConflicted(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 	RecordWorkBranchUpstreamPR(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error)
+	RecordWorkBranchAcceptedTip(ctx context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error)
 	ClearWorkBranchConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
 }

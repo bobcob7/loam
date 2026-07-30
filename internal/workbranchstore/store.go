@@ -56,6 +56,7 @@ type WorkBranch struct {
 	Author           string
 	UpstreamPRURL    *string
 	UpstreamPRNumber *int32
+	AcceptedTip      *string
 	Conflict         Conflict
 	CloseReason      *string
 	CreatedAt        time.Time
@@ -279,23 +280,68 @@ func (s *Store) Complete(ctx context.Context, id uuid.UUID) (WorkBranch, error) 
 // tracking a PR that no accept is watching and silently abandoning the
 // one that is.
 //
-// prNumber must be positive and prURL non-empty; anything else is
-// rejected here, before it can burn the row's one-shot guard on an
-// unusable identity (errInvalidUpstreamPR). There is deliberately no
-// method in this package that clears these columns again.
-func (s *Store) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32) (WorkBranch, error) {
-	if prNumber <= 0 || prURL == "" {
-		return WorkBranch{}, fmt.Errorf("recording upstream PR %q/#%d on work branch %s: %w", prURL, prNumber, id, errInvalidUpstreamPR)
+// prNumber must be positive, and prURL and acceptedTip must both be
+// non-empty; anything else is rejected here, before it can burn the row's
+// one-shot guard on an unusable identity (errInvalidUpstreamPR). There is
+// deliberately no method in this package that clears the url/number pair
+// again.
+//
+// acceptedTip (loam-cgg) is the commit SHA this accept pushed to
+// loam/<name> upstream, written in the SAME guarded statement as the url
+// and number -- RecordWorkBranchUpstreamPR (internal/db/queries/
+// work_branches.sql) sets all three columns in one UPDATE, so a row can
+// never carry a PR number with no recorded tip or the reverse. It is what
+// ListProposals compares against the mirror's live work-branch tip to
+// decide docs/web-spec.md's "PR branch is behind the work branch" clause.
+// A RE-accept that only fast-forwards an already-recorded PR never reaches
+// this method at all (its guard requires upstream_pr_number IS NULL) and
+// refreshes the tip through RecordAcceptedTip instead.
+func (s *Store) RecordUpstreamPR(ctx context.Context, id uuid.UUID, prURL string, prNumber int32, acceptedTip string) (WorkBranch, error) {
+	if prNumber <= 0 || prURL == "" || acceptedTip == "" {
+		return WorkBranch{}, fmt.Errorf("recording upstream PR %q/#%d at tip %q on work branch %s: %w", prURL, prNumber, acceptedTip, id, errInvalidUpstreamPR)
 	}
 	row, err := s.q.RecordWorkBranchUpstreamPR(ctx, gen.RecordWorkBranchUpstreamPRParams{
 		ID:               pgUUID(id),
 		UpstreamPrUrl:    pgText(prURL),
 		UpstreamPrNumber: pgtype.Int4{Int32: prNumber, Valid: true},
+		AcceptedTip:      pgText(acceptedTip),
 	})
 	if err != nil {
 		return WorkBranch{}, s.recordUpstreamPRErr(ctx, id, err)
 	}
-	s.logger.InfoContext(ctx, "recorded upstream PR on work branch", "work_branch_id", id, "pr_url", prURL, "pr_number", prNumber)
+	s.logger.InfoContext(ctx, "recorded upstream PR on work branch", "work_branch_id", id, "pr_url", prURL, "pr_number", prNumber, "accepted_tip", acceptedTip)
+	return fromGenWorkBranch(row), nil
+}
+
+// RecordAcceptedTip refreshes id's accepted_tip (loam-cgg) after a
+// RE-accept that fast-forwarded an already-recorded PR -- the one accept
+// path that never reaches RecordUpstreamPR above, since that method's
+// guard (upstream_pr_number IS NULL) has already failed by the time a
+// re-accept runs. Unlike RecordUpstreamPR this write is unconditional: a
+// re-accept is expected to run any number of times against a branch that
+// already carries a PR (docs/sync-spec.md "Proposal Acceptance":
+// "Re-accepting a caught-up work branch updates the existing PR"), so
+// overwriting the previous tip with the one this accept just pushed is
+// correct every time, not a race to arbitrate the way the first accept's
+// url/number pair is.
+//
+// tip must be non-empty; an empty value is rejected here rather than
+// silently written, for the same reason RecordUpstreamPR rejects one.
+func (s *Store) RecordAcceptedTip(ctx context.Context, id uuid.UUID, tip string) (WorkBranch, error) {
+	if tip == "" {
+		return WorkBranch{}, fmt.Errorf("recording accepted tip on work branch %s: %w", id, errInvalidUpstreamPR)
+	}
+	row, err := s.q.RecordWorkBranchAcceptedTip(ctx, gen.RecordWorkBranchAcceptedTipParams{
+		ID:          pgUUID(id),
+		AcceptedTip: pgText(tip),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WorkBranch{}, fmt.Errorf("recording accepted tip on work branch %s: %w", id, ErrNotFound)
+		}
+		return WorkBranch{}, fmt.Errorf("recording accepted tip on work branch %s: %w", id, err)
+	}
+	s.logger.InfoContext(ctx, "refreshed accepted tip on work branch", "work_branch_id", id, "accepted_tip", tip)
 	return fromGenWorkBranch(row), nil
 }
 
@@ -422,6 +468,7 @@ func fromGenWorkBranch(row gen.WorkBranch) WorkBranch {
 		Author:           row.Author,
 		UpstreamPRURL:    textFromPg(row.UpstreamPrUrl),
 		UpstreamPRNumber: int4FromPg(row.UpstreamPrNumber),
+		AcceptedTip:      textFromPg(row.AcceptedTip),
 		Conflict:         Conflict(row.Conflict),
 		CloseReason:      textFromPg(row.CloseReason),
 		CreatedAt:        row.CreatedAt.Time,

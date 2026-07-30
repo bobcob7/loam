@@ -1,0 +1,21 @@
+-- Adds work_branches.accepted_tip (loam-cgg): the commit SHA a proposal
+-- acceptance last pushed upstream as loam/<name>, recorded so
+-- ListProposals can decide the "PR branch is behind the work branch"
+-- disjunction docs/web-spec.md's proposal definition names, without a git
+-- subprocess against the sync-tick-stale mirrored refs/heads/loam/<name>
+-- copy (the rejected alternative, loam-cgg's bead NOTES).
+--
+-- Nullable, and deliberately so: every row that predates this column, and
+-- every reviewed branch never yet accepted, has no recorded tip at all.
+-- ListProposals must read that NULL as "cannot prove this is caught up",
+-- the same over-inclusion loam-ofg.14 already accepts for a branch with no
+-- upstream_pr_number -- never as "up to date", which would make a
+-- historical row silently vanish from the proposal queue the moment this
+-- migration runs.
+--
+-- No CHECK constraint on shape (a git SHA's hex length depends on the
+-- repository's hash algorithm, SHA-1 or SHA-256): the column is written by
+-- exactly one path, internal/workbranchstore.Store.RecordUpstreamPR /
+-- RecordAcceptedTip, both fed a value internal/gitref resolved directly
+-- from the mirror, never user input.
+ALTER TABLE work_branches ADD COLUMN accepted_tip text;

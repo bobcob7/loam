@@ -376,11 +376,13 @@ func allTransitionsError(err error) *querierMock {
 	}
 }
 
-// TestRecordUpstreamPR_WritesBothColumns proves the happy path passes both
-// values through in one statement -- a row carrying a number with no URL
-// (or the reverse) would be a half-accepted proposal no reader in the tree
-// knows how to interpret.
-func TestRecordUpstreamPR_WritesBothColumns(t *testing.T) {
+// TestRecordUpstreamPR_WritesAllThreeColumns proves the happy path passes
+// the url, the number, AND the accepted tip through in one statement -- a
+// row carrying a number with no URL (or no tip) would be a half-accepted
+// proposal no reader in the tree knows how to interpret, and loam-cgg's
+// ListProposals has nothing to compare against a NULL tip but "not proven
+// up to date".
+func TestRecordUpstreamPR_WritesAllThreeColumns(t *testing.T) {
 	t.Parallel()
 	id := uuid.Must(uuid.NewV7())
 	var got gen.RecordWorkBranchUpstreamPRParams
@@ -388,34 +390,42 @@ func TestRecordUpstreamPR_WritesBothColumns(t *testing.T) {
 		RecordWorkBranchUpstreamPRFunc: func(_ context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
 			got = arg
 			row := validGenRow(id)
-			row.UpstreamPrUrl, row.UpstreamPrNumber = arg.UpstreamPrUrl, arg.UpstreamPrNumber
+			row.UpstreamPrUrl, row.UpstreamPrNumber, row.AcceptedTip = arg.UpstreamPrUrl, arg.UpstreamPrNumber, arg.AcceptedTip
 			return row, nil
 		},
 	}
-	wb, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7)
+	wb, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7, "deadbeef")
 	require.NoError(t, err)
 	assert.Equal(t, "https://forge.example.com/g/r/pulls/7", got.UpstreamPrUrl.String)
 	assert.True(t, got.UpstreamPrUrl.Valid)
 	assert.Equal(t, int32(7), got.UpstreamPrNumber.Int32)
 	assert.True(t, got.UpstreamPrNumber.Valid)
+	assert.Equal(t, "deadbeef", got.AcceptedTip.String)
+	assert.True(t, got.AcceptedTip.Valid)
 	require.NotNil(t, wb.UpstreamPRNumber)
 	assert.Equal(t, int32(7), *wb.UpstreamPRNumber)
+	require.NotNil(t, wb.AcceptedTip)
+	assert.Equal(t, "deadbeef", *wb.AcceptedTip)
 }
 
-// TestRecordUpstreamPR_RejectsAnUnusableIdentity proves a PR number or URL
-// that cannot name a real pull request never reaches the database at all.
-// The column pair has a one-shot guard, so writing #0 would BOTH park the
-// branch in the PR poller's poll set forever and consume the row's single
-// chance to record the real PR.
+// TestRecordUpstreamPR_RejectsAnUnusableIdentity proves a PR number, URL,
+// or accepted tip that cannot name a real pull request/commit never
+// reaches the database at all. The column pair has a one-shot guard, so
+// writing #0 would BOTH park the branch in the PR poller's poll set
+// forever and consume the row's single chance to record the real PR; an
+// empty tip would leave loam-cgg's ListProposals comparison with nothing
+// to compare against.
 func TestRecordUpstreamPR_RejectsAnUnusableIdentity(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		url    string
 		number int32
+		tip    string
 	}{
-		"zero number":     {url: "https://forge.example.com/g/r/pulls/1", number: 0},
-		"negative number": {url: "https://forge.example.com/g/r/pulls/1", number: -3},
-		"empty url":       {url: "", number: 7},
+		"zero number":     {url: "https://forge.example.com/g/r/pulls/1", number: 0, tip: "deadbeef"},
+		"negative number": {url: "https://forge.example.com/g/r/pulls/1", number: -3, tip: "deadbeef"},
+		"empty url":       {url: "", number: 7, tip: "deadbeef"},
+		"empty tip":       {url: "https://forge.example.com/g/r/pulls/1", number: 7, tip: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -426,7 +436,7 @@ func TestRecordUpstreamPR_RejectsAnUnusableIdentity(t *testing.T) {
 					return validGenRow(uuid.Must(uuid.NewV7())), nil
 				},
 			}
-			_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), tc.url, tc.number)
+			_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), tc.url, tc.number, tc.tip)
 			require.ErrorIs(t, err, errInvalidUpstreamPR)
 			assert.Zero(t, calls, "an unusable identity must never reach the guarded UPDATE")
 		})
@@ -448,7 +458,7 @@ func TestRecordUpstreamPR_ZeroRowsWithARecordedNumberIsTheRace(t *testing.T) {
 		},
 		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) { return existing, nil },
 	}
-	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7)
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), id, "https://forge.example.com/g/r/pulls/7", 7, "deadbeef")
 	require.ErrorIs(t, err, ErrPRAlreadyRecorded)
 	assert.NotErrorIs(t, err, ErrNotFound)
 	assert.Contains(t, err.Error(), "42", "the error must name the number that actually won the column")
@@ -467,7 +477,7 @@ func TestRecordUpstreamPR_ZeroRowsWithNoSuchRowIsNotFound(t *testing.T) {
 			return gen.WorkBranch{}, pgx.ErrNoRows
 		},
 	}
-	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7, "deadbeef")
 	require.ErrorIs(t, err, ErrNotFound)
 	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
 }
@@ -486,7 +496,7 @@ func TestRecordUpstreamPR_TransportFailureIsNotDowngraded(t *testing.T) {
 			return gen.WorkBranch{}, errBoom
 		},
 	}
-	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7, "deadbeef")
 	require.ErrorIs(t, err, errBoom)
 	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
 	assert.NotErrorIs(t, err, ErrNotFound)
@@ -506,8 +516,96 @@ func TestRecordUpstreamPR_ClassificationFailureIsNotTheRace(t *testing.T) {
 			return gen.WorkBranch{}, errBoom
 		},
 	}
-	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7)
+	_, err := New(mock, testLogger()).RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://forge.example.com/g/r/pulls/7", 7, "deadbeef")
 	require.ErrorIs(t, err, errBoom)
 	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
 	assert.NotErrorIs(t, err, ErrNotFound)
+}
+
+// TestRecordAcceptedTip_WritesTheColumnUnconditionally proves a re-accept's
+// tip refresh reaches the database with no guard -- unlike
+// RecordUpstreamPR's one-shot url/number pair, this column is expected to
+// be overwritten on every re-accept (loam-cgg).
+func TestRecordAcceptedTip_WritesTheColumnUnconditionally(t *testing.T) {
+	t.Parallel()
+	id := uuid.Must(uuid.NewV7())
+	var got gen.RecordWorkBranchAcceptedTipParams
+	mock := &querierMock{
+		RecordWorkBranchAcceptedTipFunc: func(_ context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+			got = arg
+			row := validGenRow(id)
+			row.AcceptedTip = arg.AcceptedTip
+			return row, nil
+		},
+	}
+	wb, err := New(mock, testLogger()).RecordAcceptedTip(t.Context(), id, "cafef00d")
+	require.NoError(t, err)
+	assert.Equal(t, pgUUID(id), got.ID)
+	assert.Equal(t, "cafef00d", got.AcceptedTip.String)
+	assert.True(t, got.AcceptedTip.Valid)
+	require.NotNil(t, wb.AcceptedTip)
+	assert.Equal(t, "cafef00d", *wb.AcceptedTip)
+}
+
+// TestRecordAcceptedTip_RejectsAnEmptyTip proves an empty tip never reaches
+// the database -- it would leave loam-cgg's ListProposals comparison with
+// nothing to compare against.
+func TestRecordAcceptedTip_RejectsAnEmptyTip(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	mock := &querierMock{
+		RecordWorkBranchAcceptedTipFunc: func(context.Context, gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+			calls++
+			return validGenRow(uuid.Must(uuid.NewV7())), nil
+		},
+	}
+	_, err := New(mock, testLogger()).RecordAcceptedTip(t.Context(), uuid.Must(uuid.NewV7()), "")
+	require.ErrorIs(t, err, errInvalidUpstreamPR)
+	assert.Zero(t, calls, "an empty tip must never reach the UPDATE")
+}
+
+// TestRecordAcceptedTip_NoSuchRowIsNotFound proves a missing id maps to
+// ErrNotFound rather than a bare pgx sentinel.
+func TestRecordAcceptedTip_NoSuchRowIsNotFound(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		RecordWorkBranchAcceptedTipFunc: func(context.Context, gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, pgx.ErrNoRows
+		},
+	}
+	_, err := New(mock, testLogger()).RecordAcceptedTip(t.Context(), uuid.Must(uuid.NewV7()), "cafef00d")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+// TestRecordAcceptedTip_TransportFailureIsNotDowngraded proves a dropped
+// connection is reported as itself, not misread as ErrNotFound.
+func TestRecordAcceptedTip_TransportFailureIsNotDowngraded(t *testing.T) {
+	t.Parallel()
+	mock := &querierMock{
+		RecordWorkBranchAcceptedTipFunc: func(context.Context, gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, errBoom
+		},
+	}
+	_, err := New(mock, testLogger()).RecordAcceptedTip(t.Context(), uuid.Must(uuid.NewV7()), "cafef00d")
+	require.ErrorIs(t, err, errBoom)
+	assert.NotErrorIs(t, err, ErrNotFound)
+}
+
+// TestFromGenWorkBranch_AcceptedTipNullReadsAsNilPointer proves a NULL
+// accepted_tip column (every row that predates loam-cgg, or a reviewed
+// branch never yet accepted) reads back as a nil pointer, never as an
+// empty-but-non-nil string that a caller could mistake for "resolved to
+// nothing" -- the distinction ListProposals's over-inclusion rule depends
+// on (see internal/handler/proposal).
+func TestFromGenWorkBranch_AcceptedTipNullReadsAsNilPointer(t *testing.T) {
+	t.Parallel()
+	id := uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) {
+			return validGenRow(id), nil
+		},
+	}
+	wb, err := New(mock, testLogger()).Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Nil(t, wb.AcceptedTip, "a NULL accepted_tip column must read back as a nil pointer")
 }

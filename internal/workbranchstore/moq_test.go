@@ -47,6 +47,9 @@ var _ querier = &querierMock{}
 //			MarkWorkBranchConflictedFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
 //				panic("mock out the MarkWorkBranchConflicted method")
 //			},
+//			RecordWorkBranchAcceptedTipFunc: func(ctx context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+//				panic("mock out the RecordWorkBranchAcceptedTip method")
+//			},
 //			RecordWorkBranchUpstreamPRFunc: func(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error) {
 //				panic("mock out the RecordWorkBranchUpstreamPR method")
 //			},
@@ -89,6 +92,9 @@ type querierMock struct {
 
 	// MarkWorkBranchConflictedFunc mocks the MarkWorkBranchConflicted method.
 	MarkWorkBranchConflictedFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
+
+	// RecordWorkBranchAcceptedTipFunc mocks the RecordWorkBranchAcceptedTip method.
+	RecordWorkBranchAcceptedTipFunc func(ctx context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error)
 
 	// RecordWorkBranchUpstreamPRFunc mocks the RecordWorkBranchUpstreamPR method.
 	RecordWorkBranchUpstreamPRFunc func(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error)
@@ -164,6 +170,13 @@ type querierMock struct {
 			// ID is the id argument value.
 			ID pgtype.UUID
 		}
+		// RecordWorkBranchAcceptedTip holds details about calls to the RecordWorkBranchAcceptedTip method.
+		RecordWorkBranchAcceptedTip []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.RecordWorkBranchAcceptedTipParams
+		}
 		// RecordWorkBranchUpstreamPR holds details about calls to the RecordWorkBranchUpstreamPR method.
 		RecordWorkBranchUpstreamPR []struct {
 			// Ctx is the ctx argument value.
@@ -195,6 +208,7 @@ type querierMock struct {
 	lockGetWorkBranchByName           sync.RWMutex
 	lockListWorkBranches              sync.RWMutex
 	lockMarkWorkBranchConflicted      sync.RWMutex
+	lockRecordWorkBranchAcceptedTip   sync.RWMutex
 	lockRecordWorkBranchUpstreamPR    sync.RWMutex
 	lockSetWorkBranchTitleDescription sync.RWMutex
 	lockUpdateWorkBranchState         sync.RWMutex
@@ -521,6 +535,42 @@ func (mock *querierMock) MarkWorkBranchConflictedCalls() []struct {
 	mock.lockMarkWorkBranchConflicted.RLock()
 	calls = mock.calls.MarkWorkBranchConflicted
 	mock.lockMarkWorkBranchConflicted.RUnlock()
+	return calls
+}
+
+// RecordWorkBranchAcceptedTip calls RecordWorkBranchAcceptedTipFunc.
+func (mock *querierMock) RecordWorkBranchAcceptedTip(ctx context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error) {
+	if mock.RecordWorkBranchAcceptedTipFunc == nil {
+		panic("querierMock.RecordWorkBranchAcceptedTipFunc: method is nil but querier.RecordWorkBranchAcceptedTip was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.RecordWorkBranchAcceptedTipParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockRecordWorkBranchAcceptedTip.Lock()
+	mock.calls.RecordWorkBranchAcceptedTip = append(mock.calls.RecordWorkBranchAcceptedTip, callInfo)
+	mock.lockRecordWorkBranchAcceptedTip.Unlock()
+	return mock.RecordWorkBranchAcceptedTipFunc(ctx, arg)
+}
+
+// RecordWorkBranchAcceptedTipCalls gets all the calls that were made to RecordWorkBranchAcceptedTip.
+// Check the length with:
+//
+//	len(mockedquerier.RecordWorkBranchAcceptedTipCalls())
+func (mock *querierMock) RecordWorkBranchAcceptedTipCalls() []struct {
+	Ctx context.Context
+	Arg gen.RecordWorkBranchAcceptedTipParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.RecordWorkBranchAcceptedTipParams
+	}
+	mock.lockRecordWorkBranchAcceptedTip.RLock()
+	calls = mock.calls.RecordWorkBranchAcceptedTip
+	mock.lockRecordWorkBranchAcceptedTip.RUnlock()
 	return calls
 }
 
