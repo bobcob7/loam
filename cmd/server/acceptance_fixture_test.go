@@ -53,6 +53,10 @@ const (
 	// acceptanceAddedSymbol does not exist on the seeded commit and is
 	// added by acceptanceAdvancedAuthFile.
 	acceptanceAddedSymbol = "Logout"
+	// acceptanceRenamedSymbol is what acceptanceRenamedAuthContent renames
+	// acceptanceDefinedSymbol to, in acceptanceAuthFile only --
+	// acceptanceHandlerFile's own bytes are never touched by that commit.
+	acceptanceRenamedSymbol = "Authenticate"
 
 	acceptanceAuthFile    = "auth.go"
 	acceptanceHandlerFile = "handler.go"
@@ -153,6 +157,36 @@ func Login(username, password string) bool {
 // Logout ends a signed-in session. It is added by the advance, so
 // finding it proves the index was rebuilt from the new tip.
 func Logout(username string) bool {
+	return strings.TrimSpace(username) != ""
+}
+`
+
+// acceptanceRenamedAuthContent is acceptanceAuthContent with Login
+// renamed to Authenticate -- and nothing else touched: LegacyLogin stays,
+// and acceptanceHandlerFile is never part of this commit. That is the
+// fixture loam-d2b2's rewrite of "Edges reflect the current code even in
+// unchanged files" needs: a rename confined to the DEFINING file, so the
+// referencing file (which still says "Login") is provably unchanged.
+const acceptanceRenamedAuthContent = `// Package app is the acceptance suite's upstream fixture.
+package app
+
+import "strings"
+
+// Authenticate performs password authentication for a username against
+// the stored credentials, reporting whether the supplied password
+// matched.
+func Authenticate(username, password string) bool {
+	if strings.TrimSpace(username) == "" {
+		return false
+	}
+	return password != ""
+}
+
+// LegacyLogin is the superseded entry point. A scenario that advances
+// the target branch removes it, so its disappearance from the graph is
+// how "advancing refreshes the index" is proven in the negative
+// direction.
+func LegacyLogin(username string) bool {
 	return strings.TrimSpace(username) != ""
 }
 `
