@@ -37,12 +37,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/bobcob7/loam/internal/gitrun"
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/refnames"
 )
@@ -52,11 +51,6 @@ import (
 // this package classifies on is a single short line, retained only so a
 // failure message can quote what git actually said.
 const maxStderrBytes = 8 << 10
-
-// subprocessWaitDelay bounds how long a canceled invocation's git process
-// may keep this call's pipes open after the context kills it, matching
-// internal/gitdiff, internal/gitancestry and internal/gitmergetree.
-const subprocessWaitDelay = 5 * time.Second
 
 // ErrMirrorMissing indicates the repo's bare mirror does not exist on disk,
 // or the path mirrorpath.Dir derived is not a valid git repository -- an
@@ -257,75 +251,31 @@ type gitOutput struct {
 // Go error -- gitOutput.exitCode reports it for the caller to classify
 // against git's own stderr -- so only a failure to run git at all comes
 // back as err.
+//
+// GIT_AUTHOR_*/GIT_COMMITTER_* are deliberately absent from the
+// environment this runs with (internal/gitrun.Env): this package only ever
+// moves refs, never creates an object, so git never needs an identity and
+// would never prompt for one.
 func (c *Creator) run(ctx context.Context, mirrorDir string, stdin *strings.Reader, args ...string) (gitOutput, error) {
-	home, err := os.MkdirTemp("", "loam-gitref-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
 		return gitOutput{}, fmt.Errorf("creating isolated git environment: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home)
+	defer cleanup()
+	var stdinReader io.Reader
 	if stdin != nil {
-		cmd.Stdin = stdin
+		stdinReader = stdin
 	}
 	var outBuf bytes.Buffer
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = &outBuf
-	cmd.Stderr = errBuf
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitrun.Env(home), stdinReader, &outBuf, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return gitOutput{stdout: outBuf.String(), stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.String(), stderr: errBuf.String()}, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return gitOutput{stdout: outBuf.String(), stderr: errBuf.buf.String(), exitCode: exitErr.ExitCode()}, nil
+		return gitOutput{stdout: outBuf.String(), stderr: errBuf.String(), exitCode: exitErr.ExitCode()}, nil
 	}
 	return gitOutput{}, fmt.Errorf("running git %v: %w", args, runErr)
-}
-
-// gitEnv builds the environment for one git subprocess invocation: an
-// explicit minimal list rather than os.Environ() plus additions, the same
-// shape and rationale as internal/gitdiff's, internal/gitancestry's and
-// internal/gitmergetree's.
-//
-// GIT_AUTHOR_*/GIT_COMMITTER_* are deliberately absent: this package only
-// ever moves refs, never creates an object, so git never needs an identity
-// and would never prompt for one.
-func gitEnv(home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
-}
-
-// cappedBuffer is an io.Writer retaining only the first max bytes ever
-// written, matching internal/gitancestry's and internal/gitdiff's own.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-// Write implements io.Writer.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
 }

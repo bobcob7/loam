@@ -32,10 +32,14 @@
 // os.Environ()) with GIT_CONFIG_NOSYSTEM and a redirected HOME/
 // XDG_CONFIG_HOME so no host or user gitconfig is ever read; and
 // exec.CommandContext with a WaitDelay so a canceled request's context kills
-// the subprocess. That logic is duplicated here rather than imported --
-// internal/gitdiff exports none of it (run, gitEnv, isMirrorMissingStderr
-// are all unexported) -- rather than refactoring gitdiff's internals while
-// other agents may be concurrently touching unrelated packages in this tree.
+// the subprocess. That plumbing now lives in internal/gitrun (loam-ldx):
+// gitdiff's run/gitEnv had been copied here "verbatim" (this comment's own
+// prior wording) because gitdiff exported none of it, and five further
+// copies elsewhere in this tree made the duplication itself the bug worth
+// fixing -- see internal/gitrun's own package doc comment. Only the
+// classification of a git subcommand's raw exit/stderr into this package's
+// own Plan/error vocabulary stays here, per that package's explicit
+// call: launch mechanics are shared, interpretation is not.
 package diffplan
 
 import (
@@ -44,12 +48,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/bobcob7/loam/internal/gitrun"
 	"github.com/bobcob7/loam/internal/ingest"
 )
 
@@ -65,11 +67,6 @@ import (
 // A package-level var, not a const, so tests can shrink it without
 // materializing thousands of real fixture files.
 var maxIncrementalChanges = 2000
-
-// subprocessWaitDelay mirrors internal/gitdiff's constant of the same name:
-// how long a canceled invocation's process gets to exit on its own before
-// Cmd forces its pipes closed.
-const subprocessWaitDelay = 5 * time.Second
 
 // maxStderrBytes caps captured stderr the same way internal/gitdiff does --
 // git's own error output is always a few lines, never proportional to
@@ -480,80 +477,26 @@ type gitOutput struct {
 }
 
 // run executes one git subcommand against mirrorDir (via --git-dir, never
-// -C), isolated from the host and user gitconfig -- see package doc comment
-// for the full rationale, carried over verbatim from internal/gitdiff's own
-// run/gitEnv.
+// -C), isolated from the host and user gitconfig via internal/gitrun --
+// see that package's own doc comment for the full rationale (loam-ldx
+// folded this package's own run/gitEnv, copied verbatim from
+// internal/gitdiff, and five other identical copies into it).
 func (p *Planner) run(ctx context.Context, mirrorDir string, args ...string) (gitOutput, error) {
-	home, err := os.MkdirTemp("", "loam-diffplan-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
-		return gitOutput{}, fmt.Errorf("creating isolated git environment: %w", err)
+		return gitOutput{}, err
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home)
+	defer cleanup()
 	var outBuf bytes.Buffer
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = &outBuf
-	cmd.Stderr = errBuf
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitrun.Env(home), nil, &outBuf, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return gitOutput{stdout: outBuf.Bytes(), exitCode: 0, stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), exitCode: 0, stderr: errBuf.String()}, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return gitOutput{stdout: outBuf.Bytes(), exitCode: exitErr.ExitCode(), stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), exitCode: exitErr.ExitCode(), stderr: errBuf.String()}, nil
 	}
 	return gitOutput{}, fmt.Errorf("running git %v: %w", args, runErr)
-}
-
-// gitEnv builds the environment for one git subprocess invocation --
-// identical in shape and rationale to internal/gitdiff's own gitEnv: an
-// explicit minimal list (never os.Environ() plus additions), so no system,
-// user-global, or ambient-pointed gitconfig is ever read, and no pager or
-// external-diff driver can block or corrupt output this package never even
-// asks git to produce (name-status and ls-tree output do not go through
-// diff.external, but --no-ext-diff and this isolation are kept anyway for
-// the same belt-and-suspenders reasoning gitdiff documents).
-func gitEnv(home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
-}
-
-// cappedBuffer is an io.Writer retaining only the first max bytes ever
-// written, matching internal/gitdiff's own cappedBuffer -- used here only
-// for stderr (git's own error text is always small), never for stdout,
-// since every stdout this package reads must be read in full to make a
-// correct decision (see gitOutput's doc comment).
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-// Write implements io.Writer, always reporting every byte written (so a
-// subprocess never blocks on a full pipe) while retaining only the first
-// max bytes.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
 }

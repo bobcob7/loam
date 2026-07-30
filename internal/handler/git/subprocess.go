@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
-	"time"
 
+	"github.com/bobcob7/loam/internal/gitrun"
 	"github.com/bobcob7/loam/internal/httpauth"
 )
 
@@ -23,23 +22,24 @@ import (
 // so this handler must do it itself.
 const gitProtocolHeader = "Git-Protocol"
 
-// subprocessWaitDelay bounds two things per (*exec.Cmd).WaitDelay's own
-// doc comment: how long a canceled request's process gets to exit on its
-// own before Wait sends it a Kill, and how long Wait then waits for the
-// PIPES BETWEEN Cmd AND THE CHILD to close before forcibly closing them
-// itself to unblock a goroutine reading the child's stdout or writing the
-// child's stdin. It does NOT bound every possible way this handler's
-// goroutine could stay blocked: measured directly (a client that stalls
-// mid-body while the subprocess is producing output), the stdout-copying
-// goroutine can be blocked inside w.Write itself -- net/http's server
-// draining the unread request body there -- which closing the pipe
-// between Cmd and the child process cannot unblock, since that block is
-// on the RESPONSE side, not the child's own I/O. subprocessWaitDelay is
-// still worth keeping (it is what unblocks the case it actually covers:
-// a child that has exited or been killed but left its own pipes open),
-// it just is not a universal "this handler's goroutine returns within N
-// seconds no matter what" guarantee -- do not read it as one.
-const subprocessWaitDelay = 5 * time.Second
+// The subprocessWaitDelay internal/gitrun.NewCommand sets on every *exec.Cmd
+// it builds (including this package's own, since loam-ldx routed gitCommand
+// through it) bounds two things per (*exec.Cmd).WaitDelay's own doc
+// comment: how long a canceled request's process gets to exit on its own
+// before Wait sends it a Kill, and how long Wait then waits for the PIPES
+// BETWEEN Cmd AND THE CHILD to close before forcibly closing them itself to
+// unblock a goroutine reading the child's stdout or writing the child's
+// stdin. It does NOT bound every possible way this handler's goroutine
+// could stay blocked: measured directly (a client that stalls mid-body
+// while the subprocess is producing output), the stdout-copying goroutine
+// can be blocked inside w.Write itself -- net/http's server draining the
+// unread request body there -- which closing the pipe between Cmd and the
+// child process cannot unblock, since that block is on the RESPONSE side,
+// not the child's own I/O. WaitDelay is still worth keeping (it is what
+// unblocks the case it actually covers: a child that has exited or been
+// killed but left its own pipes open), it just is not a universal "this
+// handler's goroutine returns within N seconds no matter what" guarantee --
+// do not read it as one.
 
 // pktLine encodes s as a single pkt-line: a 4-hex-digit length prefix
 // (the length of the prefix itself PLUS s, per the pkt-line format smart
@@ -67,39 +67,39 @@ var flushPkt = []byte("0000")
 // a request's Context when its underlying connection closes -- kills the
 // subprocess via exec.CommandContext's default Cancel (Process.Kill)
 // rather than leaving it running forever against a mirror nobody is still
-// reading from. subprocessWaitDelay bounds the OTHER half of that: how
-// long Wait keeps the killed process's own pipes open once it has exited
-// (see subprocessWaitDelay's own doc comment for the narrower guarantee
-// this actually is -- it does not bound every way this handler's
-// goroutine could stay blocked).
+// reading from. The returned cleanup func removes this invocation's
+// isolated HOME (see internal/gitrun.NewIsolatedHome) and must be called
+// once the subprocess this built for has exited, however it exited.
 //
-// env is deliberately NOT os.Environ() plus additions: this subprocess
-// serves an agent's clone/push over HTTP, it does not authenticate
-// outward to anything, so none of the ambient credential-helper machinery
-// gittransport.Transport's own gitEnv isolates against (osxkeychain,
-// inherited GIT_* trace/credential vars) is something this process should
-// ever need -- but leaving it in reach anyway, by inheriting the full host
-// environment, is exactly the "an inherited GIT_* var from the server's
-// environment reaching upload-pack is still a real hazard" case this
-// bead's own instructions call out. Building an explicit, minimal
-// environment (PATH so git can find its own libexec helpers,
-// GIT_CONFIG_NOSYSTEM so an ambient system gitconfig's credential.helper
-// can never activate even for some future hook path that talks outward,
-// GIT_TERMINAL_PROMPT=0 so a misconfigured mirror can never block waiting
-// on a tty prompt from a request handler goroutine) costs nothing here and
-// closes that hazard outright rather than trusting every future change to
-// this handler to keep re-deriving why it was safe.
-func gitCommand(ctx context.Context, subcommand, mirrorDir string, extraArgs []string, gitProtocol string, extraEnv []string) *exec.Cmd {
+// loam-ldx: this package was one of four (of what turned out to be seven)
+// carbon copies of the same "run a local git subprocess with hardened,
+// isolated config" pair, and the WEAKEST of them -- unlike its siblings,
+// it built its environment from PATH, GIT_CONFIG_NOSYSTEM, and
+// GIT_TERMINAL_PROMPT alone, with no HOME redirection at all, leaving a
+// user-level ~/.gitconfig on whatever host runs the loam server free to
+// reach every upload-pack/receive-pack invocation (GIT_CONFIG_NOSYSTEM
+// blocks only the SYSTEM gitconfig, not that layer). It now builds its
+// environment through internal/gitrun.Env, same as every other absorbed
+// copy, closing that gap: this subprocess still authenticates outward to
+// nothing (it serves an agent's clone/push over HTTP, never talks to a
+// remote itself), so gitrun.Env's isolation costs nothing here and removes
+// one more place a hardening fix could be applied everywhere else and
+// missed here. GIT_PROTOCOL (from the client's own negotiation header) and
+// extraEnv (the receive-pack CRITICAL SEAM identity vars -- see serveRPC)
+// are appended after gitrun.Env's own list, exactly as before.
+func gitCommand(ctx context.Context, subcommand, mirrorDir string, extraArgs []string, gitProtocol string, extraEnv []string) (*exec.Cmd, func(), error) {
+	home, cleanup, err := gitrun.NewIsolatedHome()
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("creating isolated git environment: %w", err)
+	}
 	args := append([]string{subcommand, "--stateless-rpc"}, extraArgs...)
 	args = append(args, mirrorDir)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.WaitDelay = subprocessWaitDelay
-	env := []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"}
+	env := gitrun.Env(home)
 	if gitProtocol != "" {
 		env = append(env, "GIT_PROTOCOL="+gitProtocol)
 	}
-	cmd.Env = append(env, extraEnv...)
-	return cmd
+	cmd := gitrun.NewCommand(ctx, append(env, extraEnv...), nil, nil, nil, args...)
+	return cmd, cleanup, nil
 }
 
 // advertisementContentType and rpcResultContentType render the two
@@ -145,7 +145,12 @@ func (h *Handler) serveInfoRefs(w http.ResponseWriter, r *http.Request, mirrorDi
 	if _, err := w.Write(flushPkt); err != nil {
 		return
 	}
-	cmd := gitCommand(r.Context(), subcommandFor(service), mirrorDir, []string{"--advertise-refs"}, r.Header.Get(gitProtocolHeader), nil)
+	cmd, cleanup, err := gitCommand(r.Context(), subcommandFor(service), mirrorDir, []string{"--advertise-refs"}, r.Header.Get(gitProtocolHeader), nil)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "git handler: failed to prepare advertise-refs subprocess", "service", service, "mirror", mirrorDir, "error", err)
+		return
+	}
+	defer cleanup()
 	cmd.Stdout = w
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -194,7 +199,13 @@ func (h *Handler) serveRPC(w http.ResponseWriter, r *http.Request, repoName, mir
 		return
 	}
 	defer closeBody()
-	cmd := gitCommand(r.Context(), subcommandFor(service), mirrorDir, nil, r.Header.Get(gitProtocolHeader), extraEnv)
+	cmd, cleanup, err := gitCommand(r.Context(), subcommandFor(service), mirrorDir, nil, r.Header.Get(gitProtocolHeader), extraEnv)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "git handler: failed to prepare rpc subprocess", "service", service, "repo", repoName, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer cleanup()
 	cmd.Stdin = body
 	cmd.Stdout = w
 	var stderr bytes.Buffer
