@@ -399,6 +399,30 @@ func TestSubmitVerdict_PublisherErrors_MappedToConnectCodes(t *testing.T) {
 	}
 }
 
+// TestSubmitVerdict_NotOpenForReview_MessageNamesActualState is loam-jv8f's
+// acceptance test for mapPublishErr's ErrNotOpenForReview/ErrNoCurrentRound
+// case: it used to wrap only handler.ErrFailedPrecondition and discard err
+// entirely, so the message an agent or operator saw ended in the generic
+// "handler: failed precondition" with the actual state
+// (reviewpublish.ErrNotOpenForReview's own "work branch is %s: %w"
+// wrapping) nowhere to be found.
+func TestSubmitVerdict_NotOpenForReview_MessageNamesActualState(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	publisher.PublishFunc = func(context.Context, reviewpublish.Request) (reviewpublish.Result, error) {
+		return reviewpublish.Result{}, fmt.Errorf("work branch is %s: %w", workbranchstore.StateDraft, reviewpublish.ErrNotOpenForReview)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, reviewCaps, &buf)
+	_, err := h.SubmitVerdict(agentCtx(t, "reviewer"), connect.NewRequest(submitRequest(loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE)))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), "work branch is draft", "the actual state must survive -- it used to be discarded in favor of only the generic failed-precondition text")
+	assert.ErrorIs(t, err, reviewpublish.ErrNotOpenForReview, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 // TestSubmitVerdict_RejectedResolve_PublishesNothing is the handler-level
 // half of the atomicity claim in reviewing.feature's "Only the thread's
 // author may resolve it": when the resolve step fails, the caller gets the
@@ -590,6 +614,30 @@ func TestReplyToThread_NoReviewRound_FailedPrecondition(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectCode(t, err))
 	assert.Empty(t, threads.ReplyCalls())
+}
+
+// TestReplyToThread_NotThreadAuthor_MessageNamesAuthorAndActor is loam-jv8f's
+// acceptance test for mapThreadStoreErr's ErrNotThreadAuthor case: it used
+// to wrap only handler.ErrPermissionDenied and discard err, dropping the
+// actual author and actor names (reviewstore's own "thread %s was opened by
+// %s, not %s: %w" wrapping) -- precisely the diagnostic a caller wants.
+func TestReplyToThread_NotThreadAuthor_MessageNamesAuthorAndActor(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	threadID := uuid.New()
+	threads.GetFunc = func(context.Context, uuid.UUID, uuid.UUID) (reviewstore.Thread, error) {
+		return reviewstore.Thread{}, fmt.Errorf("thread %s was opened by %s, not %s: %w", threadID, "grace-hopper-3-author", "ada-lovelace-7-reviewer", reviewstore.ErrNotThreadAuthor)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, reviewCaps, &buf)
+	_, err := h.ReplyToThread(agentCtx(t, "author"), connect.NewRequest(replyRequest(threadID.String())))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), "grace-hopper-3-author", "the actual author must survive -- it used to be discarded in favor of only the generic permission-denied text")
+	assert.Contains(t, connectErr.Message(), "ada-lovelace-7-reviewer", "the actual actor must survive too")
+	assert.ErrorIs(t, err, reviewstore.ErrNotThreadAuthor, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrPermissionDenied)
 }
 
 // verdictRecord builds one reviewstore.VerdictRecord fixture. current is the

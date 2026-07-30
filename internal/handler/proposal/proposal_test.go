@@ -314,6 +314,27 @@ func TestAcceptProposal_ForgeRefusal_FailedPrecondition(t *testing.T) {
 	requireConnectCode(t, err, connect.CodeFailedPrecondition)
 }
 
+// TestAcceptProposal_ForgeRefusal_ChainSurvivesMapping is loam-jv8f's
+// acceptance test for mapAcceptErr: it used to format err with %v instead
+// of %w, so the forge's own refusal text still rendered but
+// errors.Is(mapped, forge.ErrInvalidToken) was false -- the same defect
+// shape as loam-blc/loam-dq0o/loam-c4ab, here as a %v variant rather than a
+// dropped argument.
+func TestAcceptProposal_ForgeRefusal_ChainSurvivesMapping(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	d.accepter.AcceptProposalFunc = func(_ context.Context, _ mirrorsync.RepoID, _ string) (mirrorsync.AcceptResult, error) {
+		return mirrorsync.AcceptResult{}, fmt.Errorf("opening upstream PR: %w", forge.ErrInvalidToken)
+	}
+	_, err := d.handler().AcceptProposal(adminCtx(t), connect.NewRequest(&adminv1.AcceptProposalRequest{Repo: "acme/widgets", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	var connErr *connect.Error
+	require.ErrorAs(t, err, &connErr)
+	assert.Contains(t, connErr.Message(), forge.ErrInvalidToken.Error(), "the forge's own refusal text must still render")
+	assert.ErrorIs(t, err, forge.ErrInvalidToken, "the sentinel must survive the mapping via errors.Is, not just as rendered text -- %v formatting broke this even though the message looked fine")
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 // TestAcceptProposal_TransportFailure_Internal is the other half: a call
 // that FAILED (the push never completed) is not a refusal the admin can
 // act on, so it stays loud -- CodeInternal, and logged.

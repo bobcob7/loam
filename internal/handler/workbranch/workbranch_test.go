@@ -744,6 +744,40 @@ func TestRequestReview_TerminalState_MessageNamesTerminalState(t *testing.T) {
 	assert.NotContains(t, connectErr.Message(), "title or description")
 }
 
+// TestRequestReview_TerminalState_MessageNamesIllegalTransition is
+// loam-jv8f's acceptance test for mapRequestReviewErr, mirroring loam-dq0o's
+// TestUpdateWorkBranch_TerminalState_MessageNamesIllegalTransition: the
+// mapper used to wrap only requestReviewPreconditionMessage(before) and
+// handler.ErrFailedPrecondition, discarding workbranchstore.ErrIllegalTransition
+// entirely, so errors.Is(mapped, workbranchstore.ErrIllegalTransition) was
+// false.
+func TestRequestReview_TerminalState_MessageNamesIllegalTransition(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+		return sampleTitledWorkBranch(workbranchstore.StateClosed), nil
+	}
+	// The stub names a FRESH random UUID, distinct from sampleWorkBranchID,
+	// so the assertion cannot be satisfied textually by the handler's own
+	// context prefix ("requesting review on work branch
+	// bobcob7/doc-server/wb-9c2f1a" never contains the id) -- only actually
+	// preserving err can put it in the message. Mirrors the trap
+	// loam-dq0o's precedent test deliberately set up.
+	freshID := uuid.New()
+	workBranches.UpdateStateFunc = func(_ context.Context, _ uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		return workbranchstore.WorkBranch{}, fmt.Errorf("transitioning to %s work branch %s: %w", to, freshID, workbranchstore.ErrIllegalTransition)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRequestReview}, &buf)
+	_, err := h.RequestReview(agentCtx(t, "author"), connect.NewRequest(&loamv1.RequestReviewRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Contains(t, connectErr.Message(), freshID.String(), "the store's own wrapping (naming which work branch failed) must survive -- it used to be discarded in favor of only the hand-written precondition message")
+	assert.ErrorIs(t, err, workbranchstore.ErrIllegalTransition, "the sentinel must survive the mapping, not just the Connect code")
+	assert.ErrorIs(t, err, handler.ErrFailedPrecondition)
+}
+
 func TestRequestReview_MissingTitleOrDescription_MessageNamesMissingFields(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
