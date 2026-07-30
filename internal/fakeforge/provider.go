@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/bobcob7/loam/internal/forge"
@@ -191,6 +192,7 @@ func (s *Server) handleProviderClosePR(w http.ResponseWriter, r *http.Request) {
 // this; forge does not import fakeforge, so there is no cycle.
 type Client struct {
 	baseURL string
+	host    string
 	token   string
 	http    *http.Client
 }
@@ -202,9 +204,22 @@ var _ forge.Provider = (*Client)(nil)
 
 // NewClient builds a Client bound to one fake forge Server at baseURL
 // (e.g. an httptest.Server's URL), authenticating provider REST calls with
-// token.
+// token. baseURL's host is recorded as the Client's bound host (see
+// CheckRepo), mirroring how Forgejo.NewForgejo binds a Provider to the host
+// its credential belongs to.
 func NewClient(baseURL, token string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{}}
+	trimmed := strings.TrimRight(baseURL, "/")
+	return &Client{baseURL: trimmed, host: hostOf(trimmed), token: token, http: &http.Client{}}
+}
+
+// hostOf extracts the host[:port] component from a URL, or returns rawURL
+// unchanged if it does not parse as one.
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Host
 }
 
 // ValidateToken confirms token is accepted by the forge at host. It
@@ -227,7 +242,23 @@ func (c *Client) ValidateToken(ctx context.Context, host, token string) error {
 // indistinguishable from a repo that doesn't exist, so it is classified
 // the same way; a read that succeeds but a write probe that is denied
 // means the repo exists but the token lacks push access.
+//
+// Before any of that, upstreamURL's host is checked against the Client's
+// own bound host (the host baseURL named at NewClient), matching
+// Forgejo.CheckRepo's bound-host guard (internal/forge/forgejo_git.go): a
+// token bound to one forge host must never be sent to a caller-supplied
+// URL on a different host, so a mismatch is refused outright, before any
+// network probe, with a plain error that (like the real guard's) matches
+// no forge.Provider sentinel — this is a rejection on its own terms, not a
+// "repo not found" or "no write access" (loam-6n3).
 func (c *Client) CheckRepo(ctx context.Context, upstreamURL string) error {
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		return fmt.Errorf("checking repo %s: parsing upstream URL: %w", upstreamURL, err)
+	}
+	if u.Host != c.host {
+		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q: %w", upstreamURL, u.Host, c.host, errInvalidUpstream)
+	}
 	if err := c.probeInfoRefs(ctx, upstreamURL, "git-upload-pack"); err != nil {
 		return fmt.Errorf("checking repo %s: %w", upstreamURL, errRepoNotFound)
 	}

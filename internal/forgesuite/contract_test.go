@@ -43,9 +43,9 @@
 //
 // # Deliberate exclusions
 //
-// Two behaviours are knowingly NOT asserted, because the two
-// implementations genuinely differ and the divergence is documented rather
-// than papered over:
+// One behaviour is knowingly NOT asserted, because the two implementations
+// genuinely differ and the divergence is documented rather than papered
+// over:
 //
 //   - CreatePR with a nonexistent HEAD branch. Forgejo 9.0.3 answers HTTP
 //     500 with a leaked git error ("exit status 128: ... fatal: bad
@@ -55,15 +55,13 @@
 //     Mimicking would mean inventing a git error string in the double.
 //     internal/forge/provider_test.go and internal/fakeforge/errors.go
 //     already pin both halves; see loam-9qu.
-//   - CheckRepo against a URL whose host differs from the Provider's bound
-//     host. Forgejo.CheckRepo refuses outright (forgejo_git.go's bound-host
-//     guard, so a token for one forge is never sent to another);
-//     fakeforge.Client.CheckRepo has no such guard and will happily probe
-//     any URL. That is a REAL divergence, found by this bead and filed as
-//     loam-6n3 rather than quietly patched here — the fake's job is to be
-//     honest about the real provider, and changing it is a fakeforge change
-//     with its own review. When loam-6n3 lands, delete this bullet and add
-//     the row.
+//
+// CheckRepo against a URL whose host differs from the Provider's bound host
+// USED to be excluded here for the same reason (loam-6n3): Forgejo.CheckRepo
+// refuses outright (forgejo_git.go's bound-host guard) while
+// fakeforge.Client.CheckRepo had no such guard and would happily probe any
+// URL. loam-6n3 added the guard to the fake, so this is now asserted below
+// as CheckRepo/BoundHostMismatchIsRejected rather than excluded.
 //
 // One further divergence is absorbed by the harnesses rather than excluded,
 // and is worth knowing about when reading Token: the fake models a token's
@@ -252,6 +250,23 @@ var contractCases = []contractCase{
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrNoWriteAccess)
 		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "the read probe passed, so this is not a missing repo")
+	}},
+	{"CheckRepo/BoundHostMismatchIsRejected", func(t *testing.T, e *env) {
+		// loam-6n3: a Provider is bound to one host's credential, so a
+		// CheckRepo call against a URL on a DIFFERENT host must be refused
+		// outright, before any network probe — a token for one forge must
+		// never be sent to another. This is asserted as its own class,
+		// distinct from both "repo not found" (the repo may well exist on
+		// that foreign host) and "no write access" (the probe never runs).
+		// The foreign host uses the reserved .invalid TLD (RFC 2606) so DNS
+		// can never accidentally resolve it, making this deterministic
+		// regardless of what actually answers the bound host.
+		repo := e.h.SeedRepo(t)
+		foreignURL := withForeignHost(t, repo.GitURL)
+		err := e.provider(t, TokenFull).CheckRepo(t.Context(), foreignURL)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a bound-host mismatch must be rejected on its own terms, not folded into repo-not-found")
+		assert.NotErrorIs(t, err, forge.ErrNoWriteAccess, "a bound-host mismatch is not a permissions problem")
 	}},
 	{"CheckRepo/BogusTokenFoldsIntoRepoNotFound", func(t *testing.T, e *env) {
 		// Both implementations deliberately FOLD "the credential was
@@ -553,6 +568,20 @@ func pushSyntheticBranches(t *testing.T, dir string, repo Repo, branches ...stri
 		args = append(args, "refs/heads/"+branch+":refs/heads/"+branch)
 	}
 	runGit(t, dir, args...)
+}
+
+// withForeignHost returns gitURL with its host replaced by one that is
+// guaranteed to differ from whatever host the Provider under test is bound
+// to, using the reserved .invalid TLD (RFC 2606) so DNS resolution of the
+// foreign host can never accidentally succeed — the point of this helper is
+// to prove the bound-host guard fires BEFORE any network probe, not to
+// exercise what happens when the foreign host actually answers.
+func withForeignHost(t *testing.T, gitURL string) string {
+	t.Helper()
+	u, err := url.Parse(gitURL)
+	require.NoError(t, err)
+	u.Host = "bound-to-a-different-forge.invalid"
+	return u.String()
 }
 
 // withCredentials returns rawURL with username/password embedded as HTTP

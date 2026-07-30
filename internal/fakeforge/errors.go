@@ -58,6 +58,15 @@ import (
 // "unexpected status" branch. statusForErr (control.go) already mapped
 // this sentinel to 412, so the fake's wire behavior is unchanged by that
 // bead — only the class a Client reconstructs from it on the way back.
+//
+// errInvalidUpstream deliberately wraps no forge sentinel: it is now
+// raised by Client.CheckRepo's bound-host guard (provider.go), matching
+// Forgejo.CheckRepo's own guard (internal/forge/forgejo_git.go), which
+// returns a plain fmt.Errorf rather than one of forge's sentinels. Before
+// loam-6n3, this sentinel was declared and wired into errorCodes/
+// statusForErr but never actually returned — the fake had no bound-host
+// notion at all, a real divergence from the real provider (see CheckRepo's
+// doc comment).
 var (
 	errUnauthorized         = fmt.Errorf("fakeforge: unauthorized: %w", forge.ErrInvalidToken)
 	errRepoNotFound         = fmt.Errorf("fakeforge: repo not found: %w", forge.ErrRepoNotFound)

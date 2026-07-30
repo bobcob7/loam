@@ -1,6 +1,7 @@
 package fakeforge
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,30 @@ func TestClientCheckRepo(t *testing.T) {
 	ro := NewClient(ts.URL, "ro-token")
 	assert.ErrorIs(t, ro.CheckRepo(ctx, srv.GitURL("acme/widgets")), errNoWriteAccess)
 	assert.ErrorIs(t, rw.CheckRepo(ctx, srv.GitURL("acme/nope")), errRepoNotFound)
+}
+
+// TestClientCheckRepoRejectsForeignHost covers loam-6n3: a Client is bound
+// to the host named in its baseURL (NewClient), and CheckRepo must refuse a
+// caller-supplied URL on any OTHER host before ever probing it — mirroring
+// Forgejo.CheckRepo's own bound-host guard (internal/forge/forgejo_git.go),
+// which exists so a token for one forge is never sent to a different host
+// just because a caller passed an arbitrary URL. Before this bead,
+// Client.CheckRepo had no such guard at all and would probe whatever URL it
+// was handed.
+func TestClientCheckRepoRejectsForeignHost(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	srv, ts := newTestServer(t)
+	ctx := t.Context()
+	require.NoError(t, srv.SeedRepoFiles(ctx, "acme/widgets", map[string][]byte{"a": []byte("b")}, SeedOptions{}))
+	srv.AddToken("rw-token")
+	client := NewClient(ts.URL, "rw-token")
+	foreignURL := "http://bound-to-a-different-forge.invalid" + strings.TrimPrefix(srv.GitURL("acme/widgets"), ts.URL)
+	err := client.CheckRepo(ctx, foreignURL)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errInvalidUpstream)
+	assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a bound-host mismatch must be rejected on its own terms, not folded into repo-not-found")
+	assert.NotErrorIs(t, err, forge.ErrNoWriteAccess, "a bound-host mismatch is not a permissions problem")
 }
 
 // TestClientCheckRepoUnregisteredTokenLooksLikeRepoNotFound documents that
