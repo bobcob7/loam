@@ -701,8 +701,17 @@ func proposalFor(proposals []*adminv1.Proposal, repo, name string) (*adminv1.Pro
 // The first accept's URL and upstream-branch SHA are latched separately
 // (world.upstreamPRURL, world.firstUpstreamBranchSHA) so a re-accept has
 // something to be compared against that is not simply its own output.
+//
+// world.accepterOverride, when a scenario has set one, is used INSTEAD of
+// the harness's own h.accepter -- see its doc comment on acceptanceWorld
+// for why the PRAttribution knob needs a scenario-scoped accepter rather
+// than a process-wide env var flip.
 func (h *acceptanceHarness) acceptProposalForReal(ctx context.Context, world *acceptanceWorld) error {
-	result, err := h.accepter.AcceptProposal(ctx, mirrorsync.RepoID(world.repo()), world.workBranch)
+	accepter := h.accepter
+	if world.accepterOverride != nil {
+		accepter = world.accepterOverride
+	}
+	result, err := accepter.AcceptProposal(ctx, mirrorsync.RepoID(world.repo()), world.workBranch)
 	if err != nil {
 		return fmt.Errorf("accepting proposal %s in repo %s: %w", world.workBranch, world.repo(), err)
 	}

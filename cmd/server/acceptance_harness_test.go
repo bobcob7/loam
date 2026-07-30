@@ -98,11 +98,24 @@ func newAcceptanceHarness(t *testing.T, srv acceptanceServer, forge *fakeforge.S
 // loam-giq.7 landed the only way to reach the poller at all was to seed
 // the column directly (see stepAnAcceptedWorkBranchWhosePRHasMerged).
 func newAcceptanceAccepter(srv acceptanceServer, transport *gittransport.Transport, forgeClient *fakeforge.Client, cfg config.Config) *mirrorsync.StoreProposalAccepter {
+	return newAcceptanceAccepterWithAttribution(srv, transport, forgeClient, cfg.PRAttribution)
+}
+
+// newAcceptanceAccepterWithAttribution is newAcceptanceAccepter's own
+// construction, factored out so a scenario that means to exercise the
+// PRAttribution knob itself (features/sync.feature's "the server is
+// configured without PR attribution") can build a second, scenario-scoped
+// *mirrorsync.StoreProposalAccepter over the SAME live pool, transport, and
+// fake-forge client the harness's own h.accepter uses -- differing only in
+// the one bool this package has no other seam to vary per scenario, since
+// LOAM_PR_ATTRIBUTION is read once, process-wide, before TestFeatures'
+// single shared server ever boots (acceptanceConfig).
+func newAcceptanceAccepterWithAttribution(srv acceptanceServer, transport *gittransport.Transport, forgeClient *fakeforge.Client, attribution bool) *mirrorsync.StoreProposalAccepter {
 	logger := acceptanceLogger()
 	repoStore := reposstore.NewStore(gen.New(srv.pool), logger)
 	workBranchStore := workbranchstore.New(gen.New(srv.pool), logger)
 	tips := gitref.New(srv.dataDir)
-	return mirrorsync.NewStoreProposalAccepter(srv.dataDir, logger, cfg.PRAttribution, repoStore, workBranchStore, workBranchStore, forgeClient, transport, tips)
+	return mirrorsync.NewStoreProposalAccepter(srv.dataDir, logger, attribution, repoStore, workBranchStore, workBranchStore, forgeClient, transport, tips)
 }
 
 // staticTokenCredentialSource is a minimal credentialSource (gittransport's
