@@ -105,6 +105,28 @@ func TestListen_PathTooLongForADirectBindFailsLoudlyAtStartup(t *testing.T) {
 	assert.Contains(t, err.Error(), "sun_path", "the error must name the actual constraint so an operator can act on it")
 }
 
+// TestListen_DirectoryAtSocketPathIsRefusedNotDeleted is the regression
+// test for the bug loam-lv9f fixed: Listen used to clear a stale socket
+// with os.RemoveAll, which recurses. socketPath is built from
+// LOAM_DATA_DIR, an operator-supplied value this program does not fully
+// control, so a misconfigured path landing on a real directory must be
+// refused -- not recursively deleted. A happy-path test alone (a missing
+// path, or a genuine stale socket) would not catch a regression back to
+// RemoveAll, since both those cases succeed under either call; this test
+// puts a file inside the directory and asserts it survives Listen's
+// failed attempt.
+func TestListen_DirectoryAtSocketPathIsRefusedNotDeleted(t *testing.T) {
+	t.Parallel()
+	base := shortTempDir(t)
+	socketPath := filepath.Join(base, "hook.sock")
+	require.NoError(t, os.Mkdir(socketPath, 0o755))
+	survivorPath := filepath.Join(socketPath, "survivor")
+	require.NoError(t, os.WriteFile(survivorPath, []byte("keep me"), 0o644))
+	_, err := Listen(socketPath, &WorkBranchStoreMock{}, nil, testLogger())
+	require.Error(t, err, "Listen must refuse to bind over a directory at the socket path rather than recursively deleting it")
+	assert.FileExists(t, survivorPath, "a directory (and its contents) found at the socket path must survive a failed Listen -- proof this isn't os.RemoveAll under the hood")
+}
+
 // TestServer_AllowedPush_RoundTrip proves a genuinely allowed push travels
 // the FULL real wire: a real unix socket, real JSON encode/decode on both
 // sides, real refpolicy.EvaluatePush underneath.
