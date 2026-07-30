@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 
@@ -175,6 +176,28 @@ type acceptanceWorld struct {
 	// step's decoded `loam instructions` response.
 	configuredRoleInstructions string
 	lastInstructions           acceptanceInstructionsOutput
+	// The role-authorization state (acceptance_roles_test.go, loam-tpze).
+	// lastRoles is the ListRoles response "Built-in roles ship with sane
+	// defaults" reads. customRole is the name of any admin-defined role a
+	// scenario created (currently only "Updating a role changes what its
+	// agents may do"'s "release-captain"), so afterScenario can delete it --
+	// without that, a fixed literal role name would collide with
+	// roles_name_key the next time this suite's binary runs against a fresh
+	// database seeded from the SAME feature file. lastDenialCheck is how the
+	// two "I try to ..." denial steps this file's "may not" scenarios use
+	// hand their own DECISIVE assertion (an exact CLI error code, or the
+	// git-transport's own "missing <capability> capability" reason) to the
+	// shared "the operation is denied" Then step that follows either of
+	// them -- necessary because that one Gherkin sentence is reused for two
+	// physically different failure channels (a JSON RPC error from the
+	// compiled CLI, and a 403 from the git smart-HTTP capability gate), and
+	// only the specific step that just drove one of them knows which
+	// fingerprint to check. It is nilled out the moment it is consumed, so a
+	// scenario with two denials in a row (start, then push) can never let
+	// the second "Then" vacuously re-check the first attempt's outcome.
+	lastRoles        []*adminv1.Role
+	customRole       string
+	lastDenialCheck  func() error
 	// The instructions/whoami orientation state
 	// (acceptance_instructions_test.go, loam-gp31). currentActor is the
 	// agent identity features/instructions.feature's Background names, so
@@ -423,7 +446,26 @@ func (h *acceptanceHarness) afterScenario(ctx context.Context, _ *godog.Scenario
 			return ctx, err
 		}
 	}
+	if world.customRole != "" {
+		if err := h.deleteCustomRole(teardownCtx, world.customRole); err != nil {
+			return ctx, err
+		}
+	}
 	return ctx, nil
+}
+
+// deleteCustomRole removes an admin-defined role a scenario created
+// (acceptance_roles_test.go's world.customRole), so the next run of this
+// suite's binary against a fresh database does not collide with
+// roles_name_key on the same fixed literal name. It is not used for
+// author/reviewer: those are built-in and this exact RPC would refuse them
+// anyway (features/roles.feature's own "Built-in roles cannot be deleted").
+func (h *acceptanceHarness) deleteCustomRole(ctx context.Context, name string) error {
+	_, err := h.newRoleServiceClient().DeleteRole(ctx, connect.NewRequest(&adminv1.DeleteRoleRequest{Name: name}))
+	if err != nil {
+		return fmt.Errorf("removing this scenario's custom role %s: %w", name, err)
+	}
+	return nil
 }
 
 // teardownSecondRepo mirrors afterScenario's own primary-repo teardown
