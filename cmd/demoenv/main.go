@@ -45,6 +45,8 @@
 //	                 fixture-polyglot, until signalled
 //	upstream-m5      the same pair for demo:m5, with a Forgejo-REST-shaped
 //	                 pull-request surface in front of the fake forge
+//	embed            host the fake embedder alone, for stacks (test:e2e)
+//	                 that already have a real upstream forge
 //	advance          rewrite the upstream target branch (force-push) and
 //	                 delete the branch whose prune the demo asserts
 //	conflicting-advance  advance the target branch so it no longer merges
@@ -79,6 +81,7 @@ usage: demoenv <subcommand> [flags]
 subcommands:
   upstream             host the fake forge + fake embedder, seeded with fixture-polyglot
   upstream-m5          the same, with a Forgejo-REST-shaped pull-request surface in front
+  embed                host the fake embedder alone, for a stack with a real upstream forge
   advance              force-push the upstream target branch and delete the pruned branch
   conflicting-advance  advance the target branch so open work branches no longer merge
   fixture-file         print one of demo:m5's fixture blobs verbatim
@@ -112,6 +115,8 @@ func main() {
 		err = runUpstream(ctx, logger, os.Args[2:])
 	case "upstream-m5":
 		err = runUpstreamM5(ctx, logger, os.Args[2:])
+	case "embed":
+		err = runEmbed(ctx, logger, os.Args[2:])
 	case "advance":
 		err = runAdvance(ctx, os.Args[2:])
 	case "conflicting-advance":

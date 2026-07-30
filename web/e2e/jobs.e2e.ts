@@ -19,23 +19,16 @@ import { e2eEnv, expect, test } from "./fixtures";
  * web-first (auto-retrying up to an explicit timeout).
  */
 test.describe("jobs journey", () => {
-  test("reindexing an enrolled repo enqueues a job that is visible and runs to a terminal state", async ({
+  test("reindexing an enrolled repo enqueues a job that is visible and runs to SUCCEEDED", async ({
     page,
   }) => {
     // Well above the default 30s (playwright.config.ts): the real
     // ingest.Pool worker wakes up immediately on enqueue (Pool.wakeUp,
     // internal/ingest/pool.go), but Jobs.tsx only ever learns the result via
-    // its own 5s poll, and this environment's server (task test:e2e,
-    // Taskfile.yml) is never given a reachable embedder -- no Ollama
-    // container in deploy/docker-compose.e2e.yml, and no LOAM_EMBEDDER_URL
-    // override in that task -- so the job's real, observed path here is
-    // QUEUED -> RUNNING -> FAILED once ingestion reaches the embed step and
-    // internal/ingest/embed/ollama.Embedder.Embed's real HTTP call to
-    // http://localhost:11434 refuses the connection. That failure is a
-    // genuine, deliberate consequence of this stack's fixture choices, not
-    // a bug this spec works around: see this bead's final report. A
-    // terminal FAILED is exactly as valid a proof of "the job ran" as a
-    // terminal SUCCEEDED would be, so this spec asserts on either.
+    // its own 5s poll, and a real embed step (see loam-1dmg: task test:e2e
+    // now boots cmd/demoenv embed, an Ollama-wire-shaped
+    // internal/fakeembed server, and points LOAM_EMBEDDER_URL at it) takes
+    // real wall-clock time on top of that poll interval.
     test.setTimeout(60_000);
 
     await page.goto("/jobs");
@@ -73,53 +66,24 @@ test.describe("jobs journey", () => {
     // Checks EVERY row matching this repo, not just the topmost one, and
     // reads each row's status + both timestamps from ONE snapshot
     // (`allInnerTexts`, a single round trip per row) rather than as separate
-    // sequential `expect()` calls. Both of those choices are load-bearing,
-    // not defensive over-engineering -- confirmed directly while building
-    // this spec, across three real `task test:e2e` runs against this exact
-    // stack:
-    //
-    //   - This environment's server has no reachable embedder (no Ollama
-    //     container in deploy/docker-compose.e2e.yml, no LOAM_EMBEDDER_URL
-    //     override in task test:e2e's Taskfile.yml target), so every job
-    //     that reaches the embed step fails --
-    //     internal/ingest/embed/ollama.Embedder.Embed's real HTTP call to
-    //     http://localhost:11434 gets connection-refused -- and
-    //     internal/ingest/pool.go's fail() then schedules a retry after
-    //     exponential backoff (scheduleRetry), reclaiming the same row and
-    //     cycling it through RUNNING again indefinitely. A terminal FAILED
-    //     is exactly as valid a proof of "the job ran" as a terminal
-    //     SUCCEEDED would be, so this checks for either.
-    //   - Because ReindexRepo's Enqueue only coalesces onto an existing
-    //     QUEUED row, not a FAILED one (internal/ingest/pool.go's Enqueue,
-    //     its own doc comment: "a trigger arriving while a same-key job is
-    //     in status 'failed' (mid-backoff) inserts a new queued row
-    //     alongside the eventual retry, rather than being absorbed by it"),
-    //     clicking Reindex while ./enroll.e2e.ts's own enrollment-triggered
-    //     FULL job for this repo is failed-and-waiting-to-retry (which it
-    //     reliably is by the time this spec runs, since it can never
-    //     succeed in this stack) inserts a genuinely SEPARATE second row,
-    //     not a reuse of the first -- observed directly, a real run's page
-    //     snapshot: one row QUEUED/attempts=0 (the reindex click's own new
-    //     row) alongside another FAILED/attempts=2 with a real
-    //     "connection refused" error (the enroll-triggered job, already a
-    //     few retries in).
-    //   - `queued_at DESC` ordering (internal/ingest/list.go's ListJobs) is
-    //     therefore not a stable way to pick "the" row: scheduleRetry bumps
-    //     a row's own `queued_at` to `now()` on every retry, so whichever of
-    //     the two rows most recently retried becomes topmost, continuously
-    //     trading places -- this is IngestJob carrying no id across the wire
-    //     (loam-1wpa) actually biting, not a hypothetical. An earlier
-    //     version of this spec picked only `.first()`, and confirmed
-    //     directly against a real run: the topmost row was a freshly
-    //     requeued attempt (QUEUED, attempts=0, no timestamps yet) while the
-    //     OTHER row, in the very same DOM snapshot, was already FAILED with
-    //     both timestamps populated -- a real, reproducible false negative
-    //     from scoping to the wrong row, not a timing miss. Checking every
-    //     matching row removes that ambiguity: this spec does not claim to
-    //     know which physical row is "the one Reindex enqueued" (loam-1wpa
-    //     makes that unknowable from the UI at all), only that a real FULL
-    //     ingest job for this repo, triggered into existence by this test's
-    //     own click, genuinely ran to a terminal state.
+    // sequential `expect()` calls. Both choices remain load-bearing even
+    // now that the stack has a real embedder (loam-1dmg): ReindexRepo's
+    // Enqueue only coalesces onto an existing QUEUED row
+    // (internal/ingest/pool.go's own doc comment), so clicking Reindex
+    // while ./enroll.e2e.ts's own enrollment-triggered FULL job for this
+    // repo is anywhere past QUEUED -- RUNNING, or already terminal --
+    // inserts a genuinely SEPARATE second row, not a reuse of the first.
+    // `queued_at DESC` ordering (internal/ingest/list.go's ListJobs) is
+    // therefore not a stable way to pick "the" row up front, and
+    // IngestJob carries no id across the wire (loam-1wpa), so this spec
+    // does not claim to know which physical row is "the one Reindex
+    // enqueued" -- only that a real FULL ingest job for this repo,
+    // triggered into existence by this test's own click, genuinely
+    // reaches SUCCEEDED. Requiring SUCCEEDED (not "SUCCEEDED or FAILED")
+    // is loam-1dmg's whole point: task test:e2e now boots a real fake
+    // embedder (cmd/demoenv embed) and points LOAM_EMBEDDER_URL at it, so
+    // a FAILED terminal state here would mean the fix regressed, not that
+    // the job merely "ran".
     await expect
       .poll(
         async () => {
@@ -136,7 +100,15 @@ test.describe("jobs journey", () => {
             const status = texts[3];
             const started = texts[6];
             const finished = texts[7];
-            if (kind === "Full" && (status === "Succeeded" || status === "Failed") && started !== "—" && finished !== "—") {
+            // A terminal FAILED here (loam-1dmg) means the embedder fix
+            // regressed, not that the job merely "ran" -- fail fast with
+            // the row's own error text rather than let the poll time out
+            // silently after 45s.
+            if (kind === "Full" && status === "Failed") {
+              const errorText = texts[8] ?? "(no error column)";
+              throw new Error(`a Full ingest job for ${e2eEnv.repoIdentifier} reached FAILED, not SUCCEEDED: ${errorText}`);
+            }
+            if (kind === "Full" && status === "Succeeded" && started !== "—" && finished !== "—") {
               return true;
             }
           }

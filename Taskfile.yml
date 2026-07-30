@@ -345,6 +345,21 @@ tasks:
           reason documented on those targets: go-task's shell (mvdan/sh)
           does not run an EXIT trap on its own SIGINT interception, so a
           Ctrl-C'd previous run can leak either one.
+        - THE EMBEDDER (loam-1dmg) is `cmd/demoenv embed` --
+          internal/fakeembed hosted alone, as a plain host process, the
+          same "fake the far side, drive the real near side" trade demo:m3
+          makes for its own stack (see demo:m3's own desc for the full
+          reasoning): LOAM_EMBEDDER_URL still points the server's real,
+          shipped ollama.Embedder at it, so only the model's output is
+          faked. Without this, ingest can never leave the embed step here
+          (internal/config's default LOAM_EMBEDDER_URL is a local Ollama
+          nothing in this stack provides) and pool.go's retry reclaims the
+          same row forever rather than ever reaching SUCCEEDED. Not a
+          compose service: this stack already runs the server itself
+          directly on the host rather than in a container (see
+          deploy/docker-compose.e2e.yml's own header comment on why), and
+          the embedder follows the same shape demo:m3 already established
+          rather than a new one.
     cmds:
       - task: build:bin
       - |
@@ -381,6 +396,17 @@ tasks:
         export LOAM_E2E_PG_PORT="$pg_port"
         export LOAM_E2E_FORGEJO_PORT="$forgejo_port"
         server_addr="127.0.0.1:${LOAM_E2E_SERVER_PORT:-8099}"
+        # embed_port: the fake embedder (cmd/demoenv embed, internal/fakeembed)
+        # this target boots as a plain host process, same shape as
+        # demo:m3's own embed_port -- not a compose service, since this
+        # stack's real dependency (a real Forgejo) is already the point of
+        # deploy/docker-compose.e2e.yml and the server binary itself is
+        # already run directly on the host (see that file's own header
+        # comment on why). Independently overridable, like pg_port/
+        # forgejo_port above, so concurrent namespaced runs can each pick a
+        # free host port.
+        embed_port="${LOAM_E2E_EMBED_PORT:-11534}"
+        embed_addr="127.0.0.1:$embed_port"
         admin_user="admin"
         admin_password="e2e-Loam-Admin-Passw0rd1"
         # A fixed, non-secret AES-256 key -- the same value demo:m2 already
@@ -394,6 +420,7 @@ tasks:
         repo_name="e2e-repo"
         repo_identifier="$forgejo_admin_user/$repo_name"
         target_branch="main"
+        demoenv_bin="$repo_root/bin/demoenv"
         data_dir=""
         workspace=""
         find_server_pids() {
@@ -412,9 +439,30 @@ tasks:
           done
           for stop_pid in $(find_server_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
         }
+        # find_embed_pids/stop_embed are the same shape as
+        # find_server_pids/stop_server above, for the fake embedder process
+        # (cmd/demoenv embed) this target boots. Matched by "$demoenv_bin
+        # embed" rather than just "$demoenv_bin", exactly as demo:m3's own
+        # stop_proc "$demoenv_bin upstream" does, so a self-heal here never
+        # signals a demoenv seed-credential invocation that happens to be
+        # mid-flight.
+        find_embed_pids() {
+          pgrep -f "$demoenv_bin embed" 2>/dev/null || true
+        }
+        stop_embed() {
+          stop_pids="$(find_embed_pids)"
+          [ -z "$stop_pids" ] && return 0
+          for stop_pid in $stop_pids; do /bin/kill -TERM "$stop_pid" 2>/dev/null || true; done
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ -z "$(find_embed_pids)" ] && return 0
+            sleep 0.3
+          done
+          for stop_pid in $(find_embed_pids); do /bin/kill -9 "$stop_pid" 2>/dev/null || true; done
+        }
         cleanup() {
-          echo "=== test:e2e cleanup: stopping server, tearing down compose stack, removing temp dirs ==="
+          echo "=== test:e2e cleanup: stopping server, stopping fake embedder, tearing down compose stack, removing temp dirs ==="
           stop_server
+          stop_embed
           compose down -v --remove-orphans >/dev/null 2>&1 || true
           [ -n "$data_dir" ] && rm -rf "$data_dir"
           [ -n "$workspace" ] && rm -rf "$workspace"
@@ -423,6 +471,7 @@ tasks:
         echo "=== test:e2e pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
         compose down -v --remove-orphans >/dev/null 2>&1 || true
         stop_server
+        stop_embed
         wait_for_http_ok() {
           poll_url="$1"; poll_label="$2"; poll_timeout="${3:-60}"
           poll_start=$(date +%s)
@@ -437,7 +486,7 @@ tasks:
           done
         }
         echo ""
-        echo "=== step 1/7: bring up Postgres/pgvector + a real Forgejo (deploy/docker-compose.e2e.yml) ==="
+        echo "=== step 1/8: bring up Postgres/pgvector + a real Forgejo (deploy/docker-compose.e2e.yml) ==="
         compose up -d
         pg_deadline=$(( $(date +%s) + 60 ))
         until docker exec "$pg_container" pg_isready -U loam >/dev/null 2>&1; do
@@ -447,7 +496,7 @@ tasks:
         echo "postgres ready on 127.0.0.1:$pg_port"
         wait_for_http_ok "http://127.0.0.1:$forgejo_port/api/v1/version" "forgejo" 90
         echo ""
-        echo "=== step 2/7: seed the admin user, an access token, and one auto-initialized repo on the real Forgejo ==="
+        echo "=== step 2/8: seed the admin user, an access token, and one auto-initialized repo on the real Forgejo ==="
         # -u git: Forgejo refuses to run its own CLI as root
         # ("Forgejo is not supposed to be run as root"), and `docker exec`
         # defaults to root regardless of the image's own service user --
@@ -485,12 +534,32 @@ tasks:
         upstream_url="http://127.0.0.1:$forgejo_port/$repo_identifier.git"
         echo "seeded $repo_identifier at $upstream_url"
         echo ""
-        echo "=== step 3/7: build cmd/demoenv (test-support tool; NOT one of the shipped binaries -- see cmd/demoenv/main.go) ==="
+        echo "=== step 3/8: build cmd/demoenv (test-support tool; NOT one of the shipped binaries -- see cmd/demoenv/main.go) ==="
         go build -o bin/demoenv ./cmd/demoenv
         echo ""
-        echo "=== step 4/7: boot the real server binary (task build:bin already ran, embedding the REAL admin SPA) ==="
-        data_dir="$(mktemp -d /tmp/loam-e2e-data.XXXXXX)"
+        echo "=== step 4/8: boot the fake embedder (cmd/demoenv embed, internal/fakeembed -- loam-1dmg) ==="
+        # Without this, ingest cannot succeed here: internal/config defaults
+        # LOAM_EMBEDDER_URL to a local Ollama nothing in this stack
+        # provides, so an ingest job's embed step gets connection refused
+        # and pool.go's fail() reclaims and retries the SAME row forever
+        # (loam-1dmg). demo:m3 solved the identical problem for its own
+        # stack the same way this does: fake the far side (an
+        # Ollama-wire-shaped internal/fakeembed server) and drive the real
+        # near side (LOAM_EMBEDDER_URL still points the server's real,
+        # shipped ollama.Embedder at it, so only the model output is
+        # faked -- see demo:m3's own desc above for the full reasoning,
+        # which applies unchanged here). Unlike demo:m3's `upstream`
+        # subcommand, this stack's upstream forge is already real
+        # (deploy/docker-compose.e2e.yml), so this boots cmd/demoenv's
+        # `embed` subcommand alone rather than pulling in a second fake
+        # forge alongside it.
         workspace="$(mktemp -d /tmp/loam-e2e-ws.XXXXXX)"
+        embed_log="$workspace/embed.log"
+        "$demoenv_bin" embed -addr "$embed_addr" -model nomic-embed-text >"$embed_log" 2>&1 &
+        wait_for_http_ok "http://$embed_addr/" "fake embedder" 60
+        echo ""
+        echo "=== step 5/8: boot the real server binary (task build:bin already ran, embedding the REAL admin SPA) ==="
+        data_dir="$(mktemp -d /tmp/loam-e2e-data.XXXXXX)"
         server_log="$workspace/server.log"
         database_url="postgres://loam:loam@127.0.0.1:$pg_port/loam?sslmode=disable"
         # LOAM_SYNC_INTERVAL=1h: found live while building this task, not
@@ -511,14 +580,15 @@ tasks:
           LOAM_ADMIN_PASSWORD="$admin_password" LOAM_DATABASE_URL="$database_url" \
           LOAM_ENCRYPTION_KEY="$encryption_key" LOAM_DATA_DIR="$data_dir" \
           LOAM_SYNC_INTERVAL=1h \
+          LOAM_EMBEDDER_URL="http://$embed_addr" LOAM_EMBEDDER_MODEL=nomic-embed-text \
           "$repo_root/bin/server" >"$server_log" 2>&1 &
         wait_for_http_ok "http://$server_addr/healthz" "server" 60
         echo ""
-        echo "=== step 5/7: seed the encrypted forge credential EnrollRepo resolves by host (loam-4kz; see task desc) ==="
+        echo "=== step 6/8: seed the encrypted forge credential EnrollRepo resolves by host (loam-4kz; see task desc) ==="
         "$repo_root/bin/demoenv" seed-credential -database-url "$database_url" \
           -host "127.0.0.1:$forgejo_port" -token "$forgejo_token" -encryption-key "$encryption_key"
         echo ""
-        echo "=== step 6/7: run the Playwright admin-journey suite (web/e2e) against the running server ==="
+        echo "=== step 7/8: run the Playwright admin-journey suite (web/e2e) against the running server ==="
         set +e
         # LOAM_E2E_FORGEJO_HOST/LOAM_E2E_FORGEJO_TOKEN (loam-li0.11.2, additive):
         # the bare host:port and real access token already generated above,
@@ -534,7 +604,7 @@ tasks:
         playwright_status=$?
         set -e
         echo ""
-        echo "=== step 7/7: done (cleanup runs on EXIT regardless of the result above) ==="
+        echo "=== step 8/8: done (cleanup runs on EXIT regardless of the result above) ==="
         exit "$playwright_status"
 
   demo:m1:
