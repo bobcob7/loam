@@ -424,21 +424,19 @@ func TestScheduler_SyncFailureIsRetriedOnTheNextTick(t *testing.T) {
 }
 
 // TestScheduler_CycleReleasesGuardEvenOnPanic drives cycle directly,
-// bypassing tick/Run, rather than adding a recover() inside cycle itself
-// (loam-qz1's own notes: cycle deliberately has none -- an unrecovered
-// panic crashing the process is currently the ONLY thing that surfaces a
-// stranded repo, so recovering inside cycle before this fix landed would
-// have traded a loud crash for a silent, permanent one-repo outage; that
-// hardening is loam-lae's job, gated on this bead landing first, not
-// this test's). The test claims the guard and adds to the WaitGroup
-// itself, exactly as tick does before spawning a cycle goroutine, then
-// calls the real, unmodified cycle and recovers the panic one frame up in
-// its own wrapper -- a legitimate place for a recover regardless of what
-// cycle does internally. That exercises cycle's actual defer order
-// end-to-end: if it were reverted to the un-deferred s.finish(repo) this
-// bead replaces, the panic in FetchFunc would skip finish entirely (only
-// the deferred wg.Done would run during unwinding), and the second
-// tryStart below would come back false forever.
+// bypassing tick/Run, and calls the real, unmodified cycle with NO
+// wrapper recover of its own -- loam-lae added recoverCyclePanic as
+// cycle's own outermost guard (see cycle's doc comment), so this test now
+// exercises that guard directly rather than working around its absence.
+// require.NotPanics is what turns "the recover was deleted" into a failed
+// ASSERTION here rather than a crash of this whole test binary (mirroring
+// internal/ingest/pool_test.go's TestRunOrchestrator_ConvertsAPanicIntoAJobError's
+// same NotPanics rationale). This still exercises cycle's actual defer
+// order end-to-end: if finish/wg.Done were reverted to the un-deferred
+// form loam-qz1 replaced, the panic in FetchFunc would skip finish
+// entirely (only the deferred wg.Done -- and now recoverCyclePanic --
+// would run during unwinding), and the second tryStart below would come
+// back false forever.
 func TestScheduler_CycleReleasesGuardEvenOnPanic(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -449,12 +447,146 @@ func TestScheduler_CycleReleasesGuardEvenOnPanic(t *testing.T) {
 	}
 	require.True(t, h.scheduler.tryStart("repoA"), "precondition: repoA starts unclaimed")
 	h.scheduler.wg.Add(1)
-	func() {
-		defer func() { recover() }()
-		h.scheduler.cycle(ctx, "repoA")
-	}()
+	require.NotPanics(t, func() { h.scheduler.cycle(ctx, "repoA") },
+		"cycle must recover its own panic -- an escaping panic here kills the scheduler's whole tick loop, not just repoA's cycle")
 	h.scheduler.waitIdle() // returns immediately: wg.Done must have run despite the panic
 	assert.True(t, h.scheduler.tryStart("repoA"), "repoA must not be stranded in the running map after its cycle panicked")
+}
+
+// capturingHandler is a minimal, thread-safe slog.Handler used in place of
+// testLogger's io.Discard sink wherever a test must assert on LOG CONTENT
+// -- not merely on survival. It captures every record verbatim (Clone, so
+// a record's lazily-evaluated attrs are safe to read after Handle
+// returns) for the test to inspect once the call under test has returned.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func newCapturingHandler() (*capturingHandler, *slog.Logger) {
+	h := &capturingHandler{}
+	return h, slog.New(h)
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// find returns the first captured record with the given message, or false
+// if none has been written.
+func (h *capturingHandler) find(msg string) (slog.Record, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+// attrString returns the string form of key's value on r, or "" if key was
+// never set -- good enough for these tests, which only assert non-empty /
+// Contains, never an exact numeric or structured comparison.
+func attrString(r slog.Record, key string) string {
+	var val string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return val
+}
+
+// TestScheduler_CyclePanicIsLoggedWithRepoValueAndStack is loam-lae's
+// mirrorsync proof: recoverCyclePanic must not merely swallow the panic
+// (the bead's own words: "a silent recover is strictly worse than the
+// panic") -- it must log which repo, the recovered value, and a stack
+// trace, matching internal/ingest/pool.go's runOrchestrator/
+// recoverOutcomeRecording shape. cycle is called directly, exactly as
+// TestScheduler_CycleReleasesGuardEvenOnPanic above, precisely so the log
+// assertions below run on the SAME goroutine as the panic and its
+// recovery, with no cross-goroutine race against a background Run/Tick
+// caller for when the log line actually lands.
+func TestScheduler_CyclePanicIsLoggedWithRepoValueAndStack(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	handler, logger := newCapturingHandler()
+	h := buildHarness([]RepoID{"repoA"})
+	h.scheduler = New(logger, h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state)
+	wantPanic := "collaborator exploded"
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		panic(wantPanic)
+	}
+	require.True(t, h.scheduler.tryStart("repoA"))
+	h.scheduler.wg.Add(1)
+	require.NotPanics(t, func() { h.scheduler.cycle(ctx, "repoA") })
+	rec, found := handler.find("recovered panic in mirror sync cycle")
+	require.True(t, found, "a recovered cycle panic must be logged, not silently dropped")
+	assert.Equal(t, "repoA", attrString(rec, "repo"), "the log must identify WHICH repo's cycle panicked")
+	assert.Contains(t, attrString(rec, "panic"), wantPanic, "the log must carry the recovered value")
+	assert.NotEmpty(t, attrString(rec, "stack"), "the log must carry a stack trace -- a recovered panic that loses its stack is harder to diagnose than a crash")
+}
+
+// TestScheduler_RepoStartsANewCycleOnTheNextTickAfterAPanic is the
+// end-to-end companion to the two tests above: it drives the SAME
+// panic-then-recover through Scheduler.Tick -- docs/testing-spec.md's
+// "Manual scheduler" seam, which blocks until every cycle it starts has
+// finished reporting (Tick's own doc comment) -- rather than a direct
+// cycle call, and proves the exact interaction loam-qz1 made safe: repoA
+// is not stranded in the running map, so a genuine SECOND Tick can start
+// and complete a real cycle for it, reporting success through
+// SyncStateReporter exactly like any other successful cycle. This is the
+// "(c)" proof the bead asks for: not just that tryStart flips back to
+// true, but that the scheduler itself keeps servicing repoA afterward.
+//
+// Tick, not Run-plus-the-tick-channel, is deliberate: Run's tick loop
+// gives no synchronous signal for "this tick's cycles, including any
+// recover, have fully finished" -- sending a second value on the tick
+// channel immediately after the first races the still-in-flight cycle
+// goroutine's own finish()/wg.Done, since nothing guarantees Run's
+// wg.Add for the SECOND tick happens after the first cycle's wg.Done (a
+// classic WaitGroup Add/Wait race, not a real assertion about the code
+// under test). Tick sidesteps it entirely by doing the wait on the same
+// call, on the caller's own goroutine.
+func TestScheduler_RepoStartsANewCycleOnTheNextTickAfterAPanic(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	panicOnce := true
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		if panicOnce {
+			panicOnce = false
+			panic("collaborator exploded")
+		}
+		return FetchResult{}, nil
+	}
+	started, err := h.scheduler.Tick(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []RepoID{"repoA"}, started, "precondition: the first Tick must actually start repoA's (panicking) cycle")
+	started, err = h.scheduler.Tick(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []RepoID{"repoA"}, started,
+		"repoA must be startable again on the very next Tick -- if it were still marked running, this Tick would start nothing for it")
+	select {
+	case outcome := <-h.outcomes:
+		require.Equal(t, RepoID("repoA"), outcome.repo)
+		require.NoError(t, outcome.err, "the cycle AFTER the panic must complete normally and report success")
+	default:
+		t.Fatal("the second Tick returned without repoA's cycle having reported an outcome -- Tick's own contract is to block until every started cycle has finished reporting")
+	}
 }
 
 // TestScheduler_Tick_PropagatesListReposError is loam-hhh's core claim:
