@@ -48,7 +48,7 @@ import (
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . workBranchStore repoStore verdictStore proposalAccepter upstreamPRCloser
+//go:generate go tool moq -out moq_test.go . workBranchStore repoStore verdictStore proposalAccepter upstreamPRCloser workBranchTipResolver
 
 // workBranchStore is the internal/workbranchstore.Store surface this
 // package needs, defined here at the consumer per repo convention.
@@ -128,4 +128,20 @@ type proposalAccepter interface {
 // happen when it demonstrably did.
 type upstreamPRCloser interface {
 	ClosePRAndCleanup(ctx context.Context, repo mirrorsync.RepoID, workBranchName string, prNumber int) error
+}
+
+// workBranchTipResolver resolves a work branch's CURRENT ref SHA in the
+// local bare mirror, defined here at the consumer (loam-cgg).
+// *gitref.Creator satisfies it structurally (the same value
+// cmd/server/main.go already constructs and wires into
+// registerWorkBranchService for ref creation).
+//
+// ListProposals calls this exactly once per candidate that already carries
+// BOTH a recorded upstream PR and a recorded accepted_tip -- never for a
+// branch with no PR yet, and never for a PR recorded before this column
+// existed (accepted_tip NULL) -- to decide docs/web-spec.md's "PR branch
+// is behind the work branch" clause: equal to accepted_tip means caught
+// up, anything else means behind. See proposalUpToDate.
+type workBranchTipResolver interface {
+	ResolveWorkBranchRef(ctx context.Context, repo, name string) (string, error)
 }

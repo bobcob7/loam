@@ -169,4 +169,5 @@ type WorkBranch struct {
 	CloseReason      pgtype.Text
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	AcceptedTip      pgtype.Text
 }

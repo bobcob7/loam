@@ -54,6 +54,7 @@ type testDeps struct {
 	verdicts     *verdictStoreMock
 	accepter     *proposalAccepterMock
 	prCloser     *upstreamPRCloserMock
+	tips         *workBranchTipResolverMock
 	buf          bytes.Buffer
 }
 
@@ -128,12 +129,24 @@ func newTestDeps() *testDeps {
 	d.prCloser = &upstreamPRCloserMock{
 		ClosePRAndCleanupFunc: func(_ context.Context, _ mirrorsync.RepoID, _ string, _ int) error { return nil },
 	}
+	// The default fixture (reviewedBranch) carries no recorded PR, so
+	// proposalUpToDate never calls this for an unmodified branch -- this
+	// default exists so a test that DOES seed a PR + accepted_tip still
+	// gets a harmless, always-succeeding resolve rather than an
+	// unconfigured-mock panic, matching this file's own stated testing
+	// philosophy (a mutation must be caught by an assertion, never by a
+	// panic on a collaborator the scenario did not mean to exercise).
+	d.tips = &workBranchTipResolverMock{
+		ResolveWorkBranchRefFunc: func(context.Context, string, string) (string, error) {
+			return "unused-tip", nil
+		},
+	}
 	return d
 }
 
 func (d *testDeps) handler() *Handler {
 	logger := testLogger(&d.buf)
-	return New(d.workBranches, d.repos, d.verdicts, d.accepter, d.prCloser, handler.NewErrorMapper(logger), logger)
+	return New(d.workBranches, d.repos, d.verdicts, d.accepter, d.prCloser, d.tips, handler.NewErrorMapper(logger), logger)
 }
 
 // verdict builds a VerdictRecord with the round decoration reviewstore's
@@ -473,25 +486,106 @@ func TestListProposals_CarriesCurrentRoundVerdictsOnly(t *testing.T) {
 	assert.Equal(t, uint32(2), verdicts[0].GetRound())
 }
 
-// TestListProposals_AcceptedBranchStaysListed pins the deliberate
-// over-inclusion documented on ListProposals: a branch with a recorded PR
-// is still listed, because nothing in the schema can answer "is the PR's
-// branch behind the work branch" and under-including would hide the
-// re-accept-after-catch-up case entirely (loam-cgg).
-//
-// It is here so that the day loam-cgg lands, this test fails and forces the
-// documented behaviour to be revisited rather than silently changed.
-func TestListProposals_AcceptedBranchStaysListed(t *testing.T) {
-	t.Parallel()
+// acceptedBranch builds a reviewed, approved branch carrying a recorded PR
+// (prNumber/prURL fixed at #7, matching the rest of this file's fixtures)
+// and, when tip is non-empty, a recorded accepted_tip of tip -- the shared
+// fixture builder for the three loam-cgg proposal-freshness tests below.
+func acceptedBranch(name, tip string) workbranchstore.WorkBranch {
 	prNumber, prURL := int32(7), "https://forge.example.com/acme/widgets/pulls/7"
-	accepted := branchNamed("wb-accepted", func(wb *workbranchstore.WorkBranch) {
+	return branchNamed(name, func(wb *workbranchstore.WorkBranch) {
 		wb.UpstreamPRNumber, wb.UpstreamPRURL = &prNumber, &prURL
+		if tip != "" {
+			wb.AcceptedTip = &tip
+		}
 	})
-	d := listDeps(accepted)
+}
+
+// TestListProposals_NoRecordedPR_IsListed is the disjunction's FIRST
+// clause, unaffected by loam-cgg: a reviewed, approved, unconflicted
+// branch with no upstream PR yet is a proposal outright, and this path
+// never resolves a tip at all -- proven here by leaving d.tips completely
+// unconfigured-but-for-the-harness-default and asserting on the response,
+// not by asserting zero calls (a live git resolve would be wasted work for
+// a branch nothing has been proposed against, but proving that is a
+// performance property, not the correctness one this bead is about).
+func TestListProposals_NoRecordedPR_IsListed(t *testing.T) {
+	t.Parallel()
+	d := listDeps(branchNamed("wb-unaccepted", nil))
 	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetProposals(), 1)
-	assert.Equal(t, prURL, resp.Msg.GetProposals()[0].GetWorkBranch().GetUpstreamPrUrl())
+	assert.Equal(t, "wb-unaccepted", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
+}
+
+// TestListProposals_RecordedPRWithNoAcceptedTip_IsListed proves the ONE
+// case that still over-includes on purpose (loam-cgg): a row accepted
+// before the accepted_tip column existed carries a PR but no recorded
+// tip. NULL must NOT be read as "up to date" -- that would make a
+// historical accepted-and-still-open proposal silently vanish from the
+// queue the instant this migration ran, which is a data-loss-shaped bug
+// even though no row is deleted. The live tip resolver must never even be
+// consulted for this row: there is nothing recorded to compare it against.
+func TestListProposals_RecordedPRWithNoAcceptedTip_IsListed(t *testing.T) {
+	t.Parallel()
+	legacy := acceptedBranch("wb-legacy", "")
+	d := listDeps(legacy)
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetProposals(), 1, "a NULL accepted_tip must over-include, never silently resolve to \"caught up\"")
+	assert.Equal(t, "wb-legacy", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
+	assert.Empty(t, d.tips.ResolveWorkBranchRefCalls(), "a row with no recorded accepted_tip has nothing to compare a resolved tip against")
+}
+
+// TestListProposals_RecordedPRWithMatchingTip_IsExcluded is loam-cgg's
+// headline fix: a branch whose recorded accepted_tip matches the mirror's
+// CURRENT live tip is caught up -- its PR already carries exactly what was
+// reviewed -- and must no longer clutter the queue.
+func TestListProposals_RecordedPRWithMatchingTip_IsExcluded(t *testing.T) {
+	t.Parallel()
+	caughtUp := acceptedBranch("wb-caught-up", "deadbeef")
+	d := listDeps(caughtUp)
+	d.tips.ResolveWorkBranchRefFunc = func(_ context.Context, repo, name string) (string, error) {
+		assert.Equal(t, "acme/widgets", repo)
+		assert.Equal(t, "wb-caught-up", name)
+		return "deadbeef", nil
+	}
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Msg.GetProposals(), "a branch whose live tip matches its recorded accepted_tip is caught up, not a proposal")
+	assert.Equal(t, uint32(0), resp.Msg.GetPageInfo().GetTotal())
+}
+
+// TestListProposals_RecordedPRWithDifferentTip_IsListed is the
+// re-accept-after-catch-up case docs/web-spec.md names by name: a branch
+// reset to draft by a conflicting target advance, caught up with new
+// commits, and re-reviewed still carries the original PR's number, but its
+// LIVE tip has moved past what that PR was last pushed at -- so it must
+// reappear in the queue for the admin to re-accept.
+func TestListProposals_RecordedPRWithDifferentTip_IsListed(t *testing.T) {
+	t.Parallel()
+	behind := acceptedBranch("wb-behind", "deadbeef")
+	d := listDeps(behind)
+	d.tips.ResolveWorkBranchRefFunc = func(context.Context, string, string) (string, error) {
+		return "cafef00d", nil
+	}
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetProposals(), 1, "a live tip that differs from the recorded accepted_tip means the PR's branch is behind")
+	assert.Equal(t, "wb-behind", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
+}
+
+// TestListProposals_TipResolutionFailure_IsReported proves a git failure
+// while checking proposal freshness surfaces as an RPC error rather than
+// silently including or excluding the row.
+func TestListProposals_TipResolutionFailure_IsReported(t *testing.T) {
+	t.Parallel()
+	resolveErr := errors.New("mirror unreadable")
+	d := listDeps(acceptedBranch("wb-broken-mirror", "deadbeef"))
+	d.tips.ResolveWorkBranchRefFunc = func(context.Context, string, string) (string, error) {
+		return "", resolveErr
+	}
+	_, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	requireConnectCode(t, err, connect.CodeInternal)
 }
 
 // TestListProposals_PaginatesTheFilteredResult proves limit/offset applies

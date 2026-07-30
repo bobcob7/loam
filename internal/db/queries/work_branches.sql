@@ -255,7 +255,32 @@ WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
 -- The url and number are written in ONE statement, never separately: a row
 -- carrying a number with no url (or the reverse) would be a half-accepted
 -- proposal no reader in the tree knows how to interpret.
+--
+-- accepted_tip ($4, loam-cgg) rides in the SAME statement for the identical
+-- reason: it is what ListProposals compares against the live mirror tip to
+-- decide "PR branch is behind the work branch" (docs/web-spec.md's
+-- proposal definition), and a row that recorded a PR number without also
+-- recording what was pushed for it would be exactly the half-accepted
+-- shape the url/number pairing above already refuses to produce.
 UPDATE work_branches
-SET upstream_pr_url = $2, upstream_pr_number = $3, updated_at = now()
+SET upstream_pr_url = $2, upstream_pr_number = $3, accepted_tip = $4, updated_at = now()
 WHERE id = $1 AND upstream_pr_number IS NULL
+RETURNING *;
+
+-- name: RecordWorkBranchAcceptedTip :one
+-- Proposal Acceptance's record leg for a RE-accept (loam-cgg): a
+-- fast-forward of an already-recorded PR opens no new pull request and so
+-- never reaches RecordWorkBranchUpstreamPR above, but it still moves the
+-- upstream branch to a new tip and that tip is exactly what
+-- ListProposals's "is the PR branch behind the work branch" comparison
+-- needs refreshed. Unlike RecordWorkBranchUpstreamPR this UPDATE carries
+-- no upstream_pr_number guard: a re-accept is expected to run any number
+-- of times against a branch that already carries a PR (docs/sync-spec.md
+-- "Proposal Acceptance": "Re-accepting a caught-up work branch updates the
+-- existing PR"), so unconditionally overwriting the previously recorded
+-- tip with the one this accept just pushed is the correct behavior, not a
+-- race to arbitrate.
+UPDATE work_branches
+SET accepted_tip = $2, updated_at = now()
+WHERE id = $1
 RETURNING *;

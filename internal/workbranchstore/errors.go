@@ -39,15 +39,20 @@ var ErrIllegalTransition = errors.New("illegal work branch state transition")
 // errors.Is.
 var ErrPRAlreadyRecorded = errors.New("work branch already has a recorded upstream pull request")
 
-// errInvalidUpstreamPR is returned by RecordUpstreamPR for a PR number or
-// URL that cannot identify a real pull request (a non-positive number, an
-// empty URL). It is a rejection at the store, one layer below the accept
-// engine's own validation of what the forge answered, because this column
-// pair is the sole input to internal/mirrorsync's PR poller: a recorded
-// PR #0 would put a work branch permanently into a poll set whose every
-// GetPRState call must fail, and -- worse -- would consume the row's
-// one-shot idempotency guard, so the accept that should have recorded the
-// real PR could never write it afterwards.
+// errInvalidUpstreamPR is returned by RecordUpstreamPR for a PR number,
+// URL, or accepted tip that cannot identify a real pull request or a real
+// commit (a non-positive number, an empty URL, an empty tip), and by
+// RecordAcceptedTip for an empty tip. It is a rejection at the store, one
+// layer below the accept engine's own validation of what the forge
+// answered, because this column pair is the sole input to
+// internal/mirrorsync's PR poller: a recorded PR #0 would put a work
+// branch permanently into a poll set whose every GetPRState call must
+// fail, and -- worse -- would consume the row's one-shot idempotency
+// guard, so the accept that should have recorded the real PR could never
+// write it afterwards. An empty accepted_tip is the same shape of mistake
+// for loam-cgg's ListProposals comparison: it would either compare against
+// nothing or, if ever read back as "no tip recorded", flip a just-accepted
+// row's over-inclusion into a false "up to date".
 var errInvalidUpstreamPR = errors.New("upstream pull request identity is not usable")
 
 // errDuplicateName is returned when Create hits

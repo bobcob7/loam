@@ -72,7 +72,7 @@ and `reviewer` are seeded by migration and cannot be deleted.
 `id`, `repo_id` (fk → repos), `name` (the randomly generated branch name), `target`, `title`
 (null until set), `description` (null), `state`
 (`draft`/`reviewable`/`reviewed`/`complete`/`closed`), `author` (agent identifier),
-`upstream_pr_url` (null), `upstream_pr_number` (null), `conflict`
+`upstream_pr_url` (null), `upstream_pr_number` (null), `accepted_tip` (null), `conflict`
 (`none`/`flagged`/`reset`), `close_reason` (null — set by the admin's `CloseWorkBranch`),
 timestamps.
 - `UNIQUE (repo_id, name)` — identity is `(repo, name)`.
@@ -82,8 +82,17 @@ timestamps.
   returns it to `none` — and flips a `reset` branch back to `reviewable`.
 - `upstream_pr_number` is the forge-native PR number the sync uses to poll PR state;
   `upstream_pr_url` is display-only (`docs/sync-spec.md`).
+- `accepted_tip` is the commit SHA the most recent `AcceptProposal` pushed to
+  `loam/<name>` upstream — written by `mirrorsync.StoreProposalAccepter` on every
+  accept (a first accept and a re-accept fast-forward alike), never cleared. `null` on
+  every row accepted before this column existed. `ProposalService.ListProposals`
+  compares it against a live resolve of the work branch's own ref to decide whether an
+  already-recorded PR's branch is behind (`docs/web-spec.md` → ProposalService): equal
+  means caught up, different (or `null`, treated as "not proven caught up", never as
+  "up to date") means it stays in the queue.
 - The diff is **not** stored; it is computed from git (`target...name`). The row only points
-  at the git ref by `name`.
+  at the git ref by `name`. `accepted_tip` is the one exception: it records a point-in-time
+  commit identity, not a live pointer, precisely so a later push can be compared against it.
 
 ### review_rounds
 `id`, `work_branch_id` (fk → work_branches), `number` (1, 2, …), `requested_by` (agent

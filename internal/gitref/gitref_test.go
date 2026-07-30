@@ -173,3 +173,88 @@ func TestDeleteWorkBranchRef_AbsentRefIsNotAnError(t *testing.T) {
 
 	assert.NoError(t, New(dataDir).DeleteWorkBranchRef(t.Context(), "acme/widgets", "wb-never-created"))
 }
+
+// TestResolveWorkBranchRef_ReturnsTheCurrentTip proves the happy path reads
+// back exactly what the ref points at -- the same value refSHA's direct
+// rev-parse would report, so this method is not trusted blind.
+func TestResolveWorkBranchRef_ReturnsTheCurrentTip(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+
+	sha, err := c.ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+
+	require.NoError(t, err)
+	assert.Equal(t, mainSHA, sha)
+	assert.Equal(t, refSHA(t, mirrorDir, "refs/heads/loam-reserved/wb-9c2f1a"), sha)
+}
+
+// TestResolveWorkBranchRef_MovesWithTheRef proves this is a LIVE read, not
+// a cached one: after the ref is moved by a real push, the next resolve
+// reports the NEW tip -- the property loam-cgg's whole comparison depends
+// on (a work branch pushed to after acceptance must resolve as "moved").
+func TestResolveWorkBranchRef_MovesWithTheRef(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+	first, err := c.ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+	require.NoError(t, err)
+	require.Equal(t, mainSHA, first)
+
+	newTip := advanceRef(t, mirrorDir, "refs/heads/loam-reserved/wb-9c2f1a")
+
+	second, err := c.ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+	require.NoError(t, err)
+	assert.Equal(t, newTip, second)
+	assert.NotEqual(t, first, second)
+}
+
+// TestResolveWorkBranchRef_RefMissing_ReturnsErrRefMissing proves a work
+// branch ref that was never created (or was deleted) is reported as
+// ErrRefMissing, distinguishable from CreateWorkBranchRef's
+// ErrTargetMissing even though both come off the same underlying
+// rev-parse classification.
+func TestResolveWorkBranchRef_RefMissing_ReturnsErrRefMissing(t *testing.T) {
+	t.Parallel()
+	dataDir, _, _ := seedMirror(t)
+
+	_, err := New(dataDir).ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-never-created")
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRefMissing)
+	assert.NotErrorIs(t, err, ErrTargetMissing)
+}
+
+// TestResolveWorkBranchRef_MirrorMissing_ReturnsErrMirrorMissing mirrors
+// CreateWorkBranchRef's identically-named test: an absent or invalid
+// mirror is an operational fault, not a "no such ref" answer.
+func TestResolveWorkBranchRef_MirrorMissing_ReturnsErrMirrorMissing(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(mirrorpath.Dir(dataDir, "acme/widgets"), 0o755))
+
+	_, err := New(dataDir).ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrMirrorMissing)
+}
+
+// advanceRef moves ref to a new commit inside the bare mirror by cloning
+// it, committing, and pushing back -- the only way to move a bare repo's
+// ref to a genuinely new commit without hand-rolling plumbing. Returns the
+// new tip SHA.
+func advanceRef(t *testing.T, mirrorDir, ref string) string {
+	t.Helper()
+	require.True(t, strings.HasPrefix(ref, "refs/heads/"), "advanceRef needs a refs/heads/ ref, got %q", ref)
+	tracking := "origin/" + strings.TrimPrefix(ref, "refs/heads/")
+	clone := filepath.Join(t.TempDir(), "clone")
+	runGit(t, "", "clone", "--quiet", mirrorDir, clone)
+	runGit(t, clone, "checkout", "--quiet", "-B", "local-work", tracking)
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "advance.txt"), []byte("advanced\n"), 0o644))
+	runGit(t, clone, "add", "advance.txt")
+	runGit(t, clone, "commit", "--quiet", "-m", "advance")
+	runGit(t, clone, "push", "--quiet", "origin", "HEAD:"+ref)
+	return refSHA(t, mirrorDir, ref)
+}

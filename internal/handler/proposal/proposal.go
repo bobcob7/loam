@@ -52,6 +52,7 @@ type Handler struct {
 	verdicts     verdictStore
 	accepter     proposalAccepter
 	prCloser     upstreamPRCloser
+	tips         workBranchTipResolver
 	errors       *handler.ErrorMapper
 	logger       *slog.Logger
 }
@@ -63,13 +64,17 @@ var _ adminv1connect.ProposalServiceHandler = (*Handler)(nil)
 // acceptance engine (in production *mirrorsync.StoreProposalAccepter) and
 // prCloser the upstream PR close + branch cleanup (in production
 // *mirrorsync.StorePRPoller); both are constructed at the composition root,
-// where the per-repo forge binding and the mirror root live.
+// where the per-repo forge binding and the mirror root live. tips resolves
+// a work branch's live tip against the local mirror (in production
+// *gitref.Creator) -- ListProposals's loam-cgg comparison (see
+// proposalUpToDate).
 func New(
 	workBranches workBranchStore,
 	repos repoStore,
 	verdicts verdictStore,
 	accepter proposalAccepter,
 	prCloser upstreamPRCloser,
+	tips workBranchTipResolver,
 	errors *handler.ErrorMapper,
 	logger *slog.Logger,
 ) *Handler {
@@ -79,6 +84,7 @@ func New(
 		verdicts:     verdicts,
 		accepter:     accepter,
 		prCloser:     prCloser,
+		tips:         tips,
 		errors:       errors,
 		logger:       logger,
 	}
@@ -90,33 +96,31 @@ func New(
 // admin sees who approved without a second call (docs/web-spec.md ->
 // ProposalService).
 //
-// # The predicate, and the one clause it cannot evaluate
+// # The predicate, made exact (loam-cgg)
 //
 // docs/web-spec.md defines a proposal as a reviewed branch with >= 1
 // non-stale approve "awaiting an admin decision -- either it has no
 // upstream PR yet, or its existing PR's branch is behind the work branch (a
 // conflict catch-up that has been re-reviewed)". The first three conditions
-// are evaluated here exactly. The final disjunction is NOT, and cannot be
-// from database state alone: nothing records what commit a previous accept
-// pushed, so "the PR's branch is behind the work branch" is answerable only
-// by comparing refs (the mirror's refs/heads/<name> against the upstream
-// loam/<name> the mirror fetch does bring back), which would put a git
-// subprocess per candidate row inside a cross-repo list RPC and still be
-// one sync tick stale.
+// are evaluated here exactly, as before. The final disjunction now is too:
+// mirrorsync.StoreProposalAccepter records the tip it pushes as
+// work_branches.accepted_tip on every accept (both a first accept and a
+// re-accept fast-forward), so "the PR's branch is behind" reduces to a live
+// tip resolve (proposalUpToDate) compared against that recorded value --
+// equality, never ancestry, since accepted_tip already IS what was pushed.
 //
-// So this query includes reviewed+approved+unconflicted branches REGARDLESS
-// of whether a PR is already recorded, and the deliberate error is
-// over-inclusion: a branch accepted a moment ago stays listed until its PR
-// merges or closes (at which point sync flips it to complete/closed and it
-// leaves the queue for good). The alternative -- excluding every branch with
-// a recorded PR -- was rejected because it under-includes exactly the case
-// the spec calls out by name: a branch reset to draft by a conflicting
-// target advance, caught up, and re-reviewed still carries the original
-// PR's number, so it would never reappear in the queue and the admin would
-// have no surface from which to re-accept it. Over-inclusion costs a
-// redundant row the admin can ignore, or an accept that idempotently
-// fast-forwards; under-inclusion costs a documented workflow. Filed as a
-// follow-up (loam-cgg) for the comparison that makes the clause exact.
+// The one case that STILL over-includes, deliberately, is a row with a
+// recorded PR but no recorded accepted_tip: every work branch accepted
+// before this column existed. NULL is read as "cannot prove this is caught
+// up", not as "up to date" -- a migration that made a historical row
+// silently vanish from the queue would be a data-loss-shaped bug even
+// though no row is deleted, and it would strand a branch loam-ofg.14's own
+// over-inclusion was written to keep visible. Over-inclusion for that one
+// case still costs only a redundant row the admin can ignore, or an accept
+// that idempotently fast-forwards; the option this bead explicitly did NOT
+// take -- excluding every branch with a PR -- was rejected for the reason
+// loam-ofg.14 already gives: it would hide the re-accept-after-catch-up
+// case the spec names.
 //
 // Pagination applies to the filtered result; see candidateScanPageSize.
 func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv1.ListProposalsRequest]) (*connect.Response[adminv1.ListProposalsResponse], error) {
@@ -140,13 +144,20 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 		if approvals < 1 {
 			continue
 		}
-		records, err := h.verdicts.List(ctx, wb.ID)
-		if err != nil {
-			return nil, h.errors.ToConnectErr(fmt.Errorf("listing verdicts for work branch %s: %w", wb.Name, err))
-		}
 		repoName, err := h.repoNameFor(ctx, wb.RepoID, repoNames)
 		if err != nil {
 			return nil, h.errors.ToConnectErr(err)
+		}
+		upToDate, err := h.proposalUpToDate(ctx, repoName, wb)
+		if err != nil {
+			return nil, h.errors.ToConnectErr(err)
+		}
+		if upToDate {
+			continue
+		}
+		records, err := h.verdicts.List(ctx, wb.ID)
+		if err != nil {
+			return nil, h.errors.ToConnectErr(fmt.Errorf("listing verdicts for work branch %s: %w", wb.Name, err))
 		}
 		proposals = append(proposals, &adminv1.Proposal{
 			WorkBranch: workBranchToProto(repoName, wb),
@@ -326,6 +337,37 @@ func (h *Handler) reviewedBranches(ctx context.Context) ([]workbranchstore.WorkB
 			return all, nil
 		}
 	}
+}
+
+// proposalUpToDate reports whether wb's already-recorded upstream PR is
+// already caught up with the work branch (loam-cgg), so ListProposals can
+// exclude it: docs/web-spec.md's disjunction only lists a branch with a
+// recorded PR when "its existing PR's branch is behind the work branch".
+//
+// Two of the three states this reads never call ResolveWorkBranchRef at
+// all: no recorded PR (UpstreamPRNumber nil) is never up to date -- there
+// is nothing for the admin to have already decided -- and a recorded PR
+// with no recorded accepted_tip (every row from before this column
+// existed) is ALSO never treated as up to date, on purpose. A NULL here
+// must not be read as "caught up": that would silently drop every
+// historical accepted-and-still-open proposal out of the queue the moment
+// this column's migration runs, which is a data-loss-shaped bug even
+// though no row is deleted. Only the third state -- a recorded PR AND a
+// recorded tip -- resolves the branch's CURRENT tip live from the mirror
+// (the same "never cached, always read from git" rule every other SHA in
+// this codebase follows) and compares it against accepted_tip: equal means
+// caught up, anything else means behind. That is a plain identity check,
+// not ancestry -- accepted_tip already IS the commit that was pushed, so
+// there is no history to walk, only two SHAs to compare.
+func (h *Handler) proposalUpToDate(ctx context.Context, repoName string, wb workbranchstore.WorkBranch) (bool, error) {
+	if wb.UpstreamPRNumber == nil || wb.AcceptedTip == nil {
+		return false, nil
+	}
+	tip, err := h.tips.ResolveWorkBranchRef(ctx, repoName, wb.Name)
+	if err != nil {
+		return false, fmt.Errorf("resolving work branch %s/%s's tip to check proposal freshness: %w", repoName, wb.Name, err)
+	}
+	return tip == *wb.AcceptedTip, nil
 }
 
 // repoNameFor resolves a work branch's repo name, memoized in cache: the

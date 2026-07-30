@@ -657,8 +657,13 @@ func registerProposalService(router *server.Router, cfg config.Config, pool *pgx
 	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
+	// tips resolves a work branch's live mirror tip against
+	// ListProposals's recorded accepted_tip (loam-cgg) -- the same
+	// *gitref.Creator type registerWorkBranchService wires for ref
+	// creation, rooted at the same LOAM_DATA_DIR.
+	tips := gitref.New(cfg.DataDir)
 	router.RegisterAdmin(adminv1connect.NewProposalServiceHandler(
-		proposal.New(workBranches, repos, verdicts, accepter, prCloser, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
+		proposal.New(workBranches, repos, verdicts, accepter, prCloser, tips, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 	))
 }
 
