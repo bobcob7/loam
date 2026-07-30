@@ -197,16 +197,25 @@ WHERE repo_id = $1 AND target_branch = $2;
 -- candidate and is silently skipped -- there is no edge to record without a
 -- from side.
 --
--- to_symbol_id (the REFERENCED symbol) matches purely by name within the
--- same repo_id/target_branch -- no kind or file/language narrowing. A name
--- colliding across files (or languages, e.g. the fixture-polyglot "Validate"
--- defined in both Go and TypeScript, docs/testing-spec.md "Fixtures") can
--- therefore fan out to more than one edge; tightening that is out of this
--- bead's scope (owned by the ingest test suite, loam-li0.8). Self-reference
--- (a symbol whose body references its own name, e.g. recursion) is a real,
--- legitimate case and is deliberately NOT excluded here -- it is exactly
--- the shape of self-edge the dependents/deps CTE cycle-safety guard must
--- handle.
+-- to_symbol_id (the REFERENCED symbol) matches by name within the same
+-- repo_id/target_branch, narrowed to files whose extension maps to the SAME
+-- language as the referencing file (loam-w5g) -- there is still no `kind`
+-- narrowing, and a name can still collide across files WITHIN one language,
+-- which is why this remains "approximate" rather than precise. Before
+-- loam-w5g the join had no language narrowing at all, so a name colliding
+-- ACROSS languages (e.g. the fixture-polyglot "Validate" defined in both Go
+-- and TypeScript, docs/testing-spec.md "Fixtures") produced a spurious edge
+-- into the other language's symbol; the pinned golden
+-- (internal/ingest/orchestrator/testdata/golden) had baked that leak in
+-- as "expected" output until loam-w5g re-baselined it. The two CASE
+-- expressions below classify a file's language purely from its extension,
+-- deliberately mirroring internal/parser/language.go's extensionLanguages
+-- map (go, python, typescript incl. .mts/.cts, tsx, javascript incl.
+-- .jsx/.mjs/.cjs) -- keep the two in sync if a grammar is added there.
+-- Self-reference (a symbol whose body references its own name, e.g.
+-- recursion) is a real, legitimate case and is deliberately NOT excluded
+-- here -- it is exactly the shape of self-edge the dependents/deps CTE
+-- cycle-safety guard must handle.
 --
 -- DISTINCT is required, not cosmetic: a symbol referencing the same name N
 -- times in one file produces N identical symbol_references rows resolving
@@ -236,6 +245,19 @@ JOIN symbols target
     ON target.repo_id = sr.repo_id
    AND target.target_branch = sr.target_branch
    AND target.name = sr.name
+   AND (CASE
+            WHEN target.file ~* '\.go$' THEN 'go'
+            WHEN target.file ~* '\.py$' THEN 'python'
+            WHEN target.file ~* '\.(ts|mts|cts)$' THEN 'typescript'
+            WHEN target.file ~* '\.tsx$' THEN 'tsx'
+            WHEN target.file ~* '\.(js|jsx|mjs|cjs)$' THEN 'javascript'
+        END) = (CASE
+            WHEN sr.file ~* '\.go$' THEN 'go'
+            WHEN sr.file ~* '\.py$' THEN 'python'
+            WHEN sr.file ~* '\.(ts|mts|cts)$' THEN 'typescript'
+            WHEN sr.file ~* '\.tsx$' THEN 'tsx'
+            WHEN sr.file ~* '\.(js|jsx|mjs|cjs)$' THEN 'javascript'
+        END)
 WHERE sr.repo_id = $1 AND sr.target_branch = $2;
 
 -- name: InsertGraphEdges :copyfrom

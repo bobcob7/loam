@@ -106,6 +106,33 @@ func TestGolden_AmbiguousSameNamedSymbolStaysTwoDistinctRows(t *testing.T) {
 		"the two Validate rows must be the Go one and the TypeScript one, each attributed to its own file")
 }
 
+// TestGolden_CrossLanguageSameNamedSymbolDoesNotEdge is loam-w5g:
+// pkg/validate/validate.go (Go) and src/validate.ts (TypeScript) both
+// export a function named Validate, and pkg/report/report.go's Go
+// Summarize calls only the Go one. Edge resolution
+// (ResolveGraphEdgeCandidates in internal/db/queries/code_graph.sql)
+// matches the to-side purely by name, so before loam-w5g it also matched
+// the unrelated TypeScript Validate, fanning Summarize's single real call
+// out into two graph_edges rows. This asserts the positive (the real,
+// intra-language edge exists) AND the negative (the cross-language edge
+// does not) for BOTH directions in the fixture -- a test that only checked
+// the positive would have passed against the leaking code all along.
+func TestGolden_CrossLanguageSameNamedSymbolDoesNotEdge(t *testing.T) {
+	t.Parallel()
+	f := newPolyglotFixture(t)
+	runIngest(t, f, ingest.KindIncremental)
+	state := readDerivedState(t, f.repoID)
+
+	assert.True(t, hasEdgeAt(state.Edges, "pkg/report/report.go", "Summarize", "pkg/validate/validate.go", "Validate"),
+		"Summarize calls the Go Validate, so that intra-language edge must resolve")
+	assert.False(t, hasEdgeAt(state.Edges, "pkg/report/report.go", "Summarize", "src/validate.ts", "Validate"),
+		"Summarize is Go-only and never calls the TypeScript Validate; name-based resolution must not cross languages")
+	assert.True(t, hasEdgeAt(state.Edges, "src/index.ts", "summarize", "src/validate.ts", "Validate"),
+		"the TypeScript summarize calls the TypeScript Validate, so that intra-language edge must resolve")
+	assert.False(t, hasEdgeAt(state.Edges, "src/index.ts", "summarize", "pkg/validate/validate.go", "Validate"),
+		"the TypeScript summarize never calls the Go Validate; name-based resolution must not cross languages")
+}
+
 // TestGolden_MutualRecursionResolvesEdgesInBothDirections covers
 // scripts/parity.py's is_even/is_odd pair: each calls the other, so edge
 // resolution must produce an edge in BOTH directions. That the ingest
@@ -203,6 +230,18 @@ func TestGolden_DeletedAndRenamedFilesDropTheirDerivedRows(t *testing.T) {
 func hasEdge(edges []edgeRow, from, to string) bool {
 	for _, e := range edges {
 		if e.FromName == from && e.ToName == to {
+			return true
+		}
+	}
+	return false
+}
+
+// hasEdgeAt is hasEdge narrowed to a specific (file, name) pair on each
+// side, needed whenever a plain name (e.g. "Validate") is ambiguous across
+// files and only one of the colliding files is the edge under test.
+func hasEdgeAt(edges []edgeRow, fromFile, fromName, toFile, toName string) bool {
+	for _, e := range edges {
+		if e.FromFile == fromFile && e.FromName == fromName && e.ToFile == toFile && e.ToName == toName {
 			return true
 		}
 	}
