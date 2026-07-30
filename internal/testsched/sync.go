@@ -36,13 +36,12 @@ import (
 // Tick returns only once every cycle in flight has finished — including
 // any still running from an earlier tick — and never sleeps or polls.
 //
-// Do not call Tick concurrently with another Tick, or with Run, on the
-// same Scheduler: mirrorsync.Scheduler.Tick reuses the scheduler's own
-// sync.WaitGroup, and a second Wait call arriving before a prior one has
-// returned panics ("sync: WaitGroup is reused before previous Wait has
-// returned"). Godog steps and Go tests both call Tick sequentially, so
-// this costs nothing in practice, but nothing in either signature stops
-// a caller from getting it wrong.
+// Calling Tick concurrently with another Tick, or with Run, on the same
+// Scheduler no longer panics (mirrorsync.Scheduler serializes the two via
+// an internal driveMu, added for loam-f75): a second call simply blocks
+// until the first's cycles have finished reporting. Godog steps and Go
+// tests both call Tick sequentially regardless, so this costs nothing in
+// practice, but a caller that got it wrong now sees a stall, not a crash.
 //
 // Tick also never returns early on ctx cancellation: it passes ctx to
 // the scheduler's collaborators, but the wait for every in-flight cycle

@@ -211,6 +211,22 @@ func main() {
 // LOAM_SYNC_INTERVAL well past its own runtime so this function's
 // wall-clock scheduler cannot cycle a repo underneath a manual tick.
 //
+// This wiring-level separation is the first line of defense, kept even
+// though mirrorsync.Scheduler itself no longer corrupts state if it is
+// violated: Scheduler.Run and Scheduler.Tick now serialize against each
+// other internally (an unexported driveMu, added for loam-f75) rather
+// than racing the same sync.WaitGroup, so a hypothetical future call
+// site that DID let a Scheduler's Tick and Run both become reachable
+// would see one call block behind the other, not the "WaitGroup is
+// reused before previous Wait has returned" panic this comment used to
+// warn about. That internal fix does not change the reasoning above:
+// this function still keeps its Scheduler local and returns only a
+// runner, because letting the production wall-clock scheduler be
+// Tick-able at all would be surprising -- an admin RPC or test that
+// found a way to call Tick on it would silently block on the next
+// LOAM_SYNC_INTERVAL tick's wg.Wait rather than doing anything useful --
+// not because of the panic risk, which mirrorsync.Scheduler now owns.
+//
 // onReady, if non-nil, is called exactly once, after every collaborator
 // below is constructed and reachable but before this function hands off to
 // serve's blocking Serve/Shutdown loop, with the live pool, ingestPool, and

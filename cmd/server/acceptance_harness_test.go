@@ -171,6 +171,14 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // previous Wait has returned") is per instance, so no Tick here can ever
 // collide with that Run there.
 //
+// mirrorsync.Scheduler now also guards this internally (driveMu
+// serializes Run and Tick against each other on one instance instead of
+// racing the shared WaitGroup), so even a Scheduler that DID leak both
+// directions would block, not panic. This function's own escape
+// prevention is kept regardless, for the same reason cmd/server/main.go's
+// run() keeps its own: a reachable Tick on either Scheduler is a bug
+// worth making unreachable, not merely safe to trip over.
+//
 // The production scheduler's wall-clock TICKS are kept away from this
 // suite separately, by acceptanceConfig's LOAM_SYNC_INTERVAL -- see
 // acceptanceSyncInterval for why interval, not the per-repo guard, is the

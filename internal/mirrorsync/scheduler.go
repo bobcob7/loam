@@ -21,6 +21,18 @@ import (
 // many concurrent git fetches and forge API calls on a single tick
 // (loam-5v5). WithMaxConcurrentCycles, passed to New, bounds that total,
 // across every repo combined.
+//
+// Run and Tick may be called concurrently with each other, or with
+// themselves, on one Scheduler: driveMu (see Tick's doc comment)
+// serializes every tick-plus-wait sequence, so a caller that does so
+// blocks rather than corrupting the scheduler's internal WaitGroup
+// (loam-f75). That is a safety net, not an invitation -- production and
+// the acceptance harness each still keep their own Scheduler local and
+// reachable through only one of the two methods (see cmd/server's
+// newSyncRunner and acceptance_harness_test.go's newSyncHarness), because
+// a Tick reachable on a Run-driven, wall-clock scheduler would silently
+// block on the next real tick's drain, which is never useful even though
+// it is now safe.
 type Scheduler struct {
 	logger       *slog.Logger
 	ticks        <-chan time.Time
@@ -35,6 +47,7 @@ type Scheduler struct {
 	running      map[RepoID]struct{}
 	wg           sync.WaitGroup
 	sem          chan struct{}
+	driveMu      sync.Mutex
 }
 
 // Option configures optional Scheduler behavior beyond New's required
@@ -98,13 +111,23 @@ func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher 
 // Run blocks, starting one cycle per enrolled repo on every received
 // tick, until ctx is canceled or the tick channel is closed. Each repo's
 // cycle runs in its own goroutine so a slow or stuck repo never blocks
-// another repo's cycle; Run itself only ever blocks on the tick source.
+// another repo's cycle; Run itself only ever blocks on the tick source
+// (and, per driveMu below, on a concurrent Tick call already in
+// progress).
 // A ListRepos failure is logged and the loop continues to the next tick —
 // production's retry is simply trying again later, never stopping the
 // process over a transient listing failure (loam-hhh). Tick, below,
 // propagates that same failure instead, since a manual-tick caller has no
 // "next tick" to fall back on and needs to tell it apart from an empty
 // enrollment.
+//
+// Each call to tick is serialized against every other tick and against
+// every Tick call via driveMu (see Tick's doc comment -- loam-f75): two
+// received ticks can never race each other's wg.Add, and a concurrent
+// Tick can never observe this call's Add racing its own Wait. The lock is
+// held only around the (fast) listing-and-spawning step, never around the
+// cycle goroutines' own work, so a slow cycle never delays the next
+// tick's spawn beyond the time it takes to list and launch.
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		select {
@@ -114,7 +137,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if _, err := s.tick(ctx); err != nil {
+			s.driveMu.Lock()
+			_, err := s.tick(ctx)
+			s.driveMu.Unlock()
+			if err != nil {
 				s.logger.Error("tick failed", "error", err)
 			}
 		}
@@ -215,22 +241,41 @@ func (s *Scheduler) Shutdown(ctx context.Context) error {
 // earlier, successful call, since waitIdle below waits for those
 // regardless of whether this call's own listing succeeded.
 //
-// Do not call Tick concurrently with another Tick, or with Run, on the
-// same Scheduler: both paths drive the same sync.WaitGroup, and a second
-// Wait call arriving before a prior one has returned panics ("sync:
-// WaitGroup is reused before previous Wait has returned"). Callers that
-// need manual, deterministic ticks (docs/testing-spec.md's "Manual
-// scheduler") should call Tick on its own and never start Run on that
-// Scheduler at all.
+// Calling Tick concurrently with another Tick, or with Run, on the same
+// Scheduler is safe but SERIALIZED, never parallel: driveMu is held for
+// this call's entire tick-plus-wait, so a second Tick (or Run's own next
+// tick) arriving while one is in flight simply blocks on driveMu.Lock()
+// until this call's cycles have finished reporting, then proceeds exactly
+// as if the two had been called back to back on one goroutine. No cycle
+// is ever dropped or skipped because of a concurrent caller -- the
+// tryStart guard (below) is what skips a repo already mid-cycle, and that
+// is unaffected by driveMu.
+//
+// This did not always hold: both paths drive the same sync.WaitGroup, and
+// before driveMu existed a second Wait call arriving before a prior one
+// had returned panicked ("sync: WaitGroup is reused before previous Wait
+// has returned") -- reproducible on demand with concurrent Tick calls, or
+// with Tick concurrent with Run (loam-f75). driveMu closes that hole at
+// its root, inside Scheduler itself, rather than relying on every current
+// and future caller to remember never to hold a Scheduler value somewhere
+// both Tick and Run are reachable from. Callers that need manual,
+// deterministic ticks (docs/testing-spec.md's "Manual scheduler") still
+// should not also start Run on that Scheduler -- Run would keep injecting
+// wall-clock cycles a test never asked for -- but doing so now serializes
+// instead of corrupting scheduler state.
 //
 // Tick does not return early on ctx cancellation: waitIdle's wait for
 // every in-flight cycle is unconditional (sync.WaitGroup.Wait takes no
 // ctx), and this error return does not change that -- it surfaces a
 // ListRepos failure, not a path to abort the wait. A collaborator that
-// wedges and ignores ctx still hangs Tick forever; that trade is
-// unchanged by this method's signature (see internal/testsched's
-// SyncHarness.Tick doc comment for why that is deliberate).
+// wedges and ignores ctx still hangs Tick forever, and now also blocks
+// every other Tick/Run tick waiting on driveMu behind it; that trade is
+// unchanged in kind by this method's signature (see internal/testsched's
+// SyncHarness.Tick doc comment for why that is deliberate) but is now
+// visible to concurrent callers too, not just to Tick's own caller.
 func (s *Scheduler) Tick(ctx context.Context) ([]RepoID, error) {
+	s.driveMu.Lock()
+	defer s.driveMu.Unlock()
 	started, err := s.tick(ctx)
 	s.waitIdle()
 	return started, err
