@@ -81,11 +81,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/bobcob7/loam/internal/gitrun"
 )
 
 // maxStdoutBytes caps how much of merge-tree's stdout is retained. Only
@@ -98,11 +97,6 @@ const maxStdoutBytes = 64 << 10
 // maxStderrBytes caps retained stderr for the same reason, smaller
 // because every stderr this package classifies on is a single short line.
 const maxStderrBytes = 8 << 10
-
-// subprocessWaitDelay bounds how long a canceled invocation's git process
-// may keep this call's pipes open after the context kills it, matching
-// internal/gitdiff and internal/diffplan's own subprocess handling.
-const subprocessWaitDelay = 5 * time.Second
 
 // errCheckFailed is the sentinel every "the check itself did not run"
 // outcome wraps -- a missing ref, unrelated histories, a git too old for
@@ -227,24 +221,19 @@ func summarize(out gitOutput) string {
 // errCheckFailed so every caller-visible failure from this package shares
 // one sentinel.
 func (c *Checker) run(ctx context.Context, mirrorDir string, args ...string) (gitOutput, error) {
-	home, err := os.MkdirTemp("", "loam-gitmergetree-*")
+	home, cleanup, err := gitrun.NewIsolatedHome()
 	if err != nil {
 		return gitOutput{}, fmt.Errorf("%w: creating isolated git environment: %w", errCheckFailed, err)
 	}
-	defer func() { _ = os.RemoveAll(home) }()
-	fullArgs := append([]string{"--no-pager", "-c", "credential.helper=", "--git-dir=" + mirrorDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.WaitDelay = subprocessWaitDelay
-	cmd.Env = gitEnv(home)
-	outBuf := &cappedBuffer{max: maxStdoutBytes}
-	errBuf := &cappedBuffer{max: maxStderrBytes}
-	cmd.Stdout = outBuf
-	cmd.Stderr = errBuf
+	defer cleanup()
+	outBuf := gitrun.NewCappedBuffer(maxStdoutBytes)
+	errBuf := gitrun.NewCappedBuffer(maxStderrBytes)
+	cmd := gitrun.NewCommand(ctx, gitEnv(home), nil, outBuf, errBuf, gitrun.GitDirArgs(mirrorDir, args...)...)
 	runErr := cmd.Run()
 	if runErr == nil {
-		return gitOutput{stdout: outBuf.buf.Bytes(), exitCode: 0, stderr: errBuf.buf.String()}, nil
+		return gitOutput{stdout: outBuf.Bytes(), exitCode: 0, stderr: errBuf.String()}, nil
 	}
-	return classifyRunErr(ctx, runErr, outBuf.buf.Bytes(), errBuf.buf.String(), args)
+	return classifyRunErr(ctx, runErr, outBuf.Bytes(), errBuf.String(), args)
 }
 
 // classifyRunErr decides what a failed cmd.Run means. Split out of run so
@@ -273,56 +262,16 @@ func classifyRunErr(ctx context.Context, runErr error, stdout []byte, stderr str
 	return gitOutput{}, fmt.Errorf("%w: running git %v: %w", errCheckFailed, args, runErr)
 }
 
-// gitEnv builds the environment for one git subprocess invocation, an
-// explicit minimal list rather than os.Environ() plus additions -- the
-// same shape and rationale as internal/gitdiff's and internal/diffplan's
-// own gitEnv. GIT_CONFIG_NOSYSTEM plus the redirected HOME/
-// XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL mean no system, user-global, or
-// ambient GIT_CONFIG_GLOBAL-pointed config is ever read: on macOS the
-// Command Line Tools ship a system gitconfig, and a merge driver,
-// merge.conflictStyle, core.autocrlf, or a rerere setting picked up from
-// it could change this check's verdict from one developer machine to
-// another. GIT_PAGER=cat plus the invocation's own --no-pager doubly
-// guard against core.pager blocking on a tty this subprocess does not
-// have; the GIT_TRACE* overrides are carried over from
-// internal/gittransport's gitEnv on the same belt-and-suspenders
-// reasoning, even though this package injects no credential to leak.
-// GIT_CURL_VERBOSE is deliberately not one of them: git only
-// presence-checks that variable, so "=0" would turn curl tracing on;
-// leaving it off this explicit allowlist is what keeps it off.
+// gitEnv builds the environment for one git subprocess invocation. It is a
+// thin wrapper over internal/gitrun.Env (loam-ldx: this package's own
+// hand-rolled copy, and five other identical ones elsewhere in this tree,
+// were folded into that shared package -- see its doc comment for the full
+// rationale) kept as a package-local name solely so
+// TestGitEnv_IsolatesFromAmbientConfig below -- which pins the exact
+// isolation whitelist this check's correctness depends on (a merge driver,
+// merge.conflictStyle, or core.autocrlf picked up from an ambient
+// gitconfig could change this check's verdict from one machine to
+// another) -- keeps working unmodified.
 func gitEnv(home string) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(home, "unused-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=",
-		"SSH_ASKPASS=",
-		"GIT_PAGER=cat",
-		"GIT_TRACE=0",
-		"GIT_TRACE_CURL=0",
-		"GIT_TRACE_PACKET=0",
-		"GIT_TRACE_PACK_ACCESS=0",
-		"GIT_TRACE_SETUP=0",
-	}
-}
-
-// cappedBuffer is an io.Writer retaining only the first max bytes ever
-// written, matching internal/gitdiff's own cappedBuffer.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-// Write implements io.Writer.
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		if room > len(p) {
-			room = len(p)
-		}
-		c.buf.Write(p[:room])
-	}
-	return len(p), nil
+	return gitrun.Env(home)
 }
