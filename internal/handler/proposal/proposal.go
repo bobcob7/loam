@@ -480,12 +480,34 @@ func mapRepoStoreErr(err error, context string) error {
 // ErrIllegalTransition on the close path means the branch is already
 // terminal (complete or closed) -- a failed precondition, not an internal
 // fault: the admin asked to close something that can no longer be closed.
+// err is wrapped alongside handler.ErrFailedPrecondition (Go 1.20+'s
+// multi-%w), rather than discarded: it used to substitute a hand-written
+// "the work branch has already reached a terminal state" message for err
+// entirely, which read fine but meant errors.Is(mapped,
+// workbranchstore.ErrIllegalTransition) was false -- the same sentinel-drop
+// loam-blc fixed for mapDiffComputerErr and loam-dq0o fixed for this
+// function's own namesake in internal/handler/workbranch (loam-c4ab is the
+// third instance of that shape). errors.Is(mapped,
+// workbranchstore.ErrIllegalTransition) and errors.Is(mapped,
+// handler.ErrFailedPrecondition) both now hold.
+//
+// ErrNotFound deliberately keeps the single-%w shape and still discards
+// err: this is the choice already made (and left alone) when workbranch.go's
+// mapWorkBranchStoreErr was fixed for ErrIllegalTransition above, and it is
+// the right one here too. Unlike ErrIllegalTransition, err's own wrapping
+// for a not-found ((GetByName's "getting work branch %s/%s: %w" or the
+// guarded transition's "%s work branch %s: %w" in store.go) names the
+// row's internal UUID or repo ID, not the repo/branch name pair context
+// already carries -- so preserving it would not add a diagnosable cause,
+// only an internal id with no meaning to the caller. There is nothing more
+// useful to say than "not found" once context has named what was looked
+// up, so err is left out on purpose here, not by accident.
 func mapWorkBranchStoreErr(err error, context string) error {
 	switch {
 	case errors.Is(err, workbranchstore.ErrNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	case errors.Is(err, workbranchstore.ErrIllegalTransition):
-		return fmt.Errorf("%s: the work branch has already reached a terminal state: %w", context, handler.ErrFailedPrecondition)
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
 	}
