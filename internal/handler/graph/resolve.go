@@ -74,6 +74,18 @@ func (h *Handler) symbolExists(ctx context.Context, scoped []handler.ScopedRepo,
 	return false, nil
 }
 
+// matchInfoFor builds the `of` disambiguator (docs/cli-spec.md's Ambiguity
+// paragraph: "each result row naming its match in `of`") naming which
+// resolved symbol s is. Used both for a row that IS itself one of several
+// ambiguous candidates (`graph def`/refs-style) and for a row that is NOT
+// itself ambiguous but was produced BY one of several ambiguous target
+// matches (`graph deps`/`dependents`'s dependency/dependent rows) -- in the
+// latter case s is the resolved TARGET the row is attributed to, not the
+// row's own symbol.
+func matchInfoFor(s codegraph.Symbol) *loamv1.MatchInfo {
+	return &loamv1.MatchInfo{Symbol: s.Name, File: s.File, Kind: s.Kind}
+}
+
 // toLocation converts a resolved codegraph.Symbol to the wire Location
 // shape. ambiguous marks whether the target this symbol was matched against
 // had more than one candidate (docs/cli-spec.md:528-533's "of" disambiguation
@@ -93,7 +105,7 @@ func toLocation(repoName string, s codegraph.Symbol, ambiguous, includeKind bool
 		loc.Kind = s.Kind
 	}
 	if ambiguous {
-		loc.Of = &loamv1.MatchInfo{Symbol: s.Name, File: s.File, Kind: s.Kind}
+		loc.Of = matchInfoFor(s)
 	}
 	return loc
 }

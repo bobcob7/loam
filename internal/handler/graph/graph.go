@@ -183,10 +183,17 @@ func (h *Handler) queryReferences(ctx context.Context, scoped []handler.ScopedRe
 
 // queryDependencies backs `graph deps <file|symbol>` ("what the target
 // depends on"): resolveSymbols turns target into one or more matched
-// symbols (ambiguous is data, not an error, per docs/cli-spec.md:528-533),
-// then Deps walks each match's forward blast radius. Each edge's From is
-// the resolved target (carrying `of` when ambiguous); To is the found
-// dependency, never itself ambiguous.
+// symbols, then Deps walks each match's forward blast radius, once per
+// match, concatenating rather than deduplicating -- docs/cli-spec.md's
+// Ambiguity paragraph commits to exactly that contract: "the query operates
+// on every matching symbol and returns the union, each result row naming
+// its match in `of`". Each edge's From is the resolved target (also
+// carrying `of` when ambiguous, self-describing which candidate it is); To
+// is the found dependency, which is never itself one of several ambiguous
+// candidates but, when the target was ambiguous, still carries `of` naming
+// which resolved target match produced it (loam-9rm) -- without that, two
+// dependency rows from two different matches can be byte-identical with no
+// way to tell them apart, which is the bug this comment guards against.
 func (h *Handler) queryDependencies(ctx context.Context, scoped []handler.ScopedRepo, target, file string, limit, offset int32) ([]*loamv1.DependencyEdge, bool, int32, error) {
 	if target == "" {
 		return nil, false, 0, fmt.Errorf("dependencies query: empty target: %w", handler.ErrInvalidArgument)
@@ -210,7 +217,11 @@ func (h *Handler) queryDependencies(ctx context.Context, scoped []handler.Scoped
 		}
 		truncated = truncated || depTruncated
 		for _, dep := range deps {
-			all = append(all, &loamv1.DependencyEdge{From: fromLoc, To: toLocation(m.repo.Name, dep.Symbol, false, true)})
+			toLoc := toLocation(m.repo.Name, dep.Symbol, false, true)
+			if ambiguous {
+				toLoc.Of = matchInfoFor(m.symbol)
+			}
+			all = append(all, &loamv1.DependencyEdge{From: fromLoc, To: toLoc})
 		}
 	}
 	if int32(len(all)) > mergeLimit {
@@ -223,8 +234,19 @@ func (h *Handler) queryDependencies(ctx context.Context, scoped []handler.Scoped
 
 // queryDependents backs `graph dependents <file|symbol>` (the reverse blast
 // radius): mirrors queryDependencies with From/To swapped -- each edge's To
-// is the resolved target (carrying `of` when ambiguous), From is a symbol
-// that depends on it.
+// is the resolved target (also carrying `of` when ambiguous, self-
+// describing which candidate it is), From is a symbol that depends on it.
+// resolveSymbols can return more than one match for an ambiguous target
+// (e.g. fixture-polyglot's Validate, a Go export and a TypeScript export
+// sharing a name), and Dependents runs once per match, concatenating
+// rather than deduplicating -- docs/cli-spec.md's Ambiguity paragraph
+// commits to exactly that: "the query operates on every matching symbol
+// and returns the union, each result row naming its match in `of`". So
+// every From row, even though it is never itself one of several ambiguous
+// candidates, still carries `of` naming which resolved target match
+// produced it when the target was ambiguous (loam-9rm) -- without that, two
+// dependent rows from two different matches can be byte-identical with no
+// way to tell them apart, which is the bug this comment guards against.
 func (h *Handler) queryDependents(ctx context.Context, scoped []handler.ScopedRepo, target, file string, limit, offset int32) ([]*loamv1.DependencyEdge, bool, int32, error) {
 	if target == "" {
 		return nil, false, 0, fmt.Errorf("dependents query: empty target: %w", handler.ErrInvalidArgument)
@@ -248,7 +270,11 @@ func (h *Handler) queryDependents(ctx context.Context, scoped []handler.ScopedRe
 		}
 		truncated = truncated || depTruncated
 		for _, dep := range deps {
-			all = append(all, &loamv1.DependencyEdge{From: toLocation(m.repo.Name, dep.Symbol, false, true), To: toLoc})
+			fromLoc := toLocation(m.repo.Name, dep.Symbol, false, true)
+			if ambiguous {
+				fromLoc.Of = matchInfoFor(m.symbol)
+			}
+			all = append(all, &loamv1.DependencyEdge{From: fromLoc, To: toLoc})
 		}
 	}
 	if int32(len(all)) > mergeLimit {

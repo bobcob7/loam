@@ -366,6 +366,93 @@ func TestQuery_Dependents_Success_FromIsDependentToIsTarget(t *testing.T) {
 	assert.Equal(t, "Login", edges[0].GetTo().GetSymbol())
 }
 
+// TestQuery_Dependents_AmbiguousTarget_UnionWithAttribution reproduces
+// loam-9rm's demo:m3 repro: `graph dependents Validate --repo
+// git/fixture-polyglot` resolves Validate to two distinct symbols (a Go
+// export and a TypeScript export sharing a name), and the store's
+// Dependents call returns the SAME two dependent rows (Summarize,
+// summarize) for BOTH resolved matches -- exactly the shape the bug report
+// observed (Summarize and summarize each appearing twice). Before this
+// bead's fix, the handler concatenated those without any `of` attribution,
+// producing four byte-identical-per-pair rows a caller could not tell
+// apart. docs/cli-spec.md's Ambiguity paragraph commits to union (not
+// dedup) PLUS attribution ("each result row naming its match in `of`"), so
+// the fix must keep all four rows but make each one distinguishable.
+func TestQuery_Dependents_AmbiguousTarget_UnionWithAttribution(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repoID := uuid.New()
+	goValidate := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "pkg/validate/validate.go", Name: "Validate", Kind: "function"}
+	tsValidate := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "src/validate.ts", Name: "Validate", Kind: "function"}
+	goSummarize := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "pkg/report/report.go", Name: "Summarize", Kind: "function"}
+	tsSummarize := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "src/index.ts", Name: "summarize", Kind: "function"}
+	symbols := &graph.SymbolStoreMock{
+		LookupSymbolsByNameFunc: func(context.Context, []uuid.UUID, string, string, string, int32) ([]codegraph.Symbol, bool, error) {
+			return []codegraph.Symbol{goValidate, tsValidate}, false, nil
+		},
+		// Both resolved matches report the SAME two dependents, mirroring the
+		// bug report's observed 2x-duplication factor regardless of its
+		// upstream cause.
+		DependentsFunc: func(context.Context, uuid.UUID, string, uuid.UUID, int32) ([]codegraph.Dependency, bool, error) {
+			return []codegraph.Dependency{{Symbol: goSummarize, Depth: 1}, {Symbol: tsSummarize, Depth: 1}}, false, nil
+		},
+	}
+	h := newHandler(t, symbols, oneRepoScope(repoID, "git/fixture-polyglot", "main"), []handler.Capability{handler.CapabilityGraphQuery}, &buf)
+	resp, err := h.Query(agentCtx(t, "author"), dependentsRequest("Validate"))
+	require.NoError(t, err)
+	edges := resp.Msg.GetDependencies().GetEdges()
+	require.Len(t, edges, 4, "one row per (resolved match x dependent) pair, per docs/cli-spec.md's union contract -- not deduplicated")
+	for _, edge := range edges {
+		require.NotNil(t, edge.GetFrom().GetOf(), "an ambiguous target's dependent rows must each name their match in `of` -- a row with no `of` at all is the bug's \"compounding problem\"")
+		assert.Equal(t, "Validate", edge.GetFrom().GetOf().GetSymbol())
+	}
+	// The two rows sharing a dependent (Summarize appears once per resolved
+	// match) must be distinguishable via `of`, not byte-identical.
+	var summarizeOfFiles []string
+	for _, edge := range edges {
+		if edge.GetFrom().GetSymbol() == "Summarize" {
+			summarizeOfFiles = append(summarizeOfFiles, edge.GetFrom().GetOf().GetFile())
+		}
+	}
+	require.Len(t, summarizeOfFiles, 2)
+	assert.ElementsMatch(t, []string{"pkg/validate/validate.go", "src/validate.ts"}, summarizeOfFiles,
+		"the two Summarize rows must be attributable to the Go Validate and the TypeScript Validate respectively, not indistinguishable duplicates")
+}
+
+// TestQuery_Dependencies_AmbiguousTarget_UnionWithAttribution mirrors
+// TestQuery_Dependents_AmbiguousTarget_UnionWithAttribution for `graph
+// deps`: the same union-plus-`of`-attribution contract applies to the
+// forward direction, and queryDependencies shares the identical
+// per-match-concatenation shape that produced loam-9rm's bug.
+func TestQuery_Dependencies_AmbiguousTarget_UnionWithAttribution(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repoID := uuid.New()
+	goValidate := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "pkg/validate/validate.go", Name: "Validate", Kind: "function"}
+	tsValidate := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "src/validate.ts", Name: "Validate", Kind: "function"}
+	sharedDep := codegraph.Symbol{ID: uuid.New(), RepoID: repoID, File: "pkg/util/util.go", Name: "Trim", Kind: "function"}
+	symbols := &graph.SymbolStoreMock{
+		LookupSymbolsByNameFunc: func(context.Context, []uuid.UUID, string, string, string, int32) ([]codegraph.Symbol, bool, error) {
+			return []codegraph.Symbol{goValidate, tsValidate}, false, nil
+		},
+		DepsFunc: func(context.Context, uuid.UUID, string, uuid.UUID, int32) ([]codegraph.Dependency, bool, error) {
+			return []codegraph.Dependency{{Symbol: sharedDep, Depth: 1}}, false, nil
+		},
+	}
+	h := newHandler(t, symbols, oneRepoScope(repoID, "git/fixture-polyglot", "main"), []handler.Capability{handler.CapabilityGraphQuery}, &buf)
+	resp, err := h.Query(agentCtx(t, "author"), dependenciesRequest("Validate"))
+	require.NoError(t, err)
+	edges := resp.Msg.GetDependencies().GetEdges()
+	require.Len(t, edges, 2, "one row per resolved match, per docs/cli-spec.md's union contract")
+	var ofFiles []string
+	for _, edge := range edges {
+		require.NotNil(t, edge.GetTo().GetOf(), "an ambiguous target's dependency rows must each name their match in `of`")
+		ofFiles = append(ofFiles, edge.GetTo().GetOf().GetFile())
+	}
+	assert.ElementsMatch(t, []string{"pkg/validate/validate.go", "src/validate.ts"}, ofFiles)
+	assert.NotEqual(t, edges[0].GetTo().String(), edges[1].GetTo().String(), "the two dependency rows must not be byte-identical")
+}
+
 // TestQuery_History_Success proves history entries convert with Repo set
 // from the resolved symbol's repo.
 func TestQuery_History_Success(t *testing.T) {
