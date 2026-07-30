@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -317,6 +318,17 @@ func (s *Scheduler) finish(repo RepoID) {
 // property tick's own goroutine-per-repo spawn already gives every
 // enrolled repo, just bounded now across all of them combined.
 func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
+	// recoverCyclePanic is registered FIRST, before the wg.Done/finish/sem
+	// defers below, so it is the LAST to run during a panic unwind --
+	// loam-337's recoverOutcomeRecording is the model: it is that
+	// package's "outermost guard", running only after the release/notify
+	// defers that must fire regardless of how this function exits. Every
+	// defer below still runs when it panics: Go executes a frame's whole
+	// defer chain, in LIFO order, even after one of them calls recover(),
+	// so finish and wg.Done are unaffected by where this one sits in that
+	// chain. It is placed here, ahead of them, only to mirror that
+	// established shape, not because placement changes correctness.
+	defer s.recoverCyclePanic(ctx, repo)
 	// defer order matters and is NOT source order: Go runs deferred calls
 	// LIFO, so finish (deferred second) runs before wg.Done (deferred
 	// first) on every exit path, including a panic unwinding through this
@@ -348,6 +360,33 @@ func (s *Scheduler) cycle(ctx context.Context, repo RepoID) {
 	if rerr := s.state.ReportIdle(ctx, repo, enqueuedIngest); rerr != nil {
 		s.logger.Error("reporting sync idle", "repo", string(repo), "error", rerr)
 	}
+}
+
+// recoverCyclePanic is loam-lae's per-cycle panic boundary, gated on
+// loam-qz1 (see cycle's own defer-order comment above): before that fix,
+// recovering here without a deferred finish would have stranded repo in
+// the running map forever, silently skipping it on every later tick --
+// trading a loud crash for a quiet, permanent one-repo outage. With that
+// fix landed, a panic anywhere in runSteps (git plumbing, the forge HTTP
+// calls, the mergeability check) still unwinds through cycle, but finish
+// and wg.Done -- both deferred ahead of this call returning -- have
+// already run by the time this recovers it, so repo is immediately
+// eligible for a new cycle on the scheduler's next tick.
+//
+// This recovers exactly ONE repo's cycle: it is not the multiRunner-style
+// "kill the whole subsystem" guard (cmd/server/multirunner.go) -- the
+// scheduler itself, and every other repo's cycle, keeps running
+// regardless of this one panicking. Never re-panics, matching
+// runOrchestrator/recoverOutcomeRecording's rule (internal/ingest/pool.go):
+// a silent recover would be strictly worse than the crash it replaces, so
+// this always logs the repo, the recovered value, and a stack trace.
+func (s *Scheduler) recoverCyclePanic(ctx context.Context, repo RepoID) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	s.logger.ErrorContext(ctx, "recovered panic in mirror sync cycle",
+		"repo", string(repo), "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 }
 
 // runSteps runs the fixed 5-step Mirror Sync order for repo in order
