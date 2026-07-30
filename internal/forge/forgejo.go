@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -100,17 +101,34 @@ type forgejoErrorEnvelope struct {
 // envelope in the body is treated as unclassifiable rather than success:
 // a 404 alone only means "nothing rejected this request," which is also
 // what an unauthenticated request or a wrong/misconfigured host produces.
+//
+// # Bare host, plaintext-HTTP forge (loam-4kz)
+//
+// host reaches this method verbatim from CredentialService.SetUpstreamToken
+// (internal/handler/credential), which has no upstream URL in scope to
+// borrow a scheme from — it is a standalone RPC field, typed by an admin
+// or a CLI/CI seeding step. apiBaseURL therefore defaults a scheme-less
+// host to https, which is the right default and is byte-compatible with
+// every host string this method has ever accepted. But it means a bare
+// host that actually names a plaintext-HTTP forge (a self-hosted Forgejo
+// with no TLS in front of it, or this repo's own e2e/demo fixtures) can
+// never validate: the https attempt reaches a real listener that answers
+// in plain HTTP, and Go's client reports that decisively as
+// http.ErrSchemeMismatch ("server gave HTTP response to HTTPS client") —
+// not a guess based on the host string's shape (loopback, a private IP,
+// ...), but the TLS layer itself confirming no TLS is there. On exactly
+// that signal, and only for a host that had no explicit scheme to begin
+// with (an explicit "https://" is never second-guessed), this method
+// retries once against "http://"+host before giving up. Any other
+// transport failure (DNS, refused connection, timeout) is returned as-is.
 func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 	if token == "" {
 		return fmt.Errorf("validating token for %s: %w", host, ErrInvalidToken)
 	}
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL(host), probeOwner, probeRepo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return fmt.Errorf("building validate-token request for %s: %w", host, err)
+	resp, err := f.probeValidateToken(ctx, host, token)
+	if err != nil && !strings.Contains(host, "://") && errors.Is(err, http.ErrSchemeMismatch) {
+		resp, err = f.probeValidateToken(ctx, "http://"+strings.TrimSuffix(host, "/"), token)
 	}
-	req.Header.Set("Authorization", "token "+token)
-	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("validating token for %s: %w", host, err)
 	}
@@ -132,6 +150,26 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 		return fmt.Errorf("validating token for %s: probe returned 404 without a Forgejo error body; host may not be reachable as a Forgejo API", host)
 	}
 	return fmt.Errorf("validating token for %s: unexpected status %s", host, resp.Status)
+}
+
+// probeValidateToken issues the scope probe described on ValidateToken's
+// own doc comment against host and returns the raw response for
+// ValidateToken to classify, or the request/transport error unclassified
+// (so errors.Is(err, http.ErrSchemeMismatch) still works after the %w
+// wrap here — url.Error, which f.httpClient.Do returns on failure, always
+// unwraps to the underlying transport error).
+func (f *Forgejo) probeValidateToken(ctx context.Context, host, token string) (*http.Response, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL(host), probeOwner, probeRepo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building validate-token request for %s: %w", host, err)
+	}
+	req.Header.Set("Authorization", "token "+token)
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("validating token for %s: %w", host, err)
+	}
+	return resp, nil
 }
 
 // forgejoPullRequest is the subset of the Forgejo pull-request response

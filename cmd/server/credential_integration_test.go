@@ -225,6 +225,46 @@ func TestServer_SetUpstreamToken_EncryptsAtRestAndIsNeverReadableBack(t *testing
 	assert.NotContains(t, rs.serverLog(), credValidToken, "the success path must not log the token")
 }
 
+// TestServer_SetUpstreamToken_BareHostAgainstPlaintextForge_Validates is
+// the loam-4kz regression against the REAL binary: an admin (or a seeding
+// script -- see Taskfile.yml's test:e2e target) submits a BARE
+// "host:port", exactly what stubForgejoAPI's own doc comment calls a
+// scheme-bearing form and this test deliberately strips, naming a real
+// plaintext-HTTP server with no upstream URL anywhere in the request to
+// borrow a scheme from. Before this fix, *forge.Forgejo's apiBaseURL
+// dialled that bare host over https, the stub (plain HTTP, never
+// NewTLSServer) answered with a plaintext HTTP response, and Go's client
+// reported that decisively as http.ErrSchemeMismatch -- surfaced by the
+// handler as an unclassified CodeInternal. ValidateToken now retries once
+// over http on exactly that signal (internal/forge/forgejo.go), so this
+// must now succeed, end to end, through the real server process.
+func TestServer_SetUpstreamToken_BareHostAgainstPlaintextForge_Validates(t *testing.T) {
+	dsn := newPostgres(t)
+	rs := startServer(t, dsn)
+	forgeStub := stubForgejoAPI(t)
+	bareHost := strings.TrimPrefix(forgeStub.URL, "http://")
+	require.NotEqual(t, forgeStub.URL, bareHost, "forgeStub must be a plain http:// httptest server for this to be a real regression test")
+	client := credentialClient(t, rs)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	setResp, err := client.SetUpstreamToken(ctx, connect.NewRequest(&adminv1.SetUpstreamTokenRequest{Host: bareHost, Token: credValidToken}))
+	require.NoError(t, err)
+	assert.Equal(t, bareHost, setResp.Msg.GetStatus().GetHost(), "the stored key is the host exactly as submitted -- the scheme fallback is internal to validation, it never rewrites what credentials.host stores")
+	assert.True(t, setResp.Msg.GetStatus().GetHasToken())
+	assert.True(t, setResp.Msg.GetStatus().GetValidated(), "the forge accepted this token over the http fallback, so the stored verdict must say so")
+
+	getResp, err := client.GetCredentialStatus(ctx, connect.NewRequest(&adminv1.GetCredentialStatusRequest{Host: bareHost}))
+	require.NoError(t, err)
+	assert.True(t, getResp.Msg.GetStatus().GetHasToken())
+	assert.True(t, getResp.Msg.GetStatus().GetValidated())
+
+	ciphertext := credentialCiphertext(t, dsn, bareHost)
+	require.NotEmpty(t, ciphertext, "positive control: a token really was written under the bare host key")
+	assert.False(t, bytes.Contains(ciphertext, []byte(credValidToken)), "token_ciphertext must not contain the plaintext token")
+	assert.NotContains(t, rs.serverLog(), credValidToken, "the success path must not log the token")
+}
+
 // TestServer_SetUpstreamToken_RejectedTokenIsReportedAndNeverStored is
 // features/credentials.feature's "A rejected token is reported", end to
 // end. The store assertion is the load-bearing half: a handler that wrote

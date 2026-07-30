@@ -122,39 +122,28 @@ import { e2eEnv, expect, setUpstreamTokenOutOfBand, test } from "./fixtures";
  *   defence-in-depth regardless of this file's own fix, since it bounds
  *   what a leaked artefact from ANY spec could do, not just this journey's.
  *
- * loam-4kz (KNOWN BUG, verified directly against this exact stack while
- * building this spec -- OUT OF SCOPE, not worked around here): `forge.
- * Forgejo.ValidateToken`'s `apiBaseURL` (internal/forge/forgejo.go)
- * unconditionally prepends "https://" to any host string that does not
- * already contain "://". `EnrollRepo` derives credentials by the upstream
- * URL's BARE `host:port` (deriveRepoIdentity), and the Credentials screen's
- * own Host field hint tells an admin to type exactly that bare form
- * ("github.com", "forgejo.example.com") -- but this e2e stack's seeded
- * Forgejo (deploy/docker-compose.e2e.yml) serves plaintext HTTP, so
- * validating that realistic bare host always dials `https://` at a
- * plaintext listener and fails before Forgejo ever sees the token. Confirmed
- * directly, via `curl` against this exact namespaced stack, before writing
- * any Playwright code:
+ * loam-4kz (FIXED; this test previously carried a `test.fail()` annotation
+ * documenting it here): `forge.Forgejo.ValidateToken`'s `apiBaseURL`
+ * (internal/forge/forgejo.go) unconditionally prepends "https://" to any
+ * host string that does not already contain "://", and this e2e stack's
+ * seeded Forgejo (deploy/docker-compose.e2e.yml) serves plaintext HTTP --
+ * so validating the realistic bare host below used to always dial
+ * `https://` at a plaintext listener and fail before Forgejo ever saw the
+ * token (confirmed directly via `curl` against this exact namespaced
+ * stack while building this spec: `POST .../SetUpstreamToken
+ * {"host":"127.0.0.1:13030",...}` -> `{"code":"internal",...}`, server
+ * log `... http: server gave HTTP response to HTTPS client`).
  *
- *   POST /loam.admin.v1.CredentialService/SetUpstreamToken
- *   {"host":"127.0.0.1:13030","token":"<real seeded token>"}
- *   -> {"code":"internal","message":"internal error"}
- *
- *   server log: "validating the token against 127.0.0.1:13030: validating
- *   token for 127.0.0.1:13030: Post \"https://127.0.0.1:13030/api/v1/
- *   repos/loam-scope-probe-.../does-not-exist/pulls\": http: server gave
- *   HTTP response to HTTPS client"
- *
- * This is the exact failure cmd/demoenv/credential.go's own doc comment
- * predicts ("no single host string can both validate over the RPC and be
- * found again at enrollment"). The test below submits exactly that
- * realistic bare host (matching the field's own hint, matching what
- * EnrollRepo would derive) and is marked `test.fail()` rather than adjusted
- * to a host format that dodges the bug -- per this bead's explicit
- * instruction not to shape the test around it. When loam-4kz lands, this
- * annotation must be removed; Playwright will fail the run loudly if the
- * test starts passing while `test.fail()` is still present, which is the
- * intended forcing function to catch a stale annotation.
+ * The fix (internal/forge/forgejo.go's `ValidateToken`): on exactly that
+ * signal -- Go's own `http.ErrSchemeMismatch`, not a guess based on the
+ * host string's shape -- and only for a host that carried no explicit
+ * scheme to begin with, ValidateToken now retries once over `http://`.
+ * This test submits the realistic bare host the Credentials screen's own
+ * Host field hint has always described (matching what
+ * `RepoAdminService.EnrollRepo` derives from an https upstream, per
+ * `internal/handler/repoadmin/handler.go`'s `forgeHostOf`), unmodified
+ * from before the fix -- it was deliberately never adjusted to a host
+ * format that would dodge the bug.
  */
 /**
  * Filled into the "[loam-4kz]" test's Token field below in place of a real
@@ -171,16 +160,10 @@ test.describe("credentials journey", () => {
     page,
   }) => {
     // See this file's own top-of-file doc comment for the full reasoning
-    // and the exact curl reproduction. Not worked around: this uses the
-    // bare host:port the Host field's own hint tells an admin to type, the
-    // same bare form EnrollRepo derives -- the one loam-4kz breaks against
-    // this stack's plaintext-HTTP Forgejo.
-    test.fail(
-      true,
-      "loam-4kz: SetUpstreamToken always dials https:// for a bare host, and this stack's seeded " +
-        "Forgejo is plaintext HTTP -- see this file's doc comment for the exact curl reproduction.",
-    );
-
+    // and the exact curl reproduction. This uses the bare host:port the
+    // Host field's own hint has always described -- the format loam-4kz
+    // used to break against this stack's plaintext-HTTP Forgejo, now
+    // reached via ValidateToken's scheme-mismatch retry.
     await page.goto("/credentials");
     await expect(page.getByRole("heading", { name: "Credentials", level: 1 })).toBeVisible();
 
@@ -208,13 +191,7 @@ test.describe("credentials journey", () => {
 
     // The spec-mandated outcome (docs/testing-spec.md: "set token ->
     // validated"): the dialog closes on success and the row for this host
-    // shows "Validated". This is the assertion that currently fails --
-    // loam-4kz means the dialog instead stays open with an ErrorBanner
-    // reading "internal error" (Code.Internal -> "unexpected" ->
-    // data/mapConnectError.ts), which this test deliberately does NOT
-    // assert on: doing so would be asserting the bug's shape as the
-    // expected behaviour, which is exactly the "test shaped around a bug"
-    // this bead warns against.
+    // shows "Validated".
     await expect(dialog).toBeHidden();
     const row = page.getByRole("row", { name: new RegExp(escapeForRegExp(e2eEnv.forgejoHost)) });
     await expect(row.getByText("Validated")).toBeVisible();

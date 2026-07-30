@@ -37,15 +37,21 @@ func (h *Handler) ProbeRepo(ctx context.Context, req *connect.Request[adminv1.Pr
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: upstream_url %s is not a valid http(s) URL: %w", upstreamURL, handler.ErrInvalidArgument))
 	}
+	// host must be derived exactly like EnrollRepo's deriveRepoIdentity
+	// (forgeHostOf, handler.go): both resolve the same credentials.host
+	// row for the same forge, and for a plaintext-HTTP forge that row is
+	// keyed by the scheme-qualified form, not upstreamURL's bare u.Host
+	// (loam-4kz).
+	host := forgeHostOf(u)
 	// h.cloner.LsRemote (gittransport.Transport) resolves the credential
 	// itself before running the git subprocess; this call is purely to
 	// fail fast with a clear "no credential configured" message, rather
 	// than a generic git-subprocess failure, when the host was never
 	// enrolled with a token at all.
-	if _, err := h.credentials.GetByHost(ctx, u.Host); err != nil {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: no usable credential for host %s: %w: %w", u.Host, err, handler.ErrFailedPrecondition))
+	if _, err := h.credentials.GetByHost(ctx, host); err != nil {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo: no usable credential for host %s: %w: %w", host, err, handler.ErrFailedPrecondition))
 	}
-	out, err := h.cloner.LsRemote(ctx, u.Host, upstreamURL)
+	out, err := h.cloner.LsRemote(ctx, host, upstreamURL)
 	if err != nil {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("probe repo %s: %w: %w", upstreamURL, err, handler.ErrFailedPrecondition))
 	}

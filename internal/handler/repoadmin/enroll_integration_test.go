@@ -109,7 +109,15 @@ func TestEnrollRepo_RealMirror_ClonesPopulatedBareMirrorAndReconciles(t *testing
 	require.NoError(t, srv.SeedRepoFiles(ctx, "widgets", map[string][]byte{"a.txt": []byte("hi")}, fakeforge.SeedOptions{}))
 	upstreamURL := srv.GitURL("widgets")
 	const repoName = "git/widgets"
-	host := strings.TrimPrefix(strings.TrimPrefix(ts.URL, "http://"), "https://")
+	// host is scheme-qualified ("http://host:port"), not bare -- loam-4kz:
+	// deriveRepoIdentity (handler.go's forgeHostOf) derives a scheme-
+	// qualified host from a plain-HTTP upstream URL like this fixture's
+	// (srv.GitURL builds off ts.URL, a plain httptest.NewServer, never
+	// NewTLSServer), and the credential this test seeds below must be
+	// keyed identically or EnrollRepo's own GetByHost call fails to find
+	// it -- exactly the failure this bead exists to fix, reproduced here
+	// if this host were bare.
+	host := ts.URL
 
 	repos := reposstore.NewStore(gen.New(pool), logger)
 	workBranches := workbranchstore.New(gen.New(pool), logger)

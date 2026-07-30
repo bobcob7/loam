@@ -124,7 +124,58 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 		return "", "", fmt.Errorf("upstream url %s: missing host", upstreamURL)
 	}
 	path := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
-	return u.Host, path, nil
+	return forgeHostOf(u), path, nil
+}
+
+// forgeHostOf returns the forge-host string this package resolves
+// credentials by and persists as repos.forge_host, from an
+// already scheme-validated URL (deriveRepoIdentity/ProbeRepo both parse
+// and validate u.Scheme is http or https before calling this).
+//
+// It is BARE ("host:port") for the default, https, scheme -- byte-for-byte
+// what this package has always derived, before loam-4kz -- so every
+// existing https repos/credentials row, and every https admin workflow
+// (typing "github.com" into the Credentials screen's Host field), keeps
+// resolving exactly as it always has. No migration, no changed UI
+// guidance, for the dominant case.
+//
+// It is scheme-QUALIFIED ("http://host:port") only for plain HTTP, the
+// one scheme internal/forge's apiBaseURL cannot otherwise address
+// correctly: that function's own doc comment says a host without "://" is
+// always dialled over https, so a bare host derived from an http://
+// upstream would have every REST call (ValidateToken, CheckRepo's git
+// probes are unaffected -- they use upstreamURL directly -- but CreatePR/
+// GetPRState/ClosePR/FindOpenPR all go through apiBaseURL) silently
+// target the wrong scheme and fail against a real plaintext forge
+// (loam-4kz's root cause). This is exactly the asymmetry apiBaseURL's own
+// doc comment already documents ("host may be a bare domain ... or
+// include a scheme"); this function is what makes EnrollRepo (and
+// ProbeRepo, which must derive the identical string so a credential set
+// for one is found by the other) apply that asymmetry consistently,
+// rather than only at the httptest-server tests that originally motivated
+// apiBaseURL's scheme-passthrough.
+//
+// The corollary an operator (or a seeding script -- see Taskfile.yml's
+// test:e2e/demo:m3 targets) must know: a credential for a plaintext-HTTP
+// forge has to be set with the SAME "http://host:port" form this function
+// derives, not the bare host -- credentials.host and repos.forge_host are
+// two independently-keyed lookups (internal/credentialstore.GetByHost)
+// that only resolve each other when the literal strings match. There is
+// no normalization chokepoint reconciling a mismatched pair: EnrollRepo's
+// GetByHost call and this function are the single source of truth for
+// what "the forge host" is, deliberately, rather than layering a second
+// heuristic (e.g. defaulting loopback addresses to http) on top that
+// could itself silently downgrade a REAL https credential-bearing
+// request. CredentialService.SetUpstreamToken separately tolerates a bare
+// host that turns out to be plaintext HTTP (internal/forge/forgejo.go's
+// ValidateToken doc comment), but that tolerance is scoped to validating
+// the token over the wire -- it never changes what key the token is
+// stored under, so it does not create a second way to reach the same row.
+func forgeHostOf(u *url.URL) string {
+	if u.Scheme == "http" {
+		return "http://" + u.Host
+	}
+	return u.Host
 }
 
 // stringOrEmpty dereferences s, or returns "" for a nil pointer -- the

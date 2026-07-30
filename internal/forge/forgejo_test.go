@@ -2,11 +2,13 @@ package forge
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,6 +104,82 @@ func TestForgejo_ValidateToken_NetworkFailure(t *testing.T) {
 	err := f.ValidateToken(t.Context(), "http://127.0.0.1:0", "token")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrInvalidToken)
+}
+
+// roundTripFunc adapts a plain function to http.RoundTripper, for tests
+// that need to observe (or control) exactly what scheme/URL a request was
+// sent with, independent of what a real TCP/TLS handshake would do.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestForgejo_ValidateToken_BareHostFallsBackToHTTPOnSchemeMismatch is the
+// loam-4kz regression: a BARE host:port (no "://", exactly what
+// CredentialService.SetUpstreamToken receives from an admin typing a
+// forge host with no accompanying upstream URL to borrow a scheme from)
+// naming a REAL plaintext-HTTP server must still validate. Before this
+// fix, apiBaseURL's https default meant the httptest server below -- a
+// genuine `httptest.NewServer`, HTTP only, never `NewTLSServer` -- would
+// answer a TLS ClientHello with a plain HTTP response and ValidateToken
+// would surface http.ErrSchemeMismatch as an unclassified failure.
+func TestForgejo_ValidateToken_BareHostFallsBackToHTTPOnSchemeMismatch(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/repos/"+probeOwner+"/"+probeRepo+"/pulls", r.URL.Path)
+		assert.Equal(t, "token good-token", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"repository does not exist","url":"https://x/api/swagger"}`))
+	}))
+	defer server.Close()
+	bareHost := strings.TrimPrefix(server.URL, "http://")
+	require.NotEqual(t, server.URL, bareHost, "server.URL must be a bare http:// httptest server for this to be a real regression test")
+	f := NewForgejo(bareHost, "", server.Client(), testLogger())
+	err := f.ValidateToken(t.Context(), bareHost, "good-token")
+	require.NoError(t, err)
+}
+
+// TestForgejo_ValidateToken_ExplicitHTTPSNeverFallsBack proves the retry
+// is scoped to a host that carried NO scheme to begin with. A caller that
+// wrote "https://" explicitly gets that request honoured to its actual
+// failure, never silently downgraded to plaintext -- an explicit scheme
+// is the one signal this method treats as non-negotiable.
+func TestForgejo_ValidateToken_ExplicitHTTPSNeverFallsBack(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	bareHost := strings.TrimPrefix(server.URL, "http://")
+	explicitHTTPS := "https://" + bareHost
+	f := NewForgejo(explicitHTTPS, "", server.Client(), testLogger())
+	err := f.ValidateToken(t.Context(), explicitHTTPS, "good-token")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, http.ErrSchemeMismatch)
+}
+
+// TestForgejo_ValidateToken_BareHost_OnlyRetriesOnSchemeMismatch proves
+// the retry fires on the SPECIFIC http.ErrSchemeMismatch signal, not on
+// any transport failure -- a bare host whose https attempt fails for an
+// unrelated reason (here, a fake RoundTripper returning an arbitrary
+// error) must be reported as-is, with no second, http:// request ever
+// sent. A mutation that widened the guard to "retry on any error" is
+// caught here: this test's RoundTripper asserts it is invoked exactly
+// once and that the one call was scheme "https".
+func TestForgejo_ValidateToken_BareHost_OnlyRetriesOnSchemeMismatch(t *testing.T) {
+	t.Parallel()
+	var calls int
+	wantErr := errors.New("boom: connection reset by peer")
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		assert.Equal(t, "https", req.URL.Scheme, "the first attempt for a bare host must always be https")
+		return nil, wantErr
+	})}
+	f := NewForgejo("forge.example.invalid", "", client, testLogger())
+	err := f.ValidateToken(t.Context(), "forge.example.invalid", "good-token")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, wantErr)
+	assert.Equal(t, 1, calls, "a non-scheme-mismatch transport error must not trigger the http:// retry")
 }
 
 func TestForgejo_CreatePR(t *testing.T) {

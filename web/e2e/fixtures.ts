@@ -55,14 +55,19 @@ export const e2eEnv = {
   },
   /**
    * The seeded Forgejo's bare `host:port` (e.g. "127.0.0.1:13000") -- the
-   * same string Taskfile.yml's step 5 hands to `demoenv seed-credential`
-   * for enrollment, and the same format the Credentials screen's own Host
-   * field hints an admin should type ("github.com", "forgejo.example.com").
-   * Added for loam-li0.11.2 (credentials.e2e.ts), which -- unlike the enroll
-   * journey -- must submit `SetUpstreamToken` for real, against the real
-   * seeded Forgejo, rather than relying on the row that step 5 seeds out of
-   * band. See credentials.e2e.ts's own doc comment for why the bare form of
-   * this host trips loam-4kz.
+   * same format the Credentials screen's own Host field hints an admin
+   * should type for the default, https case ("github.com"). Deliberately
+   * NOT the scheme-qualified form Taskfile.yml's step 5 hands to `demoenv
+   * seed-credential` for enrollment (`http://127.0.0.1:13000`, matching
+   * what `RepoAdminService.EnrollRepo` derives from the http:// upstream
+   * URL, `internal/handler/repoadmin/handler.go`'s `forgeHostOf`) -- this
+   * fixture exists precisely so credentials.e2e.ts can submit the
+   * REALISTIC bare form to `SetUpstreamToken` and prove it still
+   * validates against this stack's plaintext Forgejo (loam-4kz's
+   * scheme-mismatch retry, internal/forge/forgejo.go's `ValidateToken`),
+   * rather than relying on the scheme-qualified row step 5 seeds out of
+   * band for enrollment's own sake. Added for loam-li0.11.2
+   * (credentials.e2e.ts).
    */
   get forgejoHost(): string {
     return requireEnv("LOAM_E2E_FORGEJO_HOST");
