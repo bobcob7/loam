@@ -83,6 +83,16 @@ func validateSyncInterval(interval time.Duration) error {
 // change could silently break. The acceptance harness reaches the opposite
 // end of the same constraint from its own side (see
 // acceptance_harness_test.go's newSyncHarness).
+//
+// mirrorsync.Scheduler itself now also serializes Run and Tick internally
+// (driveMu) rather than racing the same sync.WaitGroup, so this escape
+// prevention is belt-and-suspenders, not the only thing standing between
+// this binary and the panic loam-f75 reported. It stays anyway: even
+// serialized, a Tick reachable on the production scheduler would be a
+// live footgun (it would block on the next wall-clock tick's drain for no
+// caller's benefit), and never letting the Scheduler value leave this
+// function is what keeps that call impossible to reach at all, not just
+// safe if reached.
 type syncRunner struct {
 	run      func(ctx context.Context)
 	shutdown func(ctx context.Context) error

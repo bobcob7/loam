@@ -703,6 +703,186 @@ func TestScheduler_Tick_StillBlocksUntilEveryBoundedCycleFinishes(t *testing.T) 
 	}
 }
 
+// TestScheduler_ConcurrentTickBlocksUntilFirstCompletes is loam-f75's core
+// claim, proven deterministically rather than by stress: a second Tick
+// call arriving while an earlier one's cycle is still in flight on the
+// same Scheduler must BLOCK behind driveMu, not race the shared
+// WaitGroup. Before driveMu existed, this exact interleaving -- a fresh
+// tick()'s wg.Add racing an in-flight call's wg.Wait -- panicked with
+// "sync: WaitGroup is reused before previous Wait has returned"
+// (reproduced on demand, both under -race and without it, by looping this
+// shape a few hundred times over a fresh Scheduler each time; see
+// TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup below for that
+// same proof kept as a permanent regression). This test instead asserts
+// the documented, now-safe behavior directly: the second call does not
+// return early, and once it does, it reports it started nothing new,
+// because repoA was still claimed by the first call's cycle at the moment
+// the second call's own tick() ran.
+func TestScheduler_ConcurrentTickBlocksUntilFirstCompletes(t *testing.T) {
+	t.Parallel()
+	h := newHarness("repoA")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return FetchResult{}, nil
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := h.scheduler.Tick(context.Background())
+		firstDone <- err
+	}()
+	<-entered // the first Tick's cycle is now genuinely in flight, blocked in Fetch
+
+	secondDone := make(chan tickResult, 1)
+	go func() {
+		started, err := h.scheduler.Tick(context.Background())
+		secondDone <- tickResult{started: started, err: err}
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("the second, concurrent Tick call returned before the first Tick's cycle finished -- it must serialize behind driveMu, not race the shared WaitGroup (loam-f75)")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	require.NoError(t, <-firstDone)
+	select {
+	case result := <-secondDone:
+		require.NoError(t, result.err)
+		assert.Empty(t, result.started, "repoA was already running under the first call's cycle when the second call's own tick() ran, so it starts nothing new -- it only had to wait its turn")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second Tick call never returned after the first call's in-flight cycle completed")
+	}
+	<-h.outcomes // drain the one cycle's terminal report so it does not leak past the test
+}
+
+// TestScheduler_TickDuringRunSerializesInsteadOfRacing is loam-f75's other
+// named interleaving: a manual Tick call arriving while Run's own tick is
+// still driving a cycle. Same proof shape as
+// TestScheduler_ConcurrentTickBlocksUntilFirstCompletes above, just with
+// Run standing in for the first caller.
+func TestScheduler_TickDuringRunSerializesInsteadOfRacing(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := newHarness("repoA")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return FetchResult{}, nil
+	}
+	go h.scheduler.Run(ctx)
+	h.ticks <- time.Now()
+	<-entered // Run's own tick has started repoA's cycle and it is in flight
+
+	tickDone := make(chan tickResult, 1)
+	go func() {
+		started, err := h.scheduler.Tick(context.Background())
+		tickDone <- tickResult{started: started, err: err}
+	}()
+
+	select {
+	case <-tickDone:
+		t.Fatal("Tick returned while Run's own cycle was still in flight -- it must serialize behind driveMu, not race the shared WaitGroup (loam-f75)")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case result := <-tickDone:
+		require.NoError(t, result.err)
+		assert.Empty(t, result.started, "repoA was already running under Run's cycle when Tick's own tick() ran, so it starts nothing new")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Tick never returned after Run's in-flight cycle completed")
+	}
+	<-h.outcomes // drain the one cycle's terminal report so it does not leak past the test
+}
+
+// TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup is
+// loam-f75's stress-shaped regression: it reproduces, near-verbatim, the
+// interleaving the bead reported (repeated concurrent Tick calls racing
+// finish/wg.Done against a fresh tick's wg.Add as repos free up and get
+// re-claimed almost immediately). Confirmed, before driveMu existed, to
+// panic with "sync: WaitGroup is reused before previous Wait has
+// returned" reliably within the first handful of the loop's 200
+// iterations, both under -race (as a data race) and without it (as the
+// literal panic) -- reverting the driveMu change and rerunning this test
+// reproduces that panic again. With the fix, every iteration must
+// complete cleanly: this is the shape a vacuous "guard removed" pass
+// cannot fake, since the old code fails it almost immediately.
+func TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup(t *testing.T) {
+	t.Parallel()
+	for range 200 {
+		h := newHarness("repoA", "repoB")
+		h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+			return FetchResult{}, nil
+		}
+		h.state.ReportIdleFunc = func(ctx context.Context, repo RepoID, enqueuedIngest bool) error { return nil }
+		var start sync.WaitGroup
+		start.Add(1)
+		var done sync.WaitGroup
+		for range 4 {
+			done.Add(1)
+			go func() {
+				defer done.Done()
+				start.Wait()
+				_, err := h.scheduler.Tick(context.Background())
+				assert.NoError(t, err)
+			}()
+		}
+		start.Done()
+		done.Wait()
+	}
+}
+
+// TestScheduler_TickDuringRunDoesNotRaceTheSharedWaitGroup is
+// TestScheduler_ConcurrentTicksDoNotRaceTheSharedWaitGroup's sibling for
+// the Tick-during-Run interleaving: Run is fed a steady stream of ticks
+// on its own goroutine while several goroutines hammer Tick concurrently
+// on the same Scheduler. Confirmed, before driveMu existed, to panic
+// reliably on the first iteration.
+func TestScheduler_TickDuringRunDoesNotRaceTheSharedWaitGroup(t *testing.T) {
+	t.Parallel()
+	for range 50 {
+		h := newHarness("repoA", "repoB")
+		h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
+			return FetchResult{}, nil
+		}
+		h.state.ReportIdleFunc = func(ctx context.Context, repo RepoID, enqueuedIngest bool) error { return nil }
+		ctx, cancel := context.WithCancel(context.Background())
+		go h.scheduler.Run(ctx)
+		var done sync.WaitGroup
+		for range 4 {
+			done.Add(1)
+			go func() {
+				defer done.Done()
+				for range 20 {
+					_, err := h.scheduler.Tick(context.Background())
+					assert.NoError(t, err)
+				}
+			}()
+		}
+		go func() {
+			for range 200 {
+				select {
+				case h.ticks <- time.Now():
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		done.Wait()
+		cancel()
+	}
+}
+
 // TestScheduler_WithMaxConcurrentCyclesNonPositiveIsANoOp pins the
 // documented contract on WithMaxConcurrentCycles that n <= 0 leaves the
 // scheduler unbounded rather than, say, creating a zero-capacity channel
