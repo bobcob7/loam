@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
 )
 
 // defaultPollInterval is the fallback cadence a worker re-checks for
@@ -39,6 +41,52 @@ const (
 // that a test harness driving features/ingestion.feature's "the job is
 // retried" step can still use it without a real wall-clock wait.
 const minBackoffBase = 1 * time.Millisecond
+
+// defaultMaxAttempts bounds how many times fail() will requeue a failed job
+// before leaving it terminally 'failed' instead of scheduling another retry
+// (see fail's doc comment). Before this ceiling existed, fail() scheduled a
+// retry unconditionally, forever: a permanently-failing repo (bad
+// credentials, an unparseable file, an embedder that is simply never coming
+// back -- exactly the connection-refused case this codebase hit in every
+// environment before loam-1dmg gave the e2e stack an embedder) churned
+// ingest_jobs between 'failed' and 'queued' indefinitely, growing attempts
+// without bound.
+//
+// 10 is chosen to match backoffDelay's own math against the default backoff
+// bounds (defaultBackoffBase, defaultBackoffMax): backoffDelay(10,
+// defaultBackoffBase, defaultBackoffMax) is the first attempt whose delay
+// actually reaches the 5-minute cap (1,2,4,8,...,256s at attempt 9, then
+// capped to 300s at attempt 10) -- see TestBackoffDelay_DoublesPerAttemptUpToCap
+// and this bead's tests for the exact numbers. Past that point the backoff
+// curve has fully ramped: every further attempt would wait the identical
+// plateaued delay for no additional information, so continuing to retry
+// stops buying anything a persistent failure couldn't already have shown in
+// the first 9 attempts across roughly 17 minutes of accumulated backoff.
+//
+// This is a hardcoded default with an Option to override (WithMaxAttempts),
+// not a LOAM_* environment variable: it follows this file's own precedent
+// for defaultBackoffBase/defaultBackoffMax/defaultPollInterval, all three
+// of which are also production-hardcoded and only ever overridden via an
+// Option from a test harness, never wired to config.go/docs/server-spec.md's
+// LOAM_* surface. That is a deliberate difference from LOAM_INGEST_WORKERS
+// (a cross-repo parallelism sizing knob an operator genuinely needs to
+// tune for their hardware): docs/ingestion-spec.md's own status line still
+// marks "retry policy" as firming up during implementation, so exposing a
+// fourth environment variable for a policy this package's own author does
+// not yet consider settled would commit operators to an interface this
+// bead is not the one deciding is stable.
+const defaultMaxAttempts = 10
+
+// minMaxAttempts is the floor WithMaxAttempts clamps a non-positive ceiling
+// to. Zero or negative would mean fail() never retries at all -- turning
+// every transient failure (a briefly-unreachable embedder, a lock
+// contention) into a hard failure on its very first attempt, which is
+// exactly the over-correction this bead must not introduce: the bug is
+// that retry never stops, not that it retries at all. A caller that
+// genuinely wants "try once, never retry" already has that at 1 -- attempts
+// is never 0 by the time fail() consults it, since the UPDATE that reads it
+// back has already incremented.
+const minMaxAttempts = 1
 
 // minPollInterval is the floor WithPollInterval clamps a non-positive
 // interval to. time.NewTicker panics on a non-positive duration ("PANIC:
@@ -70,6 +118,7 @@ type Pool struct {
 	pollInterval time.Duration
 	backoffBase  time.Duration
 	backoffMax   time.Duration
+	maxAttempts  int
 	wake         chan struct{}
 	mu           sync.Mutex
 	busy         map[uuid.UUID]struct{}
@@ -125,6 +174,20 @@ func WithPollInterval(d time.Duration) Option {
 	}
 }
 
+// WithMaxAttempts overrides the default retry ceiling (defaultMaxAttempts)
+// fail() enforces before leaving a job terminally failed instead of
+// scheduling another retry. n below minMaxAttempts is clamped up to it --
+// see minMaxAttempts's doc comment for why a caller cannot use a
+// smaller-than-1 value to mean "never retry".
+func WithMaxAttempts(n int) Option {
+	if n < minMaxAttempts {
+		n = minMaxAttempts
+	}
+	return func(p *Pool) {
+		p.maxAttempts = n
+	}
+}
+
 // NewPool builds a Pool. workers is LOAM_INGEST_WORKERS (a server-wide
 // cross-repo parallelism cap, read by internal/config); values below 1 are
 // clamped to 1 so the pool always makes progress. logger and db must be
@@ -143,6 +206,7 @@ func NewPool(logger *slog.Logger, db *pgxpool.Pool, orchestrator Orchestrator, w
 		pollInterval: defaultPollInterval,
 		backoffBase:  defaultBackoffBase,
 		backoffMax:   defaultBackoffMax,
+		maxAttempts:  defaultMaxAttempts,
 		wake:         make(chan struct{}, 1),
 		busy:         make(map[uuid.UUID]struct{}),
 		drainWaiters: make(map[uuid.UUID][]chan struct{}),
@@ -464,12 +528,13 @@ func (p *Pool) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 }
 
 // fail records a failed ingest -- status=failed, the error, attempts
-// incremented, finished_at set -- then schedules a retry after bounded
-// exponential backoff (bead DESCRIPTION: "On failure mark status=failed
-// with the error recorded ... retry with exponential backoff (increment
-// attempts)"). The repo moves to sync_state='error' carrying the same
-// message under syncErrorPrefix, in the same transaction as the job's own
-// terminal status (see the syncStateSyncingQuery block).
+// incremented, finished_at set -- then, unless abandonReason says
+// otherwise, schedules a retry after bounded exponential backoff (bead
+// DESCRIPTION: "On failure mark status=failed with the error recorded ...
+// retry with exponential backoff (increment attempts)"). The repo moves to
+// sync_state='error' carrying the same message under syncErrorPrefix, in
+// the same transaction as the job's own terminal status (see the
+// syncStateSyncingQuery block).
 // The repo's serialization slot is released as soon as this returns (not
 // held for the backoff wait -- the retry is a detached goroutine), so a
 // coalesced follow-up for the same repo can run right away rather than
@@ -487,6 +552,18 @@ func (p *Pool) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 // bead's "a merely queued job leaves sync_state unchanged" rule, which
 // falls out of claim being the only writer of 'syncing' rather than
 // needing a rule of its own here.
+//
+// When abandonReason reports a job should not retry (loam-eean), the row is
+// left exactly as the UPDATE above just left it: status='failed', attempts
+// at its final count, error carrying the last failure. No new schema state
+// is introduced for "permanently abandoned" (ingest_jobs.status's CHECK
+// constraint admits only queued/running/succeeded/failed, and
+// docs/ingestion-spec.md's DESIGN note prefers the convention over a
+// migration): a row that will never retry again is simply a 'failed' row
+// whose attempts has stopped climbing, which ListJobs/ListIngestJobs
+// already surfaces verbatim (internal/ingest/list.go) -- an admin comparing
+// attempts against the documented ceiling (or against a job that is still
+// climbing) can already tell the two apart without a new column.
 func (p *Pool) fail(ctx context.Context, job Job, runErr error) {
 	var attempts int
 	err := p.inTx(ctx, func(tx pgx.Tx) error {
@@ -506,9 +583,51 @@ func (p *Pool) fail(ctx context.Context, job Job, runErr error) {
 		return
 	}
 	p.logger.ErrorContext(ctx, "ingest job failed", "job_id", job.ID, "repo_id", job.RepoID, "attempts", attempts, "error", runErr)
+	if reason := p.abandonReason(attempts, runErr); reason != "" {
+		p.logger.WarnContext(ctx, "ingest job abandoned, not scheduling a retry", "job_id", job.ID, "repo_id", job.RepoID, "attempts", attempts, "reason", reason)
+		return
+	}
 	delay := backoffDelay(attempts, p.backoffBase, p.backoffMax)
 	p.wg.Add(1)
 	go p.scheduleRetry(ctx, job.ID, delay)
+}
+
+// abandonReason reports why fail should NOT schedule another retry for a
+// job that just recorded its attempts-th failure, or "" if it should retry
+// as usual. Two independent reasons stop a retry, checked in this order:
+//
+//   - ollama.IsPermanent(runErr) -- a failure this codebase's one embedder
+//     backend already knows will recur unchanged (a 4xx rejection, which
+//     subsumes ollama.IsContextLengthExceeded's "this input can never fit
+//     the model's context window" case; a malformed response body; a
+//     dimension mismatch). This fires even on attempts==1, before the
+//     ceiling below would ever trigger, because burning the whole attempts
+//     budget on a request that is provably going to fail identically every
+//     time is pure waste, not caution -- IsContextLengthExceeded's own doc
+//     comment makes exactly this point.
+//   - attempts >= p.maxAttempts -- the general ceiling, which bounds every
+//     OTHER kind of failure too: an unrecognized error (a git-mirror
+//     failure, a lock-contention error, bad forge credentials) is not
+//     provably permanent the way ollama.IsPermanent's cases are, so it is
+//     given every chance up to the ceiling rather than abandoned on attempt
+//     one -- but it is not retried forever either, which is the actual bug
+//     this function exists to fix.
+//
+// ollama.IsPermanent is deliberately NOT read as `!ollama.IsRetryable`: see
+// that function's own doc comment for why the negation is unsafe here --
+// IsRetryable is false for any error this package did not produce at all,
+// not only for the ones it knows are permanent, and treating "unrecognized"
+// as "permanent" would abandon a transient failure from anywhere else in
+// the pipeline (e.g. a lock-contention error) on its very first attempt,
+// which the bead's ACCEPTANCE CRITERIA explicitly forbids.
+func (p *Pool) abandonReason(attempts int, runErr error) string {
+	if ollama.IsPermanent(runErr) {
+		return "permanently classified failure, not retryable"
+	}
+	if attempts >= p.maxAttempts {
+		return fmt.Sprintf("retry ceiling reached (%d/%d attempts)", attempts, p.maxAttempts)
+	}
+	return ""
 }
 
 // scheduleRetry waits delay, then flips job jobID back to queued so a

@@ -7,6 +7,25 @@ document specifies how they are built and kept current.
 Status: **draft.** The pipeline and its decisions are settled for the MVP; tuning details
 (chunk sizes, retry policy) firm up during implementation.
 
+**Retry policy (loam-eean):** a failed job retries with exponential backoff (see "Trigger
+& Scheduling" below) up to a **ceiling of 10 attempts**, hardcoded in
+`internal/ingest.defaultMaxAttempts` (overridable per-`Pool` via `WithMaxAttempts`, the same
+Option-not-environment-variable shape as the existing backoff/poll-interval knobs — this is
+a retry-policy tuning value this doc's status line still calls unsettled, not a sizing knob
+an operator needs day one the way `LOAM_INGEST_WORKERS` is, so it is not a `LOAM_*`
+variable). 10 matches the point the default backoff (1s base, 5-minute cap) itself plateaus:
+by the 10th attempt the wait has already reached its cap, so a further attempt would just
+repeat the same delay for no new information. A failure the embedder already knows is
+permanent (`internal/ingest/embed/ollama.IsPermanent` — a 4xx rejection, including a
+context-length overflow that can never fit on retry; a malformed response; a dimension
+mismatch) skips retrying immediately, on its very first failure, rather than spending any of
+that budget on a request proven to fail identically every time. Once a job stops retrying —
+ceiling reached, or a permanent classification — it stays `failed` permanently: `ingest_jobs`
+gains no new status for this (its `queued`/`running`/`succeeded`/`failed` CHECK constraint is
+unchanged), since a `failed` row whose `attempts` has stopped climbing is already
+distinguishable, and `RepoAdminService.ListIngestJobs` already surfaces `status` and
+`attempts` verbatim for the Jobs view to read.
+
 ## Overview
 
 ```

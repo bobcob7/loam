@@ -2,14 +2,19 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
 )
 
 func testLogger() *slog.Logger {
@@ -115,6 +120,7 @@ func TestNewPool_DefaultsWithoutOptions(t *testing.T) {
 	assert.Equal(t, defaultPollInterval, pool.pollInterval)
 	assert.Equal(t, defaultBackoffBase, pool.backoffBase)
 	assert.Equal(t, defaultBackoffMax, pool.backoffMax)
+	assert.Equal(t, defaultMaxAttempts, pool.maxAttempts)
 }
 
 // TestWithBackoff_OverridesBothBounds is FIX 3's core seam: a test in
@@ -199,6 +205,143 @@ func TestWithBackoff_ClampsNonPositiveAndInvertedBounds(t *testing.T) {
 			assert.Positive(t, backoffDelay(1, pool.backoffBase, pool.backoffMax), "the resulting bounds must never yield a zero or negative delay")
 		})
 	}
+}
+
+// TestWithMaxAttempts_OverridesTheDefault is the retry-ceiling counterpart
+// to TestWithBackoff_OverridesBothBounds: a test harness needs a way to
+// shrink the ceiling down from defaultMaxAttempts without waiting out ten
+// real backoff cycles.
+func TestWithMaxAttempts_OverridesTheDefault(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1, WithMaxAttempts(3))
+	assert.Equal(t, 3, pool.maxAttempts)
+}
+
+// TestWithMaxAttempts_ClampsNonPositiveToTheFloor pins minMaxAttempts's
+// doc comment: a zero or negative ceiling must not reach abandonReason as
+// "never retry at all" by accident -- see minMaxAttempts's rationale for
+// why that would over-correct the exact bug this bead fixes.
+func TestWithMaxAttempts_ClampsNonPositiveToTheFloor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "zero", n: 0, want: minMaxAttempts},
+		{name: "negative", n: -5, want: minMaxAttempts},
+		{name: "valid value passes through unchanged", n: 7, want: 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := NewPool(testLogger(), nil, nil, 1, WithMaxAttempts(tt.n))
+			assert.Equal(t, tt.want, pool.maxAttempts)
+		})
+	}
+}
+
+// newOllamaPermanentError returns a genuine error produced by the real
+// ollama.Embedder against a 4xx response. ollama's own classification
+// sentinels are unexported, so the only way a test outside that package can
+// produce a value ollama.IsPermanent actually recognizes is to trigger the
+// real classification path, the same way ollama's own
+// TestEmbed_StatusClassification does from inside that package.
+func newOllamaPermanentError(t *testing.T) error {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid request shape"}`))
+	}))
+	t.Cleanup(server.Close)
+	e, err := ollama.New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	_, embedErr := e.Embed(t.Context(), []string{"hello"})
+	require.Error(t, embedErr)
+	require.True(t, ollama.IsPermanent(embedErr), "test setup must actually produce a permanent-classified error")
+	return embedErr
+}
+
+// newOllamaTransientError is newOllamaPermanentError's sibling for a
+// genuinely retryable ollama classification (a 5xx), so abandonReason's
+// transient tests exercise the real predicate rather than a stand-in.
+func newOllamaTransientError(t *testing.T) error {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"server busy"}`))
+	}))
+	t.Cleanup(server.Close)
+	e, err := ollama.New(server.URL, "nomic-embed-text", server.Client(), testLogger())
+	require.NoError(t, err)
+	_, embedErr := e.Embed(t.Context(), []string{"hello"})
+	require.Error(t, embedErr)
+	require.False(t, ollama.IsPermanent(embedErr), "test setup must actually produce a non-permanent error")
+	require.True(t, ollama.IsRetryable(embedErr), "test setup must actually produce a retryable error")
+	return embedErr
+}
+
+// TestAbandonReason_PermanentClassificationStopsEvenOnTheFirstAttempt is
+// the loam-eean core unit for the "skip retries entirely" decision: a
+// permanently-classified embedder failure (bad credentials, a model that
+// will never accept the input) must not be retried, even before the
+// general attempts ceiling would ever fire -- burning the whole retry
+// budget on a request already known to fail identically every time is
+// pure waste, not caution.
+func TestAbandonReason_PermanentClassificationStopsEvenOnTheFirstAttempt(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1)
+	reason := pool.abandonReason(1, newOllamaPermanentError(t))
+	assert.NotEmpty(t, reason, "a permanently classified embedder failure must not be retried, even on attempt 1")
+}
+
+// TestAbandonReason_TransientEmbedderFailureRetriesBelowTheCeiling is the
+// mutation-catching counterpart: without it, an abandonReason that stopped
+// retrying for ANY ollama-produced error (not only the permanent ones)
+// would still pass the test above.
+func TestAbandonReason_TransientEmbedderFailureRetriesBelowTheCeiling(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1)
+	reason := pool.abandonReason(1, newOllamaTransientError(t))
+	assert.Empty(t, reason, "a transient embedder failure must retry, not be abandoned")
+}
+
+// TestAbandonReason_UnrelatedErrorIsNotMisclassifiedAsPermanent pins the
+// exact failure mode ollama.IsPermanent's own doc comment warns against: an
+// error from a wholly different subsystem (a DB lock-contention failure, a
+// git-mirror read failure) matches none of ollama's sentinels, so it must
+// be treated as unclassified-but-retryable -- not silently abandoned on its
+// first attempt the way a naive `!ollama.IsRetryable(err)` would, which
+// would break the bead's "lock contention should retry" requirement.
+func TestAbandonReason_UnrelatedErrorIsNotMisclassifiedAsPermanent(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1)
+	reason := pool.abandonReason(1, errors.New("lock contention acquiring the ingest_jobs row"))
+	assert.Empty(t, reason, "an error this codebase's embedder never produced must not be treated as permanent")
+}
+
+// TestAbandonReason_CeilingBoundary_OneBelowRetriesExactlyAtStops is the
+// off-by-one guard for the general attempts ceiling: at maxAttempts-1 the
+// job must still retry (one more attempt is exactly what the ceiling
+// allows), and at maxAttempts it must stop -- both directions asserted
+// against the SAME unrelated, unclassified error so the only variable
+// between the two assertions is attempts, not the error's classification.
+func TestAbandonReason_CeilingBoundary_OneBelowRetriesExactlyAtStops(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1, WithMaxAttempts(5))
+	runErr := errors.New("embedder unreachable: connection refused")
+	assert.Empty(t, pool.abandonReason(4, runErr), "attempts one below the ceiling must still retry")
+	assert.NotEmpty(t, pool.abandonReason(5, runErr), "attempts at the ceiling must stop retrying")
+}
+
+// TestAbandonReason_OnePastTheCeilingAlsoStops is the mutation-catching
+// companion to the boundary test above: without it, an off-by-one that
+// compared attempts > maxAttempts (instead of >=) would still pass the
+// exactly-at-ceiling case above, since it never checks past it.
+func TestAbandonReason_OnePastTheCeilingAlsoStops(t *testing.T) {
+	t.Parallel()
+	pool := NewPool(testLogger(), nil, nil, 1, WithMaxAttempts(5))
+	assert.NotEmpty(t, pool.abandonReason(6, errors.New("still failing")), "attempts past the ceiling must never retry again")
 }
 
 // TestRunOrchestrator_ConvertsAPanicIntoAJobError is loam-337's core unit:
