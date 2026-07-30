@@ -47,10 +47,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -172,24 +174,34 @@ func (h *acceptanceHarness) registerProposalSteps(sc *godog.ScenarioContext) {
 	h.registerWorkBranchLifecycleSteps(sc)
 }
 
-// registerWorkBranchLifecycleSteps wires the steps
-// features/work-branch-lifecycle.feature needs that are not already in this
-// suite, for the four of its scenarios whose subject is the proposal loop
-// this file already implements: a reviewed+approved branch becoming a
-// proposal, a re-review sending it back, completion happening only on an
-// upstream merge, and a catch-up push returning a conflict-reset branch to
-// review. They are here rather than in a file of their own because every
-// one of them is a thin sentence over a helper above; the rest of that
-// feature file (starting a branch, editing a terminal one, a CLEAN target
-// advance) is a different subject and stays @wip.
+// registerWorkBranchLifecycleSteps wires every step
+// features/work-branch-lifecycle.feature needs that is not already shared
+// with the rest of this suite -- all 8 of its scenarios that this file's
+// own NOTES on loam-ofg.8 records were provisionally closed under a
+// DEFERRED-WIP claim ("functionally covered by tests") that held for their
+// UNIT coverage and not for this acceptance layer: the loam-9wr @wip sweep
+// found every one of them failing at godog.ErrPending, because no step
+// definition for them existed anywhere in cmd/server. This is that missing
+// wiring: starting a work branch, refusing review without a title and
+// description, opening review for real, editing title/description in
+// place, the first verdict's reviewable -> reviewed flip, the absence of
+// any author-facing completion action, a terminal branch refusing an edit,
+// and a clean (non-conflicting) target advance leaving a reviewable branch
+// untouched -- plus the four scenarios this file already covered before
+// them, whose subject is the proposal loop this file implements: a
+// reviewed+approved branch becoming a proposal, a re-review sending it
+// back, completion happening only on an upstream merge, and a catch-up
+// push returning a conflict-reset branch to review.
 //
-// Three of its sentences are near-twins of admin-proposals.feature's and
-// are deliberately registered separately rather than by widening a regex:
-// "the target branch advances ..." vs "ITS target branch advances ...",
-// "it no longer appears in the ADMIN'S proposal queue" vs "... in the
-// proposal queue". godog dispatches on the whole sentence, so a shared
-// definition would mean rewriting one feature file's prose to match the
-// other's -- which is the tail wagging the dog.
+// Several of its sentences are near-twins of admin-proposals.feature's (or
+// of this file's own) and are deliberately registered separately rather
+// than by widening a regex: "the target branch advances ..." vs "ITS
+// target branch advances ..." vs "... advances with changes that merge
+// CLEANLY", "it no longer appears in the ADMIN'S proposal queue" vs "... in
+// the proposal queue", "the work branch KEEPS its state ..." vs "IT keeps
+// its state ...". godog dispatches on the whole sentence, so a shared
+// definition would mean rewriting one feature file's prose to match
+// another's -- which is the tail wagging the dog.
 func (h *acceptanceHarness) registerWorkBranchLifecycleSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^it appears in the admin's proposal queue$`, h.stepItAppearsInTheAdminsProposalQueue)
 	sc.Step(`^I request review again$`, h.stepIRequestReviewAgain)
@@ -197,6 +209,21 @@ func (h *acceptanceHarness) registerWorkBranchLifecycleSteps(sc *godog.ScenarioC
 	sc.Step(`^a work branch reset to "([^"]*)" by a conflicting target advance$`, h.stepAWorkBranchResetByAConflictingTargetAdvance)
 	sc.Step(`^I push commits that bring it up to date with its target$`, h.stepIPushCommitsThatBringItUpToDate)
 	sc.Step(`^no request for review was needed$`, h.stepNoRequestForReviewWasNeeded)
+	sc.Step(`^I start a work branch from "([^"]*)"$`, h.stepIStartAWorkBranchFrom)
+	sc.Step(`^a work branch is created in state "([^"]*)"$`, h.stepAWorkBranchIsCreatedInState)
+	sc.Step(`^its name is randomly generated$`, h.stepItsNameIsRandomlyGenerated)
+	sc.Step(`^I have started a work branch with no title or description$`, h.stepIHaveStartedAWorkBranchWithNoTitleOrDescription)
+	sc.Step(`^the request is rejected with a precondition error$`, h.stepTheRequestIsRejectedWithAPreconditionError)
+	sc.Step(`^I have started a work branch with a title and description$`, h.stepIHaveStartedAWorkBranchWithATitleAndDescription)
+	sc.Step(`^I update its title and description$`, h.stepIUpdateItsTitleAndDescription)
+	sc.Step(`^the work branch keeps its state "([^"]*)"$`, h.stepTheWorkBranchKeepsItsState)
+	sc.Step(`^the new title and description are shown$`, h.stepTheNewTitleAndDescriptionAreShown)
+	sc.Step(`^the reviewer "([^"]*)" submits an "([^"]*)" verdict$`, h.stepTheReviewerSubmitsAVerdict)
+	sc.Step(`^there is no author action that sets it "([^"]*)"$`, h.stepThereIsNoAuthorActionThatSetsIt)
+	sc.Step(`^I try to update its title$`, h.stepITryToUpdateItsTitle)
+	sc.Step(`^the target branch advances with changes that merge cleanly$`, h.stepTheTargetBranchAdvancesWithChangesThatMergeCleanly)
+	sc.Step(`^the work branch's commits are unchanged$`, h.stepTheWorkBranchsCommitsAreUnchanged)
+	sc.Step(`^it keeps its state "([^"]*)"$`, h.stepItKeepsItsState)
 }
 
 // --- features/work-branch-lifecycle.feature ---
@@ -291,6 +318,284 @@ func (h *acceptanceHarness) stepNoRequestForReviewWasNeeded(ctx context.Context)
 		return fmt.Errorf("round %d was requested by %q, want the server's own \"server\" -- a round opened by anyone else means a review WAS requested", number, requestedBy)
 	}
 	return nil
+}
+
+// acceptanceLifecycleUpdatedTitle/Description are the values "I update its
+// title and description" sets on an already-titled, already-described
+// reviewable branch (its Given reaches "reviewable" through
+// acceptance_review_test.go's seedWorkBranchToState, which sets its own
+// fixture title/description via setTitleAndDescription). They are
+// deliberately distinct from that fixture text, so "the new title and
+// description are shown" is a claim about a genuine REPLACEMENT, not merely
+// that some title happens to exist.
+const acceptanceLifecycleUpdatedTitle = "Updated while work progresses"
+const acceptanceLifecycleUpdatedDescription = "The description as it reads after the author updated it mid-review, replacing the fixture text seedWorkBranchToState used to reach reviewable."
+
+// acceptanceCleanAdvanceFile/Content is the target-side edit "the target
+// branch advances with changes that merge cleanly" makes; acceptanceCleanWorkBranchFile
+// is the work branch's OWN file for that same scenario. The two paths are
+// deliberately distinct, so the two sides' whole-file additions from a
+// shared base cannot help but merge cleanly -- a future edit that made them
+// overlap would turn this scenario into the conflicting-advance one it
+// exists to be distinguished from, not silently keep passing.
+const acceptanceCleanAdvanceFile = "CLEAN-ADVANCE.md"
+const acceptanceCleanAdvanceContent = "# A clean, non-conflicting target advance\n"
+const acceptanceCleanWorkBranchFile = "WORK-BRANCH-OWN-FILE.md"
+
+// acceptanceRandomWorkBranchNamePattern is the exact shape
+// internal/handler/workbranch.randomWorkBranchName produces: "wb-" plus 3
+// random bytes, hex-encoded.
+var acceptanceRandomWorkBranchNamePattern = regexp.MustCompile(`^wb-[0-9a-f]{6}$`)
+
+// stepIStartAWorkBranchFrom is "When I start a work branch from ...":
+// CreateWorkBranch for real, as the scenario's own author, against a
+// mirror this step builds first -- unlike every OTHER scenario in this
+// file, this one's Given is nothing (its Background only enrolls the repo),
+// so no earlier step has given it one.
+func (h *acceptanceHarness) stepIStartAWorkBranchFrom(ctx context.Context, from string) error {
+	world := worldFrom(ctx)
+	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
+		return err
+	}
+	before := world.workBranch
+	res := h.runLoamAs(world, world.author, "", "work", "start", world.repo(), from)
+	world.lastCLI = res
+	if err := requireLoamOK(res, fmt.Sprintf("loam work start (as %s)", world.author.identifier())); err != nil {
+		return err
+	}
+	var out acceptanceWorkBranchOutput
+	if err := json.Unmarshal([]byte(res.stdout), &out); err != nil {
+		return fmt.Errorf("decoding loam work start JSON output: %w\nstdout: %s", err, res.stdout)
+	}
+	if out.Name == "" || out.Name == before {
+		return fmt.Errorf("loam work start reported name %q (this scenario's own unstarted default %q); want a freshly generated one", out.Name, before)
+	}
+	world.lastWorkBranch = out
+	world.setPrimaryWorkBranch(out.Name)
+	return nil
+}
+
+// stepAWorkBranchIsCreatedInState checks both halves of CreateWorkBranch's
+// own response: what the RPC just echoed back, and what actually landed in
+// the row -- so a handler that reported the right state without persisting
+// it (or vice versa) fails here rather than passing on whichever half this
+// step happened to trust.
+func (h *acceptanceHarness) stepAWorkBranchIsCreatedInState(ctx context.Context, want string) error {
+	world := worldFrom(ctx)
+	if world.lastWorkBranch.Name == "" {
+		return fmt.Errorf("no work branch was started in this scenario, so \"a work branch is created in state %q\" has nothing to check", want)
+	}
+	if world.lastWorkBranch.State != want {
+		return fmt.Errorf("loam work start reported state %q, want %q", world.lastWorkBranch.State, want)
+	}
+	return h.requireWorkBranchState(ctx, world, world.workBranch, want)
+}
+
+// stepItsNameIsRandomlyGenerated asserts the name CreateWorkBranch reported
+// matches the server's own random-name shape AND differs from this
+// scenario's own pre-assigned default (acceptanceWorld's deterministic
+// "wb-<n>") -- shape alone would also accept a handler that always
+// returned some fixed, correctly-shaped literal.
+func (h *acceptanceHarness) stepItsNameIsRandomlyGenerated(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if !acceptanceRandomWorkBranchNamePattern.MatchString(world.workBranch) {
+		return fmt.Errorf("work branch name %q does not match the server's randomly generated shape wb-<6 hex characters>", world.workBranch)
+	}
+	return nil
+}
+
+// stepIHaveStartedAWorkBranchWithNoTitleOrDescription seeds a draft work
+// branch with neither field set -- RequestReview's own precondition
+// (docs/cli-spec.md -> "request-review": requires title + description to
+// be set) -- through the same direct-row technique every Given in this
+// suite that needs no real git presence uses.
+func (h *acceptanceHarness) stepIHaveStartedAWorkBranchWithNoTitleOrDescription(ctx context.Context) error {
+	world := worldFrom(ctx)
+	name := world.claimWorkBranch()
+	return h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier())
+}
+
+// stepTheRequestIsRejectedWithAPreconditionError is this feature file's own
+// wording for a request-review refusal -- the CLI-driven twin of
+// acceptance_review_test.go's RPC-agnostic
+// stepTheAttemptIsRejectedAsFailedPrecondition, reading the same
+// world.lastCLI stepIRequestReview (acceptance_steps_test.go) leaves behind
+// on a non-zero exit.
+func (h *acceptanceHarness) stepTheRequestIsRejectedWithAPreconditionError(ctx context.Context) error {
+	return requireLoamRejected(worldFrom(ctx).lastCLI, "loam work request-review", "precondition_failed", 2)
+}
+
+// stepIHaveStartedAWorkBranchWithATitleAndDescription is the Given
+// request-review actually needs to succeed: a draft branch carrying both
+// fields, set through `loam work set` for real (setTitleAndDescription),
+// not by widening insertWorkBranchRow's own INSERT.
+func (h *acceptanceHarness) stepIHaveStartedAWorkBranchWithATitleAndDescription(ctx context.Context) error {
+	world := worldFrom(ctx)
+	name := world.claimWorkBranch()
+	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier()); err != nil {
+		return err
+	}
+	return h.setTitleAndDescription(world, world.author, name)
+}
+
+// stepIUpdateItsTitleAndDescription is "When I update its title and
+// description": `loam work set` with values distinct from whatever fixture
+// text the Given used to reach "reviewable" -- see the
+// acceptanceLifecycleUpdated* constants' own doc comment for why
+// distinctness matters here.
+func (h *acceptanceHarness) stepIUpdateItsTitleAndDescription(ctx context.Context) error {
+	world := worldFrom(ctx)
+	res := h.runLoamAs(world, world.author, acceptanceLifecycleUpdatedDescription,
+		"work", "set", world.repo(), world.workBranch, "--title", acceptanceLifecycleUpdatedTitle)
+	world.lastCLI = res
+	return requireLoamOK(res, fmt.Sprintf("loam work set (as %s)", world.author.identifier()))
+}
+
+// stepTheWorkBranchKeepsItsState is this scenario's own wording for "the
+// state did not move" -- a bare title/description edit is not a lifecycle
+// transition, and this is the assertion that would catch one that
+// accidentally became one.
+func (h *acceptanceHarness) stepTheWorkBranchKeepsItsState(ctx context.Context, want string) error {
+	world := worldFrom(ctx)
+	return h.requireWorkBranchState(ctx, world, world.workBranch, want)
+}
+
+// stepTheNewTitleAndDescriptionAreShown reads the update back through
+// `loam work show` -- the read path the Gherkin's "are SHOWN" names, rather
+// than a direct row read -- and asserts both fields equal exactly what
+// stepIUpdateItsTitleAndDescription just sent, not merely that they are
+// non-empty.
+func (h *acceptanceHarness) stepTheNewTitleAndDescriptionAreShown(ctx context.Context) error {
+	world := worldFrom(ctx)
+	out, err := h.showWorkBranch(world, world.author, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if out.Title != acceptanceLifecycleUpdatedTitle || out.Description != acceptanceLifecycleUpdatedDescription {
+		return fmt.Errorf("loam work show reports title %q / description %q, want %q / %q", out.Title, out.Description, acceptanceLifecycleUpdatedTitle, acceptanceLifecycleUpdatedDescription)
+	}
+	return nil
+}
+
+// stepTheReviewerSubmitsAVerdict is "When the reviewer \"...\" submits an
+// \"...\" verdict": a literal reviewer identity, parsed and recorded as
+// world.reviewer for a later step to read, then one real SubmitVerdict.
+func (h *acceptanceHarness) stepTheReviewerSubmitsAVerdict(ctx context.Context, reviewerID, outcome string) error {
+	world := worldFrom(ctx)
+	reviewer, err := parseAcceptanceActor(reviewerID)
+	if err != nil {
+		return err
+	}
+	if reviewer.role != "reviewer" {
+		return fmt.Errorf("agent %q has role %q, but this step names a REVIEWER", reviewerID, reviewer.role)
+	}
+	world.reviewer = reviewer
+	_, err = h.submitVerdict(world, reviewer, world.workBranch, outcome)
+	return err
+}
+
+// stepThereIsNoAuthorActionThatSetsIt is "Then there is no author action
+// that sets it \"complete\"": the closest thing to a completion command an
+// author could reach for, `loam work complete`, does not exist at all --
+// internal/cli/router.go's own work subcommand table has no such entry,
+// per proto/loam/v1/workbranch.proto's own SubmitVerdict comment ("There is
+// no agent-facing completion RPC ... COMPLETE is set by the server when the
+// upstream PR merges"). Asserting the CLI's own usage rejection, not merely
+// "the state is still X", is what makes this catch a REGRESSION that added
+// such a route: if `work complete` ever started succeeding, this step would
+// see exit 0 where it demands the "usage" rejection and fail there, before
+// the state check below even runs. That state check is the Gherkin's own
+// claim made literal: the row's state must still differ from state after
+// the rejected attempt.
+func (h *acceptanceHarness) stepThereIsNoAuthorActionThatSetsIt(ctx context.Context, state string) error {
+	world := worldFrom(ctx)
+	res := h.runLoamAs(world, world.author, "", "work", "complete", world.repo(), world.workBranch)
+	if err := requireLoamRejected(res, "loam work complete (as the author)", "usage", 2); err != nil {
+		return fmt.Errorf("%w -- no author-facing action may set a work branch to %q", err, state)
+	}
+	current, _, err := h.workBranchStateConflict(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if current == state {
+		return fmt.Errorf("work branch %s is in state %q after the rejected attempt -- an author action set it to %q after all", world.workBranch, current, state)
+	}
+	return nil
+}
+
+// stepITryToUpdateItsTitle is "When I try to update its title": `loam work
+// set --title ...` against a work branch this scenario expects to already
+// be terminal. Unlike stepIUpdateItsTitleAndDescription it does not fail
+// the step on a non-zero exit -- the refusal is the following Then's job
+// (the shared stepTheAttemptIsRejectedAsFailedPrecondition,
+// acceptance_review_test.go), reached through world.lastCLI exactly as
+// every other CLI-driven refusal in this suite is.
+func (h *acceptanceHarness) stepITryToUpdateItsTitle(ctx context.Context) error {
+	world := worldFrom(ctx)
+	world.lastCLI = h.runLoamAs(world, world.author, "", "work", "set", world.repo(), world.workBranch, "--title", "An edit a terminal work branch must refuse")
+	return nil
+}
+
+// stepTheTargetBranchAdvancesWithChangesThatMergeCleanly is "When the
+// target branch advances with changes that merge cleanly": unlike every
+// other target-advance scenario in this suite, this one's own Given ("a
+// work branch in state \"reviewable\"", acceptance_review_test.go's
+// stepAWorkBranchInState) gives the branch a real title, description and
+// review round but no git presence at all. The production mergeability
+// checker (internal/mirrorsync.StoreMergeabilityChecker) runs git
+// merge-tree against the work branch's OWN ref, so this step builds that
+// ref itself: a mirror cloned for real from upstream, then one commit on
+// the work branch's ref, forked from the target's CURRENT tip, touching a
+// path the target's own advance (below) never does -- see
+// acceptanceCleanAdvanceFile/acceptanceCleanWorkBranchFile's own doc
+// comment for why that distinctness is load-bearing.
+func (h *acceptanceHarness) stepTheTargetBranchAdvancesWithChangesThatMergeCleanly(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if err := h.ensureMirrorFromUpstream(ctx, world); err != nil {
+		return err
+	}
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), refnames.TargetBranch(world.targetBranch),
+		acceptanceCleanWorkBranchFile, "# This work branch's own, untouched file\n", "acceptance: the work branch's own commit")
+	if err != nil {
+		return err
+	}
+	world.workBranchSHA = sha
+	if err := h.forge.AdvanceBranch(ctx, world.repo(), world.targetBranch, fakeforge.AdvanceOptions{
+		Path:    acceptanceCleanAdvanceFile,
+		Content: []byte(acceptanceCleanAdvanceContent),
+		Message: "acceptance: a clean, non-conflicting target advance",
+	}); err != nil {
+		return fmt.Errorf("advancing upstream %s on %s: %w", world.targetBranch, world.repo(), err)
+	}
+	return h.stepTheNextSyncRuns(ctx)
+}
+
+// stepTheWorkBranchsCommitsAreUnchanged asserts the work branch's own ref in
+// the mirror still points at the commit
+// stepTheTargetBranchAdvancesWithChangesThatMergeCleanly made, proving the
+// mergeability check -- correctly, for a clean merge -- never touched it:
+// "a broker, not an author" (StoreMergeabilityChecker's own doc comment).
+func (h *acceptanceHarness) stepTheWorkBranchsCommitsAreUnchanged(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if world.workBranchSHA == "" {
+		return fmt.Errorf("no baseline commit was recorded for work branch %s, so \"unchanged\" would compare against nothing", world.workBranch)
+	}
+	sha, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
+	if err != nil {
+		return fmt.Errorf("reading the mirror's %s: %w", refnames.WorkBranch(world.workBranch), err)
+	}
+	if sha != world.workBranchSHA {
+		return fmt.Errorf("work branch %s moved from %s to %s after a clean target advance; a mergeability check must never write to it", world.workBranch, world.workBranchSHA, sha)
+	}
+	return nil
+}
+
+// stepItKeepsItsState is this scenario's own third-person wording for "the
+// state did not move" -- see stepTheWorkBranchKeepsItsState for the other
+// scenario's near-twin and why the two are registered separately.
+func (h *acceptanceHarness) stepItKeepsItsState(ctx context.Context, want string) error {
+	world := worldFrom(ctx)
+	return h.requireWorkBranchState(ctx, world, world.workBranch, want)
 }
 
 // --- driver plumbing ---

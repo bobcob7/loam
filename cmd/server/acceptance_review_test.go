@@ -552,6 +552,38 @@ func verdictByReviewer(verdicts []acceptanceVerdict, reviewer string) (acceptanc
 func (h *acceptanceHarness) stepAWorkBranchNamedIsInState(ctx context.Context, name, state string) error {
 	world := worldFrom(ctx)
 	world.setPrimaryWorkBranch(name)
+	return h.seedWorkBranchToState(ctx, world, name, state)
+}
+
+// seedWorkBranchToState is the shared body behind stepAWorkBranchNamedIsInState
+// and stepAWorkBranchInState (below): seed name as a draft row, then --
+// unless state IS draft -- take it through the same production path a real
+// author uses to reach reviewable (title + description via `loam work
+// set`, then `loam work request-review`, which opens review round 1), and
+// finally force the row's state column directly to whatever state was
+// asked for beyond reviewable (reviewed, complete, closed), since none of
+// those has an agent-facing shortcut this harness can drive without a real
+// verdict or an upstream event of its own.
+//
+// Routing "reviewable" through the real request-review call too (rather
+// than a bare direct-state INSERT, as this helper's predecessor did for
+// every state including reviewable) is what makes that fixture a genuinely
+// reachable production row instead of an artificial one: every reviewable
+// branch in real use carries an open review round, opened by
+// RequestReview, and a row missing one cannot have a verdict submitted
+// against it at all -- internal/reviewpublish.Publish's CurrentRound has no
+// round to resolve. features/work-branch-lifecycle.feature's "The first
+// verdict marks the work branch reviewed" (loam-ofg.8) is what surfaced
+// this: it needs to submit a real verdict against a "reviewable" work
+// branch this exact Given seeds.
+//
+// This is safe for every OTHER current caller of the bare, unnamed
+// "a work branch in state ..." step (reviewing.feature's "draft", still
+// returned immediately below with no round at all, and admin-proposals.
+// feature's "reviewed", which gains a title and a round it never asked for
+// but whose own scenario -- closing the branch -- does not look at
+// either).
+func (h *acceptanceHarness) seedWorkBranchToState(ctx context.Context, world *acceptanceWorld, name, state string) error {
 	if err := h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, "draft", world.author.identifier()); err != nil {
 		return err
 	}
@@ -583,21 +615,28 @@ func (h *acceptanceHarness) stepTheWorkBranchNamedIsInState(ctx context.Context,
 	return h.forceWorkBranchState(ctx, worldFrom(ctx), name, state)
 }
 
-// stepAWorkBranchInState seeds one work branch directly in state, with no
-// review round at all, under whichever name acceptanceWorld.claimWorkBranch
-// hands it (see that method for the first-come rule and why both feature
-// files it serves get the branch they mean).
+// stepAWorkBranchInState seeds one work branch through seedWorkBranchToState
+// (above), under whichever name acceptanceWorld.claimWorkBranch hands it
+// (see that method for the first-come rule and why every feature file it
+// serves gets the branch it means).
 //
 // In reviewing.feature's "A verdict cannot be submitted before review is
-// requested" that is an ADDITIONAL, roundless branch, leaving the
-// Background's own branch untouched so the rejection cannot be confused
-// with anything about it. In admin-proposals.feature's "Closing a work
-// branch ends it" it is the scenario's own branch, which is what "When I
-// close it" then closes.
+// requested" state is "draft", which seedWorkBranchToState leaves genuinely
+// roundless -- that is the scenario's own point -- as an ADDITIONAL branch,
+// leaving the Background's own branch untouched so the rejection cannot be
+// confused with anything about it. In admin-proposals.feature's "Closing a
+// work branch ends it" it is the scenario's own branch, which is what
+// "When I close it" then closes. In features/work-branch-lifecycle.feature
+// (loam-ofg.8) it backs five further scenarios -- editing title and
+// description in place, the first verdict's reviewable -> reviewed flip, the
+// absence of any author-facing completion action, a terminal branch
+// refusing an edit, and a clean target advance -- each of which needs the
+// real title/round/state seedWorkBranchToState now provides for "reviewable"
+// and beyond.
 func (h *acceptanceHarness) stepAWorkBranchInState(ctx context.Context, state string) error {
 	world := worldFrom(ctx)
 	name := world.claimWorkBranch()
-	return h.insertWorkBranchRow(ctx, world.repoID, name, world.targetBranch, state, world.author.identifier())
+	return h.seedWorkBranchToState(ctx, world, name, state)
 }
 
 // stepIAmTheReviewerAgent records the literal reviewer identity a scenario
@@ -817,7 +856,14 @@ func (h *acceptanceHarness) stepMyStagedCommentsAreCleared(ctx context.Context) 
 }
 
 // stepTheWorkBranchStaysInState asserts the work branch's state through
-// `loam work show` -- the CLI read, not a direct database peek.
+// `loam work show` -- the CLI read, not a direct database peek -- read as
+// world.reviewer when this scenario has one (every current caller except
+// the one noted below does) and as world.author otherwise:
+// work-branch-lifecycle.feature's "A work branch cannot be reviewed
+// without a title and description" (loam-ofg.8) never names a reviewer at
+// all, and GetWorkBranch is gated by CapabilityWorkRead alone, which an
+// author holds just as a reviewer does, so reading as the author is not a
+// weaker check, only a different valid caller.
 //
 // It is registered ONLY for "the work branch stays in state ...".
 // "the work branch is in state ..." already has a step definition
@@ -828,7 +874,11 @@ func (h *acceptanceHarness) stepMyStagedCommentsAreCleared(ctx context.Context) 
 // ambiguous rather than additive.
 func (h *acceptanceHarness) stepTheWorkBranchStaysInState(ctx context.Context, state string) error {
 	world := worldFrom(ctx)
-	out, err := h.showWorkBranch(world, world.reviewer, world.workBranch)
+	viewer := world.reviewer
+	if viewer == (acceptanceActor{}) {
+		viewer = world.author
+	}
+	out, err := h.showWorkBranch(world, viewer, world.workBranch)
 	if err != nil {
 		return err
 	}
