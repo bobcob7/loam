@@ -2,7 +2,8 @@ name: CI
 
 # Gate set (docs/bead-workflow.md, "Gates"; docs/testing-spec.md "CI
 # Stages" per-PR row, loam-li0.12): gofmt, go build, go vet, go test -race,
-# go tool buf lint, and a generated-code drift check, all in the `ci` job
+# go tool buf lint, a generated-code drift check, and a `go mod tidy`
+# drift check (loam-j09k), all in the `ci` job
 # below; -tags=integration in `integration`; the godog acceptance suite
 # (vs internal/fakeforge) in `acceptance`. Together these three jobs are
 # what Taskfile.yml's `task test` describes as the aggregate PR gate --
@@ -89,6 +90,25 @@ jobs:
       - name: go tool buf lint
         if: matrix.os == 'ubuntu-latest'
         run: go tool buf lint
+
+      # loam-j09k. The generated-code drift check below cannot catch this:
+      # nothing it runs rewrites go.mod, so a require block that has drifted
+      # from the import graph stays green forever. That is exactly how
+      # golang.org/x/sync sat marked `// indirect` while
+      # internal/ingest/orchestrator imported errgroup directly. Scoped to
+      # go.mod/go.sum rather than folded into that step so the two failures
+      # stay distinguishable, and pinned to the ubuntu leg because the
+      # tidy result is Go-version-dependent and setup-go reads the same
+      # go-version-file on both.
+      - name: go mod tidy has no drift
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "::error::go.mod/go.sum drifted from the import graph — run 'go mod tidy' and commit the result."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
 
       # web/src/gen (TypeScript codegen: protoc-gen-es + connect-query) is
       # covered by the SAME drift check below as internal/gen and
