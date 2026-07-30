@@ -175,6 +175,15 @@ type acceptanceWorld struct {
 	// step's decoded `loam instructions` response.
 	configuredRoleInstructions string
 	lastInstructions           acceptanceInstructionsOutput
+	// The enrollment state (acceptance_enrollment_test.go, loam-ofg.12).
+	// lastEnrolledRepo is the most recent EnrolledRepo this scenario
+	// observed -- an EnrollRepo/SetTargetBranches response or a plain
+	// GetRepo view -- for a following Then to assert on; lastProbeBranches/
+	// lastProbeHead are ProbeRepo's own read-only response, kept separately
+	// since a probe never touches lastEnrolledRepo (it enrolls nothing).
+	lastEnrolledRepo  *adminv1.EnrolledRepo
+	lastProbeBranches []string
+	lastProbeHead     string
 }
 
 // repo returns this scenario's full "<group>/<repo_name>" identifier.
