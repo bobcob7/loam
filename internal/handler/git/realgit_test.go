@@ -104,6 +104,47 @@ func TestEndToEnd_UnenrolledRepo404sForRealGitClone(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "no working tree must be created for an unenrolled repo")
 }
 
+// TestEndToEnd_EnrolledButUnmirroredRepo503sForRealGitClone is
+// TestEndToEnd_UnenrolledRepo404sForRealGitClone's loam-1gq counterpart: the
+// repo IS enrolled (enrolledRepoStore resolves "acme/widgets"), but unlike
+// every other end-to-end test in this file, seedBareMirror is deliberately
+// never called -- dataDir has no mirrors/ subtree at all, reproducing the
+// window between EnrollRepo's row write and the first successful
+// clone/sync. Before the fix this was the bug's actual symptom: real git
+// clone did not fail outright, it reported "Could not read from remote
+// repository" -- indistinguishable from a permissions or network problem
+// -- because the server had answered 200 with an empty ref advertisement.
+// This asserts what a real git client actually prints for the fixed 503,
+// so the message text is pinned against the real binary, not just this
+// package's own httptest.Recorder assertions.
+func TestEndToEnd_EnrolledButUnmirroredRepo503sForRealGitClone(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	identity := httpauth.Identity{Name: "alice", ID: "agent-1", Role: "author"}
+	srv := newTestServer(t, dataDir, enrolledRepoStore("acme/widgets"), identity)
+	workspace := t.TempDir()
+	clonePath := filepath.Join(workspace, "clone")
+	cmd := exec.CommandContext(t.Context(), "git", "clone", "--quiet", srv.URL+"/git/acme/widgets.git", clonePath)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "cloning an enrolled-but-unmirrored repo must fail, not silently succeed: %s", out)
+	t.Logf("real git client output for enrolled-but-unmirrored clone: %s", out)
+	_, statErr := os.Stat(clonePath)
+	assert.True(t, os.IsNotExist(statErr), "no working tree must be created")
+
+	infoRefsReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/git/acme/widgets.git/info/refs?service=git-upload-pack", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(infoRefsReq)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "must be 503, not the 200-with-empty-advertisement the bug reported")
+	wantAdvertisementHeader := append(pktLine("# service=git-upload-pack\n"), flushPkt...)
+	assert.NotContains(t, string(body), string(wantAdvertisementHeader), "the response must not be shaped like a valid (if empty) ref advertisement")
+	assert.Contains(t, string(body), "acme/widgets")
+	assert.Contains(t, string(body), "not yet mirrored")
+}
+
 // TestServeInfoRefs_FramingAndContentType hits GET info/refs directly (not
 // through the git binary) so it can assert on the EXACT response bytes
 // and headers real git's smart-HTTP protocol requires (git-scm.com/docs/

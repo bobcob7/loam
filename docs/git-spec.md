@@ -99,6 +99,18 @@ Middleware authorizes the operation before any git process runs:
 - Missing/malformed identity → `403`. Role lacking the capability → `403`. Repo not
   enrolled → `404`. These surface as ordinary git HTTP errors — there is no CLI layer in
   between.
+- **Repo enrolled but no mirror on disk yet → `503`, not `404`** (loam-1gq). The window
+  between `EnrollRepo` writing the `repos` row and the first successful clone/sync
+  landing is normally narrow — `EnrollRepo` runs the clone synchronously and returns
+  only once `sync_state` is back to `idle` — but it stays open indefinitely if that
+  first clone **fails** (`docs/sync-spec.md`: `sync_state` goes to `error`, not back to
+  unenrolled), which is exactly when an operator most needs an honest signal. `404`
+  would read as "no such repo" to an agent that just watched enrollment succeed; `503`
+  says what is actually true — this repo is known, it is just not ready yet — mirroring
+  the `503`/"not ready: `<reason>`" convention `internal/health`'s `/readyz` already
+  establishes elsewhere in this codebase, rather than inventing a second one. All three
+  smart-HTTP requests (`info/refs`, `git-upload-pack`, `git-receive-pack`) share this
+  check, run once before any response byte is written.
 - `upload-pack` serves the **whole mirror** — roles gate *whether* an agent may fetch,
   not which refs. Mirrors are not secret from enrolled agents.
 - **Both built-in roles carry `git.clone`.** Reviewers clone so they can bring their own

@@ -2,8 +2,10 @@ package git
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -100,6 +102,22 @@ type gitRequest struct {
 // test exercising Handler directly, without the gate, sees) and as the
 // genuine "enrolled shape, unenrolled repo" case the gate cannot decide
 // -- it has no repo store of its own.
+//
+// A repo that IS enrolled but has no mirror on disk yet -- the window
+// between EnrollRepo writing the repos row and the first successful
+// clone/sync landing, which stays open indefinitely if that first clone
+// FAILS (docs/sync-spec.md "Enrollment is the degenerate first cycle":
+// sync_state goes to "error", not back to unenrolled) -- is a distinct
+// case from "not enrolled" and gets a distinct answer: 503, not 404
+// (loam-1gq). docs/git-spec.md's "Repo not enrolled -> 404" governs the
+// unenrolled case only; it is silent on this narrower one, so this is a
+// deliberate call, not a spec-mandated one -- see writeGitNotReady's doc
+// comment for the reasoning. Checked here, before either dispatch path
+// runs, so it also closes the same hole for the two RPC endpoints
+// (git-upload-pack, git-receive-pack), not just info/refs: all three
+// shell out to a subprocess against mirrorDir and all three write
+// WriteHeader(200) before running it, so all three would otherwise return
+// 200 with an empty/failed-subprocess body for the identical reason.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseGitRequest(r)
 	if !ok {
@@ -117,6 +135,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mirrorDir := mirrorpath.Dir(h.dataDir, repo.Name)
+	if !mirrorExists(mirrorDir) {
+		h.logger.WarnContext(r.Context(), "git handler: repo enrolled but mirror not yet on disk", "repo", repo.Name, "mirror", mirrorDir)
+		writeGitNotReady(w, repo.Name)
+		return
+	}
 	if req.isInfoRefs {
 		h.serveInfoRefs(w, r, mirrorDir, req.service)
 		return
@@ -186,4 +209,52 @@ func writeGitNotFound(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write([]byte("loam: repository not found\n"))
+}
+
+// mirrorExists reports whether mirrorDir is present on disk as a
+// directory -- the cheapest possible check, run before any response byte
+// is written, for the enrolled-but-unmirrored window ServeHTTP's doc
+// comment describes. A bare mirror is always a directory (mirrorreconcile
+// creates it with `git clone --bare`), so a stat that resolves to a
+// non-directory (a stray file at that path) is treated the same as
+// "does not exist" -- neither shape is something upload-pack/receive-pack
+// could serve.
+func mirrorExists(mirrorDir string) bool {
+	info, err := os.Stat(mirrorDir)
+	return err == nil && info.IsDir()
+}
+
+// writeGitNotReady answers a request for an enrolled repo whose mirror has
+// not landed on disk yet: 503, not 404 (loam-1gq).
+//
+// 404 is the wrong signal here. It means "no such repo" everywhere else in
+// this handler (writeGitNotFound, docs/git-spec.md's "Repo not enrolled ->
+// 404"), and this repo IS enrolled -- the repos row exists, EnrollRepo
+// succeeded. An agent seeing 404 immediately after a successful enrollment
+// reasonably concludes enrollment itself failed, or that the repo name is
+// wrong, and starts debugging the wrong problem. Worse, real git renders
+// both a 404 and this 503 the same way to a human ("Could not read from
+// remote repository" either way, per the bead's own report) -- so the
+// status code mostly matters for what a SCRIPT or a careful operator
+// reading server logs / `curl -i` sees, and there 503 is unambiguous:
+// "the server knows this repo, cannot serve it RIGHT NOW, try again" is
+// exactly what 503 (Service Unavailable) means on the wire, and it mirrors
+// the pattern internal/health.Readiness already establishes in this
+// codebase for the identical shape ("not ready: <reason>", 503) rather
+// than inventing a second convention for the same idea.
+//
+// docs/git-spec.md itself is SILENT on this case: its "Repo not enrolled
+// -> 404" row is scoped to the enrolled/unenrolled boundary and says
+// nothing about an enrolled repo with no mirror yet, so this status is a
+// judgment call this handler makes, not one the spec mandates.
+//
+// The body names the repo and says why, in the vocabulary a human tailing
+// `curl -i` or a stderr log actually reads -- the same reasoning
+// writeGitNotFound's own comment gives for a distinct fixed string per
+// case, so a test (or an operator) can tell which path answered.
+func writeGitNotReady(w http.ResponseWriter, repoName string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = fmt.Fprintf(w, "loam: repository %q is enrolled but not yet mirrored; retry once the initial clone/sync completes\n", repoName)
 }

@@ -127,6 +127,83 @@ func TestServeHTTP_UnenrolledRepoIs404(t *testing.T) {
 	assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
 }
 
+// enrolledButUnmirroredRepoStore resolves repoName as enrolled -- the repos
+// row exists -- independent of whatever is (or is not) on disk at its
+// mirror path. Used to reproduce loam-1gq: the window between EnrollRepo
+// writing the row and the first successful clone/sync landing.
+func enrolledButUnmirroredRepoStore(repoName string) *RepoStoreMock {
+	return &RepoStoreMock{
+		GetRepoByNameFunc: func(context.Context, string) (reposstore.Repo, error) {
+			return reposstore.Repo{Name: repoName}, nil
+		},
+	}
+}
+
+// TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady reproduces loam-1gq
+// directly: repos.GetRepoByName resolves "acme/widgets" (the repo IS
+// enrolled), but h's dataDir (a fresh t.TempDir()) has no mirrors/
+// subtree at all -- exactly the on-disk state between EnrollRepo's row
+// write and the first successful clone/sync, which stays open
+// indefinitely if that first clone fails (docs/sync-spec.md: sync_state
+// goes to "error", not back to unenrolled).
+//
+// Before the fix, ServeHTTP wrote StatusOK and the pkt-line service
+// header + flush unconditionally, then let `git upload-pack
+// --advertise-refs` fail against the missing directory with nothing
+// else written -- 200 with a body that LOOKS like a valid, empty ref
+// advertisement (indistinguishable on the wire from a real repo with no
+// refs), not the distinct "not mirrored yet" case it actually is. This
+// test pins both the status code AND the body shape, so a regression
+// that fixes the code but leaves the old advertisement-shaped body (or
+// vice versa) cannot pass silently -- see the bead's own "vacuous
+// assertion" warning.
+func TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady(t *testing.T) {
+	t.Parallel()
+	repos := enrolledButUnmirroredRepoStore("acme/widgets")
+	h := New(t.TempDir(), repos, discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/git/acme/widgets.git/info/refs?service=git-upload-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "an enrolled repo with no mirror on disk must not be a bare 200")
+	assert.NotEqual(t, http.StatusNotFound, rec.Code, "must not be 404 either: the repo IS enrolled, unlike TestServeHTTP_UnenrolledRepoIs404")
+	body := rec.Body.String()
+	wantAdvertisementHeader := string(append(pktLine("# service=git-upload-pack\n"), flushPkt...))
+	assert.NotContains(t, body, wantAdvertisementHeader, "the body must not look like a valid (if empty) git ref advertisement")
+	assert.Contains(t, body, "acme/widgets", "the message must name the repo")
+	assert.Contains(t, body, "not yet mirrored", "the message must say why, not merely that something failed")
+}
+
+// TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady_UploadPackRPC proves the
+// same fix covers the POST git-upload-pack RPC endpoint, not just GET
+// info/refs: serveRPC has the identical shape (WriteHeader(200) before
+// running the subprocess), so it shared the same hole before ServeHTTP's
+// check moved ahead of both dispatch paths.
+func TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady_UploadPackRPC(t *testing.T) {
+	t.Parallel()
+	repos := enrolledButUnmirroredRepoStore("acme/widgets")
+	h := New(t.TempDir(), repos, discardLogger())
+	req := httptest.NewRequest(http.MethodPost, "/git/acme/widgets.git/git-upload-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not yet mirrored")
+}
+
+// TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady_ReceivePackRPC is the
+// receive-pack (push) analogue: it must fail closed on the missing mirror
+// before ever reaching the identity/hook-environment logic, since there is
+// no mirror for receive-pack to run against either.
+func TestServeHTTP_EnrolledRepoWithNoMirrorIsNotReady_ReceivePackRPC(t *testing.T) {
+	t.Parallel()
+	repos := enrolledButUnmirroredRepoStore("acme/widgets")
+	h := New(t.TempDir(), repos, discardLogger())
+	req := httptest.NewRequest(http.MethodPost, "/git/acme/widgets.git/git-receive-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not yet mirrored")
+}
+
 // TestServeHTTP_MalformedShapeIs404 proves a request outside the three
 // smart-HTTP shapes gets the same 404 as an unenrolled repo, never a 500
 // or a panic -- exercised directly against Handler (bypassing
