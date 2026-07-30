@@ -194,13 +194,14 @@ func runWorkList(ctx context.Context, deps *Deps, args []string) error {
 // comment threads are deliberately absent -- they are `diff` and `comments`,
 // "to keep each response small".
 //
-// There is NO round field, despite the example in docs/cli-spec.md -> show
-// showing `"round": { "number": 2, "requested_by": "..." }`. Nothing carries
-// it on the wire: GetWorkBranchResponse holds a single WorkBranch, and
-// proto/loam/v1/common.proto's WorkBranch has no round member and no
-// requested_by. Synthesizing a plausible-looking round here would be
-// inventing data, so this reports exactly what the server returns; adding it
-// is a proto + handler change, not a CLI one.
+// Round is GetWorkBranchResponse's Round message (proto/loam/v1/workbranch.proto),
+// populated by internal/handler/workbranch.GetWorkBranch from the same
+// RoundStore.CurrentRound lookup RequestReview and ReplyToThread use. It is
+// omitted from the JSON entirely -- not rendered as `"round": {"number": 0}`
+// -- for a branch with no round yet (still DRAFT), matching UpstreamPRURL's
+// presence/absence convention below; loam-0pj.10 refused to fabricate this
+// field before the proto carried it, and a zeroed Round would be the same
+// fabrication under a different name.
 type workShowOutput struct {
 	Repo        string `json:"repo"`
 	Name        string `json:"name"`
@@ -221,6 +222,17 @@ type workShowOutput struct {
 	// reachable only through the admin ProposalService queue, which agents
 	// cannot call (loam-ls7u).
 	UpstreamPRURL *string `json:"upstream_pr_url,omitempty"`
+	// Round is nil (and therefore omitted, via omitempty) for a branch with
+	// no review round yet; see the type doc comment above.
+	Round *workShowRoundOutput `json:"round,omitempty"`
+}
+
+// workShowRoundOutput is workShowOutput's round shape, matching
+// GetWorkBranchResponse_Round field-for-field and docs/cli-spec.md -> show's
+// `"round": { "number": 2, "requested_by": "..." }` example.
+type workShowRoundOutput struct {
+	Number      uint32 `json:"number"`
+	RequestedBy string `json:"requested_by"`
 }
 
 // runWorkShow implements `loam work show [repo] [work-branch]`
@@ -260,6 +272,9 @@ func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 	if wb.UpstreamPrUrl != nil {
 		url := wb.GetUpstreamPrUrl()
 		out.UpstreamPRURL = &url
+	}
+	if round := resp.Msg.GetRound(); round != nil {
+		out.Round = &workShowRoundOutput{Number: round.GetNumber(), RequestedBy: round.GetRequestedBy()}
 	}
 	return deps.encoder.Encode(out)
 }

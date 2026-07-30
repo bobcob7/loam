@@ -530,8 +530,14 @@ func (x *GetWorkBranchRequest) GetWorkBranch() string {
 }
 
 type GetWorkBranchResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkBranch    *WorkBranch            `protobuf:"bytes,1,opt,name=work_branch,json=workBranch,proto3" json:"work_branch,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	WorkBranch *WorkBranch            `protobuf:"bytes,1,opt,name=work_branch,json=workBranch,proto3" json:"work_branch,omitempty"`
+	// The work branch's current review round. Unset for a branch with no round
+	// yet (e.g. still DRAFT) -- absent, not a zeroed Round, so a caller can
+	// distinguish "no round" from round 0 (docs/cli-spec.md -> "show"). A new
+	// nested message rather than fields on WorkBranch itself, since a round is
+	// this response's view of review state, not a property of the branch row.
+	Round         *GetWorkBranchResponse_Round `protobuf:"bytes,2,opt,name=round,proto3" json:"round,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -569,6 +575,13 @@ func (*GetWorkBranchResponse) Descriptor() ([]byte, []int) {
 func (x *GetWorkBranchResponse) GetWorkBranch() *WorkBranch {
 	if x != nil {
 		return x.WorkBranch
+	}
+	return nil
+}
+
+func (x *GetWorkBranchResponse) GetRound() *GetWorkBranchResponse_Round {
+	if x != nil {
+		return x.Round
 	}
 	return nil
 }
@@ -1178,6 +1191,66 @@ func (x *ReplyToThreadResponse) GetComment() *Comment {
 	return nil
 }
 
+// A work branch's current review round: the number and who requested it.
+// Field names and semantics match Thread.round and Comment.round
+// (proto/loam/v1/common.proto), which loam-ofg.9 added for the same
+// concept.
+type GetWorkBranchResponse_Round struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Incremented each time review is requested (docs/persistence-spec.md ->
+	// review_rounds).
+	Number uint32 `protobuf:"varint,1,opt,name=number,proto3" json:"number,omitempty"`
+	// Agent identifier of whoever requested this round, or "admin" for an
+	// admin send-back.
+	RequestedBy   string `protobuf:"bytes,2,opt,name=requested_by,json=requestedBy,proto3" json:"requested_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWorkBranchResponse_Round) Reset() {
+	*x = GetWorkBranchResponse_Round{}
+	mi := &file_loam_v1_workbranch_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWorkBranchResponse_Round) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWorkBranchResponse_Round) ProtoMessage() {}
+
+func (x *GetWorkBranchResponse_Round) ProtoReflect() protoreflect.Message {
+	mi := &file_loam_v1_workbranch_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWorkBranchResponse_Round.ProtoReflect.Descriptor instead.
+func (*GetWorkBranchResponse_Round) Descriptor() ([]byte, []int) {
+	return file_loam_v1_workbranch_proto_rawDescGZIP(), []int{9, 0}
+}
+
+func (x *GetWorkBranchResponse_Round) GetNumber() uint32 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *GetWorkBranchResponse_Round) GetRequestedBy() string {
+	if x != nil {
+		return x.RequestedBy
+	}
+	return ""
+}
+
 var File_loam_v1_workbranch_proto protoreflect.FileDescriptor
 
 const file_loam_v1_workbranch_proto_rawDesc = "" +
@@ -1225,10 +1298,14 @@ const file_loam_v1_workbranch_proto_rawDesc = "" +
 	"\x14GetWorkBranchRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x1f\n" +
 	"\vwork_branch\x18\x02 \x01(\tR\n" +
-	"workBranch\"M\n" +
+	"workBranch\"\xcd\x01\n" +
 	"\x15GetWorkBranchResponse\x124\n" +
 	"\vwork_branch\x18\x01 \x01(\v2\x13.loam.v1.WorkBranchR\n" +
-	"workBranch\"O\n" +
+	"workBranch\x12:\n" +
+	"\x05round\x18\x02 \x01(\v2$.loam.v1.GetWorkBranchResponse.RoundR\x05round\x1aB\n" +
+	"\x05Round\x12\x16\n" +
+	"\x06number\x18\x01 \x01(\rR\x06number\x12!\n" +
+	"\frequested_by\x18\x02 \x01(\tR\vrequestedBy\"O\n" +
 	"\x18GetWorkBranchDiffRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x1f\n" +
 	"\vwork_branch\x18\x02 \x01(\tR\n" +
@@ -1296,82 +1373,84 @@ func file_loam_v1_workbranch_proto_rawDescGZIP() []byte {
 	return file_loam_v1_workbranch_proto_rawDescData
 }
 
-var file_loam_v1_workbranch_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_loam_v1_workbranch_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_loam_v1_workbranch_proto_goTypes = []any{
-	(*CreateWorkBranchRequest)(nil),   // 0: loam.v1.CreateWorkBranchRequest
-	(*CreateWorkBranchResponse)(nil),  // 1: loam.v1.CreateWorkBranchResponse
-	(*UpdateWorkBranchRequest)(nil),   // 2: loam.v1.UpdateWorkBranchRequest
-	(*UpdateWorkBranchResponse)(nil),  // 3: loam.v1.UpdateWorkBranchResponse
-	(*RequestReviewRequest)(nil),      // 4: loam.v1.RequestReviewRequest
-	(*RequestReviewResponse)(nil),     // 5: loam.v1.RequestReviewResponse
-	(*ListWorkBranchesRequest)(nil),   // 6: loam.v1.ListWorkBranchesRequest
-	(*ListWorkBranchesResponse)(nil),  // 7: loam.v1.ListWorkBranchesResponse
-	(*GetWorkBranchRequest)(nil),      // 8: loam.v1.GetWorkBranchRequest
-	(*GetWorkBranchResponse)(nil),     // 9: loam.v1.GetWorkBranchResponse
-	(*GetWorkBranchDiffRequest)(nil),  // 10: loam.v1.GetWorkBranchDiffRequest
-	(*GetWorkBranchDiffResponse)(nil), // 11: loam.v1.GetWorkBranchDiffResponse
-	(*ListCommentsRequest)(nil),       // 12: loam.v1.ListCommentsRequest
-	(*ListCommentsResponse)(nil),      // 13: loam.v1.ListCommentsResponse
-	(*ListVerdictsRequest)(nil),       // 14: loam.v1.ListVerdictsRequest
-	(*ListVerdictsResponse)(nil),      // 15: loam.v1.ListVerdictsResponse
-	(*VerdictComment)(nil),            // 16: loam.v1.VerdictComment
-	(*SubmitVerdictRequest)(nil),      // 17: loam.v1.SubmitVerdictRequest
-	(*SubmitVerdictResponse)(nil),     // 18: loam.v1.SubmitVerdictResponse
-	(*ReplyToThreadRequest)(nil),      // 19: loam.v1.ReplyToThreadRequest
-	(*ReplyToThreadResponse)(nil),     // 20: loam.v1.ReplyToThreadResponse
-	(*WorkBranch)(nil),                // 21: loam.v1.WorkBranch
-	(WorkBranchState)(0),              // 22: loam.v1.WorkBranchState
-	(*Page)(nil),                      // 23: loam.v1.Page
-	(*PageInfo)(nil),                  // 24: loam.v1.PageInfo
-	(*Thread)(nil),                    // 25: loam.v1.Thread
-	(*VerdictSummary)(nil),            // 26: loam.v1.VerdictSummary
-	(*FileLine)(nil),                  // 27: loam.v1.FileLine
-	(VerdictOutcome)(0),               // 28: loam.v1.VerdictOutcome
-	(*Comment)(nil),                   // 29: loam.v1.Comment
+	(*CreateWorkBranchRequest)(nil),     // 0: loam.v1.CreateWorkBranchRequest
+	(*CreateWorkBranchResponse)(nil),    // 1: loam.v1.CreateWorkBranchResponse
+	(*UpdateWorkBranchRequest)(nil),     // 2: loam.v1.UpdateWorkBranchRequest
+	(*UpdateWorkBranchResponse)(nil),    // 3: loam.v1.UpdateWorkBranchResponse
+	(*RequestReviewRequest)(nil),        // 4: loam.v1.RequestReviewRequest
+	(*RequestReviewResponse)(nil),       // 5: loam.v1.RequestReviewResponse
+	(*ListWorkBranchesRequest)(nil),     // 6: loam.v1.ListWorkBranchesRequest
+	(*ListWorkBranchesResponse)(nil),    // 7: loam.v1.ListWorkBranchesResponse
+	(*GetWorkBranchRequest)(nil),        // 8: loam.v1.GetWorkBranchRequest
+	(*GetWorkBranchResponse)(nil),       // 9: loam.v1.GetWorkBranchResponse
+	(*GetWorkBranchDiffRequest)(nil),    // 10: loam.v1.GetWorkBranchDiffRequest
+	(*GetWorkBranchDiffResponse)(nil),   // 11: loam.v1.GetWorkBranchDiffResponse
+	(*ListCommentsRequest)(nil),         // 12: loam.v1.ListCommentsRequest
+	(*ListCommentsResponse)(nil),        // 13: loam.v1.ListCommentsResponse
+	(*ListVerdictsRequest)(nil),         // 14: loam.v1.ListVerdictsRequest
+	(*ListVerdictsResponse)(nil),        // 15: loam.v1.ListVerdictsResponse
+	(*VerdictComment)(nil),              // 16: loam.v1.VerdictComment
+	(*SubmitVerdictRequest)(nil),        // 17: loam.v1.SubmitVerdictRequest
+	(*SubmitVerdictResponse)(nil),       // 18: loam.v1.SubmitVerdictResponse
+	(*ReplyToThreadRequest)(nil),        // 19: loam.v1.ReplyToThreadRequest
+	(*ReplyToThreadResponse)(nil),       // 20: loam.v1.ReplyToThreadResponse
+	(*GetWorkBranchResponse_Round)(nil), // 21: loam.v1.GetWorkBranchResponse.Round
+	(*WorkBranch)(nil),                  // 22: loam.v1.WorkBranch
+	(WorkBranchState)(0),                // 23: loam.v1.WorkBranchState
+	(*Page)(nil),                        // 24: loam.v1.Page
+	(*PageInfo)(nil),                    // 25: loam.v1.PageInfo
+	(*Thread)(nil),                      // 26: loam.v1.Thread
+	(*VerdictSummary)(nil),              // 27: loam.v1.VerdictSummary
+	(*FileLine)(nil),                    // 28: loam.v1.FileLine
+	(VerdictOutcome)(0),                 // 29: loam.v1.VerdictOutcome
+	(*Comment)(nil),                     // 30: loam.v1.Comment
 }
 var file_loam_v1_workbranch_proto_depIdxs = []int32{
-	21, // 0: loam.v1.CreateWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
-	21, // 1: loam.v1.UpdateWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
-	21, // 2: loam.v1.RequestReviewResponse.work_branch:type_name -> loam.v1.WorkBranch
-	22, // 3: loam.v1.ListWorkBranchesRequest.state:type_name -> loam.v1.WorkBranchState
-	23, // 4: loam.v1.ListWorkBranchesRequest.page:type_name -> loam.v1.Page
-	21, // 5: loam.v1.ListWorkBranchesResponse.work_branches:type_name -> loam.v1.WorkBranch
-	24, // 6: loam.v1.ListWorkBranchesResponse.page_info:type_name -> loam.v1.PageInfo
-	21, // 7: loam.v1.GetWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
-	23, // 8: loam.v1.ListCommentsRequest.page:type_name -> loam.v1.Page
-	25, // 9: loam.v1.ListCommentsResponse.threads:type_name -> loam.v1.Thread
-	24, // 10: loam.v1.ListCommentsResponse.page_info:type_name -> loam.v1.PageInfo
-	26, // 11: loam.v1.ListVerdictsResponse.verdicts:type_name -> loam.v1.VerdictSummary
-	27, // 12: loam.v1.VerdictComment.anchor:type_name -> loam.v1.FileLine
-	28, // 13: loam.v1.SubmitVerdictRequest.outcome:type_name -> loam.v1.VerdictOutcome
-	16, // 14: loam.v1.SubmitVerdictRequest.comments:type_name -> loam.v1.VerdictComment
-	28, // 15: loam.v1.SubmitVerdictResponse.outcome:type_name -> loam.v1.VerdictOutcome
-	29, // 16: loam.v1.ReplyToThreadResponse.comment:type_name -> loam.v1.Comment
-	0,  // 17: loam.v1.WorkBranchService.CreateWorkBranch:input_type -> loam.v1.CreateWorkBranchRequest
-	2,  // 18: loam.v1.WorkBranchService.UpdateWorkBranch:input_type -> loam.v1.UpdateWorkBranchRequest
-	4,  // 19: loam.v1.WorkBranchService.RequestReview:input_type -> loam.v1.RequestReviewRequest
-	6,  // 20: loam.v1.WorkBranchService.ListWorkBranches:input_type -> loam.v1.ListWorkBranchesRequest
-	8,  // 21: loam.v1.WorkBranchService.GetWorkBranch:input_type -> loam.v1.GetWorkBranchRequest
-	10, // 22: loam.v1.WorkBranchService.GetWorkBranchDiff:input_type -> loam.v1.GetWorkBranchDiffRequest
-	12, // 23: loam.v1.WorkBranchService.ListComments:input_type -> loam.v1.ListCommentsRequest
-	14, // 24: loam.v1.WorkBranchService.ListVerdicts:input_type -> loam.v1.ListVerdictsRequest
-	17, // 25: loam.v1.WorkBranchService.SubmitVerdict:input_type -> loam.v1.SubmitVerdictRequest
-	19, // 26: loam.v1.WorkBranchService.ReplyToThread:input_type -> loam.v1.ReplyToThreadRequest
-	1,  // 27: loam.v1.WorkBranchService.CreateWorkBranch:output_type -> loam.v1.CreateWorkBranchResponse
-	3,  // 28: loam.v1.WorkBranchService.UpdateWorkBranch:output_type -> loam.v1.UpdateWorkBranchResponse
-	5,  // 29: loam.v1.WorkBranchService.RequestReview:output_type -> loam.v1.RequestReviewResponse
-	7,  // 30: loam.v1.WorkBranchService.ListWorkBranches:output_type -> loam.v1.ListWorkBranchesResponse
-	9,  // 31: loam.v1.WorkBranchService.GetWorkBranch:output_type -> loam.v1.GetWorkBranchResponse
-	11, // 32: loam.v1.WorkBranchService.GetWorkBranchDiff:output_type -> loam.v1.GetWorkBranchDiffResponse
-	13, // 33: loam.v1.WorkBranchService.ListComments:output_type -> loam.v1.ListCommentsResponse
-	15, // 34: loam.v1.WorkBranchService.ListVerdicts:output_type -> loam.v1.ListVerdictsResponse
-	18, // 35: loam.v1.WorkBranchService.SubmitVerdict:output_type -> loam.v1.SubmitVerdictResponse
-	20, // 36: loam.v1.WorkBranchService.ReplyToThread:output_type -> loam.v1.ReplyToThreadResponse
-	27, // [27:37] is the sub-list for method output_type
-	17, // [17:27] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	22, // 0: loam.v1.CreateWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
+	22, // 1: loam.v1.UpdateWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
+	22, // 2: loam.v1.RequestReviewResponse.work_branch:type_name -> loam.v1.WorkBranch
+	23, // 3: loam.v1.ListWorkBranchesRequest.state:type_name -> loam.v1.WorkBranchState
+	24, // 4: loam.v1.ListWorkBranchesRequest.page:type_name -> loam.v1.Page
+	22, // 5: loam.v1.ListWorkBranchesResponse.work_branches:type_name -> loam.v1.WorkBranch
+	25, // 6: loam.v1.ListWorkBranchesResponse.page_info:type_name -> loam.v1.PageInfo
+	22, // 7: loam.v1.GetWorkBranchResponse.work_branch:type_name -> loam.v1.WorkBranch
+	21, // 8: loam.v1.GetWorkBranchResponse.round:type_name -> loam.v1.GetWorkBranchResponse.Round
+	24, // 9: loam.v1.ListCommentsRequest.page:type_name -> loam.v1.Page
+	26, // 10: loam.v1.ListCommentsResponse.threads:type_name -> loam.v1.Thread
+	25, // 11: loam.v1.ListCommentsResponse.page_info:type_name -> loam.v1.PageInfo
+	27, // 12: loam.v1.ListVerdictsResponse.verdicts:type_name -> loam.v1.VerdictSummary
+	28, // 13: loam.v1.VerdictComment.anchor:type_name -> loam.v1.FileLine
+	29, // 14: loam.v1.SubmitVerdictRequest.outcome:type_name -> loam.v1.VerdictOutcome
+	16, // 15: loam.v1.SubmitVerdictRequest.comments:type_name -> loam.v1.VerdictComment
+	29, // 16: loam.v1.SubmitVerdictResponse.outcome:type_name -> loam.v1.VerdictOutcome
+	30, // 17: loam.v1.ReplyToThreadResponse.comment:type_name -> loam.v1.Comment
+	0,  // 18: loam.v1.WorkBranchService.CreateWorkBranch:input_type -> loam.v1.CreateWorkBranchRequest
+	2,  // 19: loam.v1.WorkBranchService.UpdateWorkBranch:input_type -> loam.v1.UpdateWorkBranchRequest
+	4,  // 20: loam.v1.WorkBranchService.RequestReview:input_type -> loam.v1.RequestReviewRequest
+	6,  // 21: loam.v1.WorkBranchService.ListWorkBranches:input_type -> loam.v1.ListWorkBranchesRequest
+	8,  // 22: loam.v1.WorkBranchService.GetWorkBranch:input_type -> loam.v1.GetWorkBranchRequest
+	10, // 23: loam.v1.WorkBranchService.GetWorkBranchDiff:input_type -> loam.v1.GetWorkBranchDiffRequest
+	12, // 24: loam.v1.WorkBranchService.ListComments:input_type -> loam.v1.ListCommentsRequest
+	14, // 25: loam.v1.WorkBranchService.ListVerdicts:input_type -> loam.v1.ListVerdictsRequest
+	17, // 26: loam.v1.WorkBranchService.SubmitVerdict:input_type -> loam.v1.SubmitVerdictRequest
+	19, // 27: loam.v1.WorkBranchService.ReplyToThread:input_type -> loam.v1.ReplyToThreadRequest
+	1,  // 28: loam.v1.WorkBranchService.CreateWorkBranch:output_type -> loam.v1.CreateWorkBranchResponse
+	3,  // 29: loam.v1.WorkBranchService.UpdateWorkBranch:output_type -> loam.v1.UpdateWorkBranchResponse
+	5,  // 30: loam.v1.WorkBranchService.RequestReview:output_type -> loam.v1.RequestReviewResponse
+	7,  // 31: loam.v1.WorkBranchService.ListWorkBranches:output_type -> loam.v1.ListWorkBranchesResponse
+	9,  // 32: loam.v1.WorkBranchService.GetWorkBranch:output_type -> loam.v1.GetWorkBranchResponse
+	11, // 33: loam.v1.WorkBranchService.GetWorkBranchDiff:output_type -> loam.v1.GetWorkBranchDiffResponse
+	13, // 34: loam.v1.WorkBranchService.ListComments:output_type -> loam.v1.ListCommentsResponse
+	15, // 35: loam.v1.WorkBranchService.ListVerdicts:output_type -> loam.v1.ListVerdictsResponse
+	18, // 36: loam.v1.WorkBranchService.SubmitVerdict:output_type -> loam.v1.SubmitVerdictResponse
+	20, // 37: loam.v1.WorkBranchService.ReplyToThread:output_type -> loam.v1.ReplyToThreadResponse
+	28, // [28:38] is the sub-list for method output_type
+	18, // [18:28] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_loam_v1_workbranch_proto_init() }
@@ -1389,7 +1468,7 @@ func file_loam_v1_workbranch_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_v1_workbranch_proto_rawDesc), len(file_loam_v1_workbranch_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

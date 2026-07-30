@@ -370,6 +370,9 @@ convention above).
   "round": { "number": 2, "requested_by": "grace-hopper-3-author" } }
 ```
 
+`round` is omitted entirely (not `{ "number": 0 }`) for a work branch with no review round
+yet — e.g. still `draft`, before the first `request-review`.
+
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved (not in a clone and arguments omitted).
 

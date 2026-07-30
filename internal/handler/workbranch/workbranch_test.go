@@ -1099,6 +1099,59 @@ func TestGetWorkBranch_PreservesUpstreamPRURL(t *testing.T) {
 	assert.Equal(t, url, resp.Msg.GetWorkBranch().GetUpstreamPrUrl())
 }
 
+// TestGetWorkBranch_WithCurrentRound_PopulatesRound proves the response
+// carries the round CurrentRound reports, number and requested_by both,
+// matching Thread.round/Comment.round's semantics (loam-ofg.9).
+func TestGetWorkBranch_WithCurrentRound_PopulatesRound(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{ID: sampleRoundID, WorkBranchID: workBranchID, Number: 2, RequestedBy: "grace-hopper-3-author"}, nil
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.NoError(t, err)
+	require.NotNil(t, resp.Msg.Round)
+	assert.Equal(t, uint32(2), resp.Msg.Round.GetNumber())
+	assert.Equal(t, "grace-hopper-3-author", resp.Msg.Round.GetRequestedBy())
+}
+
+// TestGetWorkBranch_NoCurrentRound_LeavesRoundUnset proves a branch with no
+// review round yet (e.g. still DRAFT) is reported with Round entirely
+// absent -- not a zeroed Round message -- so a caller can tell "no round"
+// apart from "round 0" (loam-0pj.10 refused to fabricate this field before
+// the proto carried it; a zero value here would be the same fabrication
+// under a different name).
+func TestGetWorkBranch_NoCurrentRound_LeavesRoundUnset(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	rounds.CurrentRoundFunc = func(_ context.Context, workBranchID uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{}, fmt.Errorf("getting current round for work branch %s: %w", workBranchID, reviewstore.ErrNoCurrentRound)
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.NoError(t, err)
+	assert.Nil(t, resp.Msg.Round)
+}
+
+// TestGetWorkBranch_RoundStoreFails_ReturnsInternal proves a genuine
+// RoundStore failure (anything other than ErrNoCurrentRound) surfaces as an
+// error rather than being silently swallowed into an absent round.
+func TestGetWorkBranch_RoundStoreFails_ReturnsInternal(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+	rounds.CurrentRoundFunc = func(context.Context, uuid.UUID) (reviewstore.Round, error) {
+		return reviewstore.Round{}, errors.New("database is on fire")
+	}
+	h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+	_, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInternal, connectCode(t, err))
+}
+
 // --- GetWorkBranchDiff ---
 
 // TestGetWorkBranchDiff_AgentLackingWorkRead_Denied proves the capability

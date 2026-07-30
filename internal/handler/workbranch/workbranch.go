@@ -321,6 +321,12 @@ func (h *Handler) ListWorkBranches(ctx context.Context, req *connect.Request[loa
 // GetWorkBranch fetches a work branch's metadata -- no diff, no threads --
 // separately from GetWorkBranchDiff to keep each response small
 // (docs/cli-spec.md -> "show"). Gated by CapabilityWorkRead.
+//
+// The round is looked up via the same RoundStore.CurrentRound RequestReview
+// and ReplyToThread already use, but unlike those callers a branch with no
+// round yet (still DRAFT) is not an error here -- reviewstore.ErrNoCurrentRound
+// just leaves the response's Round unset, matching UpstreamPRURL's
+// absent-vs-present convention below.
 func (h *Handler) GetWorkBranch(ctx context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
 	if err := h.capabilities.RequireCapability(ctx, handler.CapabilityWorkRead); err != nil {
 		return nil, h.errors.ToConnectErr(err)
@@ -329,7 +335,15 @@ func (h *Handler) GetWorkBranch(ctx context.Context, req *connect.Request[loamv1
 	if err != nil {
 		return nil, h.errors.ToConnectErr(err)
 	}
-	return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: workBranchToProto(repoRow.Name, wb)}), nil
+	round, err := h.rounds.CurrentRound(ctx, wb.ID)
+	if err != nil && !errors.Is(err, reviewstore.ErrNoCurrentRound) {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("looking up current review round for work branch %s/%s: %w", req.Msg.GetRepo(), req.Msg.GetWorkBranch(), err))
+	}
+	resp := &loamv1.GetWorkBranchResponse{WorkBranch: workBranchToProto(repoRow.Name, wb)}
+	if err == nil {
+		resp.Round = &loamv1.GetWorkBranchResponse_Round{Number: uint32(round.Number), RequestedBy: round.RequestedBy}
+	}
+	return connect.NewResponse(resp), nil
 }
 
 // GetWorkBranchDiff fetches a work branch's unified diff against its
