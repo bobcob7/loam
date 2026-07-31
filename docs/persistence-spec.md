@@ -85,13 +85,19 @@ timestamps.
   Catch-Up): `flagged` when a target advance no longer merges cleanly into the branch,
   `reset` when that demoted a `reviewable`/`reviewed` branch to `draft`. A catch-up push
   returns it to `none` — and flips a `reset` branch back to `reviewable`.
-  `upstream_diverged` is the fourth value and the odd one out: it does not describe the
-  target at all, but Loam's own `loam/<name>` branch upstream being edited behind its
-  back into a shape no fast-forward reconciles (`docs/sync-spec.md` → Upstream Drift).
-  It is recorded for the admin console and never cleared automatically — only a human
-  resolving the upstream branch can clear it. That it shares a column with the two
-  target-advance values is a deliberate simplification and an open question in
-  sync-spec, not a claim that they are the same kind of problem.
+  It stays a three-value column: upstream drift is tracked separately, in
+  `upstream_drift`, because the two can hold at once.
+- `upstream_drift` records whether Loam's own `loam/<name>` branch has been edited
+  upstream behind its back (`docs/sync-spec.md` → Upstream Drift): `none`, or `diverged`
+  when the upstream tip and the work-branch tip have no ancestor relationship and no
+  fast-forward reconciles them. A clean fast-forward is *adopted* rather than recorded —
+  the work branch advances, `accepted_tip` follows, and a new review round opens — so it
+  leaves no drift state behind. `diverged` is never cleared automatically; only a human
+  resolving the upstream branch clears it.
+  It is deliberately NOT a fourth `conflict` value: `conflict` describes the target
+  advancing, `upstream_drift` describes Loam's own branch being rewritten, and both can
+  be true simultaneously. One column would let whichever happened second overwrite the
+  first, hiding a problem the operator still has. `AcceptProposal` refuses on either.
 - `upstream_pr_number` is the forge-native PR number the sync uses to poll PR state;
   `upstream_pr_url` is display-only (`docs/sync-spec.md`).
 - `accepted_tip` is the commit SHA at which Loam last knows `loam/<name>` to stand

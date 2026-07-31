@@ -186,11 +186,33 @@ own tip:
   and it cannot reach a *further* upstream push until someone approves it.
 
 - **Diverged** — neither tip is an ancestor of the other. Loam changes
-  nothing, and records `conflict = upstream_diverged` for the admin console
+  nothing, and records `upstream_drift = diverged` for the admin console
   (`docs/web-spec.md` → ProposalService). Loam does not merge, rebase, or
   force: it cannot know which side is intended, and the push that would
   reconcile it is precisely the destructive one Proposal Acceptance refuses to
   make.
+
+`upstream_drift` is its **own column**, deliberately not a fourth `conflict`
+value. The two describe independent facts that can hold simultaneously — a
+target can advance into a merge conflict while the `loam/` branch is
+separately rewritten — and a single field would let whichever happened second
+overwrite the first, leaving the operator to fix one problem while never
+learning about the other. They also want different sentences: `flagged`/`reset`
+mean *the target moved, catch up*; `diverged` means *someone rewrote the branch
+Loam pushed*.
+
+**`AcceptProposal` must refuse on either field.** Its existing precondition
+rejects a non-`none` `conflict`; it gains an equivalent check on
+`upstream_drift`, with its own message. A branch that is diverged upstream
+cannot be accepted, because the push that acceptance performs is exactly the
+non-forced push that would fail.
+
+**Prerequisite, and it is not free.** Neither field is on the wire today:
+`conflict` is a server-internal value (`workbranchstore.Conflict`, backed by
+the column's CHECK constraint) consumed only by `ListProposals`' exclusion and
+`AcceptProposal`'s precondition. Surfacing drift to the admin console
+therefore requires exposing this state through the proposal/work-branch protos
+first. That work is part of this feature, not an assumed given.
 
 **Why adoption is safe to automate and divergence is not.** A fast-forward
 loses nothing — the work branch gains commits and history is preserved. A
@@ -234,17 +256,16 @@ still-open PR (a handful of REST calls at most):
 
 ## Open Questions
 
-- **Where upstream drift is recorded.** The spec above adds a fourth
-  `conflict` value, `upstream_diverged`, alongside `none`/`flagged`/`reset`.
-  That keeps one field for "this branch needs a human", but `conflict` is
-  otherwise about the *target* advancing, while this is about Loam's *own*
-  upstream branch moving — arguably a separate axis deserving its own column.
-  The two call for different operator actions, which is the argument for
-  splitting them.
-- **Whether `accepted_tip` should absorb an adopted commit.** The spec sets it
-  to the adopted tip, so it reads "the upstream tip Loam last pushed *or*
-  adopted", which keeps `ListProposals` exact: nothing is left to push, so the
-  branch is not re-listed, and the reopened round is what demands re-review.
-  The alternative keeps `accepted_tip` strictly push-only and adds an observed
-  upstream tip beside it — more faithful to the column's name, one more piece
-  of state to keep true.
+None currently open. Two were settled when this section was written:
+
+- **Where upstream drift is recorded** — its own `upstream_drift` column, not
+  a fourth `conflict` value, so that a target-advance conflict and an upstream
+  rewrite can both be true without one erasing the other.
+- **What `accepted_tip` holds after an adoption** — the adopted commit. It
+  reads "the upstream tip Loam last pushed *or* adopted", which adds no new
+  state and keeps `ListProposals` exact: nothing remains to push, so the branch
+  is not re-listed, and the reopened round is what demands re-review. The
+  alternative considered and rejected was a strictly push-only column beside an
+  observed upstream tip; it bought an audit record rather than any safety,
+  since the reopened round already restores the review gate and an accept
+  cannot un-push a commit that is already upstream.

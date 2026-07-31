@@ -180,12 +180,17 @@ Target Advances & Catch-Up).
 edited upstream behind Loam's back does not belong in this queue — it is not awaiting an
 accept decision, and a clean fast-forward is reconciled automatically (`docs/sync-spec.md`
 → Upstream Drift), which reopens a review round rather than producing a proposal. What the
-admin must see is the case Loam refuses to guess at: `conflict = upstream_diverged`, shown
-on the work branch wherever its conflict state is already displayed, and distinguishable
-from `flagged`/`reset`. Those two mean *the target moved, catch up*; this one means
+admin must see is the case Loam refuses to guess at: `upstream_drift = diverged`, shown on
+the work branch alongside its conflict state and distinguishable from `flagged`/`reset`. Those two mean *the target moved, catch up*; this one means
 *someone rewrote the branch Loam pushed, and no fast-forward reconciles it* — a different
 sentence to the operator and a different remedy, so the console must not collapse them
-into one "conflicted" badge.
+into one "conflicted" badge. They are separate fields precisely because they can both be
+set at once, and the console must be able to show both.
+
+Note that **neither field reaches the admin today**: `conflict` is server-internal, read
+only by `ListProposals`' exclusion and `AcceptProposal`'s precondition. Exposing
+`conflict` and `upstream_drift` on the work-branch/proposal protos is part of this
+feature.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
   title/description, and records `pr_url` on the work branch. On a re-accept after a
