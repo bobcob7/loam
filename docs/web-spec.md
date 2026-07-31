@@ -125,7 +125,12 @@ REST calls that open upstream PRs and git-over-HTTPS transport to the upstream (
 
 - `SetUpstreamToken(string host, string token) → { CredentialStatus }` — set/replace the
   forge token; the server validates the REST side immediately (git access is proven per
-  repo at enrollment).
+  repo at enrollment). `host` is canonicalized before validation or storage
+  (`internal/forgehost.Canonicalize`, loam-0hjq): a bare host and the equivalent
+  scheme-qualified URL ("github.com" / "https://github.com") both resolve the same
+  credential, matching what `RepoAdminService.EnrollRepo`/`ProbeRepo` derive from an
+  upstream URL. A host that is malformed rather than merely differently spelled (a path,
+  embedded userinfo, or a non-http(s) scheme) is rejected as `invalid_argument`.
 - `GetCredentialStatus(string host) → { CredentialStatus }` / `ListCredentials() →
   { CredentialStatus[] }` — presence and validation state per host.
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bobcob7/loam/internal/forgehost"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
@@ -177,22 +178,26 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 // forge has to be set with the SAME "http://host:port" form this function
 // derives, not the bare host -- credentials.host and repos.forge_host are
 // two independently-keyed lookups (internal/credentialstore.GetByHost)
-// that only resolve each other when the literal strings match. There is
-// no normalization chokepoint reconciling a mismatched pair: EnrollRepo's
-// GetByHost call and this function are the single source of truth for
-// what "the forge host" is, deliberately, rather than layering a second
-// heuristic (e.g. defaulting loopback addresses to http) on top that
-// could itself silently downgrade a REAL https credential-bearing
-// request. CredentialService.SetUpstreamToken separately tolerates a bare
-// host that turns out to be plaintext HTTP (internal/forge/forgejo.go's
-// ValidateToken doc comment), but that tolerance is scoped to validating
-// the token over the wire -- it never changes what key the token is
-// stored under, so it does not create a second way to reach the same row.
+// that only resolve each other when the literal strings match.
+// CredentialService.SetUpstreamToken (loam-0hjq) now canonicalizes what an
+// admin types through internal/forgehost.Canonicalize before it is stored,
+// applying the IDENTICAL bare-vs-scheme-qualified rule this function
+// applies via internal/forgehost.FromURL below -- that shared function,
+// not a second heuristic layered on top (e.g. defaulting loopback
+// addresses to http, which could silently downgrade a REAL https
+// credential-bearing request), is what EnrollRepo's GetByHost call and
+// this function rely on as the single source of truth for what "the
+// forge host" is. Before loam-0hjq there was no such chokepoint at all,
+// which is how a credential entered as "https://git.example.com" could
+// validate (internal/forge/forgejo.go's apiBaseURL tolerates a
+// scheme-qualified host) yet never be found by this function's bare
+// derivation. CredentialService.SetUpstreamToken separately tolerates a
+// bare host that turns out to be plaintext HTTP purely for ITS OWN
+// token-validation call (ValidateToken's doc comment) -- that tolerance
+// never changes what key the token is stored under, so it does not create
+// a second way to reach the same row.
 func forgeHostOf(u *url.URL) string {
-	if u.Scheme == "http" {
-		return "http://" + u.Host
-	}
-	return u.Host
+	return forgehost.FromURL(u)
 }
 
 // redactUserinfo reconstructs u's string form with any embedded userinfo
