@@ -59,14 +59,31 @@ spec:
       # (same externally-managed-secrets rule as the app secrets below).
       imagePullSecrets:
         - name: registry-bobcob7-com
+      # fsGroup is LOAD-BEARING, not boilerplate hardening. The image runs
+      # as non-root uid/gid 10001 (see Dockerfile), and a freshly
+      # provisioned PVC mounts owned by root. loam-ytt2.1 reproduced the
+      # exact failure against an empty mount: the server exits immediately
+      # with "LOAM_DATA_DIR: data directory not writable: ... permission
+      # denied". Without fsGroup this Deployment crashloops on its FIRST
+      # start with a new volume and works on every subsequent redeploy of
+      # an existing one, which is the worst shape of bug to debug later.
+      # fsGroup makes the kubelet chown the volume to that gid at mount.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
       containers:
         - name: loam
-          # PLACEHOLDER. loam-ytt2.1 (container image) and loam-ytt2.2
-          # (publish to registry.bobcob7.com) have not landed yet as of
-          # this bead -- there is no real tag to pin to. Override with
-          # kustomize's `images:` transformer once one exists; do not
-          # leave this pointed at a floating tag in a real deploy.
-          image: registry.bobcob7.com/loam/loam:0.0.0-placeholder
+          # Repository name now matches what loam-ytt2.1's Dockerfile and
+          # Taskfile docker:build actually produce
+          # (registry.bobcob7.com/loam/server); the earlier value here said
+          # loam/loam and would have pulled a repository that will never
+          # exist. The TAG is still a placeholder: loam-ytt2.2 owns
+          # publishing and the tag scheme, and nothing has been pushed yet.
+          # Pin it with kustomize's `images:` transformer once an immutable
+          # tag exists; do not point a real deploy at a floating tag.
+          image: registry.bobcob7.com/loam/server:0.0.0-placeholder
           ports:
             - name: http
               containerPort: 8080

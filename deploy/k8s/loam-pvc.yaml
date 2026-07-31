@@ -4,9 +4,15 @@
 # replica-count comment for the full correctness argument this PVC's
 # ReadWriteOnce access mode is part of).
 #
-# storageClassName is deliberately omitted so the cluster's default
-# StorageClass is used; override with a kustomize patch if this addon needs
-# a specific class (e.g. one backed by faster or more durable storage).
+# storageClassName is set EXPLICITLY rather than left to the cluster
+# default, which on vega is `nfs`. Git is a poor fit for NFS: it coordinates
+# through lock files (index.lock, per-ref locks) and NFS's locking and
+# attribute caching make those unreliable, which shows up as intermittent
+# corruption rather than as a clean failure. `iscsi` is block storage and
+# RWO, matching the single-replica argument in loam-deployment.yaml. It is
+# also the house convention for anything stateful that is not bulk file
+# data -- vega-infra's docs addon pins iscsi for its Postgres and Qdrant
+# and uses nfs only for Outline's file uploads.
 # 20Gi is a starting-point size, not a measured figure -- there is no
 # production corpus to size against yet. Expanding it later requires a
 # StorageClass with allowVolumeExpansion; shrinking a PVC is not supported
@@ -21,3 +27,4 @@ spec:
   resources:
     requests:
       storage: 20Gi
+  storageClassName: iscsi

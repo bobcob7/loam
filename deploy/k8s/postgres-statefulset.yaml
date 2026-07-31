@@ -130,6 +130,10 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            # storageClassName intentionally omitted -- uses the cluster
-            # default, same reasoning as loam-pvc.yaml.
             storage: 10Gi
+        # Pinned, NOT left to the cluster default: vega's default class is
+        # `nfs`, and Postgres on NFS is a durability and locking hazard
+        # rather than merely a slow one. vega-infra's own docs addon pins
+        # iscsi for its Postgres and Qdrant and uses nfs only for Outline's
+        # file uploads -- this follows that convention.
+        storageClassName: iscsi
