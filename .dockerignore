@@ -1,0 +1,8 @@
+.git/
+.beads/
+.claude/
+bin/
+web/node_modules/
+web/e2e/
+*.md
+docs/
