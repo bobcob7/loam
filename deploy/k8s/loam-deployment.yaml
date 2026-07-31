@@ -75,15 +75,19 @@ spec:
         fsGroup: 10001
       containers:
         - name: loam
-          # Repository name now matches what loam-ytt2.1's Dockerfile and
-          # Taskfile docker:build actually produce
-          # (registry.bobcob7.com/loam/server); the earlier value here said
-          # loam/loam and would have pulled a repository that will never
-          # exist. The TAG is still a placeholder: loam-ytt2.2 owns
-          # publishing and the tag scheme, and nothing has been pushed yet.
-          # Pin it with kustomize's `images:` transformer once an immutable
-          # tag exists; do not point a real deploy at a floating tag.
-          image: registry.bobcob7.com/loam/server:0.0.0-placeholder
+          # Pinned to an IMMUTABLE commit-sha manifest list, not :latest,
+          # which the build workflow also publishes. :latest would make
+          # this manifest permanently identical while the running image
+          # changed underneath it -- Argo would report Synced with no
+          # commit anywhere saying what is deployed, and a rollback would
+          # have nothing to revert to. With the sha tag, bumping the
+          # deployed version is a reviewable diff and rolling back is a
+          # git revert.
+          #
+          # This tag is a real multi-arch manifest list (linux/amd64 +
+          # linux/arm64), built by .forgejo/workflows/build.yaml on native
+          # runners of each architecture and verified in the registry.
+          image: registry.bobcob7.com/loam/server:dff3598deddb394f1e13bacb92a23ccf23a9b70d
           ports:
             - name: http
               containerPort: 8080
