@@ -175,6 +175,17 @@ Target Advances & Catch-Up).
 - `ListProposals(Page) → { Proposal[] proposals, PageInfo }` — proposals awaiting an admin
   decision, across all repos, paginated. Each `Proposal` is `{ WorkBranch, VerdictSummary[]
   verdicts }` so the admin sees who approved without a second call.
+
+**Upstream drift is surfaced, not listed.** A work branch whose `loam/<name>` branch was
+edited upstream behind Loam's back does not belong in this queue — it is not awaiting an
+accept decision, and a clean fast-forward is reconciled automatically (`docs/sync-spec.md`
+→ Upstream Drift), which reopens a review round rather than producing a proposal. What the
+admin must see is the case Loam refuses to guess at: `conflict = upstream_diverged`, shown
+on the work branch wherever its conflict state is already displayed, and distinguishable
+from `flagged`/`reset`. Those two mean *the target moved, catch up*; this one means
+*someone rewrote the branch Loam pushed, and no fast-forward reconciles it* — a different
+sentence to the operator and a different remedy, so the console must not collapse them
+into one "conflicted" badge.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
   title/description, and records `pr_url` on the work branch. On a re-accept after a

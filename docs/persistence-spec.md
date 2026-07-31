@@ -85,11 +85,21 @@ timestamps.
   Catch-Up): `flagged` when a target advance no longer merges cleanly into the branch,
   `reset` when that demoted a `reviewable`/`reviewed` branch to `draft`. A catch-up push
   returns it to `none` — and flips a `reset` branch back to `reviewable`.
+  `upstream_diverged` is the fourth value and the odd one out: it does not describe the
+  target at all, but Loam's own `loam/<name>` branch upstream being edited behind its
+  back into a shape no fast-forward reconciles (`docs/sync-spec.md` → Upstream Drift).
+  It is recorded for the admin console and never cleared automatically — only a human
+  resolving the upstream branch can clear it. That it shares a column with the two
+  target-advance values is a deliberate simplification and an open question in
+  sync-spec, not a claim that they are the same kind of problem.
 - `upstream_pr_number` is the forge-native PR number the sync uses to poll PR state;
   `upstream_pr_url` is display-only (`docs/sync-spec.md`).
-- `accepted_tip` is the commit SHA the most recent `AcceptProposal` pushed to
-  `loam/<name>` upstream — written by `mirrorsync.StoreProposalAccepter` on every
-  accept (a first accept and a re-accept fast-forward alike), never cleared. `null` on
+- `accepted_tip` is the commit SHA at which Loam last knows `loam/<name>` to stand
+  upstream: the tip the most recent `AcceptProposal` pushed there — written by
+  `mirrorsync.StoreProposalAccepter` on every accept (a first accept and a re-accept
+  fast-forward alike) — or, since `docs/sync-spec.md` → Upstream Drift, the tip Loam
+  **adopted** when someone pushed to that branch directly and the result was a clean
+  fast-forward. Never cleared. `null` on
   every row accepted before this column existed. `ProposalService.ListProposals`
   compares it against a live resolve of the work branch's own ref to decide whether an
   already-recorded PR's branch is behind (`docs/web-spec.md` → ProposalService): equal

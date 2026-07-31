@@ -285,6 +285,15 @@ they appear here because they define the push rules above.
   never chase stale mirror state and the mirror stays a plain bare repo. The policy
   itself lives in one Go function with the rest of the domain logic.
 
+**One path bypasses all of the above, by construction.** Everything in this
+section applies to pushes that arrive through `/git/*`. A commit pushed
+directly to a `loam/<work-branch>` branch *on the forge* reaches Loam through
+the mirror fetch instead, so no hook runs and no policy applies to it. Loam
+adopts such a commit only when it is a clean fast-forward, and reopens the
+review round when it does, so the code cannot reach a further upstream push
+unreviewed — see `docs/sync-spec.md` → Upstream Drift for the full rule and
+why divergence is escalated to the admin rather than resolved.
+
 ## The CLI's Role
 
 Loam's client-side git surface shrinks to one bootstrap verb:

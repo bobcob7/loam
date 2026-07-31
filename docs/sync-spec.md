@@ -160,6 +160,55 @@ so a failure between the steps (branch pushed, PR creation failed) is retried
 safely by the admin re-running accept. Errors surface on the RPC for the
 proposal screen.
 
+## Upstream Drift on `loam/<work-branch>`
+
+Loam owns the `loam/…` branches it pushes, but it does not control them: the
+forge lets anyone with write access push to `loam/<work-branch-name>`
+directly, and that has happened in practice. The branch is mirrored back by
+the ordinary fetch (`branchesRefspec` is `+refs/heads/*:refs/heads/*`; only
+the reserved namespace is excluded), so the divergence is already visible in
+the mirror — what follows is the reconciliation.
+
+Each sync cycle, for every work branch with a recorded PR, compare the
+mirrored `loam/<name>` tip against `accepted_tip`. Equal is the normal case
+and does nothing. Otherwise, classify by ancestry against the work branch's
+own tip:
+
+- **Fast-forward** — the work-branch tip is an ancestor of the upstream tip.
+  Loam **adopts** it: the work branch advances to the upstream commit, and a
+  **new review round opens**, which makes every prior verdict stale (staleness
+  is derived from the round number, so no verdict is rewritten). `requested_by`
+  is `server`, the same attribution a catch-up round uses. `accepted_tip`
+  becomes the adopted commit.
+
+  Adopting is not blessing. The commit arrived without review, and resetting
+  the approvals is what keeps the gate honest: it is now in the work branch,
+  and it cannot reach a *further* upstream push until someone approves it.
+
+- **Diverged** — neither tip is an ancestor of the other. Loam changes
+  nothing, and records `conflict = upstream_diverged` for the admin console
+  (`docs/web-spec.md` → ProposalService). Loam does not merge, rebase, or
+  force: it cannot know which side is intended, and the push that would
+  reconcile it is precisely the destructive one Proposal Acceptance refuses to
+  make.
+
+**Why adoption is safe to automate and divergence is not.** A fast-forward
+loses nothing — the work branch gains commits and history is preserved. A
+diverged pair can only be reconciled by discarding work on one side or
+writing a merge nobody reviewed, both of which are decisions, not mechanics.
+
+**A note that belongs beside the implementation.** An adopted commit reached
+the mirror through the forge, not through `/git/*`, so it never passed the
+pre-receive hook and none of the push policy applied to it — not the author
+check, not the reserved-namespace guard, not force-push rejection
+(`docs/git-spec.md` → Enforcement Mechanics). This is the one path by which
+Loam takes in code it did not gate, and it is defensible **only** because the
+approvals reset. Anything that weakens the reset breaks that argument.
+
+Without this reconciliation the failure is deferred rather than avoided: the
+next accept attempts a non-forced push to a branch that has moved, and the
+operator meets a non-fast-forward rejection several layers from its cause.
+
 ## PR State Tracking
 
 Each sync cycle polls `GetPRState` for every work branch with a recorded,
@@ -185,4 +234,17 @@ still-open PR (a handful of REST calls at most):
 
 ## Open Questions
 
-None currently open.
+- **Where upstream drift is recorded.** The spec above adds a fourth
+  `conflict` value, `upstream_diverged`, alongside `none`/`flagged`/`reset`.
+  That keeps one field for "this branch needs a human", but `conflict` is
+  otherwise about the *target* advancing, while this is about Loam's *own*
+  upstream branch moving — arguably a separate axis deserving its own column.
+  The two call for different operator actions, which is the argument for
+  splitting them.
+- **Whether `accepted_tip` should absorb an adopted commit.** The spec sets it
+  to the adopted tip, so it reads "the upstream tip Loam last pushed *or*
+  adopted", which keeps `ListProposals` exact: nothing is left to push, so the
+  branch is not re-listed, and the reopened round is what demands re-review.
+  The alternative keeps `accepted_tip` strictly push-only and adds an observed
+  upstream tip beside it — more faithful to the column's name, one more piece
+  of state to keep true.
