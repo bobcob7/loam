@@ -3830,3 +3830,25 @@ tasks:
       # If that pathspec error ever returns, the depth needs raising again --
       # it must exceed the distance from HEAD back to the baseline.
       - go tool buf breaking --against '.git#ref=22d5ed7,depth=2000'
+
+  docker:build:
+    desc: >-
+      Build the server image (loam-ytt2.1) from the Dockerfile at the repo
+      root: cmd/server + cmd/loamhook + git, CGO_ENABLED=1 for
+      internal/parser's tree-sitter C sources, alpine/musl builder and
+      runtime paired to avoid a glibc-builder-into-musl-runtime loader
+      mismatch. This is a plain single-arch, single-platform build --
+      whatever architecture invokes it -- matching one leg of the house CI
+      pattern (git.bobcob7.com/forgejo_admin/ingestion-pipeline's
+      .forgejo/workflows/build.yaml): a job matrix over NATIVE amd64 and
+      arm64 Forgejo runners each doing this exact `docker build`, tagged
+      per-arch, with a final `merge` job assembling both into one manifest
+      list via `docker manifest create --amend` + `docker manifest push`.
+      That per-arch tagging and manifest assembly is CI's job, not this
+      task's -- this task only proves the Dockerfile builds on the host
+      it's run on. LOAM_IMAGE_TAG overrides the default dev tag (the
+      registry is registry.bobcob7.com; CI applies the real
+      registry.bobcob7.com/loam/server:<arch>/:<version> scheme this task
+      does not need to duplicate).
+    cmds:
+      - docker build -t "${LOAM_IMAGE_TAG:-registry.bobcob7.com/loam/server:dev}" -f Dockerfile .
