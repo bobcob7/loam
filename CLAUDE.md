@@ -90,7 +90,12 @@ task web:install   # npm ci in web/
 task web:generate  # go tool buf generate --template web/buf.gen.yaml -- refresh web/src/gen after a proto/ change
 task web:build     # tsc --noEmit + vite build -> web/dist (real output; see task build above for what happens to it there)
 task web:test      # npm test (vitest run) in web/
+
+task docker:build  # build the server image (loam-ytt2.1) from the repo-root Dockerfile
 ```
+
+See `docs/deployment-spec.md` for how that image, `deploy/k8s`'s kustomize set, and
+the running service are configured, backed up, and rolled back.
 
 CI is two workflows. `.github/workflows/ci.yml` is the per-PR gate: the
 `ci` job (gofmt, build, vet, test -race, buf lint, a generated-code drift
