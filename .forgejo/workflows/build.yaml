@@ -44,8 +44,18 @@ jobs:
     container:
       image: docker:27
     steps:
+      # Hand-rolled for the same reason ci.yaml documents: actions/checkout
+      # is a JavaScript action and this container (docker:27) has no node.
+      # git is not in the docker image either, hence the apk add -- the
+      # reference workflow at forgejo_admin/ingestion-pipeline does exactly
+      # this.
       - name: checkout
-        uses: actions/checkout@v4
+        run: |
+          set -eu
+          apk add --no-cache git
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
 
       - name: build and push (${{ matrix.arch }})
         run: |

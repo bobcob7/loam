@@ -40,15 +40,33 @@ jobs:
     env:
       CGO_ENABLED: "1"
     steps:
+      # Cloned by hand rather than with actions/checkout, and NOT by
+      # preference: actions/checkout is a JavaScript action, so the runner
+      # execs `node` inside THIS job's container. The runner's default
+      # container (node:lts-trixie-slim) has node for exactly that reason,
+      # but this job overrides it with golang, which does not -- the first
+      # attempt failed with:
+      #   OCI runtime exec failed: exec: "node": executable file not found
+      # That is also why the reference workflow at
+      # forgejo_admin/ingestion-pipeline clones by hand: its container is
+      # docker:27, equally node-less. Any job that sets `container:` to a
+      # non-node image must do the same.
+      #
+      # Full history, not a shallow clone: `task proto:breaking` compares
+      # against a baseline ~330 commits back and fails outright under
+      # --depth 1. Nothing here runs it yet, but a shallow clone would make
+      # adding it later fail in a way that looks unrelated to the change.
+      #
+      # The in-cluster address is what the runner itself registered
+      # against, so this needs no external DNS or TLS trust; the repo is
+      # private, hence the token.
       - name: checkout
-        uses: actions/checkout@v4
-        with:
-          # Full history, NOT the shallow clone the reference workflow
-          # (forgejo_admin/ingestion-pipeline) uses. `task proto:breaking`
-          # compares against a baseline ~330 commits back and fails outright
-          # under --depth 1. Nothing here runs it yet, but a shallow clone
-          # would make adding it later fail in a way that looks unrelated.
-          fetch-depth: 0
+        run: |
+          set -eu
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
+          git log --oneline -1
 
       - name: gofmt (must produce no output)
         run: |
