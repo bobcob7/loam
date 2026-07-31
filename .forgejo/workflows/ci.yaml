@@ -1,0 +1,94 @@
+# Per-PR gate on Forgejo Actions (loam-ytt2.7), replacing the GitHub
+# workflows this repo carried before the move to git.bobcob7.com.
+#
+# runs-on values are NOT free-form. This instance has exactly two runners,
+# read from their own /data/.runner registration files:
+#
+#   vega-runner-arm64   labels: ['arm64:docker://node:lts-trixie-slim']
+#   vega-runner-amd64   labels: ['amd64:docker://node:lts-trixie-slim']
+#
+# So 'arm64' and 'amd64' are the only labels that will ever be claimed.
+# There is no ubuntu-latest here, and naming one does not fail -- it QUEUES
+# FOREVER, which is exactly what the imported .github/workflows/ci.yml did
+# on the first push after the move (run 35 sat in 'waiting' with no runner
+# able to take it). If you add a job, use one of those two labels.
+#
+# Each runner has capacity 1 and a 2h timeout, so jobs on the same
+# architecture SERIALIZE. Two jobs both pinned to arm64 do not run in
+# parallel -- they queue. That is why this gate is a single job rather than
+# the matrix-of-everything the GitHub workflow used: on GitHub the matrix
+# bought parallelism, here it would only buy waiting.
+#
+# The default container for both labels is node:lts-trixie-slim, which has
+# no Go at all. This job therefore names its own golang image. It must be a
+# glibc image with a C compiler: internal/parser statically links
+# tree-sitter's C sources, so CGO_ENABLED=1 and cc are required for
+# ./... anything -- including `go vet`, not just build and test.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: arm64
+    container:
+      image: golang:1.26.5
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history, NOT the shallow clone the reference workflow
+          # (forgejo_admin/ingestion-pipeline) uses. `task proto:breaking`
+          # compares against a baseline ~330 commits back and fails outright
+          # under --depth 1. Nothing here runs it yet, but a shallow clone
+          # would make adding it later fail in a way that looks unrelated.
+          fetch-depth: 0
+
+      - name: gofmt (must produce no output)
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go build ./...
+        run: go build ./...
+
+      - name: go vet ./...
+        run: go vet ./...
+
+      - name: go test ./... -race
+        run: go test ./... -race
+
+      # Typechecks the build-tagged trees without starting a single
+      # container (docs/bead-workflow.md step 7). These exist because an
+      # untagged build cannot see those files at all, so a changed exported
+      # signature breaks them invisibly -- loam-cgg shipped exactly that and
+      # it was only caught at merge.
+      - name: go vet -tags=integration ./...
+        run: go vet -tags=integration ./...
+
+      - name: go vet -tags=acceptance ./...
+        run: go vet -tags=acceptance ./...
+
+      - name: go tool buf lint
+        run: go tool buf lint
+
+      # The generated-code drift check cannot catch a stale require block,
+      # because nothing it runs rewrites go.mod (loam-j09k).
+      - name: go mod tidy has no drift
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "::error::go.mod/go.sum drifted from the import graph — run 'go mod tidy' and commit the result."
+            git diff -- go.mod go.sum
+            exit 1
+          fi

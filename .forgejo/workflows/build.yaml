@@ -1,0 +1,86 @@
+# Multi-arch container image build (loam-ytt2.1, loam-ytt2.2), modelled
+# directly on this instance's existing pattern at
+# forgejo_admin/ingestion-pipeline/.forgejo/workflows/build.yaml.
+#
+# WHY THIS SHAPE, AND WHY NOT BUILDX: there are native runners for both
+# architectures ('arm64' and 'amd64' -- see ci.yaml's header for the
+# measured inventory), so each image is built on its own architecture and a
+# final job stitches them into a manifest list. That matters more here than
+# it does for most projects: internal/parser statically links tree-sitter's
+# C sources, so CGO_ENABLED=1 is mandatory, and cross-compiling cgo needs a
+# cross C toolchain rather than just GOOS/GOARCH. Native runners make the
+# whole problem disappear. Do not "simplify" this into a single buildx job
+# with QEMU -- it would be slower and reintroduce the toolchain problem.
+#
+# Each runner carries a docker:27-dind sidecar with
+# container.docker_host = unix:///shared/docker.sock, which the runner
+# config's own comment says exists precisely so `docker build` works inside
+# job steps. registry.bobcob7.com serves /v2/ unauthenticated, so there is
+# no login step -- same as the reference workflow.
+#
+# NOT wired to run on every push to main, unlike ci.yaml. Each runner has
+# capacity 1, so an image build occupies the only slot for that
+# architecture and would make every concurrent CI gate queue behind it.
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: registry.bobcob7.com/loam/server
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            platform: linux/arm64
+          - arch: amd64
+            platform: linux/amd64
+    runs-on: ${{ matrix.arch }}
+    container:
+      image: docker:27
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build and push (${{ matrix.arch }})
+        run: |
+          set -eu
+          # Tag per-architecture first; the manifest list is assembled in
+          # the merge job below once BOTH architectures have pushed.
+          docker build --platform ${{ matrix.platform }} \
+            -t "$IMAGE:${{ matrix.arch }}" \
+            -t "$IMAGE:${{ github.sha }}-${{ matrix.arch }}" \
+            -f Dockerfile .
+          docker push "$IMAGE:${{ matrix.arch }}"
+          docker push "$IMAGE:${{ github.sha }}-${{ matrix.arch }}"
+
+  merge:
+    needs: build
+    runs-on: arm64
+    container:
+      image: docker:27
+    steps:
+      - name: merge into multi-arch manifest lists
+        run: |
+          set -eu
+          # Two manifest lists, deliberately, and deploy/k8s should pin the
+          # IMMUTABLE one. ':latest' is what the reference workflow
+          # publishes and is kept for parity, but on its own it is a GitOps
+          # trap: the manifest in git never changes, so Argo reports Synced
+          # while the pod runs whatever was pushed last, and there is no
+          # commit that says what is deployed. The sha-tagged list makes a
+          # version bump a reviewable diff and a rollback a git revert.
+          for tag in latest "${{ github.sha }}"; do
+            if [ "$tag" = "latest" ]; then
+              a="$IMAGE:arm64"; b="$IMAGE:amd64"
+            else
+              a="$IMAGE:${{ github.sha }}-arm64"; b="$IMAGE:${{ github.sha }}-amd64"
+            fi
+            docker manifest create --amend "$IMAGE:$tag" "$a" "$b"
+            docker manifest push "$IMAGE:$tag"
+          done
