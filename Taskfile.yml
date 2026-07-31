@@ -2876,8 +2876,7 @@ tasks:
         echo "  - the prior round's verdict went stale            $reviewer_identifier approve round 1: false -> true"
         echo "  - the branch re-queued for review                 --awaiting-review: listed, empty, listed"
         echo "Known defects shown honestly, never worked around silently:"
-        echo "  - loam-ppb   the author cannot push to their own work branch (found by this demo)"
-        echo "  - loam-8d2   work show reports no round, because the proto carries none"
+        echo "  - none outstanding: loam-ppb and loam-8d2 are both fixed and closed"
         echo "=== demo:m4 complete ==="
 
   demo:m5:
@@ -3696,10 +3695,73 @@ tasks:
         echo "  - the merged PR completed the branch                    complete, set by StorePRPoller, never by this script"
         echo "  - the merged code reached the index                     graph def StartSession and search, both at $merged_ref"
         echo "Known defects shown honestly, never worked around silently:"
-        echo "  - loam-8d2   work show reports no round, because the proto carries none"
-        echo "  - loam-ls7u   work show does not print upstream_pr_url, though the proto carries it"
-        echo "  - loam-0l9m   a bare repos.forge_host makes forge.Forgejo address an http forge over https"
+        echo "  - none outstanding: loam-8d2, loam-ls7u and loam-0l9m are all fixed and closed"
         echo "=== demo:m5 complete ==="
+
+  demo:m7:
+    desc: >-
+      Demo M7 (loam-d1s): the MVP-complete gate. Pure composition -- it has
+      no behavior of its own and adds no cleanup of its own; each sub-suite
+      tears down whatever it stood up. It runs docs/testing-spec.md's four
+      Completion Criteria against ONE commit and fails fast on the first
+      one that does not hold:
+
+        1. task test               -- the per-PR gate (lint, unit -race,
+                                      integration vs real Postgres,
+                                      acceptance vs internal/fakeforge;
+                                      loam-li0.12)
+        2. task test:e2e:golden    -- golden path PLUS the conflict/
+                                      catch-up/re-accept variant, scripted
+                                      over the real compiled CLI and admin
+                                      API against a real Forgejo
+                                      (loam-li0.10)
+        3. task test:e2e           -- compose stack + the Playwright
+                                      admin-journey suite against the
+                                      SHIPPED binaries (loam-li0.11)
+        4. task test:contract:forgejo -- the provider contract re-run
+                                      against a REAL Forgejo rather than
+                                      the fake (loam-li0.9)
+
+      Then, last and literal, docs/testing-spec.md's own "MVP complete"
+      check rather than a paraphrase of it: grep -r '@wip' features/ must
+      find nothing.
+
+      ORDER IS DELIBERATE. The cheap, container-light gate runs first so a
+      formatting error does not cost forty minutes of Forgejo boots. The
+      two e2e targets run BACK TO BACK AND NEVER CONCURRENTLY: they share
+      deploy/docker-compose.e2e.yml, and while LOAM_E2E_SUFFIX makes
+      running two stacks legal, on a resource-constrained host it is not
+      affordable -- namespacing makes concurrency legal, not affordable
+      (test:e2e:golden's own desc says this). go-task runs a cmds list
+      sequentially, which is exactly what this target wants; do not
+      "optimize" it into parallel deps.
+
+      Needs a Docker (or Docker-API-compatible) daemon with enough memory
+      for a Postgres + Forgejo stack, and `task web:e2e:install` to have
+      been run at least once for the Playwright leg. On podman also export
+      TESTCONTAINERS_RYUK_DISABLED=true, exactly as test:integration
+      documents -- and note that nothing then reaps containers, so a run
+      that dies partway can leave a stack behind.
+
+      Definition of done (loam-d1s): exits 0 only when all four Completion
+      Criteria hold on one commit, and exits non-zero with the grep output
+      if any @wip tag remains.
+    cmds:
+      - task: test
+      - task: test:e2e:golden
+      - task: test:e2e
+      - task: test:contract:forgejo
+      - |
+        echo "=== demo:m7 step 5/5: docs/testing-spec.md Completion Criteria -- zero @wip ==="
+        # Literal, per loam-d1s's DESIGN: the check is the grep itself, not a
+        # count parsed out of it. grep exits 1 when it finds nothing, which is
+        # the PASSING case here, so the sense is inverted deliberately.
+        if grep -rn '@wip' features/; then
+          echo "FAIL: @wip scenarios remain" >&2
+          exit 1
+        fi
+        echo "zero @wip scenarios remain in features/"
+        echo "=== demo:m7 complete: all four Completion Criteria hold on this commit ==="
 
   lint:
     desc: Run all lint gates (gofmt + buf lint)
