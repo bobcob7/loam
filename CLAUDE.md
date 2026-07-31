@@ -97,25 +97,31 @@ task docker:build  # build the server image (loam-ytt2.1) from the repo-root Doc
 See `docs/deployment-spec.md` for how that image, `deploy/k8s`'s kustomize set, and
 the running service are configured, backed up, and rolled back.
 
-CI is two workflows. `.github/workflows/ci.yml` is the per-PR gate: the
-`ci` job (gofmt, build, vet, test -race, buf lint, a generated-code drift
-check that fails if `buf generate`/`go generate` produce an uncommitted
-diff — covering `internal/gen`, `moq_test.go`, and, via `go tool buf
-generate --template web/buf.gen.yaml`, `web/src/gen` too — and a `go mod
-tidy` drift check, which the generated-code check cannot subsume because
-nothing it runs rewrites `go.mod`, loam-j09k), the `web` job (admin SPA
-install/typecheck/test/build — `npm ci`, `tsc --noEmit`, `npm test`,
-`npm run build`, on both ubuntu-latest and macos-latest; see
-`docs/web-frontend-spec.md` for the dev-proxy workflow), the `integration`
-job (`-tags=integration -race`, real Postgres via testcontainers), and the
-`acceptance` job (godog vs internal/fakeforge, real Postgres via
-testcontainers) — together these enforce what `task test` describes as one
-aggregate, since go-task itself isn't installed on these runners (each job
-inlines the bare command instead of shelling out to `task`).
-`.github/workflows/nightly.yml` runs the "tens of minutes" suites on a
-schedule (+ workflow_dispatch + `v*` tag push): the provider contract vs a
-real Forgejo, the compose e2e smoke, and the Playwright admin journeys
-(docs/testing-spec.md "CI Stages").
+CI runs on **Forgejo Actions** at git.bobcob7.com, not GitHub — the repo
+moved (loam-ytt2.6) and `.github/workflows/` was deleted, because Forgejo
+Actions reads that directory too and its `ubuntu-latest` jobs queued
+forever against runners that do not exist.
+
+`.forgejo/workflows/ci.yaml` is the per-PR gate: **one** job on the
+`arm64` runner (gofmt, build, vet, `test -race`, `go vet` over both the
+`integration` and `acceptance` build tags, `buf lint`, and a `go mod tidy`
+drift check that the generated-code check cannot subsume because nothing
+it runs rewrites `go.mod`, loam-j09k). `.forgejo/workflows/build.yaml`
+builds the container image on native `arm64` and `amd64` runners and
+merges them into a multi-arch manifest list.
+
+Three constraints on this instance, learned the hard way and documented at
+length in those files' headers: `runs-on` accepts **only** `arm64` and
+`amd64`; each runner has capacity 1 and a 2h timeout, so same-arch jobs
+serialize rather than parallelize (hence one gate job, not a matrix); and
+`actions/checkout` is a JavaScript action, so any job overriding
+`container:` with a node-less image (golang, docker) must clone by hand.
+
+NOT yet ported, and tracked separately: the `web` job (SPA
+install/typecheck/test/build — see `docs/web-frontend-spec.md`), the
+generated-code drift check, and the nightly suites (provider contract vs a
+real Forgejo, compose e2e, Playwright — docs/testing-spec.md "CI Stages"),
+which are blocked on proving testcontainers works inside a Forgejo job.
 
 ## Architecture Overview
 
