@@ -1,0 +1,11 @@
+# Namespace loam's manifests deploy into. ArgoCD Applications in vega-infra
+# typically set syncPolicy.syncOptions: CreateNamespace=true, which would
+# create this for us -- but that option lives on the Application object in
+# vega-infra (a separate repo/bead, loam-ytt2.8), not here. Keeping an
+# explicit Namespace resource in this set makes `kustomize build`/`kubectl
+# apply -k` self-sufficient on their own, and applying it twice (once here,
+# once via CreateNamespace) is idempotent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loam

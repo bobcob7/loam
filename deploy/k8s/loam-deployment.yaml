@@ -1,0 +1,184 @@
+# The loam server. Deliberately a single-replica Deployment with a plain
+# PersistentVolumeClaim (loam-pvc.yaml), NOT a StatefulSet and NOT a
+# multi-replica Deployment. Both alternatives were considered and rejected:
+#
+#   - Multi-replica Deployment: wrong on two independent grounds, not one.
+#     (1) loam-pvc.yaml is ReadWriteOnce, so a second pod on a different
+#         node cannot mount it at all -- a storage-layer failure.
+#     (2) Even if storage supported multi-attach, the sync scheduler
+#         assumes it is the ONLY process ticking a given repo -- ownership
+#         of repos.sync_state is a per-tick invariant (see loam-fp7), not
+#         merely an optimization. A second replica polling the same table
+#         would race it and could double-fetch, or worse, interleave
+#         mirror writes. This is a correctness question, not a capacity
+#         one: no amount of shared storage makes it safe to scale this
+#         workload horizontally today.
+#   - StatefulSet: StatefulSet's value over a Deployment is ordered,
+#     identity-stable scaling to N members (stable pod names, ordered
+#     rollout/rollback, per-member PVCs via volumeClaimTemplates). Since N
+#     must always be exactly 1 for the reasons above, none of that buys
+#     anything here -- it would just be a Deployment with extra ceremony.
+#
+# `strategy: Recreate` (not the Kubernetes default RollingUpdate) is load
+# bearing, not stylistic: RollingUpdate brings up the new pod BEFORE
+# terminating the old one, and two pods racing to mount the same RWO PVC on
+# most CSI drivers is a stuck rollout, not a graceful handover. Recreate
+# guarantees the old pod (and its volume attachment) is fully gone before
+# the new one is scheduled, at the cost of a short outage per rollout --
+# an acceptable trade for a service that cannot be horizontally redundant
+# anyway.
+#
+# Do not raise `replicas` without first solving both the storage
+# multi-attach problem AND making repo-sync ownership safe under
+# concurrent tickers (loam-fp7).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loam
+  labels:
+    app.kubernetes.io/name: loam
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loam
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loam
+    spec:
+      # Only needed if the image below is pulled from a private registry
+      # (registry.bobcob7.com per the epic's reconnaissance). Harmless if
+      # no such secret exists yet -- the kubelet only consults
+      # imagePullSecrets when a pull actually needs credentials, and a
+      # missing secret only surfaces as an ImagePullBackOff on this pod,
+      # not a kustomize build failure. Name is overridable with a
+      # kustomize patch; this manifest set never creates the secret itself
+      # (same externally-managed-secrets rule as the app secrets below).
+      imagePullSecrets:
+        - name: registry-bobcob7-com
+      containers:
+        - name: loam
+          # PLACEHOLDER. loam-ytt2.1 (container image) and loam-ytt2.2
+          # (publish to registry.bobcob7.com) have not landed yet as of
+          # this bead -- there is no real tag to pin to. Override with
+          # kustomize's `images:` transformer once one exists; do not
+          # leave this pointed at a floating tag in a real deploy.
+          image: registry.bobcob7.com/loam/loam:0.0.0-placeholder
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: loam-config
+          env:
+            # The three required secrets from internal/config/config.go's
+            # loadRequired. All three come from ONE externally-managed
+            # Secret (default name loam-secrets, in this Namespace) that
+            # this manifest set never creates, generates, or templates --
+            # see loam-ytt2.4. Both the secret name and each key are
+            # plain, individually-named literals so a downstream
+            # kustomization can retarget either with a JSON6902 or
+            # strategic-merge patch without touching anything else, e.g.:
+            #
+            #   patches:
+            #     - target:
+            #         kind: Deployment
+            #         name: loam
+            #       patch: |-
+            #         - op: replace
+            #           path: /spec/template/spec/containers/0/env/0/valueFrom/secretKeyRef/name
+            #           value: my-other-secret
+            #
+            # Required keys in that Secret (namespace: loam). Key names
+            # match the env var name itself (the same convention the live
+            # vega cluster's docs addon uses for its own Postgres secret,
+            # `kubectl get statefulset -n docs -o yaml`, read 2026-07-31)
+            # rather than an invented lowercase-hyphen scheme:
+            #   LOAM_ADMIN_PASSWORD
+            #   LOAM_DATABASE_URL   -- full postgres:// DSN, password
+            #                          inline -- see postgres-
+            #                          statefulset.yaml's comment on
+            #                          keeping this in sync with
+            #                          POSTGRES_PASSWORD
+            #   LOAM_ENCRYPTION_KEY -- base64-encoded 32-byte AES-GCM key;
+            #                          NOT rotatable in place without
+            #                          re-encrypting every stored forge
+            #                          credential -- see loam-ytt2.4 and
+            #                          docs/deployment-spec.md once
+            #                          loam-ytt2.9 lands
+            - name: LOAM_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: LOAM_ADMIN_PASSWORD
+            - name: LOAM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: LOAM_DATABASE_URL
+            - name: LOAM_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: LOAM_ENCRYPTION_KEY
+          volumeMounts:
+            - name: data
+              # Must match LOAM_DATA_DIR in configmap.yaml.
+              mountPath: /var/lib/loam
+          # Startup can take a while: Load (migrate, pool connect, mirror
+          # reconcile, orphan requeue, policy-socket bind -- see
+          # internal/health's package doc) all happen BEFORE the HTTP
+          # listener binds, so /healthz answers nothing at all until every
+          # one of those has succeeded. startupProbe gives that its own,
+          # generous budget so a slow-but-healthy startup is never mistaken
+          # for a liveness failure and killed mid-migration.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60 # ~5 minutes
+          # /healthz checks NOTHING beyond "this process is accepting
+          # connections" by design (internal/health's package doc) -- its
+          # only job here is to trigger a restart if the process wedges
+          # after startup. It is not, and must not be read as, evidence
+          # that sync or ingest are alive.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # /readyz proves only that Postgres is reachable and this
+          # binary's embedded migrations match what's applied
+          # (internal/health/health.go's ServeHTTP). It deliberately
+          # excludes the embedder, the forge, the policy socket, the
+          # ingest pool, and the sync scheduler -- a green readiness probe
+          # is NOT a guarantee that repo sync or code ingest are making
+          # progress (see loam-lae, loam-ymyq). Do not wire anything else
+          # to this probe's result on the strength of "it's ready".
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Starting point only, not a measured figure -- there is no
+          # production workload to size against yet. Tune once real usage
+          # exists.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: loam-data

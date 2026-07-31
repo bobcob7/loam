@@ -1,0 +1,135 @@
+# loam's own Postgres, WITH pgvector. vega has no shared pgvector instance
+# today, so this addon runs its own -- following addons/docs' precedent of
+# a per-app Postgres StatefulSet + PVC rather than waiting on shared
+# infrastructure that doesn't exist yet.
+#
+# Image is pgvector/pgvector:pg16, the EXACT tag
+# deploy/docker-compose.e2e.yml pins for the same image, so dev/e2e and
+# this cluster deployment run the identical Postgres + pgvector build --
+# no version drift in the extension between the two. Do not bump this
+# independently of that compose file's pin.
+#
+# A plain StatefulSet (not a Deployment+PVC) IS the right shape here, in
+# contrast to loam-deployment.yaml's server workload: Postgres's own
+# replication story is a separate, harder problem this addon is not
+# attempting (single instance, single PVC via volumeClaimTemplates), but
+# StatefulSet still buys a stable pod identity and DNS name
+# (postgres-0.postgres...) and, if this ever needs to grow into a
+# replicated topology later, is the right foundation to already be on.
+#
+# The vector extension itself is NOT created here: loam's own migrations
+# (internal/db/migrations/files/0002_code_intel.up.sql) run `CREATE
+# EXTENSION IF NOT EXISTS vector` as part of normal startup migration, so
+# this manifest only needs to provide a Postgres build that HAS the
+# extension available to create, not create it itself.
+#
+# POSTGRES_USER/POSTGRES_DB/POSTGRES_PASSWORD all coming from the same
+# externally-managed Secret, and PGDATA pointed at a subdirectory of the
+# mount rather than the mount root, both match the live precedent read
+# directly off the vega cluster's docs addon (`kubectl get statefulset -n
+# docs -o yaml`, read 2026-07-31) -- not guessed. The PGDATA subdirectory
+# in particular sidesteps postgres's initdb refusing to start in a
+# non-empty directory, which some CSI drivers trip by leaving a
+# lost+found entry at the volume root.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            # PGDATA in a subdirectory of the mount, not the mount root --
+            # see the file-level comment above for why.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # All three sourced from the SAME externally-managed Secret as
+            # loam's own required env vars (default name loam-secrets, see
+            # loam-deployment.yaml's comment for the full contract and the
+            # patch-based override pattern) so there is exactly one Secret
+            # object to provision per cluster, not two. POSTGRES_USER and
+            # POSTGRES_DB aren't secret by themselves, but keeping them
+            # alongside POSTGRES_PASSWORD in one object matches the docs
+            # addon's own precedent and keeps the whole Postgres identity
+            # in one place to override together.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: POSTGRES_DB
+            # IMPORTANT: this password and the password embedded in the
+            # LOAM_DATABASE_URL key of the SAME Secret (consumed by
+            # loam-deployment.yaml) describe the SAME credential from two
+            # sides -- the Postgres server's copy and the client DSN's
+            # copy. Nothing in Kubernetes enforces that they match;
+            # whoever provisions loam-secrets is responsible for keeping
+            # them in sync. A mismatch surfaces as loam's /readyz
+            # reporting "database unreachable" (authentication failure),
+            # not as a Postgres-side error.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loam-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            # $POSTGRES_USER (not a hardcoded "loam") so the probe still
+            # works if a downstream patch overrides the secret's
+            # POSTGRES_USER key -- pg_isready needs a shell to expand it.
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            # $POSTGRES_USER (not a hardcoded "loam") so the probe still
+            # works if a downstream patch overrides the secret's
+            # POSTGRES_USER key -- pg_isready needs a shell to expand it.
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # Starting point only -- tune once there is a real corpus and
+          # query load to measure against.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # storageClassName intentionally omitted -- uses the cluster
+            # default, same reasoning as loam-pvc.yaml.
+            storage: 10Gi

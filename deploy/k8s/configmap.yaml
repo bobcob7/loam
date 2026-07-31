@@ -1,0 +1,40 @@
+# Non-secret LOAM_* env vars, mirroring the defaulted (non-required) rows of
+# internal/config/config.go's table. The three required vars
+# (LOAM_ADMIN_PASSWORD, LOAM_DATABASE_URL, LOAM_ENCRYPTION_KEY) are all
+# secrets and deliberately do NOT appear here -- see loam-deployment.yaml's
+# env block and the secret-contract comment in kustomization.yaml.
+#
+# Every value below equals the code's own default except LOAM_EMBEDDER_URL,
+# which config.go defaults to http://localhost:11434 (correct for a
+# single-process dev run) but which this cluster overrides to reach the
+# vega cluster's own ollama addon instead -- that addon already runs
+# ollama.ollama.svc.cluster.local:11434 and its PostSync job already pulls
+# nomic-embed-text, loam's own LOAM_EMBEDDER_MODEL default, so no new
+# infrastructure is needed, just this URL. Do NOT add an ollama Deployment,
+# model-pull Job, or GPU request to this addon -- that is owned elsewhere.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loam-config
+data:
+  LOAM_HTTP_ADDR: ":8080"
+  LOAM_ADMIN_USER: "admin"
+  # Matches loam-pvc.yaml's mount path below -- keep these two in sync.
+  LOAM_DATA_DIR: "/var/lib/loam"
+  LOAM_SYNC_INTERVAL: "60s"
+  LOAM_PR_ATTRIBUTION: "true"
+  # External ollama addon, not deployed by this manifest set. Overridable
+  # per-cluster with a kustomize patch against this key. Confirmed against
+  # the live vega cluster (`kubectl get svc -n ollama`, read 2026-07-31):
+  # ClusterIP service "ollama" in namespace "ollama" listening on 11434.
+  # Cross-namespace reachability was checked too, not assumed: the cluster
+  # has no NetworkPolicy or Cilium(Cluster)WideNetworkPolicy objects at
+  # all today (`kubectl get networkpolicy,ciliumnetworkpolicy -A`), so
+  # nothing blocks the loam namespace from reaching it. That is an
+  # absence, not a guarantee -- if network policies are added later,
+  # loam's egress to ollama:11434 (and to Postgres, and to whatever forge
+  # it syncs against) will need an explicit allow.
+  LOAM_EMBEDDER_URL: "http://ollama.ollama.svc.cluster.local:11434"
+  LOAM_EMBEDDER_MODEL: "nomic-embed-text"
+  LOAM_INGEST_WORKERS: "2"
+  LOAM_LOG_LEVEL: "info"
