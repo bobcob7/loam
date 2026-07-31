@@ -38,6 +38,27 @@
 # automatic toolchain download the moment `go build` reads go.mod's
 # directive — a network dependency this build should not have.
 #
+# Multi-arch: this image targets both linux/amd64 and linux/arm64. There is
+# no cross-compilation here and none is needed — the house CI pattern
+# (git.bobcob7.com/forgejo_admin/ingestion-pipeline's .forgejo/workflows/
+# build.yaml) runs a job matrix over NATIVE amd64 and arm64 Forgejo
+# runners, each doing a plain `docker build --platform linux/<arch> -t
+# ...:<arch> .` with cgo compiling against that runner's own native
+# toolchain, then a final `merge` job assembles the two arch-tagged images
+# into one manifest list with `docker manifest create --amend` + `docker
+# manifest push`. So this Dockerfile only has to build correctly, unmodified,
+# on whichever architecture invokes it — no TARGETARCH handling, no `xx`
+# cross-build helpers, no QEMU. The concrete thing that DOES matter for that
+# to hold: every base image and every installed package must exist for both
+# architectures, and nothing may be an arch-pinned downloaded binary. Checked
+# directly (docker manifest inspect) before landing this file:
+# golang:1.26.5-alpine, node:22-alpine, and alpine:3 all publish amd64 AND
+# arm64 (and more) in their manifest lists, and every package installed
+# above (build-base, git, ca-certificates) comes from apk, which resolves
+# per-arch automatically — there is no curl-a-binary step anywhere in this
+# file for either the toolchain or the runtime image to get wrong on one
+# architecture and not the other.
+#
 # cmd/loam (the agent CLI) is deliberately NOT included in this image.
 # It's a client tool operators and agents run from their OWN machine
 # against the server's RPC surface — the server's own runtime path never
