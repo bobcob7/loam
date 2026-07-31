@@ -271,6 +271,98 @@ func TestSetUpstreamToken_MissingFieldsAreInvalidArgument(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// SetUpstreamToken: host canonicalization (loam-0hjq)
+// ---------------------------------------------------------------------
+
+// TestSetUpstreamToken_CanonicalizesHostBeforeValidatingAndStoring is the
+// central regression this bead exists for: before loam-0hjq, a
+// scheme-qualified https host was stored VERBATIM (only
+// strings.TrimSpace), so it validated and reported validated=true, yet
+// internal/handler/repoadmin's forgeHostOf -- which EnrollRepo/ProbeRepo
+// resolve credentials by -- always derives the BARE form for an https
+// upstream and could never find it. Both the forge round trip and the
+// store write must now see the canonical (bare) form, not the raw string
+// the admin typed, and the response must report the canonical form too --
+// otherwise the Credentials screen would show a host string that still
+// does not match what EnrollRepo derives.
+func TestSetUpstreamToken_CanonicalizesHostBeforeValidatingAndStoring(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	resp, err := d.handler().SetUpstreamToken(adminCtx(t), setTokenReq("https://"+testHost, testToken))
+	require.NoError(t, err)
+	require.Len(t, d.validator.ValidateTokenCalls(), 1)
+	assert.Equal(t, testHost, d.validator.ValidateTokenCalls()[0].Host,
+		"the forge must be asked about the CANONICAL host, not the raw scheme-qualified string the admin typed")
+	require.Len(t, d.store.UpsertTokenCalls(), 1)
+	assert.Equal(t, testHost, d.store.UpsertTokenCalls()[0].Host,
+		"the stored key must be the canonical host -- this is what forgeHostOf's bare derivation must be able to find again")
+	require.Len(t, d.store.SetValidatedCalls(), 1)
+	assert.Equal(t, testHost, d.store.SetValidatedCalls()[0].Host)
+	assert.Equal(t, testHost, resp.Msg.GetStatus().GetHost(),
+		"the response must report the canonical host, not the raw string that was submitted")
+}
+
+// TestSetUpstreamToken_PlainHTTPSchemeSurvivesCanonicalizationUnchanged
+// pins the other half of the rule: a plain-http host keeps its scheme
+// prefix exactly (internal/forgehost.Canonicalize's rule), since
+// internal/forge's apiBaseURL only ever dials a scheme-less host over
+// https and forgeHostOf derives the same scheme-qualified form for a
+// plain-HTTP upstream.
+func TestSetUpstreamToken_PlainHTTPSchemeSurvivesCanonicalizationUnchanged(t *testing.T) {
+	t.Parallel()
+	const plainHTTPHost = "http://forge.internal:3000"
+	d := newTestDeps()
+	resp, err := d.handler().SetUpstreamToken(adminCtx(t), setTokenReq(plainHTTPHost, testToken))
+	require.NoError(t, err)
+	require.Len(t, d.store.UpsertTokenCalls(), 1)
+	assert.Equal(t, plainHTTPHost, d.store.UpsertTokenCalls()[0].Host)
+	assert.Equal(t, plainHTTPHost, resp.Msg.GetStatus().GetHost())
+}
+
+// TestSetUpstreamToken_MalformedHostIsRejectedBeforeTouchingTheForgeOrStore
+// proves the reject side of Canonicalize's contract is wired all the way
+// through this handler: a host that is WRONG, not merely differently
+// spelled (a path component, embedded userinfo, or an unsupported
+// scheme), must never reach the forge or the store -- not just fail
+// eventually.
+func TestSetUpstreamToken_MalformedHostIsRejectedBeforeTouchingTheForgeOrStore(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+	}{
+		{name: "a path component", host: "https://" + testHost + "/owner/repo"},
+		{name: "embedded userinfo", host: "https://token@" + testHost},
+		{name: "an unsupported scheme", host: "ftp://" + testHost},
+		{name: "unparseable", host: "https://[::1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := newTestDeps()
+			_, err := d.handler().SetUpstreamToken(adminCtx(t), setTokenReq(tt.host, testToken))
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
+			assert.Empty(t, d.validator.ValidateTokenCalls(), "a malformed host must never reach the forge")
+			assert.Empty(t, d.store.UpsertTokenCalls(), "a malformed host must never reach the store")
+		})
+	}
+}
+
+// TestSetUpstreamToken_MalformedHostRejectionNeverEchoesEmbeddedUserinfo is
+// the leak check for the rejection path specifically (loam-ra1k): a host
+// carrying a credential-shaped userinfo component must not have that
+// value appear in the error returned to the caller.
+func TestSetUpstreamToken_MalformedHostRejectionNeverEchoesEmbeddedUserinfo(t *testing.T) {
+	t.Parallel()
+	const embeddedSecret = "leak-canary-userinfo-9d3f1a"
+	d := newTestDeps()
+	_, err := d.handler().SetUpstreamToken(adminCtx(t), setTokenReq("https://"+embeddedSecret+"@"+testHost, testToken))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), embeddedSecret)
+}
+
+// ---------------------------------------------------------------------
 // The leak surface: a token must never reach an error, a response, or a log
 // ---------------------------------------------------------------------
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/credentialstore"
 	"github.com/bobcob7/loam/internal/forge"
+	"github.com/bobcob7/loam/internal/forgehost"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/handler"
@@ -84,19 +85,24 @@ func New(credentials credentialStore, validator tokenValidator, errors *handler.
 //
 // # What "host" means, and the coupling to RepoAdminService.EnrollRepo
 //
-// host is stored VERBATIM as credentials.host, the exact string
-// req.Msg.GetHost() carries after trimming whitespace -- this handler
-// never rewrites, defaults, or normalizes it. That matters because
-// EnrollRepo resolves this same row by an independently-derived host
-// (internal/handler/repoadmin/handler.go's forgeHostOf): bare
-// ("host:port") for an https upstream, scheme-qualified
-// ("http://host:port") for a plain-HTTP one. For a credential meant to
-// back an enrollment, host here must match that derivation exactly, or
-// EnrollRepo's own GetByHost call will not find it -- there is no
-// normalization chokepoint reconciling a mismatched pair (loam-4kz).
-// Getting this right for an https forge needs nothing special (the bare
-// form has always worked); for a plaintext-HTTP forge, host must be the
-// scheme-qualified form.
+// host is CANONICALIZED (loam-0hjq) via internal/forgehost.Canonicalize
+// before validation or storage ever sees it: bare ("host:port") for an
+// https host, however it was typed (with or without an "https://"
+// prefix); scheme-qualified ("http://host:port") for a plain-HTTP one.
+// That is the exact rule EnrollRepo's independently-derived host applies
+// (internal/handler/repoadmin/handler.go's forgeHostOf, via the same
+// internal/forgehost package), so credentials.host and repos.forge_host
+// agree by construction -- there is no longer a way to store a credential
+// under a key EnrollRepo's own GetByHost call can never find. Before this
+// fix, host was stored VERBATIM (only whitespace-trimmed): an https
+// credential entered as "https://git.example.com" would VALIDATE (see
+// below) and report validated=true, yet EnrollRepo -- which always
+// derives the bare form for an https upstream -- could never find it,
+// because credentialstore.GetByHost is an exact string match with no
+// normalization of its own. A malformed host (a path, embedded userinfo,
+// an unparseable string, or a non-http(s) scheme) is rejected outright
+// with handler.ErrInvalidArgument rather than canonicalized; see
+// Canonicalize's own doc comment for the exact accept/reject rules.
 //
 // Separately, and only for THIS request's own token-validation call:
 // internal/forge/forgejo.go's ValidateToken tolerates a bare host that
@@ -117,6 +123,11 @@ func (h *Handler) SetUpstreamToken(ctx context.Context, req *connect.Request[adm
 	if token == "" {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("set upstream token for host %s: token is required: %w", host, handler.ErrInvalidArgument))
 	}
+	canonicalHost, err := forgehost.Canonicalize(host)
+	if err != nil {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("set upstream token: %w: %w", err, handler.ErrInvalidArgument))
+	}
+	host = canonicalHost
 	if err := h.validateToken(ctx, host, token); err != nil {
 		return nil, h.errors.ToConnectErr(err)
 	}

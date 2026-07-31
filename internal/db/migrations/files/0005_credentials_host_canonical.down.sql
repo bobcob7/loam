@@ -1,0 +1,12 @@
+-- Reverses 0005_credentials_host_canonical.up.sql: intentionally a no-op.
+--
+-- The up migration is a data rewrite, not a schema change, and it is not
+-- meaningfully reversible: once "https://git.example.com" and
+-- "git.example.com" have been merged into one bare-host row, which rows
+-- originally carried the "https://" prefix -- and which of a collided
+-- pair was kept -- is no longer recorded anywhere. Reconstructing a
+-- scheme-qualified host column would only reintroduce loam-0hjq's own
+-- bug (a credential ProbeRepo/EnrollRepo's bare derivation can no longer
+-- find), which is the opposite of what a "down" migration exists to do
+-- safely. golang-migrate requires a down file to exist for every up file;
+-- this one deliberately does nothing.

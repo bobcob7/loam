@@ -41,9 +41,14 @@ Work.
   enrollment). `RepoAdminService.EnrollRepo` derives it from `upstream_url`: bare
   (`host:port`) for the default `https` scheme, scheme-qualified (`http://host:port`) for a
   plaintext-HTTP upstream -- the one case a bare host cannot be dialled over correctly
-  (`internal/forge`'s `apiBaseURL` always defaults a scheme-less host to `https`). A
-  credential meant to back an enrollment must be set under the identical string; there is no
-  normalization reconciling a mismatched pair (loam-4kz).
+  (`internal/forge`'s `apiBaseURL` always defaults a scheme-less host to `https`).
+  `CredentialService.SetUpstreamToken` applies the identical rule to whatever an admin types
+  (`internal/forgehost.Canonicalize`, shared with `forgeHostOf` above via `internal/forgehost`),
+  so a credential entered as a bare host or as a scheme-qualified URL resolves the same row
+  either way -- this is loam-0hjq's fix for a live incident where the two independently-derived
+  strings disagreed (loam-4kz's own gap: "there is no normalization reconciling a mismatched
+  pair"). A migration (`0005_credentials_host_canonical`) rewrote every pre-existing
+  `https://`-qualified `credentials.host` row to the bare form on upgrade.
 
 ### repo_target_branches
 `repo_id` (fk → repos), `branch`, `ingested_ref` (null), `ingested_at` (null),

@@ -50,20 +50,26 @@ import styles from "./Credentials.module.css";
  * `ListCredentialsResponse`/`SetUpstreamTokenResponse`, and neither message
  * has a token field to cache.
  *
- * HOST FORMAT (loam-4kz): this screen sends exactly the `host` string the
- * admin types, verbatim, as `SetUpstreamTokenRequest.host` -- it never
- * reshapes, defaults, or otherwise papers over it. For the default case
- * (an https forge) a bare host ("github.com") is all that has ever been
- * needed. For a plaintext-HTTP, self-hosted forge, the SAME host used for
- * enrollment's Upstream URL must be typed here WITH its "http://" scheme,
- * matching what `RepoAdminService.EnrollRepo` derives from that URL
- * (`internal/handler/repoadmin/handler.go`'s `forgeHostOf`) -- a bare host
- * still validates here (the server retries once over plain HTTP on an
- * unambiguous scheme-mismatch signal, `internal/forge/forgejo.go`'s
- * `ValidateToken`), but it is stored under a different key than a
- * scheme-qualified enrollment would look up, so it would not be found
- * again at `EnrollRepo` time. The `Host` column below renders
- * `CredentialStatus.host` as returned by `ListCredentials`, unmodified.
+ * HOST FORMAT (loam-0hjq, superseding loam-4kz): this screen sends
+ * whatever the admin types as `SetUpstreamTokenRequest.host`, and the
+ * server CANONICALIZES it (`internal/forgehost.Canonicalize`) before
+ * validating or storing it -- so pasting a full forge URL
+ * ("https://github.com") and typing the bare host ("github.com") both
+ * store, and later resolve, identically. That matters because
+ * `RepoAdminService.EnrollRepo`/`ProbeRepo` resolve a credential by an
+ * independently-derived host (`internal/handler/repoadmin/handler.go`'s
+ * `forgeHostOf`, via the SAME `internal/forgehost` package): bare
+ * ("host:port") for the default, https, case, scheme-qualified
+ * ("http://host:port") for a plaintext-HTTP forge. Before this fix, host
+ * was stored verbatim with no normalization, so a credential entered as
+ * "https://git.example.com" would validate here yet never be found by
+ * EnrollRepo's bare derivation -- see loam-0hjq's own bug report for the
+ * live incident this caused. A host the server cannot parse as any
+ * accepted form (a path, embedded userinfo, or a non-http(s) scheme) is
+ * rejected with `invalid_argument`, routed to `hostFieldError` below. The
+ * `Host` column in the table still renders `CredentialStatus.host`
+ * exactly as `ListCredentials` returns it -- the CANONICAL form, since
+ * that is what the server now always stores.
  */
 export function Credentials(): ReactElement {
   const listQuery = useQuery(listCredentials, create(ListCredentialsRequestSchema, {}));
@@ -162,7 +168,7 @@ export function Credentials(): ReactElement {
               value={host}
               onChange={(event) => setHost(event.target.value)}
               error={hostFieldError}
-              hint='Forge host, e.g. "github.com". For a plaintext-HTTP forge, include the scheme: "http://forge.internal:3000".'
+              hint='Bare forge host, e.g. "github.com" -- pasting the full "https://github.com" URL also works and is stored the same way. For a plaintext-HTTP forge, include the scheme: "http://forge.internal:3000".'
             />
           </div>
           <Field
