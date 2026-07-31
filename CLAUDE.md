@@ -94,7 +94,7 @@ task web:test      # npm test (vitest run) in web/
 task docker:build  # build the server image (loam-ytt2.1) from the repo-root Dockerfile
 ```
 
-See `docs/deployment-spec.md` for how that image, `deploy/k8s`'s kustomize set, and
+See `docs/deployment-spec.md` for how that image, the `helm/loam` chart, and
 the running service are configured, backed up, and rolled back.
 
 CI runs on **Forgejo Actions** at git.bobcob7.com, not GitHub — the repo

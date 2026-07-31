@@ -1,0 +1,13 @@
+apiVersion: v2
+name: loam
+description: >-
+  Loam: git smart-HTTP server, per-repo sync scheduler, and code-ingest
+  pipeline, with its own Postgres/pgvector store. Single-replica by
+  correctness constraint, not capacity -- see values.yaml and
+  templates/deployment.yaml.
+type: application
+version: 0.1.0
+appVersion: "dff3598deddb394f1e13bacb92a23ccf23a9b70d"
+home: https://git.bobcob7.com/loam/loam
+sources:
+  - https://git.bobcob7.com/loam/loam

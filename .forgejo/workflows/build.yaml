@@ -78,8 +78,8 @@ jobs:
       - name: merge into multi-arch manifest lists
         run: |
           set -eu
-          # Two manifest lists, deliberately, and deploy/k8s should pin the
-          # IMMUTABLE one. ':latest' is what the reference workflow
+          # Two manifest lists, deliberately, and helm/loam's values.yaml
+          # should pin the IMMUTABLE one. ':latest' is what the reference workflow
           # publishes and is kept for parity, but on its own it is a GitOps
           # trap: the manifest in git never changes, so Argo reports Synced
           # while the pod runs whatever was pushed last, and there is no

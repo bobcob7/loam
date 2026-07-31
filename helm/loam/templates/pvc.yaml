@@ -1,0 +1,19 @@
+# LOAM_DATA_DIR's backing volume. This is NOT a cache: it holds the git
+# mirrors that every enrolled repo's smart-HTTP endpoints serve from
+# directly and that every sync tick fetches into (see values.yaml's
+# replicaCount comment for the full correctness argument this PVC's
+# ReadWriteOnce access mode is part of).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loam-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | quote }}
+  storageClassName: {{ .Values.persistence.storageClassName | quote }}

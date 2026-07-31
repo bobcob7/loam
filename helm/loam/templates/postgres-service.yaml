@@ -1,0 +1,25 @@
+{{- if .Values.postgres.enabled }}
+# Headless (clusterIP: None) so the StatefulSet gets the stable per-pod DNS
+# name (postgres-0.postgres.<namespace>.svc.cluster.local) a StatefulSet's
+# identity guarantees depend on, even though this chart only ever runs one
+# replica today. secret.keys.databaseUrl's DSN (in the consumer-supplied
+# Secret) should point at "postgres" (this Service's name), which
+# load-balances to the single pod either way. Omitted entirely -- not just
+# scaled down -- when postgres.enabled is false.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "postgres.selectorLabels" . | nindent 4 }}
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}

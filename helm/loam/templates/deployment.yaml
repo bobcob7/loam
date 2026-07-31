@@ -1,9 +1,10 @@
+{{- include "loam.validateReplicaCount" . -}}
 # The loam server. Deliberately a single-replica Deployment with a plain
-# PersistentVolumeClaim (loam-pvc.yaml), NOT a StatefulSet and NOT a
+# PersistentVolumeClaim (templates/pvc.yaml), NOT a StatefulSet and NOT a
 # multi-replica Deployment. Both alternatives were considered and rejected:
 #
 #   - Multi-replica Deployment: wrong on two independent grounds, not one.
-#     (1) loam-pvc.yaml is ReadWriteOnce, so a second pod on a different
+#     (1) templates/pvc.yaml is ReadWriteOnce, so a second pod on a different
 #         node cannot mount it at all -- a storage-layer failure.
 #     (2) Even if storage supported multi-attach, the sync scheduler
 #         assumes it is the ONLY process ticking a given repo -- ownership
@@ -12,7 +13,8 @@
 #         would race it and could double-fetch, or worse, interleave
 #         mirror writes. This is a correctness question, not a capacity
 #         one: no amount of shared storage makes it safe to scale this
-#         workload horizontally today.
+#         workload horizontally today. Enforced above by
+#         loam.validateReplicaCount, not just documented here.
 #   - StatefulSet: StatefulSet's value over a Deployment is ordered,
 #     identity-stable scaling to N members (stable pod names, ordered
 #     rollout/rollback, per-member PVCs via volumeClaimTemplates). Since N
@@ -27,38 +29,34 @@
 # the new one is scheduled, at the cost of a short outage per rollout --
 # an acceptable trade for a service that cannot be horizontally redundant
 # anyway.
-#
-# Do not raise `replicas` without first solving both the storage
-# multi-attach problem AND making repo-sync ownership safe under
-# concurrent tickers (loam-fp7).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: loam
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: loam
+    {{- include "loam.selectorLabels" . | nindent 4 }}
+    {{- include "loam.partOfLabel" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: loam
+      {{- include "loam.selectorLabels" . | nindent 6 }}
+      {{- include "loam.partOfLabel" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: loam
+        {{- include "loam.selectorLabels" . | nindent 8 }}
+        {{- include "loam.partOfLabel" . | nindent 8 }}
     spec:
-      # Only needed if the image below is pulled from a private registry
-      # (registry.bobcob7.com per the epic's reconnaissance). Harmless if
-      # no such secret exists yet -- the kubelet only consults
-      # imagePullSecrets when a pull actually needs credentials, and a
-      # missing secret only surfaces as an ImagePullBackOff on this pod,
-      # not a kustomize build failure. Name is overridable with a
-      # kustomize patch; this manifest set never creates the secret itself
-      # (same externally-managed-secrets rule as the app secrets below).
+      {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
-        - name: registry-bobcob7-com
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       # fsGroup is LOAD-BEARING, not boilerplate hardening. The image runs
       # as non-root uid/gid 10001 (see Dockerfile), and a freshly
       # provisioned PVC mounts owned by root. loam-ytt2.1 reproduced the
@@ -75,19 +73,11 @@ spec:
         fsGroup: 10001
       containers:
         - name: loam
-          # Pinned to an IMMUTABLE commit-sha manifest list, not :latest,
-          # which the build workflow also publishes. :latest would make
-          # this manifest permanently identical while the running image
-          # changed underneath it -- Argo would report Synced with no
-          # commit anywhere saying what is deployed, and a rollback would
-          # have nothing to revert to. With the sha tag, bumping the
-          # deployed version is a reviewable diff and rolling back is a
-          # git revert.
-          #
-          # This tag is a real multi-arch manifest list (linux/amd64 +
-          # linux/arm64), built by .forgejo/workflows/build.yaml on native
-          # runners of each architecture and verified in the registry.
-          image: registry.bobcob7.com/loam/server:dff3598deddb394f1e13bacb92a23ccf23a9b70d
+          # Pinned to an IMMUTABLE commit-sha manifest list, not :latest --
+          # see values.yaml's image.tag comment and
+          # docs/deployment-spec.md's Rollback section.
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 8080
@@ -96,59 +86,31 @@ spec:
                 name: loam-config
           env:
             # The three required secrets from internal/config/config.go's
-            # loadRequired. All three come from ONE externally-managed
-            # Secret (default name loam-secrets, in this Namespace) that
-            # this manifest set never creates, generates, or templates --
-            # see loam-ytt2.4. Both the secret name and each key are
-            # plain, individually-named literals so a downstream
-            # kustomization can retarget either with a JSON6902 or
-            # strategic-merge patch without touching anything else, e.g.:
-            #
-            #   patches:
-            #     - target:
-            #         kind: Deployment
-            #         name: loam
-            #       patch: |-
-            #         - op: replace
-            #           path: /spec/template/spec/containers/0/env/0/valueFrom/secretKeyRef/name
-            #           value: my-other-secret
-            #
-            # Required keys in that Secret (namespace: loam). Key names
-            # match the env var name itself (the same convention the live
-            # vega cluster's docs addon uses for its own Postgres secret,
-            # `kubectl get statefulset -n docs -o yaml`, read 2026-07-31)
-            # rather than an invented lowercase-hyphen scheme:
-            #   LOAM_ADMIN_PASSWORD
-            #   LOAM_DATABASE_URL   -- full postgres:// DSN, password
-            #                          inline -- see postgres-
-            #                          statefulset.yaml's comment on
-            #                          keeping this in sync with
-            #                          POSTGRES_PASSWORD
-            #   LOAM_ENCRYPTION_KEY -- base64-encoded 32-byte AES-GCM key;
-            #                          NOT rotatable in place without
-            #                          re-encrypting every stored forge
-            #                          credential -- see loam-ytt2.4 and
-            #                          docs/deployment-spec.md once
-            #                          loam-ytt2.9 lands
+            # loadRequired. All three come from ONE consumer-supplied
+            # Secret (values.yaml's secret.name, default loam-secrets, in
+            # this Namespace) that this chart never creates, generates, or
+            # templates -- see loam-ytt2.4 and values.yaml's secret:
+            # section, which also makes each key name individually
+            # overridable.
             - name: LOAM_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: loam-secrets
-                  key: LOAM_ADMIN_PASSWORD
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.adminPassword }}
             - name: LOAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: loam-secrets
-                  key: LOAM_DATABASE_URL
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.databaseUrl }}
             - name: LOAM_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: loam-secrets
-                  key: LOAM_ENCRYPTION_KEY
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.encryptionKey }}
           volumeMounts:
             - name: data
-              # Must match LOAM_DATA_DIR in configmap.yaml.
-              mountPath: /var/lib/loam
+              # Must match config.dataDir in values.yaml.
+              mountPath: {{ .Values.config.dataDir }}
           # Startup can take a while: Load (migrate, pool connect, mirror
           # reconcile, orphan requeue, policy-socket bind -- see
           # internal/health's package doc) all happen BEFORE the HTTP
@@ -180,8 +142,9 @@ spec:
           # excludes the embedder, the forge, the policy socket, the
           # ingest pool, and the sync scheduler -- a green readiness probe
           # is NOT a guarantee that repo sync or code ingest are making
-          # progress (see loam-lae, loam-ymyq). Do not wire anything else
-          # to this probe's result on the strength of "it's ready".
+          # progress (see loam-lae, loam-ymyq; also NOTES.txt). Do not wire
+          # anything else to this probe's result on the strength of "it's
+          # ready".
           readinessProbe:
             httpGet:
               path: /readyz
@@ -189,17 +152,21 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
-          # Starting point only, not a measured figure -- there is no
-          # production workload to size against yet. Tune once real usage
-          # exists.
           resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
+            {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: loam-data
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
