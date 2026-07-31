@@ -1,0 +1,40 @@
+{{- if .Values.ingress.enabled }}
+# loam serves the admin UI/RPC AND git smart-HTTP (`/git/*`) on the same
+# path prefix "/", and auth for both is handled INSIDE the application
+# (basic auth for admin, agent-identity headers for git) -- this ingress
+# deliberately does not add its own nginx-level auth-basic annotation,
+# which would double up on or conflict with that.
+#
+# The annotations (values.yaml's ingress.annotations, default set below)
+# exist for exactly one reason: git smart-HTTP push of a real repo can be
+# many times larger and slower than a typical HTTP request, and nginx's
+# defaults (1m body size, 60s timeouts) will cut a legitimate push off
+# mid-stream. That failure mode looks like a network flake to whoever hits
+# it, not a config limit -- hence generous values by default rather than
+# leaving nginx's defaults in place and discovering this the hard way
+# during the first real push.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: loam
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: loam
+                port:
+                  name: http
+{{- end }}

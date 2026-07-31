@@ -1,24 +1,29 @@
 # Deployment Spec
 
 How Loam is packaged, configured, and operated as a running service — the container
-image, the kustomize manifest set in `deploy/k8s/`, and the operational procedures
-(backup/restore, rollback, readiness) that the manifests' own comments don't fully
-carry. This document explains *why* and complements the manifests; it does not restate
-their YAML. Agent↔server transport, RPC surface, and the sync/ingest pipelines
+image, the Helm chart in `helm/loam/`, and the operational procedures
+(backup/restore, rollback, readiness) that the chart's own comments don't fully
+carry. This document explains *why* and complements the chart; it does not restate
+its YAML. Agent↔server transport, RPC surface, and the sync/ingest pipelines
 themselves are `docs/server-spec.md`, `docs/sync-spec.md`, and `docs/ingestion-spec.md`.
 
 Status: **partial.** The image (`loam-ytt2.1`), its registry publication
-(`loam-ytt2.2`), and the kustomize set (`loam-ytt2.3`) are built and merged. Three
+(`loam-ytt2.2`), and the deployment manifests (`loam-ytt2.3`, originally a kustomize
+set, converted to the `helm/loam` Helm chart) are built and merged. Three
 pieces of the epic (`loam-ytt2`) are **not yet done**, and this document says so
 plainly rather than describing them as if they existed:
 
-- **The Secret is not provisioned anywhere.** `deploy/k8s` references a Secret named
-  `loam-secrets` (namespace `loam`) and never creates it — see
-  `deploy/k8s/kustomization.yaml`'s header comment for the full key contract. Sealing
-  it as a vega-infra sealed-secret is `loam-ytt2.4`, still open.
+- **The Secret is not provisioned anywhere.** `helm/loam` references a Secret whose
+  name and key names are consumer-supplied (default name `loam-secrets`) and never
+  creates it — see `helm/loam/values.yaml`'s `secret:` section for the full key
+  contract. Sealing it as a vega-infra sealed-secret is `loam-ytt2.4`, still open.
 - **The ArgoCD Application is not merged.** Nothing in `sudo-core/vega-infra` points
-  at this manifest set yet; that PR is `loam-ytt2.8`, still open. Loam is not, as of
-  this writing, running anywhere.
+  at this chart yet; that PR is `loam-ytt2.8`, still open. Loam is not, as of
+  this writing, running anywhere. The expected shape follows
+  `argocd/apps/gastown-operator.yaml`'s precedent exactly: an in-house chart living in
+  its own repo (`path: helm/loam` in this repo), pinned by `targetRevision`, with
+  `spec.source.helm.valuesObject` supplying `secret.name`, `image.tag`, and anything
+  else the consumer needs to override.
 - **The nightly-only test suites (provider contract, e2e, Playwright) don't run in
   this instance's CI yet.** `.forgejo/workflows/` has `ci.yaml` and `build.yaml` only
   — porting the GitHub-era nightly workflow is `loam-ytt2.10`, still open. Treat
@@ -30,30 +35,33 @@ plainly rather than describing them as if they existed:
 `internal/config/config.go` and `internal/config/env.go` are the source of truth;
 `docs/server-spec.md` documents the same table for the application's own purposes.
 This table adds the deployment angle: where each value comes from in
-`deploy/k8s/`.
+`helm/loam/`.
 
-| Variable | Required | Secret | Default | In `deploy/k8s` |
+| Variable | Required | Secret | Default | In `helm/loam` |
 | --- | --- | --- | --- | --- |
-| `LOAM_ADMIN_PASSWORD` | yes | yes | — | `loam-secrets` Secret key, same name |
-| `LOAM_DATABASE_URL` | yes | yes | — | `loam-secrets` Secret key, same name |
-| `LOAM_ENCRYPTION_KEY` | yes | yes | — | `loam-secrets` Secret key, same name |
-| `LOAM_HTTP_ADDR` | no | no | `:8080` | `loam-config` ConfigMap |
-| `LOAM_ADMIN_USER` | no | no | `admin` | `loam-config` ConfigMap |
-| `LOAM_DATA_DIR` | no | no | `/var/lib/loam` | `loam-config` ConfigMap **and** the Dockerfile's `ENV`; the two must agree with each other and with `loam-pvc.yaml`'s mount path — see that manifest's comment |
-| `LOAM_SYNC_INTERVAL` | no | no | `60s` | `loam-config` ConfigMap |
-| `LOAM_PR_ATTRIBUTION` | no | no | `true` | `loam-config` ConfigMap |
-| `LOAM_EMBEDDER_URL` | no | no | `http://localhost:11434` | `loam-config` ConfigMap, **overridden** to `http://ollama.ollama.svc.cluster.local:11434` — the vega cluster's existing ollama addon, confirmed live and already pulling `nomic-embed-text` |
-| `LOAM_EMBEDDER_MODEL` | no | no | `nomic-embed-text` | `loam-config` ConfigMap |
-| `LOAM_INGEST_WORKERS` | no | no | `2` | `loam-config` ConfigMap |
-| `LOAM_LOG_LEVEL` | no | no | `info` | `loam-config` ConfigMap |
+| `LOAM_ADMIN_PASSWORD` | yes | yes | — | `secret.keys.adminPassword` (values.yaml), key name overridable |
+| `LOAM_DATABASE_URL` | yes | yes | — | `secret.keys.databaseUrl` (values.yaml), key name overridable |
+| `LOAM_ENCRYPTION_KEY` | yes | yes | — | `secret.keys.encryptionKey` (values.yaml), key name overridable |
+| `LOAM_HTTP_ADDR` | no | no | `:8080` | `loam-config` ConfigMap (not a value — this port is not expected to vary) |
+| `LOAM_ADMIN_USER` | no | no | `admin` | `config.adminUser` (values.yaml) |
+| `LOAM_DATA_DIR` | no | no | `/var/lib/loam` | `config.dataDir` (values.yaml) **and** the Dockerfile's `ENV`; the two must agree with each other and with `persistence`'s mount path — see `templates/deployment.yaml`'s comment |
+| `LOAM_SYNC_INTERVAL` | no | no | `60s` | `config.syncInterval` (values.yaml) |
+| `LOAM_PR_ATTRIBUTION` | no | no | `true` | `config.prAttribution` (values.yaml) |
+| `LOAM_EMBEDDER_URL` | no | no | `http://localhost:11434` | `config.embedderUrl` (values.yaml), **defaulted** by the chart to `http://ollama.ollama.svc.cluster.local:11434` — the vega cluster's existing ollama addon, confirmed live and already pulling `nomic-embed-text` |
+| `LOAM_EMBEDDER_MODEL` | no | no | `nomic-embed-text` | `config.embedderModel` (values.yaml) |
+| `LOAM_INGEST_WORKERS` | no | no | `2` | `config.ingestWorkers` (values.yaml) |
+| `LOAM_LOG_LEVEL` | no | no | `info` | `config.logLevel` (values.yaml) |
 
-Two things worth being explicit about, since the manifests only hint at them:
+Two things worth being explicit about, since the chart's comments only hint at them:
 
-- **All three secrets live in one Secret object**, not three, and the Postgres
-  StatefulSet draws `POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD` from that same
-  object — six keys total. `postgres-statefulset.yaml`'s comment flags the one
-  invariant Kubernetes cannot enforce for you: `POSTGRES_PASSWORD` and the password
-  embedded in `LOAM_DATABASE_URL`'s DSN describe the same credential from two sides.
+- **All three loam secrets, plus the Postgres password, live in one Secret object**,
+  not four, referenced by `secret.name` (values.yaml, default `loam-secrets`) — but
+  `POSTGRES_USER`/`POSTGRES_DB` are **not** secret and live in the chart-managed
+  `postgres-config` ConfigMap instead (`config.postgresUser`/`config.postgresDb`),
+  only rendered when `postgres.enabled` is true. `templates/postgres-statefulset.yaml`'s
+  comment flags the one invariant Kubernetes cannot enforce for you:
+  `secret.keys.postgresPassword` and the password embedded in
+  `secret.keys.databaseUrl`'s DSN describe the same credential from two sides.
   A mismatch doesn't fail to apply — it surfaces later, as `/readyz` reporting
   `database unreachable` with an authentication error in the log.
 - **`LOAM_DATA_DIR` is set twice** (image `ENV` default, ConfigMap override) and both
@@ -83,10 +91,12 @@ mirrors). Losing the volume has two different costs, and they are not the same s
   push loses that work branch's actual content — the Postgres row survives, pointing
   at a ref that no longer exists.
 
-This is why `loam-pvc.yaml` pins `storageClassName: iscsi` rather than the cluster
-default (`nfs`) — see that manifest's comment for the git-on-NFS locking hazard — and
-why `loam-deployment.yaml` is a single-replica `Deployment` with `strategy: Recreate`
-rather than a `StatefulSet` or a scaled-out Deployment: per-repo sync/ingest
+This is why `persistence.storageClassName` (values.yaml) pins `iscsi` rather than the
+cluster default (`nfs`) — see `templates/pvc.yaml`'s comment for the git-on-NFS
+locking hazard — and why `templates/deployment.yaml` is a single-replica `Deployment`
+with `strategy: Recreate` rather than a `StatefulSet` or a scaled-out Deployment
+(`replicaCount` above 1 fails the chart's render outright — see
+`templates/_helpers.tpl`'s `loam.validateReplicaCount`): per-repo sync/ingest
 serialization is an in-process invariant today (`docs/server-spec.md` → Process
 Model), not merely a capacity choice, so there is no safe way to run two pods against
 this volume regardless of access mode.
@@ -175,7 +185,7 @@ the one above.
 
 ## Rollback
 
-`deploy/k8s/loam-deployment.yaml` pins the container image to an **immutable,
+`helm/loam/values.yaml`'s `image.tag` pins the container image to an **immutable,
 commit-sha manifest list** —
 `registry.bobcob7.com/loam/server:<full-git-sha>` — never `:latest`. `:latest` is
 also published (`.forgejo/workflows/build.yaml`'s `merge` job pushes both tags), and
@@ -192,7 +202,7 @@ are not symmetric:
 - Migrations run automatically, forward-only, as part of every server startup
   (`internal/db/migrations.Migrate`, called before the pool connects —
   `docs/server-spec.md` → Startup, step 2). There is no separate migration job or
-  step in `deploy/k8s` to skip; every pod start re-runs `Migrate`, and it's a no-op
+  step in `helm/loam` to skip; every pod start re-runs `Migrate`, and it's a no-op
   once current.
 - `internal/db/migrations.Down` — which actually reverts, running each
   `NNNN_name.down.sql` in reverse — exists and is exercised by the integration suite
@@ -224,8 +234,8 @@ reachability and migration currency — and deliberately excludes the embedder, 
 forge, the policy socket, the ingest pool, and the sync scheduler, because each of
 those failing only degrades a subset of the surface, and folding a partial-dependency
 failure into readiness is exactly the cascade shape that package's doc warns against.
-`loam-deployment.yaml`'s `readinessProbe`/`livenessProbe` comments say the same thing
-inline; this section says *why it matters operationally*.
+`templates/deployment.yaml`'s `readinessProbe`/`livenessProbe` comments say the same
+thing inline; this section says *why it matters operationally*.
 
 The concrete way this bites: `loam-lae` found that a dead `multiRunner` member (the
 sync scheduler or the ingest pool's own run loop panicking and being recovered)
@@ -266,15 +276,16 @@ is a manual RPC check, not a probe.
 ## Running Locally
 
 There is no local Kubernetes story in this repo — no `kind`/`k3d` target, no
-`kubectl apply -k` walkthrough — because nothing has actually run the manifests
-against a real cluster from this repo yet (that first real run is `loam-ytt2.8`).
-`kubectl kustomize deploy/k8s` renders the manifest set without starting anything and
-is safe to run any time as a lint/sanity check; it's the closest thing to a "does
-this compose" check available without a cluster.
+`helm install` walkthrough — because nothing has actually run the chart against a
+real cluster from this repo yet (that first real run is `loam-ytt2.8`). `helm lint
+helm/loam` and `helm template loam helm/loam` render the chart without starting
+anything and are safe to run any time as a lint/sanity check; piping the latter
+through `kubectl apply --dry-run=client --validate=strict -f -` is the closest thing
+to a "does this compose" check available without a cluster.
 
 For an actual running comparison, `deploy/docker-compose.e2e.yml` is the closest
 local analogue to the deployed shape: Postgres/pgvector on the same image and tag
-pinned in `postgres-statefulset.yaml`'s comment (`pgvector/pgvector:pg16` — the two
+pinned in `helm/loam`'s `postgres.image` default (`pgvector/pgvector:pg16` — the two
 are pinned together deliberately, "no version drift in the extension between the
 two"), plus a seeded real Forgejo (`docs/testing-spec.md` → Layer 3). It does **not**
 containerize the server itself — `task test:e2e` runs the host-built binary
@@ -282,7 +293,7 @@ containerize the server itself — `task test:e2e` runs the host-built binary
 rather than adding container-to-container networking this repo doesn't otherwise
 need.
 
-To exercise the **actual container image** (the one the k8s manifests deploy) rather
+To exercise the **actual container image** (the one the chart deploys) rather
 than a host binary, `task docker:build` builds it locally from the same `Dockerfile`
 CI uses (single-arch, whatever architecture invokes it — see that task's own
 description for how it relates to `.forgejo/workflows/build.yaml`'s multi-arch

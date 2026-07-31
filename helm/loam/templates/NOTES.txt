@@ -1,0 +1,78 @@
+loam has been installed/upgraded as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+REQUIRED SECRET (this chart never creates it)
+----------------------------------------------
+This chart only *references* a Secret named "{{ .Values.secret.name }}" in
+namespace "{{ .Release.Namespace }}" -- it does not create, generate, or
+template it. Provision it yourself (e.g. as a vega-infra sealed-secret)
+with these keys:
+
+  {{ .Values.secret.keys.adminPassword }}     -- loam admin UI password
+  {{ .Values.secret.keys.databaseUrl }}       -- full postgres:// DSN{{ if .Values.postgres.enabled }}, password matching {{ .Values.secret.keys.postgresPassword }} below{{ end }}
+  {{ .Values.secret.keys.encryptionKey }}     -- base64-encoded 32-byte AES-GCM key (NOT rotatable in place)
+{{- if .Values.postgres.enabled }}
+  {{ .Values.secret.keys.postgresPassword }}  -- must match the password embedded in {{ .Values.secret.keys.databaseUrl }} above
+{{- end }}
+
+Until that Secret exists, the loam pod will not start (secretKeyRef with a
+missing key/Secret blocks the pod at CreateContainerConfigError).
+
+{{- if .Values.postgres.enabled }}
+
+POSTGRES: IN-CLUSTER (postgres.enabled=true)
+----------------------------------------------
+This release runs its own Postgres/pgvector StatefulSet ("postgres" in
+this namespace). {{ .Values.secret.keys.databaseUrl }} in your Secret
+should point at it, e.g.:
+
+  postgres://{{ .Values.config.postgresUser }}:<password>@postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/{{ .Values.config.postgresDb }}
+{{- else }}
+
+*** POSTGRES: EXTERNAL (postgres.enabled=false) ***
+----------------------------------------------
+NO Postgres StatefulSet or Service is rendered by this release. The loam
+Deployment is still relying on {{ .Values.secret.keys.databaseUrl }} in
+your "{{ .Values.secret.name }}" Secret for its DSN -- CONFIRM that DSN
+already points at a real, reachable, externally-managed database before
+this release goes live. Nothing in this chart validates that for you: a
+DSN left pointing at the old in-cluster "postgres" Service (or anywhere
+else unreachable) will boot the pod but leave /readyz permanently
+unhealthy.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+INGRESS
+----------------------------------------------
+  http://{{ .Values.ingress.host }}/  (ingressClassName: {{ .Values.ingress.className }})
+
+git smart-HTTP clone/push and the admin UI/RPC are both served from this
+same host and path prefix "/" -- see docs/web-spec.md's routing table.
+{{- else }}
+
+INGRESS: DISABLED (ingress.enabled=false)
+----------------------------------------------
+No Ingress was rendered. Reach the "loam" Service (port 8080) some other
+way -- port-forward, a Gateway API route you manage separately, etc.
+{{- end }}
+
+READINESS CAVEAT -- READ THIS BEFORE TRUSTING A GREEN DEPLOYMENT
+----------------------------------------------
+/readyz proves only that Postgres is reachable and this binary's embedded
+migrations match what's applied. It deliberately excludes the embedder,
+the forge, the policy socket, the ingest pool, and the sync scheduler.
+
+A green readiness probe is NOT proof that repo sync or code ingest are
+alive. A dead sync scheduler or ingest pool can log exactly one error line
+and otherwise look, from the outside, identical to "quiet because there's
+nothing to do." To actually check:
+
+  - Sync scheduler: RepoAdminService.ListRepos/GetRepo -- SyncStatus.state
+    and last_synced_at should be advancing roughly every
+    {{ .Values.config.syncInterval }} across every repo.
+  - Ingest pool: RepoAdminService.ListIngestJobs?status=queued -- a queued
+    count that only grows, with nothing transitioning to running, means
+    the pool is dead, not merely busy.
+
+See docs/deployment-spec.md's "The Readiness Caveat" section for the full
+detail (loam-lae, loam-ymyq).

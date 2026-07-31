@@ -1,0 +1,13 @@
+{{- if .Values.namespace.create }}
+# See values.yaml's namespace.create comment: kept optional (default true)
+# rather than assumed, since an ArgoCD Application's own
+# syncOptions: [CreateNamespace=true] (ArgoCD's own precedent for this --
+# see argocd/apps/gastown-operator.yaml in sudo-core/vega-infra) can do this
+# instead. Applying both is idempotent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+{{- end }}

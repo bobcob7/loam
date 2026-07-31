@@ -1,0 +1,19 @@
+# ClusterIP fronting the loam Deployment's single pod. One Service is
+# enough for all of loam's traffic shapes -- admin UI, CLI Connect RPC, and
+# git smart-HTTP under /git/* -- because loam is a single HTTP listener
+# that routes by path internally; there is no separate git port to expose.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loam
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "loam.selectorLabels" . | nindent 4 }}
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

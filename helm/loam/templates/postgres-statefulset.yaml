@@ -1,0 +1,131 @@
+{{- if .Values.postgres.enabled }}
+# loam's own Postgres, WITH pgvector. Rendered only when postgres.enabled
+# is true (values.yaml) -- flip that to false to move to an external
+# database instead; no other template in this chart references Postgres.
+#
+# Image defaults to pgvector/pgvector:pg16, the EXACT tag
+# deploy/docker-compose.e2e.yml (before this chart's conversion) pinned for
+# the same image, so dev/e2e and this cluster deployment run the identical
+# Postgres + pgvector build -- no version drift in the extension between
+# the two. Do not bump postgres.image independently of that compose file's
+# pin.
+#
+# A plain StatefulSet (not a Deployment+PVC) IS the right shape here, in
+# contrast to templates/deployment.yaml's server workload: Postgres's own
+# replication story is a separate, harder problem this chart is not
+# attempting (single instance, single PVC via volumeClaimTemplates), but
+# StatefulSet still buys a stable pod identity and DNS name
+# (postgres-0.postgres...) and, if this ever needs to grow into a
+# replicated topology later, is the right foundation to already be on.
+#
+# The vector extension itself is NOT created here: loam's own migrations
+# (internal/db/migrations/files/0002_code_intel.up.sql) run `CREATE
+# EXTENSION IF NOT EXISTS vector` as part of normal startup migration, so
+# this manifest only needs to provide a Postgres build that HAS the
+# extension available to create, not create it itself.
+#
+# POSTGRES_USER/POSTGRES_DB come from the postgres-config ConfigMap
+# (values.yaml's config.postgresUser/postgresDb) -- not secret material,
+# see values.yaml's comment on why they moved out of the Secret in review.
+# POSTGRES_PASSWORD alone comes from the consumer-supplied Secret
+# (values.yaml's secret.name / secret.keys.postgresPassword). PGDATA
+# pointed at a subdirectory of the mount rather than the mount root sidesteps
+# postgres's initdb refusing to start in a non-empty directory, which some
+# CSI drivers trip by leaving a lost+found entry at the volume root.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres.selectorLabels" . | nindent 4 }}
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "postgres.selectorLabels" . | nindent 6 }}
+      {{- include "loam.partOfLabel" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "postgres.selectorLabels" . | nindent 8 }}
+        {{- include "loam.partOfLabel" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            # PGDATA in a subdirectory of the mount, not the mount root --
+            # see the file-level comment above for why.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-config
+                  key: POSTGRES_DB
+            # IMPORTANT: this password and the password embedded in
+            # secret.keys.databaseUrl's DSN (consumed by
+            # templates/deployment.yaml) describe the SAME credential from
+            # two sides -- the Postgres server's copy and the client DSN's
+            # copy. Nothing in Kubernetes enforces that they match;
+            # whoever provisions the Secret is responsible for keeping them
+            # in sync. A mismatch surfaces as loam's /readyz reporting
+            # "database unreachable" (authentication failure), not as a
+            # Postgres-side error.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.postgresPassword }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            # $POSTGRES_USER (not a hardcoded "loam") so the probe still
+            # works if config.postgresUser is overridden -- pg_isready
+            # needs a shell to expand it.
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            # $POSTGRES_USER (not a hardcoded "loam") so the probe still
+            # works if config.postgresUser is overridden -- pg_isready
+            # needs a shell to expand it.
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "loam.partOfLabel" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage | quote }}
+        # Pinned, NOT left to the cluster default: vega's default class is
+        # `nfs`, and Postgres on NFS is a durability and locking hazard
+        # rather than merely a slow one. vega-infra's own docs addon pins
+        # iscsi for its Postgres and Qdrant and uses nfs only for bulk
+        # file uploads -- this follows that convention.
+        storageClassName: {{ .Values.postgres.storageClassName | quote }}
+{{- end }}

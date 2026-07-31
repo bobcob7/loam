@@ -1,0 +1,23 @@
+# Non-secret LOAM_* env vars, mirroring the defaulted (non-required) rows of
+# internal/config/config.go's table. The three required vars
+# (LOAM_ADMIN_PASSWORD, LOAM_DATABASE_URL, LOAM_ENCRYPTION_KEY) are all
+# secrets and deliberately do NOT appear here -- see templates/deployment.yaml's
+# env block and values.yaml's secret: section.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loam-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+data:
+  LOAM_HTTP_ADDR: ":8080"
+  LOAM_ADMIN_USER: {{ .Values.config.adminUser | quote }}
+  # Matches persistence.yaml's mount path -- keep these in sync.
+  LOAM_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  LOAM_SYNC_INTERVAL: {{ .Values.config.syncInterval | quote }}
+  LOAM_PR_ATTRIBUTION: {{ .Values.config.prAttribution | quote }}
+  LOAM_EMBEDDER_URL: {{ .Values.config.embedderUrl | quote }}
+  LOAM_EMBEDDER_MODEL: {{ .Values.config.embedderModel | quote }}
+  LOAM_INGEST_WORKERS: {{ .Values.config.ingestWorkers | quote }}
+  LOAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}

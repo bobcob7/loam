@@ -1,0 +1,202 @@
+# Default values for the loam chart. Consumers (e.g. an ArgoCD Application's
+# spec.source.helm.valuesObject, following the exact precedent of this
+# cluster's argocd/apps/gastown-operator.yaml) override this file, never
+# edit it in place.
+
+# -----------------------------------------------------------------------
+# replicaCount is enforced to be exactly 1 by templates/_helpers.tpl's
+# "loam.validateReplicaCount" guard (invoked from templates/deployment.yaml).
+# This is NOT a capacity choice, so do not raise it without first solving
+# BOTH of the following, independently:
+#   1. persistence below is ReadWriteOnce -- a second pod on a different
+#      node cannot mount the data volume at all (storage-layer failure).
+#   2. The sync scheduler assumes it is the ONLY process ticking a given
+#      repo -- ownership of repos.sync_state is a per-tick invariant
+#      (loam-fp7), not merely an optimization. A second replica polling the
+#      same table would race it and could double-fetch, or worse,
+#      interleave mirror writes.
+# See templates/deployment.yaml's own header comment for the fuller
+# StatefulSet-vs-Deployment reasoning this chart inherited from
+# deploy/k8s/loam-deployment.yaml.
+# -----------------------------------------------------------------------
+replicaCount: 1
+
+image:
+  repository: registry.bobcob7.com/loam/server
+  # Pinned to an IMMUTABLE commit-sha manifest list, not :latest, which the
+  # build workflow also publishes. :latest would make chart upgrades
+  # invisible to ArgoCD/git history -- see docs/deployment-spec.md#rollback.
+  # Bumping this is a reviewable diff; rolling back is a git revert.
+  tag: dff3598deddb394f1e13bacb92a23ccf23a9b70d
+  pullPolicy: IfNotPresent
+  # Only needed if the image above is pulled from a private registry
+  # (registry.bobcob7.com). Harmless if no such secret exists yet -- the
+  # kubelet only consults imagePullSecrets when a pull actually needs
+  # credentials; a missing secret only surfaces as ImagePullBackOff on the
+  # pod, not a render failure. Set to [] to omit imagePullSecrets entirely.
+  pullSecrets:
+    - registry-bobcob7-com
+
+namespace:
+  # Render a Namespace object as part of this chart's own output, matching
+  # deploy/k8s/namespace.yaml's precedent of being self-sufficient under
+  # `helm template | kubectl apply` without relying on the consumer's
+  # ArgoCD Application also setting syncOptions: [CreateNamespace=true].
+  # Applying both is idempotent (server-side apply), so this is safe to
+  # leave on even when the Application also sets CreateNamespace=true.
+  create: true
+
+# The chart NEVER creates a Secret -- it only references one, by name and
+# by individual key, both fully overridable so a consumer can point this at
+# an existing Secret with a different name/shape (e.g. a vega-infra
+# sealed-secret) without a values-file fork. See templates/deployment.yaml
+# and templates/postgres-statefulset.yaml for where each key lands.
+secret:
+  # Consumer-supplied Secret name, namespace-local (same namespace as this
+  # release). Provisioning it (e.g. as a sealed-secret) is out of scope for
+  # this chart -- see NOTES.txt for exactly what an operator must create
+  # before this release will become ready.
+  name: loam-secrets
+  keys:
+    # -> loam container LOAM_ADMIN_PASSWORD
+    adminPassword: LOAM_ADMIN_PASSWORD
+    # -> loam container LOAM_DATABASE_URL. Full postgres:// DSN, password
+    # inline. When postgres.enabled is true, this DSN's password MUST be
+    # the same credential as secret.keys.postgresPassword below --
+    # Kubernetes cannot enforce that; see postgres.enabled's comment and
+    # templates/postgres-statefulset.yaml.
+    databaseUrl: LOAM_DATABASE_URL
+    # -> loam container LOAM_ENCRYPTION_KEY. base64-encoded 32-byte AES-GCM
+    # key; NOT rotatable in place without re-encrypting every stored forge
+    # credential -- see docs/deployment-spec.md's Backup & Restore section.
+    encryptionKey: LOAM_ENCRYPTION_KEY
+    # -> postgres container POSTGRES_PASSWORD, only referenced when
+    # postgres.enabled is true. Must describe the SAME credential as the
+    # password embedded in databaseUrl's DSN above -- see
+    # templates/postgres-statefulset.yaml's comment.
+    postgresPassword: POSTGRES_PASSWORD
+
+postgres:
+  # false => no in-cluster Postgres: the StatefulSet and its headless
+  # Service are both omitted entirely (not merely scaled to zero), and the
+  # loam Deployment still gets its DSN from secret.keys.databaseUrl above
+  # -- unchanged either way, since the loam container never talks to
+  # Postgres through anything this chart renders, only through the DSN.
+  # This is the whole point of the values-driven secret contract above:
+  # moving to an external database is a one-line values change, not a
+  # consumer-side overlay. When you flip this to false, the consumer is
+  # responsible for making sure secret.keys.databaseUrl's Secret key
+  # already points at that external database -- see NOTES.txt, which warns
+  # loudly about this at install/upgrade time.
+  enabled: true
+  image: pgvector/pgvector:pg16
+  # Pinned, NOT left to the cluster default (`nfs` on vega): Postgres on
+  # NFS is a durability and locking hazard, not merely a slow one.
+  # vega-infra's own docs addon pins iscsi for its Postgres and Qdrant and
+  # uses nfs only for bulk file uploads -- this follows that convention.
+  storageClassName: iscsi
+  # Starting point only, not a measured figure -- there is no production
+  # corpus to size against yet.
+  storage: 10Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+config:
+  adminUser: admin
+  # Matches persistence's mount path below AND the image's own Dockerfile
+  # ENV default -- keep all three in sync if this ever changes.
+  dataDir: /var/lib/loam
+  syncInterval: 60s
+  prAttribution: true
+  # External ollama addon, never deployed by this chart. Confirmed against
+  # the live vega cluster (`kubectl get svc -n ollama`, read 2026-07-31):
+  # ClusterIP service "ollama" in namespace "ollama" listening on 11434,
+  # and its PostSync job already pulls nomic-embed-text -- loam's embedder
+  # needs no new infrastructure, just this URL. Do NOT add an ollama
+  # Deployment, model-pull Job, or GPU request to this chart -- that is
+  # owned elsewhere. (config.go's own default is http://localhost:11434,
+  # correct only for a single-process dev run.)
+  embedderUrl: http://ollama.ollama.svc.cluster.local:11434
+  embedderModel: nomic-embed-text
+  ingestWorkers: 2
+  logLevel: info
+  # POSTGRES_USER / POSTGRES_DB are NOT secret and live here, in the
+  # ConfigMap -- not in the Secret. (Corrected in review: an earlier draft
+  # of this chart put them in secret.keys alongside the three passwords;
+  # they carry no credential material and belong beside the rest of the
+  # non-secret config, same as every other LOAM_* default.) Only consumed
+  # by the postgres StatefulSet when postgres.enabled is true; ignored
+  # entirely against an external database.
+  postgresUser: loam
+  postgresDb: loam
+
+persistence:
+  # LOAM_DATA_DIR's backing volume. This is NOT a cache: it holds the git
+  # mirrors that every enrolled repo's smart-HTTP endpoints serve from
+  # directly and that every sync tick fetches into. Pinned, not left to the
+  # cluster default (`nfs`): git coordinates through lock files
+  # (index.lock, per-ref locks), and NFS's locking/attribute caching make
+  # those unreliable -- intermittent corruption, not a clean failure.
+  # `iscsi` is block storage and RWO, matching replicaCount's single-writer
+  # argument above.
+  storageClassName: iscsi
+  # Starting point only -- there is no production corpus to size against
+  # yet. Expanding later requires a StorageClass with
+  # allowVolumeExpansion; shrinking a PVC is not supported by Kubernetes at
+  # all, so err small and grow rather than the reverse.
+  size: 20Gi
+
+ingress:
+  enabled: true
+  # Confirmed against the live vega cluster (`kubectl get ingressclass`):
+  # `intranet` (controller k8s.io/ingress-nginx-intranet), NOT
+  # `ingress-nginx-intranet` -- that longer string names the addon/
+  # namespace, not the IngressClass object. Defaults to the cluster's
+  # intranet ingress, not the internet-facing one, because nothing calls
+  # for external clone/push access; override if that changes.
+  className: intranet
+  # PLACEHOLDER hostname -- pick the real one when this chart is wired into
+  # an ArgoCD Application (loam-ytt2.8) and override via valuesObject.
+  host: loam.bobcob7.com
+  # loam serves the admin UI/RPC AND git smart-HTTP (/git/*) on the same
+  # path prefix "/", and auth for both is handled INSIDE the application
+  # (basic auth for admin, agent-identity headers for git) -- this ingress
+  # deliberately has no nginx-level auth-basic annotation of its own, which
+  # would double up on or conflict with that.
+  #
+  # The annotations below exist for exactly one reason: git smart-HTTP push
+  # of a real repo can be many times larger and slower than a typical HTTP
+  # request, and nginx's defaults (1m body size, 60s timeouts) will cut a
+  # legitimate push off mid-stream. That failure mode looks like a network
+  # flake to whoever hits it, not a config limit -- hence generous values
+  # here rather than discovering this the hard way during the first real
+  # push.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0" # unlimited
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # git smart-HTTP pushes stream a packfile in the request body; letting
+    # nginx buffer the whole thing to disk before forwarding it adds
+    # latency and local disk pressure proportional to push size for no
+    # benefit here.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+# Starting point only, not a measured figure -- there is no production
+# workload to size against yet. Tune once real usage exists. (This is the
+# loam container's own resources; postgres.resources above is separate.)
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

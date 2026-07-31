@@ -1,0 +1,18 @@
+{{- if .Values.postgres.enabled }}
+# POSTGRES_USER / POSTGRES_DB are not secret and live in their own
+# ConfigMap (not folded into loam-config's envFrom, which would leak them
+# into the loam container's env for no reason, and not in the Secret --
+# see values.yaml's config.postgresUser comment for why they moved out of
+# the Secret in review). Only rendered when postgres.enabled is true; an
+# external database's user/db naming is the consumer's own business.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "loam.partOfLabel" . | nindent 4 }}
+data:
+  POSTGRES_USER: {{ .Values.config.postgresUser | quote }}
+  POSTGRES_DB: {{ .Values.config.postgresDb | quote }}
+{{- end }}
