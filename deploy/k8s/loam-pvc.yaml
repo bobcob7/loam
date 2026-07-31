@@ -1,0 +1,23 @@
+# LOAM_DATA_DIR's backing volume. This is NOT a cache: it holds the git
+# mirrors that every enrolled repo's smart-HTTP endpoints serve from
+# directly and that every sync tick fetches into (see loam-deployment.yaml's
+# replica-count comment for the full correctness argument this PVC's
+# ReadWriteOnce access mode is part of).
+#
+# storageClassName is deliberately omitted so the cluster's default
+# StorageClass is used; override with a kustomize patch if this addon needs
+# a specific class (e.g. one backed by faster or more durable storage).
+# 20Gi is a starting-point size, not a measured figure -- there is no
+# production corpus to size against yet. Expanding it later requires a
+# StorageClass with allowVolumeExpansion; shrinking a PVC is not supported
+# by Kubernetes at all, so err small and grow rather than the reverse.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loam-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
