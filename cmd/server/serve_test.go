@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -599,4 +601,80 @@ func TestOSFileDoubleClose_ClobbersReusedDescriptor(t *testing.T) {
 	}
 	_, statErr := bystander.Stat()
 	assert.Error(t, statErr, "the finalizer closing a stale, already-reassigned fd number must have clobbered the bystander's descriptor -- this is loam-6ob's exact mechanism")
+}
+
+// policySocketPanicCrashTestEnv, when set to "1" in a subprocess's
+// environment, tells TestPolicySocketPanicCrashesTheProcess's own re-exec
+// of itself (see that test's doc comment for why a subprocess, not a
+// plain in-process call, is what proving a real crash needs) to call
+// serve with a policySocket whose Run panics immediately, instead of
+// running the normal `go test` suite.
+const policySocketPanicCrashTestEnv = "LOAM_TEST_POLICY_SOCKET_PANIC_CRASH"
+
+// policySocketPanicCrashMessage is the panic value the child half of
+// TestPolicySocketPanicCrashesTheProcess raises, and the parent half
+// looks for verbatim in the child's captured output -- proof the crash
+// output actually carries this panic, not some other failure.
+const policySocketPanicCrashMessage = "policy socket accept loop exploded"
+
+// TestPolicySocketPanicCrashesTheProcess proves serve.go's own documented
+// decision (loam-ymyq, see the comment directly above the
+// `go func() { ...; policySocket.Run(policyCtx) }()` line): a panic out
+// of the policy socket's Run is left UNGUARDED on purpose, so it crashes
+// this whole process exactly like any unrecovered panic always has,
+// rather than being recovered and logged the way multiRunner's members
+// are (multirunner.go's recoverMember, proved by
+// TestMultiRunner_MemberPanicIsRecoveredLoggedAndTheGroupSurvives).
+//
+// This cannot be proved in-process: Go's runtime terminates the entire
+// program the instant an unrecovered panic escapes ANY goroutine, testing
+// package or not, since only a deferred recover somewhere on that same
+// goroutine's stack could stop it -- there is none here, by design. An
+// in-process call would therefore take `go test` itself down mid-run
+// rather than let this test observe and assert on the outcome. So this
+// test re-execs itself as a subprocess (the standard Go idiom for
+// asserting on a fatal/os.Exit-shaped code path) with
+// policySocketPanicCrashTestEnv set; the child's own run of this same
+// test function calls serve with a policySocket whose Run panics
+// immediately, and the parent (where the env var is unset) waits for
+// that child under a bounded timeout and asserts it exited abnormally,
+// carrying the panic message and a real Go panic trace on its output --
+// the loud, discoverable kind of crash this design decision is banking
+// on, not a silent one.
+//
+// The bounded timeout, not a bare cmd.Run(), is what keeps a regression
+// from "crashes" back to "recovers and keeps serving" (e.g. someone
+// copy-pasting multiRunner's recoverMember pattern onto this goroutine)
+// failing as a clear ASSERTION rather than hanging this test forever: a
+// recovered child never exits on its own (nothing ever cancels its ctx),
+// so childCtx's deadline fires, exec kills it, and the childCtx.Err()
+// assertion below fails with a message that names exactly that scenario.
+func TestPolicySocketPanicCrashesTheProcess(t *testing.T) {
+	t.Parallel()
+	if os.Getenv(policySocketPanicCrashTestEnv) == "1" {
+		listener := newTestListener(t)
+		httpServer := &http.Server{Handler: http.NewServeMux()}
+		background, _ := newTrackedRunner(nil)
+		policySocket := runnerFunc(func(context.Context) { panic(policySocketPanicCrashMessage) })
+		db, _ := newTrackedCloser()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_ = serve(ctx, cancel, testLogger(), listener, httpServer, background, policySocket, db, time.Second)
+		return
+	}
+	childCtx, cancelChild := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelChild()
+	cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestPolicySocketPanicCrashesTheProcess$")
+	cmd.Env = append(os.Environ(), policySocketPanicCrashTestEnv+"=1")
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	runErr := cmd.Run()
+	require.Error(t, runErr, "the child process must exit abnormally when the policy socket's Run panics -- a nil error means the panic was silently swallowed somewhere between here and serve")
+	require.NoError(t, childCtx.Err(), "the child process did not exit within the timeout and had to be killed -- it likely survived the panic (e.g. something now recovers it) instead of crashing, which is exactly the regression this test guards against")
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, runErr, &exitErr, "the child must have actually run and exited (crashed), not merely failed to start")
+	assert.False(t, exitErr.Success(), "the child process must exit with a non-zero/abnormal status")
+	assert.Contains(t, output.String(), policySocketPanicCrashMessage, "the crash output must carry the original panic value")
+	assert.Contains(t, output.String(), "panic:", "the crash output must be a real, unrecovered Go panic")
 }

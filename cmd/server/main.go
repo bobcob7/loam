@@ -337,7 +337,12 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	// syncScheduler the instant the shutdown signal arrives -- see serve's
 	// own doc comment for why (loam-48y, mirroring this file's own
 	// loam-ofg.18 comment above about STARTUP ordering, in the other
-	// direction).
+	// direction). It is also, separately, deliberately NOT given
+	// multiRunner's recover-panic-and-keep-serving treatment (loam-lae's
+	// recoverMember): a panic in policyServer.Run is left to crash this
+	// whole process, on purpose -- see the doc comment directly above the
+	// `go func() { ...; policySocket.Run(policyCtx) }()` line in serve.go
+	// (loam-ymyq) for the full argument.
 	background := newMultiRunner(cfg.Logger,
 		member{name: "ingest pool", runner: ingestPool},
 		member{name: "sync scheduler", runner: syncScheduler},

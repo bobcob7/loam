@@ -115,6 +115,60 @@ func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, li
 	policyCtx, cancelPolicySocket := context.WithCancel(context.Background())
 	defer cancelPolicySocket()
 	policySocketDone := make(chan struct{})
+	// policySocket.Run is deliberately left unguarded here -- no recover,
+	// unlike every multiRunner member (multirunner.go's recoverMember) --
+	// so a panic in its accept loop (Server.Run, internal/hooksocket/
+	// server.go; the per-CONNECTION handler is a separate concern, tracked
+	// as loam-j1l) crashes this whole process instead of leaving it
+	// running with the socket silently dead. This is loam-ymyq's decision,
+	// and a deliberate departure from multiRunner's "recover, log, and
+	// keep serving" pattern, not an oversight:
+	//
+	//   - Either way, a dead policy socket already fails every git push
+	//     CLOSED, not open: hooksocket.Call (client.go) treats a refused
+	//     or timed-out connection as a hard error, and cmd/loamhook's own
+	//     contract (docs/git-spec.md "Enforcement Mechanics") requires
+	//     every caller to reject the whole push on any such error. So
+	//     "recover and keep serving" does not trade push safety for
+	//     uptime here -- pushes are denied under EITHER choice. What it
+	//     actually trades is how fast, and how visibly, that gets fixed.
+	//   - internal/health/health.go's own doc comment excludes the policy
+	//     socket from /readyz on purpose (its health is a liveness
+	//     question about this process, not a dependency /readyz reports
+	//     on), and /healthz checks nothing at all. So a recovered-and-
+	//     silently-dead policy socket produces NO signal any orchestrator
+	//     already watches -- not a metric, not a rotation, nothing but an
+	//     ERROR log line an operator has to already be watching for. A
+	//     crash, by contrast, takes /healthz down immediately (the one
+	//     signal every deployment already polls, per that file's own doc
+	//     comment) and lets the orchestrator's existing restart policy
+	//     rebind the socket fresh -- self-healing, typically within one
+	//     restart cycle, with no operator required to notice a log line
+	//     first.
+	//   - Contrast with why multiRunner DOES recover its members (see its
+	//     own doc comment): a dead ingest pool or sync scheduler degrades
+	//     a non-security-critical feature (search staleness, sync lag)
+	//     that a restart cannot repair any faster than draining and
+	//     retrying already does, so trading a total outage for a partial
+	//     one is a clear win there. The policy socket has the opposite
+	//     shape: it is the sole enforcement point for git push policy, its
+	//     failure is already 100% user-visible (every push fails, not a
+	//     quiet background degradation), and a crash-triggered restart
+	//     genuinely repairs it faster than any operator can. This mirrors
+	//     bindUnixSocket's own STARTUP-time argument (server.go, same
+	//     hooksocket package) for the identical trade in the other
+	//     direction: "A loud, immediate ... failure is far preferable to a
+	//     policy socket that reports healthy but can never actually be
+	//     reached."
+	//
+	// What an operator observes if this fires: the process exits. Go's
+	// runtime prints the panic value and a goroutine stack trace to
+	// stderr and terminates with a non-zero status -- its default
+	// behavior for any unrecovered panic -- so there is no application
+	// log line to search for, only that crash dump and, once the process
+	// restarts, a fresh "listening"/policy-socket-bound startup sequence
+	// in the logs. TestPolicySocketPanicCrashesTheProcess (serve_test.go)
+	// proves exactly this against a real subprocess.
 	go func() {
 		defer close(policySocketDone)
 		policySocket.Run(policyCtx)
