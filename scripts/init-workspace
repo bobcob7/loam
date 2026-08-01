@@ -23,9 +23,9 @@ the loam CLI effectively. Writes two artifacts into the target directory:
 Both paths are appended to .git/info/exclude (idempotently) if the target
 directory is inside a git repo, so the workspace does not show as dirty.
 
-After writing, runs "loam whoami" (local) and "loam instructions" (a real
-server round-trip) with the composed environment, and reports whether the
-profile actually works.
+After writing, runs "loam whoami --verify" (identity plus a real server
+round-trip confirming the configured role resolves) with the composed
+environment, and reports whether the profile actually works.
 
 Options:
   --server <url>     Loam server base URL (LOAM_SERVER_URL).
@@ -265,25 +265,15 @@ echo "$script_name: wrote $settings_file" >&2
 echo "$script_name: wrote $claude_md_file" >&2
 
 echo "$script_name: verifying profile ..." >&2
-whoami_output="$(cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
-  LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" whoami 2>&1)"
-whoami_status=$?
-if [[ $whoami_status -ne 0 ]]; then
-  echo "$script_name: FAILED - loam whoami (local) exited $whoami_status: $whoami_output" >&2
-  echo "$script_name: files were written but the profile does not work" >&2
-  exit 1
-fi
-echo "$script_name: loam whoami OK: $whoami_output" >&2
-
-instructions_output="$(cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
-  LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" instructions 2>&1)"
-instructions_status=$?
-if [[ $instructions_status -ne 0 ]]; then
-  echo "$script_name: FAILED - loam instructions (server round-trip) exited $instructions_status: $instructions_output" >&2
-  echo "$script_name: the server at $server was unreachable or rejected the profile" >&2
+verify_output="$(cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
+  LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" whoami --verify 2>&1)"
+verify_status=$?
+if [[ $verify_status -ne 0 ]]; then
+  echo "$script_name: FAILED - loam whoami --verify exited $verify_status: $verify_output" >&2
+  echo "$script_name: the server at $server was unreachable, or rejected the role \"$role\"" >&2
   echo "$script_name: files were written to $target_dir but the profile does not work yet" >&2
   exit 1
 fi
 
-echo "$script_name: loam instructions OK - server round-trip succeeded" >&2
+echo "$script_name: loam whoami --verify OK: $verify_output" >&2
 echo "$script_name: profile verified and working in $target_dir" >&2
