@@ -47,7 +47,7 @@ func TestForgejoValidateTokenAgainstFake(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
 	srv.AddToken("full-token")
-	srv.AddTokenWithoutPRScope("push-only-token")
+	srv.AddReadOnlyToken("read-only-token")
 	client := newForgejoClient()
 
 	t.Run("a fully scoped token validates", func(t *testing.T) {
@@ -65,7 +65,7 @@ func TestForgejoValidateTokenAgainstFake(t *testing.T) {
 	})
 	t.Run("a token missing PR scope is ErrInsufficientScope", func(t *testing.T) {
 		t.Parallel()
-		err := client.ValidateToken(t.Context(), ts.URL, "push-only-token")
+		err := client.ValidateToken(t.Context(), ts.URL, "read-only-token")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrInsufficientScope)
 		assert.NotErrorIs(t, err, forge.ErrInvalidToken,
@@ -106,14 +106,14 @@ func TestForgejoScopeProbeWireContract(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
 	srv.AddToken("full-token")
-	srv.AddTokenWithoutPRScope("push-only-token")
+	srv.AddReadOnlyToken("read-only-token")
 	for _, tc := range []struct {
 		name       string
 		token      string
 		wantStatus int
 	}{
 		{"unregistered token", "never-issued-token", http.StatusUnauthorized},
-		{"token without PR scope", "push-only-token", http.StatusForbidden},
+		{"token without PR scope", "read-only-token", http.StatusForbidden},
 		{"fully scoped token", "full-token", http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,8 +138,8 @@ func TestForgejoScopeProbeWireContract(t *testing.T) {
 func TestForgejoScopeProbeChecksScopeBeforeResolvingTheRepo(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
-	srv.AddTokenWithoutPRScope("push-only-token")
-	resp := postProbe(t, ts.URL, "push-only-token")
+	srv.AddReadOnlyToken("read-only-token")
+	resp := postProbe(t, ts.URL, "read-only-token")
 	defer func() { assert.NoError(t, resp.Body.Close()) }()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode,
 		"the scope verdict must win over the nonexistent repo, or an underscoped token would validate")

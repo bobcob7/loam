@@ -61,13 +61,15 @@ func TestClientValidateTokenEmptyTokenIsForgeErrInvalidToken(t *testing.T) {
 // empirically against a real Forgejo 9.0.3 instance that a 403 (wrong
 // scope) and a 401 (no auth) are genuinely different wire responses
 // (loam-1ao) — so the fake must match on that same class, not fold it
-// into ErrInvalidToken.
+// into ErrInvalidToken. A read-only token is the reachable way to produce
+// this on the fake (loam-2uy: push and PR-opening share one scope, so
+// there is no token that authenticates, can push, yet lacks PR scope).
 func TestClientValidateTokenMissingPRScopeIsForgeErrInsufficientScope(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
-	srv.AddTokenWithoutPRScope("push-only-token")
-	client := NewClient(ts.URL, "push-only-token")
-	err := client.ValidateToken(t.Context(), "example.invalid", "push-only-token")
+	srv.AddReadOnlyToken("read-only-token")
+	client := NewClient(ts.URL, "read-only-token")
+	err := client.ValidateToken(t.Context(), "example.invalid", "read-only-token")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, forge.ErrInsufficientScope)
 	assert.NotErrorIs(t, err, forge.ErrInvalidToken, "a scope failure must not also read as an auth failure")

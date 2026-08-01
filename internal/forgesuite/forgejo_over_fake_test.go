@@ -48,18 +48,15 @@ func TestProviderContract_ForgejoOverFake(t *testing.T) {
 	Run(t, newForgejoOverFakeHarness(t))
 }
 
-// forgejoOverFakeTokens are the four credentials this leg's fakeforge.Server
-// registers, one per TokenKind -- the same registrations
+// forgejoOverFakeTokens are the three credentials this leg's
+// fakeforge.Server registers, one per TokenKind -- the same registrations
 // TestProviderContract_FakeForge's fakeHarness makes, since both legs are
-// backed by the SAME fake token model (fakeforge/server.go's
-// tokenScope: canPush and canPR as independent axes, distinct from real
-// Forgejo's single write:repository scope -- see the package doc's "one
-// further divergence").
+// backed by the SAME fake token model (fakeforge/server.go's tokenScope: a
+// single write:repository-shaped axis, matching real Forgejo -- loam-2uy).
 const (
-	forgejoOverFakeTokenFull       = "contract-over-fake-full-token"
-	forgejoOverFakeTokenNoGitWrite = "contract-over-fake-read-only-token"
-	forgejoOverFakeTokenNoPRScope  = "contract-over-fake-no-pr-scope-token"
-	forgejoOverFakeTokenBogus      = "contract-over-fake-never-issued-token"
+	forgejoOverFakeTokenFull     = "contract-over-fake-full-token"
+	forgejoOverFakeTokenReadOnly = "contract-over-fake-read-only-token"
+	forgejoOverFakeTokenBogus    = "contract-over-fake-never-issued-token"
 )
 
 // forgejoOverFakeHarness drives the contract against internal/fakeforge's
@@ -87,8 +84,7 @@ func newForgejoOverFakeHarness(t *testing.T) *forgejoOverFakeHarness {
 	t.Cleanup(ts.Close)
 	server.SetBaseURL(ts.URL)
 	server.AddToken(forgejoOverFakeTokenFull)
-	server.AddReadOnlyToken(forgejoOverFakeTokenNoGitWrite)
-	server.AddTokenWithoutPRScope(forgejoOverFakeTokenNoPRScope)
+	server.AddReadOnlyToken(forgejoOverFakeTokenReadOnly)
 	return &forgejoOverFakeHarness{server: server, http: ts, client: &http.Client{}}
 }
 
@@ -104,10 +100,8 @@ func (h *forgejoOverFakeHarness) Token(t *testing.T, kind TokenKind) string {
 	switch kind {
 	case TokenFull:
 		return forgejoOverFakeTokenFull
-	case TokenNoGitWrite:
-		return forgejoOverFakeTokenNoGitWrite
-	case TokenNoPRScope:
-		return forgejoOverFakeTokenNoPRScope
+	case TokenReadOnly:
+		return forgejoOverFakeTokenReadOnly
 	case TokenBogus:
 		return forgejoOverFakeTokenBogus
 	}

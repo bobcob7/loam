@@ -101,45 +101,39 @@ func (s *Server) GitURL(repoName string) string {
 	return fmt.Sprintf("%s%s/%s.git", s.baseURL, gitPathPrefix, strings.Trim(repoName, "/"))
 }
 
-// tokenScope models the two independent axes a real forge token's scopes
-// can vary on (docs/sync-spec.md → Upstream Transport: "a token's REST
-// scopes don't prove its git scopes"): whether it can push over git, and
-// whether it can open PRs over the provider REST surface. A token missing
-// PR scope can still authenticate (ValidateToken's "the token works" half)
-// but fails the "has the scopes needed to open PRs" half.
+// tokenScope models a real forge token's scope as a SINGLE axis: whether
+// it carries write:repository. Earlier this modeled push (git) and
+// PR-opening (REST) as two independent bools -- loam-2uy found, verified
+// live against Forgejo 9.0.3, that they are not independent there. Git
+// push over HTTPS (the git-receive-pack ref advertisement) and
+// POST .../pulls are gated on the identical write:repository scope: a
+// read:repository token gets 403 on both, not one. There is no scope
+// configuration that grants one and withholds the other, so a token
+// either has write:repository (full push AND PR-opening) or it doesn't
+// (neither).
 type tokenScope struct {
-	canPush bool
-	canPR   bool
+	canWrite bool
 }
 
-// AddToken registers token as valid, with full push and PR-opening scope,
-// for both git smart-HTTP basic auth and the provider REST API's
-// Authorization header.
+// AddToken registers token as valid, with write:repository scope: full
+// push and PR-opening access, for both git smart-HTTP basic auth and the
+// provider REST API's Authorization header.
 func (s *Server) AddToken(token string) {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	s.tokens[token] = tokenScope{canPush: true, canPR: true}
+	s.tokens[token] = tokenScope{canWrite: true}
 }
 
-// AddReadOnlyToken registers token as valid for reads (git-upload-pack,
-// ValidateToken) but denied for writes (git-receive-pack, CheckRepo's write
-// probe), mirroring a real forge token missing push scope so callers can
-// exercise the read-ok-write-denied distinction from sync-spec's Upstream
-// Transport section without a real forge.
+// AddReadOnlyToken registers token as valid for reads (git-upload-pack)
+// but lacking write:repository scope, so it is denied for BOTH writes
+// (git-receive-pack, CheckRepo's write probe) AND PR-opening
+// (ValidateToken, the provider REST surface) -- mirroring a real
+// read:repository-scoped forge token (loam-2uy), which fails identically
+// on both surfaces rather than succeeding on one and failing the other.
 func (s *Server) AddReadOnlyToken(token string) {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	s.tokens[token] = tokenScope{canPush: false, canPR: true}
-}
-
-// AddTokenWithoutPRScope registers token as valid and able to push, but
-// missing the REST scope needed to open PRs, so ValidateToken can exercise
-// "the token authenticates but lacks the scopes needed to open PRs" without
-// a real forge.
-func (s *Server) AddTokenWithoutPRScope(token string) {
-	s.tokMu.Lock()
-	defer s.tokMu.Unlock()
-	s.tokens[token] = tokenScope{canPush: true, canPR: false}
+	s.tokens[token] = tokenScope{canWrite: false}
 }
 
 // hasToken reports whether token was registered with any of the Add*Token
@@ -151,21 +145,25 @@ func (s *Server) hasToken(token string) bool {
 	return ok
 }
 
-// tokenReadOnly reports whether token is registered without push scope. It
+// tokenReadOnly reports whether token is registered without write scope. It
 // assumes hasToken(token) is already true; an unregistered token reads as
 // full access here since callers gate on hasToken first.
 func (s *Server) tokenReadOnly(token string) bool {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	return !s.tokens[token].canPush
+	return !s.tokens[token].canWrite
 }
 
 // tokenHasPRScope reports whether token is registered with PR-opening
-// scope. It assumes hasToken(token) is already true.
+// scope. It assumes hasToken(token) is already true. This is now the same
+// underlying bit tokenReadOnly reads (see tokenScope's doc comment): kept
+// as a separate, named predicate because callers (handleValidateToken,
+// requireForgejoWriteScope) each read it for a distinct REST surface, not
+// because it is a distinct axis.
 func (s *Server) tokenHasPRScope(token string) bool {
 	s.tokMu.Lock()
 	defer s.tokMu.Unlock()
-	return s.tokens[token].canPR
+	return s.tokens[token].canWrite
 }
 
 func (s *Server) newMux() *http.ServeMux {

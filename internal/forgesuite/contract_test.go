@@ -63,15 +63,17 @@
 // URL. loam-6n3 added the guard to the fake, so this is now asserted below
 // as CheckRepo/BoundHostMismatchIsRejected rather than excluded.
 //
-// One further divergence is absorbed by the harnesses rather than excluded,
-// and is worth knowing about when reading Token: the fake models a token's
-// git-push scope and its PR-opening scope as INDEPENDENT axes, while
-// Forgejo 9.0.3 gates both on the same write:repository scope (verified
-// live). So TokenNoGitWrite and TokenNoPRScope are two separate
-// registrations against the fake and ONE read:repository token against
-// Forgejo. Every row below holds on both readings; the underlying
-// difference — a read-only fake token passes ValidateToken where its real
-// counterpart would not — is filed as loam-2uy.
+// A divergence used to be absorbed by the harnesses rather than excluded
+// here: the fake modeled a token's git-push scope and its PR-opening scope
+// as INDEPENDENT axes (TokenNoGitWrite and TokenNoPRScope, two separate
+// registrations), while Forgejo 9.0.3 gates both on the same
+// write:repository scope (verified live) — one read:repository token,
+// denied on both. loam-2uy collapsed the fake's model to match: there is
+// now a single TokenReadOnly, reachable on every leg with one registration,
+// and ValidateToken/ReadOnlyTokenIsInsufficientScope below asserts it fails
+// ValidateToken exactly as CheckRepo/ReadOnlyTokenIsNoWriteAccess asserts it
+// fails the git write probe — the row that would have caught the drift had
+// it existed before.
 package forgesuite
 
 import (
@@ -89,25 +91,27 @@ import (
 	"github.com/bobcob7/loam/internal/forge"
 )
 
-// TokenKind names the four credential shapes the contract needs. A Harness
-// maps each onto whatever its forge can actually issue; two kinds may map
-// to the same underlying token where the forge cannot separate them (real
-// Forgejo gates git push and PR creation on the SAME write:repository
-// scope, so its TokenNoGitWrite and TokenNoPRScope are one read:repository
-// token — verified live against Forgejo 9.0.3).
+// TokenKind names the three credential shapes the contract needs. A
+// Harness maps each onto whatever its forge can actually issue.
+//
+// TokenNoGitWrite and TokenNoPRScope used to be two separate kinds here,
+// on the premise that a forge could grant git push without PR-opening
+// scope or vice versa. loam-2uy verified live against Forgejo 9.0.3 that
+// it cannot: both are gated on the identical write:repository scope, so
+// there is exactly one reachable "authenticates but lacks write access"
+// token, not two — TokenReadOnly.
 type TokenKind int
 
 const (
 	// TokenFull authenticates and carries every scope the Provider needs:
 	// git read, git push, and PR creation.
 	TokenFull TokenKind = iota
-	// TokenNoGitWrite authenticates and can read over git, but is denied on
-	// git push — CheckRepo's ErrNoWriteAccess case, i.e. credentials.feature's
-	// "A token without git access fails enrollment".
-	TokenNoGitWrite
-	// TokenNoPRScope authenticates but lacks the scope CreatePR needs —
-	// ValidateToken's ErrInsufficientScope case.
-	TokenNoPRScope
+	// TokenReadOnly authenticates and can read over git, but lacks
+	// write:repository scope, so it is denied identically on git push
+	// (CheckRepo's ErrNoWriteAccess case) and on PR-opening
+	// (ValidateToken's ErrInsufficientScope case) — verified live against
+	// Forgejo 9.0.3 (loam-2uy).
+	TokenReadOnly
 	// TokenBogus is a well-formed token string the forge has never issued.
 	TokenBogus
 )
@@ -116,10 +120,8 @@ func (k TokenKind) String() string {
 	switch k {
 	case TokenFull:
 		return "full"
-	case TokenNoGitWrite:
-		return "no-git-write"
-	case TokenNoPRScope:
-		return "no-pr-scope"
+	case TokenReadOnly:
+		return "read-only"
 	case TokenBogus:
 		return "bogus"
 	}
@@ -224,9 +226,16 @@ var contractCases = []contractCase{
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrInvalidToken)
 	}},
-	{"ValidateToken/UnscopedTokenIsInsufficientScope", func(t *testing.T, e *env) {
+	{"ValidateToken/ReadOnlyTokenIsInsufficientScope", func(t *testing.T, e *env) {
+		// This is the row loam-2uy added: before it, nothing in the
+		// contract asserted that the SAME token CheckRepo/
+		// ReadOnlyTokenIsNoWriteAccess proves is denied git push also fails
+		// ValidateToken -- the fake modeled those as reachable independently
+		// (AddReadOnlyToken kept PR scope), which real Forgejo 9.0.3 cannot
+		// produce (verified live: a read:repository token 403s identically
+		// on the git-receive-pack advertisement and on POST .../pulls).
 		p := e.provider(t, TokenFull)
-		err := p.ValidateToken(t.Context(), e.h.Host(t), e.h.Token(t, TokenNoPRScope))
+		err := p.ValidateToken(t.Context(), e.h.Host(t), e.h.Token(t, TokenReadOnly))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrInsufficientScope)
 		assert.NotErrorIs(t, err, forge.ErrInvalidToken, "a scope failure must not also read as an auth failure")
@@ -246,7 +255,7 @@ var contractCases = []contractCase{
 	}},
 	{"CheckRepo/ReadOnlyTokenIsNoWriteAccess", func(t *testing.T, e *env) {
 		repo := e.h.SeedRepo(t)
-		err := e.provider(t, TokenNoGitWrite).CheckRepo(t.Context(), repo.GitURL)
+		err := e.provider(t, TokenReadOnly).CheckRepo(t.Context(), repo.GitURL)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrNoWriteAccess)
 		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "the read probe passed, so this is not a missing repo")
@@ -314,7 +323,7 @@ var contractCases = []contractCase{
 		// case asserts the PROBE's verdict, this one asserts the verdict is
 		// true — a real push with the same credential is actually refused.
 		repo := e.h.SeedRepo(t)
-		dir := cloneWithProviderCredentials(t, e, TokenNoGitWrite, repo)
+		dir := cloneWithProviderCredentials(t, e, TokenReadOnly, repo)
 		makeSyntheticBranch(t, dir, repo, "wb-denied")
 		out, err := tryGit(t, dir, "push", "origin", "refs/heads/wb-denied:refs/heads/wb-denied")
 		assert.Error(t, err, "a token without push scope must not be able to push: %s", out)
