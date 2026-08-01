@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/rolestore"
 )
 
 // Capability names one operation in the fixed capability vocabulary
@@ -118,7 +119,12 @@ func NewCapabilityChecker(roles RoleStore) *CapabilityChecker {
 // /loam.v1.* request lacking one, so this branch only matters if some
 // future wrapper other than CLI ever reaches a handler without resolving
 // an identity first), gets an error wrapping ErrPermissionDenied
-// (-> connect.CodePermissionDenied via ErrorMapper.ToConnectErr).
+// (-> connect.CodePermissionDenied via ErrorMapper.ToConnectErr). So does an
+// agent presenting a role the store does not recognize at all (loam-a8z):
+// rolestore.ErrNotFound is rewrapped as ErrPermissionDenied rather than
+// left to ErrorMapper's unmapped-and-logged CodeInternal default, which
+// otherwise told the caller nothing and the operator only "internal
+// error", for what is genuinely just a bad Loam-Agent-Role header.
 func (c *CapabilityChecker) RequireCapability(ctx context.Context, capability Capability) error {
 	if !capability.Valid() {
 		return fmt.Errorf("capability %s: %w", capability, errUnknownCapability)
@@ -132,6 +138,9 @@ func (c *CapabilityChecker) RequireCapability(ctx context.Context, capability Ca
 	}
 	granted, err := c.roles.RoleCapabilities(ctx, identity.Role)
 	if err != nil {
+		if errors.Is(err, rolestore.ErrNotFound) {
+			return fmt.Errorf("resolving capabilities for role %s: %w: %w", identity.Role, err, ErrPermissionDenied)
+		}
 		return fmt.Errorf("resolving capabilities for role %s: %w", identity.Role, err)
 	}
 	if slices.Contains(granted, capability) {

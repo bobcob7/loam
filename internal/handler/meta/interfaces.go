@@ -26,7 +26,14 @@ import (
 // the fixed capability vocabulary (0001_init.up.sql), so every value
 // RoleCapabilities returns is already a valid handler.Capability.
 type RoleStore interface {
-	// RoleCapabilities returns the operations granted to role.
+	// RoleCapabilities returns the operations granted to role. An unknown
+	// role returns an error wrapping internal/rolestore.ErrNotFound (as
+	// internal/rolestore.Store.GetRole does); resolveCaller (meta.go)
+	// specifically recognizes that and rewraps it as
+	// handler.ErrPermissionDenied -- an unrecognized role is a denial, not
+	// a not-found (loam-a8z) -- rather than letting it reach
+	// ErrorMapper's unmapped-and-logged CodeInternal default. Any OTHER
+	// error is forwarded unchanged.
 	RoleCapabilities(ctx context.Context, role string) ([]handler.Capability, error)
 	// RoleInstructions returns the instructions text configured for role
 	// (roles.instructions, docs/persistence-spec.md "roles"), empty until
