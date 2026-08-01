@@ -156,6 +156,19 @@ func EnforceBudget(ctx context.Context, logger *slog.Logger, file string, units 
 	return out, result
 }
 
+// SplitUnit is splitUnit exported for internal/ingest/vectors (loam-c94.16):
+// when an embed call rejects a chunk that this package's own byte-budget
+// estimate missed -- a genuine token-density outlier (dense JSON, base64),
+// not a bug in the estimate, see bytesPerTokenBudget's doc comment -- the
+// caller needs the exact same lossless, line-granularity, rune-boundary-safe
+// splitting EnforceBudget already uses, reacting to the embedder's own
+// rejection instead of re-guessing a byte/token ratio. Reusing this function
+// rather than duplicating its logic is the point: there is exactly one
+// definition of "how to cut a chunk without corrupting it" in this codebase.
+func SplitUnit(u Unit, budget int) []Unit {
+	return splitUnit(u, budget)
+}
+
 // splitUnit splits u's content into sequential pieces that each fit
 // within budget, greedily accumulating whole lines per piece and
 // hard-splitting any single line that alone exceeds budget.
