@@ -53,15 +53,47 @@ and the format agents should parse. `LOAM_OUTPUT_FORMAT` (see Environment Variab
 format: `json` (default), `yaml`, `xml`, or `human` for interactive use. An unrecognized
 value falls back to `json`. This applies globally to every command.
 
+### Help
+
+`loam help`, `loam --help`/`-h`, and `loam <command> [<subcommand>] --help`/`-h` print
+usage and exit `0`. Unlike every other route through the CLI, **help never requires any
+`LOAM_*` environment variable** — it is what an agent runs precisely because it does not
+know the configuration yet, so it cannot be gated behind config the way every other
+command legitimately is.
+
+- `loam help` / `loam --help` / `loam -h` (no command given, or a bare help token as the
+  first argument) print a static, unfiltered listing of every top-level command (and, for
+  a group like `work` or `graph`, its subcommands), one line each with its summary. This
+  listing is **not** filtered to the caller's role — it cannot be, since it runs before
+  any identity is resolved — so it explicitly names `loam instructions` as the authority
+  on which of these a given role may actually use.
+- `loam <command> [<subcommand>] --help`/`-h` (a help token anywhere among that command's
+  own arguments — flags may appear anywhere, see Argument Ordering above) prints that one
+  command's usage: its summary and its registered flags, rendered from the same
+  `pflag.FlagSet` the real command parses with, so the two can never drift apart. It does
+  **not** print a positional-argument synopsis (e.g. the shape of `work set`'s `[repo]
+  [work-branch]`) — that has no single shared source to render from without maintaining a
+  second, driftable copy per command; this document and `loam instructions <command>`
+  remain the one place each command's full argument shape is written down.
+- `loam <group> --help`/`-h`/`help` (e.g. `loam work --help`) lists that group's
+  subcommands the same way the top-level listing does. A bare `loam work` with no
+  subcommand and no help token is unaffected by any of this — it is still the usual usage
+  error (exit `2`, "work requires a subcommand"), not an implicit help listing.
+
+Help output is always plain text on stdout, regardless of `LOAM_OUTPUT_FORMAT` — it is
+usage guidance, not a data payload for an agent to parse in a chosen structured format.
+
 ### Environment Variables
 
 The complete set of environment variables the CLI reads. All are **required except
-`LOAM_OUTPUT_FORMAT`**. Identity & role feed the authorization model described in README → Agent
-Identity & Roles. Names are provisional.
+`LOAM_OUTPUT_FORMAT`**, with one further exception: `whoami` without `--verify` does not
+require `LOAM_SERVER_URL` (see `whoami` below — "Local only, no server call" means exactly
+that). Identity & role feed the authorization model described in README → Agent Identity &
+Roles. Names are provisional.
 
 | Variable | Purpose | Required | Default |
 | --- | --- | --- | --- |
-| `LOAM_SERVER_URL` | Base URL of the Loam server — the Connect APIs and the git smart-HTTP endpoint (`clone` composes `<LOAM_SERVER_URL>/git/<group>/<repo>.git`). A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes | — |
+| `LOAM_SERVER_URL` | Base URL of the Loam server — the Connect APIs and the git smart-HTTP endpoint (`clone` composes `<LOAM_SERVER_URL>/git/<group>/<repo>.git`). A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes, except bare `whoami` | — |
 | `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes | — |
 | `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes | — |
 | `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes | — |
@@ -71,6 +103,11 @@ On the wire, the `LOAM_AGENT_*` values travel as the request headers `Loam-Agent
 `Loam-Agent-Id`, and `Loam-Agent-Role` — attached by the CLI to every RPC, and written
 into a clone's git config by `clone` so plain git carries them too (see
 `docs/git-spec.md`).
+
+Every applicable missing or malformed required variable is reported together in one run,
+not one per run: the CLI validates all of them before failing, so an operator setting up a
+fresh workspace with nothing configured at all learns everything wrong from a single
+invocation.
 
 ### Exit Codes & Errors
 

@@ -1,10 +1,26 @@
 package cli
 
 import (
+	"errors"
 	"io"
 
 	"github.com/spf13/pflag"
 )
+
+// errHelpRequested replaces pflag.ErrHelp at the parse site (see
+// parseCommandArgs) so a caller's `return newUsageError(err.Error())` never
+// surfaces pflag's own internal sentinel text ("pflag: help requested") to
+// an agent (loam-q0ek). help.go's TryHelp is the actual fix -- it
+// recognizes every documented `-h`/`--help` route from argv alone, before
+// main() ever builds a Deps or dispatches to a handler, so a handler's own
+// parseCommandArgs call is not normally reached with a help flag at all in
+// the compiled binary. This sentinel exists purely as defense in depth for
+// any other caller that reaches a handler directly (e.g. a test dispatching
+// the Router without going through TryHelp first): it is a plain sentinel
+// error rather than a *cliError itself because parseCommandArgs's contract
+// is unchanged -- every one of its 16 callers still does its own
+// `newUsageError(err.Error())` -- only what err.Error() reads has changed.
+var errHelpRequested = errors.New(`help requested; run "loam <command> --help" (or "loam help") for usage`)
 
 // newFlagSet builds a per-command pflag.FlagSet. It never touches the global
 // pflag.CommandLine set, and it never prints its own usage or exits the
@@ -30,6 +46,9 @@ func newFlagSet(name string) *pflag.FlagSet {
 // bespoke splitArgs helper.
 func parseCommandArgs(fs *pflag.FlagSet, args []string) ([]string, error) {
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return nil, errHelpRequested
+		}
 		return nil, err
 	}
 	return fs.Args(), nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
@@ -181,9 +182,19 @@ type whoamiOutput struct {
 // whoami before this flag existed: loadConfig (config.go) rejects it and
 // NewProductionDeps (deps.go) reports that as a usage error through the
 // encoder before any Deps -- and therefore any dispatch -- exists.
-func runWhoami(ctx context.Context, deps *Deps, args []string) error {
+// newWhoamiFlags builds the pflag.FlagSet for `loam whoami [--verify]`,
+// plus the parsed --verify value. Factored out (rather than inlined in
+// runWhoami, as it used to be) so router.go's commandTree() can build the
+// same FlagSet with no Deps at all, for `loam whoami --help` (see
+// router.go's command.newFlags and help.go's TryHelp).
+func newWhoamiFlags() (*pflag.FlagSet, *bool) {
 	fs := newFlagSet("whoami")
 	verify := fs.Bool("verify", false, "confirm the configured role resolves on the server (makes a server call; the default is local only)")
+	return fs, verify
+}
+
+func runWhoami(ctx context.Context, deps *Deps, args []string) error {
+	fs, verify := newWhoamiFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
