@@ -49,6 +49,19 @@ func commandNames(commands []*loamv1.CommandInfo) []string {
 	return names
 }
 
+// commandSummary returns the summary of the command named name, failing the
+// test if no such command is present.
+func commandSummary(t *testing.T, commands []*loamv1.CommandInfo, name string) string {
+	t.Helper()
+	for _, c := range commands {
+		if c.GetName() == name {
+			return c.GetSummary()
+		}
+	}
+	t.Fatalf("command %q not found in catalog", name)
+	return ""
+}
+
 // TestGetInstructions_AuthorRole_SeesOnlyGrantedPlusUngatedCommands is the
 // acceptance-critical scenario: roles.feature's "A role's instructions
 // reach its agents" -- a reviewer (here, an author, exercising the
@@ -151,6 +164,34 @@ func TestGetInstructions_AdminSuperuser_SeesEveryCommand(t *testing.T) {
 	assert.Contains(t, commandNames(resp.Msg.GetCommands()), "work verdict")
 	assert.Contains(t, commandNames(resp.Msg.GetCommands()), "work start")
 	assert.Empty(t, resp.Msg.GetRoleInstructions())
+}
+
+// TestGetInstructions_StdinOnlyCommands_SummaryNamesStdin pins loam-92b0's
+// fix: "work set", "work comment", and "work reply" each take part of their
+// input on stdin, which a one-line summary can otherwise hide from an agent
+// until it fails an invocation to discover it (docs/cli-spec.md's set,
+// comment, and reply sections). Mentioning "stdin" in the summary is the
+// contract this guards -- an edit that silently drops it must fail here.
+func TestGetInstructions_StdinOnlyCommands_SummaryNamesStdin(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	store := &meta.RoleStoreMock{
+		RoleCapabilitiesFunc: func(context.Context, string) ([]handler.Capability, error) {
+			t.Fatal("the role store must not be consulted for an admin superuser")
+			return nil, nil
+		},
+		RoleInstructionsFunc: func(context.Context, string) (string, error) {
+			t.Fatal("the role store must not be consulted for an admin superuser")
+			return "", nil
+		},
+	}
+	h := newHandler(store, &buf)
+	resp, err := h.GetInstructions(adminCtx(t), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
+	require.NoError(t, err)
+	commands := resp.Msg.GetCommands()
+	assert.Contains(t, commandSummary(t, commands, "work set"), "stdin")
+	assert.Contains(t, commandSummary(t, commands, "work comment"), "stdin")
+	assert.Contains(t, commandSummary(t, commands, "work reply"), "stdin")
 }
 
 // TestGetInstructions_NoResolvedCaller_ReturnsPermissionDenied is the
