@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# init-workspace prepares a directory so a Claude Code instance started
+# there can drive the loam CLI effectively: it writes an agent-identity
+# env block into .claude/settings.local.json and a CLAUDE.local.md
+# briefing, then verifies the profile actually works against the server.
+set -euo pipefail
+
+script_name="$(basename "$0")"
+
+usage() {
+  cat <<'EOF'
+Usage: init-workspace [OPTIONS]
+
+Prepares a directory so a Claude Code instance started there can drive
+the loam CLI effectively. Writes two artifacts into the target directory:
+
+  .claude/settings.local.json   an "env" block with LOAM_SERVER_URL,
+                                 LOAM_AGENT_NAME, LOAM_AGENT_ID,
+                                 LOAM_AGENT_ROLE (merged, not clobbered,
+                                 if the file already exists)
+  CLAUDE.local.md                a briefing on the loam CLI's sharp edges
+
+Both paths are appended to .git/info/exclude (idempotently) if the target
+directory is inside a git repo, so the workspace does not show as dirty.
+
+After writing, runs "loam whoami" (local) and "loam instructions" (a real
+server round-trip) with the composed environment, and reports whether the
+profile actually works.
+
+Options:
+  --server <url>     Loam server base URL (LOAM_SERVER_URL).
+                      Default: $LOAM_SERVER_URL if set.
+  --name <name>      Agent name, "<first>-<last>" (LOAM_AGENT_NAME).
+                      Default: $LOAM_AGENT_NAME if set.
+  --id <id>          Agent ID (LOAM_AGENT_ID).
+                      Default: $LOAM_AGENT_ID if set.
+  --role <role>      Agent role (LOAM_AGENT_ROLE). Default: "author",
+                      or $LOAM_AGENT_ROLE if set.
+  --dir <path>       Target directory to initialize. Default: ".".
+                      With --repo, this is the workspace root the clone
+                      is created under; the artifacts land inside the
+                      clone itself, not this directory.
+  --repo <group/name> Enrolled repo identifier to "loam clone" first,
+                      initializing inside the resulting clone directory
+                      instead of --dir.
+  --branch <branch>  Branch to check out when --repo is given (passed to
+                      "loam clone <repo> <branch>"). Default: "main".
+                      Ignored without --repo.
+  -h, --help          Print this help and exit 0.
+
+The loam CLI is located as "loam" on PATH, else "./bin/loam" relative to
+the current directory, else the script fails with instructions to run
+"task build:bin".
+EOF
+}
+
+server=""
+agent_name=""
+agent_id=""
+role="author"
+target_dir="."
+repo=""
+branch="main"
+
+if [[ -n "${LOAM_SERVER_URL:-}" ]]; then server="$LOAM_SERVER_URL"; fi
+if [[ -n "${LOAM_AGENT_NAME:-}" ]]; then agent_name="$LOAM_AGENT_NAME"; fi
+if [[ -n "${LOAM_AGENT_ID:-}" ]]; then agent_id="$LOAM_AGENT_ID"; fi
+if [[ -n "${LOAM_AGENT_ROLE:-}" ]]; then role="$LOAM_AGENT_ROLE"; fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --server) server="${2:?--server requires a value}"; shift 2 ;;
+    --server=*) server="${1#*=}"; shift ;;
+    --name) agent_name="${2:?--name requires a value}"; shift 2 ;;
+    --name=*) agent_name="${1#*=}"; shift ;;
+    --id) agent_id="${2:?--id requires a value}"; shift 2 ;;
+    --id=*) agent_id="${1#*=}"; shift ;;
+    --role) role="${2:?--role requires a value}"; shift 2 ;;
+    --role=*) role="${1#*=}"; shift ;;
+    --dir) target_dir="${2:?--dir requires a value}"; shift 2 ;;
+    --dir=*) target_dir="${1#*=}"; shift ;;
+    --repo) repo="${2:?--repo requires a value}"; shift 2 ;;
+    --repo=*) repo="${1#*=}"; shift ;;
+    --branch) branch="${2:?--branch requires a value}"; shift 2 ;;
+    --branch=*) branch="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "$script_name: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$server" ]]; then
+  echo "$script_name: --server (or \$LOAM_SERVER_URL) is required" >&2
+  exit 2
+fi
+if [[ ! "$server" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+$ ]]; then
+  echo "$script_name: --server does not look like a URL: $server" >&2
+  exit 2
+fi
+if [[ -z "$agent_name" ]]; then
+  echo "$script_name: --name (or \$LOAM_AGENT_NAME) is required" >&2
+  exit 2
+fi
+if [[ -z "$agent_id" ]]; then
+  echo "$script_name: --id (or \$LOAM_AGENT_ID) is required" >&2
+  exit 2
+fi
+if [[ -z "$role" ]]; then
+  echo "$script_name: --role must not be empty" >&2
+  exit 2
+fi
+
+loam_bin=""
+if command -v loam >/dev/null 2>&1; then
+  loam_bin="$(command -v loam)"
+elif [[ -x "./bin/loam" ]]; then
+  # Resolve to an absolute path up front: every invocation below runs in a
+  # subshell that cd's into the target directory first, which would break
+  # a path still relative to the original working directory.
+  loam_bin="$(cd "$(dirname "./bin/loam")" && pwd)/$(basename "./bin/loam")"
+else
+  echo "$script_name: loam CLI not found on PATH or at ./bin/loam" >&2
+  echo "$script_name: build it first with: task build:bin" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "$script_name: jq is required to safely merge .claude/settings.local.json" >&2
+  echo "$script_name: (this script refuses to hand-edit JSON with sed/awk)" >&2
+  exit 1
+fi
+
+mkdir -p "$target_dir"
+
+if [[ -n "$repo" ]]; then
+  repo_name="${repo##*/}"
+  if [[ -z "$repo_name" || "$repo_name" == "$repo" ]]; then
+    echo "$script_name: --repo must look like <group>/<name>, got: $repo" >&2
+    exit 2
+  fi
+  echo "$script_name: cloning $repo at $branch into $target_dir/$repo_name ..." >&2
+  ( cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
+      LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" clone "$repo" "$branch" )
+  target_dir="$target_dir/$repo_name"
+fi
+
+settings_file="$target_dir/.claude/settings.local.json"
+claude_md_file="$target_dir/CLAUDE.local.md"
+
+mkdir -p "$target_dir/.claude"
+
+tmp_settings="$(mktemp)"
+trap 'rm -f "$tmp_settings"' EXIT
+
+if [[ -f "$settings_file" ]]; then
+  if ! jq empty "$settings_file" 2>/dev/null; then
+    echo "$script_name: $settings_file exists but is not valid JSON; refusing to touch it" >&2
+    exit 1
+  fi
+  jq --arg server "$server" --arg name "$agent_name" --arg id "$agent_id" --arg role "$role" \
+    '.env = ((.env // {}) + {
+       LOAM_SERVER_URL: $server,
+       LOAM_AGENT_NAME: $name,
+       LOAM_AGENT_ID: $id,
+       LOAM_AGENT_ROLE: $role
+     })' "$settings_file" > "$tmp_settings"
+else
+  jq -n --arg server "$server" --arg name "$agent_name" --arg id "$agent_id" --arg role "$role" \
+    '{env: {
+       LOAM_SERVER_URL: $server,
+       LOAM_AGENT_NAME: $name,
+       LOAM_AGENT_ID: $id,
+       LOAM_AGENT_ROLE: $role
+     }}' > "$tmp_settings"
+fi
+mv "$tmp_settings" "$settings_file"
+trap - EXIT
+
+cat > "$claude_md_file" <<'EOF'
+# Loam Agent Workspace Notes
+
+Local, personal context for driving `loam` from this directory. Not
+checked in (see `.git/info/exclude`) and never overwrites `CLAUDE.md`.
+
+- **Orient first**: `loam instructions` — role-filtered (an author and a
+  reviewer see different command lists) and makes a real server call.
+  `loam whoami` is local only, no server call — safe to run anytime to
+  sanity-check identity.
+- **No `loam commit` / `loam push`.** After `loam clone`, source control
+  is plain `git` — commit, push, fetch, merge, pull. The server
+  authorizes each push at receive time against the identity baked into
+  the clone's git config; there is no client-side hook guard.
+- **Plain `git clone` against the server does not work** — no ambient
+  credentials, it fails with `could not read Username`. Always bootstrap
+  with `loam clone <repo> <branch>`; it wires the remote, the
+  `remote.origin.push`/`fetch` refspecs (load-bearing — without them a
+  hand-rolled clone can't push even with the right identity), and the
+  git author identity, so plain `git push` works afterwards.
+- **`--help` is broken** (`loam-q0ek`): it exits 2 with
+  `{"error":{"code":"usage","message":"pflag: help requested"}}` (or, at
+  the top level, `unknown command "--help"`). To learn a command's flags,
+  run the bare subcommand and read the usage error, or use
+  `loam instructions <command>`.
+- **Identifying an existing work branch is positional**: `<repo>
+  <work-branch>`, e.g. `loam work show acme/repo wb-1`. Both are inferred
+  (and may be omitted) when run inside a clone — repo from the directory
+  name, work branch from the current git branch. There is no
+  `--repo`/`--branch` pair for *identifying* a work branch. (`work list`,
+  `graph`, and `search` are the exception: they take `--repo <repo>` as a
+  scope *filter*, not an identifier.)
+- **Several inputs are stdin-only, not flags**: `work set`'s description,
+  and the body for `work comment` / `work reply`. `work set --description`
+  does not exist — title is `--title`, description always comes from
+  stdin (empty stdin leaves it unchanged). `work verdict` takes no body
+  of its own: it just publishes whatever is already staged via
+  `work comment`, tagged with `--outcome`.
+- **`work show`'s `state` is workflow position, not verdict outcome**
+  (`loam-o718`): the *first* non-stale verdict of a round — approve,
+  disapprove, or neutral alike — flips `reviewable` → `reviewed`. A
+  disapprove still reads `reviewed`. Check `loam work verdicts` for the
+  actual outcome.
+- **Exit codes**: `0` success, `1` unexpected internal error, `2`
+  usage/authorization/conflict/precondition-failed, `3` not found. The
+  `error.code` field (e.g. `usage`, `unauthorized`, `conflict`,
+  `precondition_failed`) narrows within the `2` class.
+- **Roles gate commands** — an author cannot submit a verdict, a
+  reviewer cannot `work start` or push (no work branch of their own to
+  push to); accepting a proposal into an upstream PR is admin-only,
+  reachable through neither role.
+- **Author loop**: `loam work start <repo> <target>` (server-side, no
+  local checkout yet) → `loam clone <repo> <work-branch-name>` → edit →
+  `git commit` → `git push` → `loam work set --title "..."` (description
+  on stdin) → `loam work request-review`.
+- **Reviewer loop**: `loam work diff` / `loam work show` to read →
+  `loam work comment` (stages locally, invisible to others) →
+  `loam work verdict --outcome <approve|disapprove|neutral>` (publishes
+  every staged comment for this work branch atomically, as one verdict).
+- `loam graph <subquery> <target>` (`def`/`refs`/`deps`/`dependents`/
+  `history`) and `loam search <query>` give code intelligence over the
+  indexed repo(s); both take `--repo`/`--all` for scope and default to
+  the repo inferred from the current directory.
+EOF
+
+git_dir="$(git -C "$target_dir" rev-parse --git-dir 2>/dev/null || true)"
+if [[ -n "$git_dir" ]]; then
+  work_tree="$(git -C "$target_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  # show-prefix is the path from the worktree root down to $target_dir
+  # (with a trailing slash, empty when $target_dir is the root itself) --
+  # portable across GNU and BSD userlands, unlike "realpath --relative-to".
+  prefix="$(git -C "$target_dir" rev-parse --show-prefix 2>/dev/null || true)"
+  if [[ -n "$work_tree" ]]; then
+    exclude_file="$work_tree/.git/info/exclude"
+    mkdir -p "$(dirname "$exclude_file")"
+    touch "$exclude_file"
+    for entry in "${prefix}.claude/settings.local.json" "${prefix}CLAUDE.local.md"; do
+      if ! grep -qxF "$entry" "$exclude_file" 2>/dev/null; then
+        echo "$entry" >> "$exclude_file"
+      fi
+    done
+  fi
+else
+  echo "$script_name: $target_dir is not inside a git repo; skipping .git/info/exclude" >&2
+fi
+
+echo "$script_name: wrote $settings_file" >&2
+echo "$script_name: wrote $claude_md_file" >&2
+
+echo "$script_name: verifying profile ..." >&2
+whoami_output="$(cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
+  LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" whoami 2>&1)"
+whoami_status=$?
+if [[ $whoami_status -ne 0 ]]; then
+  echo "$script_name: FAILED - loam whoami (local) exited $whoami_status: $whoami_output" >&2
+  echo "$script_name: files were written but the profile does not work" >&2
+  exit 1
+fi
+echo "$script_name: loam whoami OK: $whoami_output" >&2
+
+instructions_output="$(cd "$target_dir" && LOAM_SERVER_URL="$server" LOAM_AGENT_NAME="$agent_name" \
+  LOAM_AGENT_ID="$agent_id" LOAM_AGENT_ROLE="$role" "$loam_bin" instructions 2>&1)"
+instructions_status=$?
+if [[ $instructions_status -ne 0 ]]; then
+  echo "$script_name: FAILED - loam instructions (server round-trip) exited $instructions_status: $instructions_output" >&2
+  echo "$script_name: the server at $server was unreachable or rejected the profile" >&2
+  echo "$script_name: files were written to $target_dir but the profile does not work yet" >&2
+  exit 1
+fi
+
+echo "$script_name: loam instructions OK - server round-trip succeeded" >&2
+echo "$script_name: profile verified and working in $target_dir" >&2
