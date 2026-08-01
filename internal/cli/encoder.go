@@ -42,8 +42,15 @@ func newEncoder(format string, w io.Writer) OutputEncoder {
 // jsonEncoder writes v as JSON — the default output format.
 type jsonEncoder struct{ w io.Writer }
 
-// Encode writes v to the underlying writer as JSON.
-func (e *jsonEncoder) Encode(v any) error { return json.NewEncoder(e.w).Encode(v) }
+// Encode writes v to the underlying writer as JSON. SetEscapeHTML(false)
+// keeps <, >, and & literal instead of Go's default HTML-safety escaping
+// — the CLI is not HTML output, and that escaping otherwise mangles error
+// messages and usage text containing placeholders like <repo>.
+func (e *jsonEncoder) Encode(v any) error {
+	enc := json.NewEncoder(e.w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
 
 // toGeneric round-trips v through JSON into a plain map[string]any /
 // []any / json.Number / string / bool / nil tree, so the yaml/xml/human
@@ -53,9 +60,12 @@ func (e *jsonEncoder) Encode(v any) error { return json.NewEncoder(e.w).Encode(v
 // collapsing it to float64: a plain json.Unmarshal into `any` would
 // re-render, say, line 1000000 as "1e+06" and silently lose precision on
 // any integer beyond 2^53 — scalarString below renders a json.Number
-// verbatim via its Stringer.
+// verbatim via its Stringer. marshalNoEscape below disables json.Marshal's
+// default HTML escaping of <, >, and & — json.Marshal itself has no such
+// switch, so this goes through an Encoder writing to a buffer instead, and
+// trims the trailing newline Encode appends that Marshal would not.
 func toGeneric(v any) (any, error) {
-	b, err := json.Marshal(v)
+	b, err := marshalNoEscape(v)
 	if err != nil {
 		return nil, fmt.Errorf("encoding value: %w", err)
 	}
@@ -66,6 +76,20 @@ func toGeneric(v any) (any, error) {
 		return nil, fmt.Errorf("decoding value: %w", err)
 	}
 	return generic, nil
+}
+
+// marshalNoEscape behaves like json.Marshal(v) but with HTML escaping
+// disabled — see toGeneric. json.Marshal has no SetEscapeHTML equivalent,
+// so this drives an Encoder into a buffer instead and trims the trailing
+// newline Encode appends that Marshal does not.
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // yamlEncoder writes v as YAML.
