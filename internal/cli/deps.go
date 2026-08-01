@@ -41,14 +41,26 @@ func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper
 func NewErrorMapper() ErrorMapper { return newErrorMapper() }
 
 // NewProductionDeps builds the real Deps main() injects into the Router:
-// loadConfig's validated LOAM_* configuration, the output encoder it
-// selects, the real error mapper, the real workspace resolver (workspace.go
-// -> newWorkspaceResolver), and the real Connect clients (connect.go ->
+// its validated LOAM_* configuration, the output encoder it selects, the
+// real error mapper, the real workspace resolver (workspace.go ->
+// newWorkspaceResolver), and the real Connect clients (connect.go ->
 // newConnectClient) carrying the agent identity headers. httpClient and in
 // are threaded through explicitly (main() passes http.DefaultClient and
 // os.Stdin) so tests can substitute either one -- an httptest server for
 // httpClient, a fixed reader for in, which `loam work set` reads an
 // optional description from (see commands_work.go's readStdin).
+//
+// args is the command line about to be dispatched (main() passes
+// os.Args[1:], after its own cli.TryHelp check has already ruled out a
+// help route -- see help.go). It decides which config-loading strategy to
+// use via configForArgs: `whoami` alone needs no LOAM_SERVER_URL
+// (docs/cli-spec.md -> whoami: "Local only -- no server call"; loam-dc2v
+// defect 3), every other command still needs the full four-variable
+// config loadConfig requires. This is "require each variable where it is
+// actually used" applied to WHEN AND HOW Deps itself is built, not just a
+// tweak inside config.go -- reordering loadConfig's four requireX calls
+// alone cannot fix this, because NewProductionDeps used to call it
+// unconditionally before Router.Dispatch ever saw args at all.
 //
 // Building any of these can fail before a Deps exists to route the failure
 // through — a missing/malformed required LOAM_* variable is a usage error
@@ -57,9 +69,16 @@ func NewErrorMapper() ErrorMapper { return newErrorMapper() }
 // through the resolved output-format encoder (LOAM_OUTPUT_FORMAT never
 // errors, so the encoder is available independent of the rest of config)
 // before this returns the error for main() to classify via NewErrorMapper.
-func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out io.Writer, in io.Reader) (*Deps, error) {
+//
+// The Connect client is built only when ServerURL() is non-empty. For
+// every command but `whoami` that is always true (loadConfig requires it),
+// so this changes nothing for them; for `whoami` without LOAM_SERVER_URL
+// it leaves deps.connect nil, which is safe because bare whoami never
+// touches it and `--verify` checks ServerURL() itself first (see
+// runWhoami's doc comment in commands_root.go).
+func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out io.Writer, in io.Reader, args []string) (*Deps, error) {
 	encoder := newEncoder(resolveOutputFormat(), out)
-	cfg, err := loadConfig()
+	cfg, err := configForArgs(args)
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
@@ -67,11 +86,27 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 	if err != nil {
 		return nil, reportConstructionError(encoder, err)
 	}
-	connectClient, err := newConnectClient(cfg, httpClient)
-	if err != nil {
-		return nil, reportConstructionError(encoder, err)
+	var connectClient ConnectClient
+	if cfg.ServerURL() != "" {
+		connectClient, err = newConnectClient(cfg, httpClient)
+		if err != nil {
+			return nil, reportConstructionError(encoder, err)
+		}
 	}
 	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in), nil
+}
+
+// configForArgs picks loadConfig or loadIdentityConfig based on the
+// top-level command about to run (see NewProductionDeps's doc comment).
+// Only `whoami` gets the relaxed, identity-only loader; everything else --
+// including an empty/unrecognized args, which will go on to fail
+// Dispatch's own routing checks exactly as before -- goes through the full
+// loadConfig, unchanged from before loam-dc2v.
+func configForArgs(args []string) (*envConfig, error) {
+	if len(args) > 0 && args[0] == "whoami" {
+		return loadIdentityConfig()
+	}
+	return loadConfig()
 }
 
 // reportConstructionError encodes err through encoder in the same

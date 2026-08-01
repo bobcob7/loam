@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+
+	"github.com/spf13/pflag"
 )
 
 // handlerFunc implements one leaf command. args holds everything after the
@@ -12,9 +14,21 @@ type handlerFunc func(ctx context.Context, deps *Deps, args []string) error
 
 // command is one node in the tree: either a leaf with a handler, or a group
 // with subcommands (never both).
+//
+// newFlags is set on every LEAF only (nil on a group like "work"/"graph",
+// which has no flags of its own — dispatchGroup never parses any). It
+// builds that leaf's pflag.FlagSet with no Deps at all, reusing exactly the
+// registrations the real handler makes — either the already-factored
+// newXFlags() helper most handlers already call (e.g. newWorkSetFlags,
+// newGraphQueryFlags), or a bare newFlagSet(name) for the several leaves
+// that take no flags beyond their positionals. help.go's TryHelp is the
+// reason this exists: it renders `loam <command> --help`'s flag usage from
+// this closure alone, entirely before main() ever builds a Deps (see
+// loam-dc2v/loam-q0ek — help must never require LOAM_* configuration).
 type command struct {
 	summary     string
 	run         handlerFunc
+	newFlags    func() *pflag.FlagSet
 	subcommands map[string]*command
 }
 
@@ -68,29 +82,43 @@ func dispatchGroup(ctx context.Context, deps *Deps, groupName string, group *com
 // docs/git-spec.md).
 func commandTree() map[string]*command {
 	return map[string]*command{
-		"instructions": {summary: "Role-specific instructions and CLI usage", run: runInstructions},
-		"whoami":       {summary: "Report the calling agent's resolved identity", run: runWhoami},
-		"clone":        {summary: "Clone an enrolled repo from the server", run: runClone},
+		"instructions": {summary: "Role-specific instructions and CLI usage", run: runInstructions, newFlags: flaglessCommand("instructions")},
+		"whoami":       {summary: "Report the calling agent's resolved identity", run: runWhoami, newFlags: func() *pflag.FlagSet { fs, _ := newWhoamiFlags(); return fs }},
+		"clone":        {summary: "Clone an enrolled repo from the server", run: runClone, newFlags: flaglessCommand("clone")},
 		"work": {summary: "Work branch operations", subcommands: map[string]*command{
-			"start":          {summary: "Start a work branch", run: runWorkStart},
-			"set":            {summary: "Set a work branch's title/description", run: runWorkSet},
-			"request-review": {summary: "Request review of a work branch", run: runWorkRequestReview},
-			"list":           {summary: "List work branches", run: runWorkList},
-			"show":           {summary: "Show a work branch's metadata", run: runWorkShow},
-			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff},
-			"comments":       {summary: "Fetch comment threads or staged comments", run: runWorkComments},
-			"verdicts":       {summary: "List verdicts on a work branch", run: runWorkVerdicts},
-			"comment":        {summary: "Stage a review comment", run: runWorkComment},
-			"reply":          {summary: "Reply to a comment thread", run: runWorkReply},
-			"verdict":        {summary: "Publish staged comments as a verdict", run: runWorkVerdict},
+			"start":          {summary: "Start a work branch", run: runWorkStart, newFlags: flaglessCommand("work start")},
+			"set":            {summary: "Set a work branch's title/description", run: runWorkSet, newFlags: func() *pflag.FlagSet { fs, _ := newWorkSetFlags(); return fs }},
+			"request-review": {summary: "Request review of a work branch", run: runWorkRequestReview, newFlags: flaglessCommand("work request-review")},
+			"list":           {summary: "List work branches", run: runWorkList, newFlags: func() *pflag.FlagSet { fs, _ := newWorkListFlags(); return fs }},
+			"show":           {summary: "Show a work branch's metadata", run: runWorkShow, newFlags: flaglessCommand("work show")},
+			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff, newFlags: flaglessCommand("work diff")},
+			"comments":       {summary: "Fetch comment threads or staged comments", run: runWorkComments, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }},
+			"verdicts":       {summary: "List verdicts on a work branch", run: runWorkVerdicts, newFlags: flaglessCommand("work verdicts")},
+			"comment":        {summary: "Stage a review comment", run: runWorkComment, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }},
+			"reply":          {summary: "Reply to a comment thread", run: runWorkReply, newFlags: func() *pflag.FlagSet { fs, _ := newWorkReplyFlags(); return fs }},
+			"verdict":        {summary: "Publish staged comments as a verdict", run: runWorkVerdict, newFlags: func() *pflag.FlagSet { fs, _ := newWorkVerdictFlags(); return fs }},
 		}},
 		"graph": {summary: "Structural queries over the Tree-sitter graph", subcommands: map[string]*command{
-			"def":        {summary: "Where a symbol is defined", run: runGraphDef},
-			"refs":       {summary: "Everywhere a symbol is referenced", run: runGraphRefs},
-			"deps":       {summary: "What a target depends on", run: runGraphDeps},
-			"dependents": {summary: "What depends on a target", run: runGraphDependents},
-			"history":    {summary: "A symbol's commit/ref history", run: runGraphHistory},
+			"def":        {summary: "Where a symbol is defined", run: runGraphDef, newFlags: graphQueryCommand("graph def")},
+			"refs":       {summary: "Everywhere a symbol is referenced", run: runGraphRefs, newFlags: graphQueryCommand("graph refs")},
+			"deps":       {summary: "What a target depends on", run: runGraphDeps, newFlags: graphQueryCommand("graph deps")},
+			"dependents": {summary: "What depends on a target", run: runGraphDependents, newFlags: graphQueryCommand("graph dependents")},
+			"history":    {summary: "A symbol's commit/ref history", run: runGraphHistory, newFlags: graphQueryCommand("graph history")},
 		}},
-		"search": {summary: "Natural-language semantic search", run: runSearch},
+		"search": {summary: "Natural-language semantic search", run: runSearch, newFlags: func() *pflag.FlagSet { fs, _, _, _ := newSearchFlags(); return fs }},
 	}
+}
+
+// flaglessCommand returns a command's newFlags constructor for a leaf that
+// takes no flags beyond newFlagSet(name) itself -- every leaf whose real
+// handler never registers anything beyond its own bare fs.
+func flaglessCommand(name string) func() *pflag.FlagSet {
+	return func() *pflag.FlagSet { return newFlagSet(name) }
+}
+
+// graphQueryCommand returns a command's newFlags constructor for one of the
+// five `graph` subqueries, all of which share newGraphQueryFlags (see
+// commands_graph.go).
+func graphQueryCommand(name string) func() *pflag.FlagSet {
+	return func() *pflag.FlagSet { fs, _, _, _, _ := newGraphQueryFlags(name); return fs }
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,11 +14,19 @@ import (
 )
 
 func main() {
+	args := os.Args[1:]
+	// Help must never require any LOAM_* configuration (loam-dc2v,
+	// loam-q0ek): TryHelp is resolved from args alone, before
+	// NewProductionDeps ever reads an environment variable.
+	if text, ok := cli.TryHelp(args); ok {
+		fmt.Fprint(os.Stdout, text)
+		os.Exit(0)
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	deps, err := cli.NewProductionDeps(logger, http.DefaultClient, os.Stdout, os.Stdin)
+	deps, err := cli.NewProductionDeps(logger, http.DefaultClient, os.Stdout, os.Stdin, args)
 	if err != nil {
 		os.Exit(cli.NewErrorMapper().ExitCode(err))
 	}
 	router := cli.NewRouter(deps)
-	os.Exit(cli.Run(context.Background(), router, os.Args[1:]))
+	os.Exit(cli.Run(context.Background(), router, args))
 }
