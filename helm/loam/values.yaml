@@ -60,34 +60,48 @@ secret:
   keys:
     # -> loam container LOAM_ADMIN_PASSWORD
     adminPassword: LOAM_ADMIN_PASSWORD
-    # -> loam container LOAM_DATABASE_URL. Full postgres:// DSN, password
-    # inline. When postgres.enabled is true, this DSN's password MUST be
-    # the same credential as secret.keys.postgresPassword below --
-    # Kubernetes cannot enforce that; see postgres.enabled's comment and
-    # templates/postgres-statefulset.yaml.
+    # -> loam container LOAM_DATABASE_URL, full postgres:// DSN, password
+    # inline. Only wired up when postgres.enabled is false (external
+    # database) -- see postgres.enabled's comment below. When
+    # postgres.enabled is true this key is unused: the loam container gets
+    # LOAM_DB_HOST/PORT/USER/NAME/SSLMODE from the loam-config ConfigMap
+    # and LOAM_DB_PASSWORD from secret.keys.postgresPassword below instead
+    # (internal/config's discrete-parts form, loam-ytt2.11), so there is no
+    # DSN to keep in sync with postgresPassword by hand.
     databaseUrl: LOAM_DATABASE_URL
     # -> loam container LOAM_ENCRYPTION_KEY. base64-encoded 32-byte AES-GCM
     # key; NOT rotatable in place without re-encrypting every stored forge
     # credential -- see docs/deployment-spec.md's Backup & Restore section.
     encryptionKey: LOAM_ENCRYPTION_KEY
-    # -> postgres container POSTGRES_PASSWORD, only referenced when
-    # postgres.enabled is true. Must describe the SAME credential as the
-    # password embedded in databaseUrl's DSN above -- see
-    # templates/postgres-statefulset.yaml's comment.
+    # -> postgres container POSTGRES_PASSWORD, AND, only when
+    # postgres.enabled is true, ALSO -> loam container LOAM_DB_PASSWORD
+    # (templates/deployment.yaml). One Secret key feeding both env vars is
+    # the fix for loam-ytt2.11: the postgres image only initializes its
+    # superuser from POSTGRES_PASSWORD, and pointing both consumers at the
+    # same secretKeyRef makes them structurally the same credential --
+    # unlike the old two-copies-of-one-password scheme, there is no longer
+    # a hand-synced DSN for this to drift from. Only referenced when
+    # postgres.enabled is true.
     postgresPassword: POSTGRES_PASSWORD
 
 postgres:
   # false => no in-cluster Postgres: the StatefulSet and its headless
   # Service are both omitted entirely (not merely scaled to zero), and the
-  # loam Deployment still gets its DSN from secret.keys.databaseUrl above
-  # -- unchanged either way, since the loam container never talks to
-  # Postgres through anything this chart renders, only through the DSN.
-  # This is the whole point of the values-driven secret contract above:
-  # moving to an external database is a one-line values change, not a
+  # loam Deployment falls back to the DSN form, getting LOAM_DATABASE_URL
+  # from secret.keys.databaseUrl above. This is the form for an externally
+  # managed database: moving to one is a one-line values change, not a
   # consumer-side overlay. When you flip this to false, the consumer is
   # responsible for making sure secret.keys.databaseUrl's Secret key
   # already points at that external database -- see NOTES.txt, which warns
   # loudly about this at install/upgrade time.
+  #
+  # true (the default) => the loam Deployment instead gets the discrete
+  # LOAM_DB_* form (internal/config's resolveDatabaseURL, loam-ytt2.11):
+  # LOAM_DB_HOST/PORT/USER/NAME/SSLMODE come from the loam-config ConfigMap
+  # (templates/configmap.yaml) and LOAM_DB_PASSWORD from
+  # secret.keys.postgresPassword above -- the SAME Secret key the postgres
+  # StatefulSet reads POSTGRES_PASSWORD from below, so the two credentials
+  # cannot drift apart the way two independently-set values could.
   enabled: true
   image: pgvector/pgvector:pg16
   # Pinned, NOT left to the cluster default (`nfs` on vega): Postgres on

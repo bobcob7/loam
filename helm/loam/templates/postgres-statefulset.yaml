@@ -74,15 +74,21 @@ spec:
                 configMapKeyRef:
                   name: postgres-config
                   key: POSTGRES_DB
-            # IMPORTANT: this password and the password embedded in
-            # secret.keys.databaseUrl's DSN (consumed by
-            # templates/deployment.yaml) describe the SAME credential from
-            # two sides -- the Postgres server's copy and the client DSN's
-            # copy. Nothing in Kubernetes enforces that they match;
-            # whoever provisions the Secret is responsible for keeping them
-            # in sync. A mismatch surfaces as loam's /readyz reporting
-            # "database unreachable" (authentication failure), not as a
-            # Postgres-side error.
+            # This is the SAME Secret key templates/deployment.yaml reads
+            # into the loam container's LOAM_DB_PASSWORD (only when
+            # postgres.enabled is true, see values.yaml's secret.keys.
+            # postgresPassword comment) -- one secretKeyRef feeding both
+            # consumers, not two independently-set copies of one password.
+            # Before loam-ytt2.11 this was two copies (this env var, and a
+            # password hand-embedded in a full DSN), and nothing enforced
+            # they matched; a mismatch surfaced as loam's /readyz reporting
+            # "database unreachable" (an authentication failure that reads
+            # like a networking problem). That failure mode is now
+            # structurally impossible for the in-cluster case -- it can
+            # still happen if postgres.enabled is false and the consumer
+            # hand-provisions a DSN that doesn't match a database's actual
+            # password, but that is now a single value under a single
+            # owner, not two.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:

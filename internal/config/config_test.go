@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +40,12 @@ func baseEnv(t *testing.T, dataDir string) {
 	t.Setenv("LOAM_DATABASE_URL", "postgres://user:pass@localhost:5432/loam")
 	t.Setenv("LOAM_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(validEncryptionKey()))
 	t.Setenv("LOAM_DATA_DIR", dataDir)
+	t.Setenv("LOAM_DB_HOST", "")
+	t.Setenv("LOAM_DB_PORT", "")
+	t.Setenv("LOAM_DB_USER", "")
+	t.Setenv("LOAM_DB_PASSWORD", "")
+	t.Setenv("LOAM_DB_NAME", "")
+	t.Setenv("LOAM_DB_SSLMODE", "")
 	t.Setenv("LOAM_HTTP_ADDR", "")
 	t.Setenv("LOAM_ADMIN_USER", "")
 	t.Setenv("LOAM_SYNC_INTERVAL", "")
@@ -117,6 +124,129 @@ func TestLoad_DatabaseURLKeywordValueForm(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, dsn, cfg.DatabaseURL)
+}
+
+// TestLoad_DatabaseURLFromParts covers loam-ytt2.11: when LOAM_DATABASE_URL
+// is unset, Load assembles a DSN from the discrete LOAM_DB_* parts instead
+// -- the shape a Kubernetes manifest needs so one POSTGRES_PASSWORD value
+// feeds both the postgres image and loam.
+func TestLoad_DatabaseURLFromParts(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	baseEnv(t, dataDir)
+	t.Setenv("LOAM_DATABASE_URL", "")
+	t.Setenv("LOAM_DB_HOST", "postgres.loam.svc.cluster.local")
+	t.Setenv("LOAM_DB_USER", "loam")
+	t.Setenv("LOAM_DB_PASSWORD", "hunter2")
+	t.Setenv("LOAM_DB_NAME", "loam")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://loam:hunter2@postgres.loam.svc.cluster.local:5432/loam?sslmode=disable", cfg.DatabaseURL)
+}
+
+// TestLoad_DatabaseURLPartsDefaults asserts LOAM_DB_PORT and
+// LOAM_DB_SSLMODE take their documented defaults (5432, disable) when only
+// the required parts are set.
+func TestLoad_DatabaseURLPartsDefaults(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	baseEnv(t, dataDir)
+	t.Setenv("LOAM_DATABASE_URL", "")
+	t.Setenv("LOAM_DB_HOST", "db")
+	t.Setenv("LOAM_DB_USER", "u")
+	t.Setenv("LOAM_DB_PASSWORD", "p")
+	t.Setenv("LOAM_DB_NAME", "n")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://u:p@db:5432/n?sslmode=disable", cfg.DatabaseURL)
+}
+
+// TestLoad_DatabaseURLPartsOverridePortAndSSLMode asserts LOAM_DB_PORT and
+// LOAM_DB_SSLMODE, when set, override their defaults in the assembled DSN.
+func TestLoad_DatabaseURLPartsOverridePortAndSSLMode(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	baseEnv(t, dataDir)
+	t.Setenv("LOAM_DATABASE_URL", "")
+	t.Setenv("LOAM_DB_HOST", "db")
+	t.Setenv("LOAM_DB_PORT", "6543")
+	t.Setenv("LOAM_DB_USER", "u")
+	t.Setenv("LOAM_DB_PASSWORD", "p")
+	t.Setenv("LOAM_DB_NAME", "n")
+	t.Setenv("LOAM_DB_SSLMODE", "require")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://u:p@db:6543/n?sslmode=require", cfg.DatabaseURL)
+}
+
+// TestLoad_DatabaseURLPartsPasswordNeedsEncoding is the single most likely
+// defect this feature can have: POSTGRES_PASSWORD legally contains '/',
+// '@', ':', and '+', all of which are DSN-structural characters. A naive
+// fmt.Sprintf-built DSN would corrupt on any of them; url.UserPassword must
+// percent-encode the userinfo so the assembled DSN round-trips back to the
+// exact original password through url.Parse.
+func TestLoad_DatabaseURLPartsPasswordNeedsEncoding(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	baseEnv(t, dataDir)
+	const rawPassword = `p@ss/w:o+rd`
+	t.Setenv("LOAM_DATABASE_URL", "")
+	t.Setenv("LOAM_DB_HOST", "db")
+	t.Setenv("LOAM_DB_USER", "u")
+	t.Setenv("LOAM_DB_PASSWORD", rawPassword)
+	t.Setenv("LOAM_DB_NAME", "n")
+	cfg, err := Load()
+	require.NoError(t, err)
+	parsed, err := url.Parse(cfg.DatabaseURL)
+	require.NoError(t, err)
+	got, ok := parsed.User.Password()
+	require.True(t, ok, "assembled DSN must carry a password")
+	assert.Equal(t, rawPassword, got, "password must round-trip through the assembled DSN unchanged")
+}
+
+// TestLoad_DatabaseURLBothFormsIsConflict covers the precedence decision
+// documented on resolveDatabaseURL: setting LOAM_DATABASE_URL AND any
+// LOAM_DB_* part is rejected outright rather than silently picking one --
+// silently ignoring half a config an operator actually set is its own
+// footgun.
+func TestLoad_DatabaseURLBothFormsIsConflict(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	dataDir := t.TempDir()
+	baseEnv(t, dataDir)
+	t.Setenv("LOAM_DB_HOST", "db")
+	_, err := Load()
+	require.ErrorIs(t, err, errDatabaseConfigConflict)
+}
+
+// TestLoad_DatabaseURLPartsMissingRequired table-drives every required
+// LOAM_DB_* part (HOST, USER, PASSWORD, NAME) in isolation, confirming each
+// one's absence fails Load with errMissingEnv even though the other three
+// are present -- i.e. none of the four is silently optional once the parts
+// form is in use.
+func TestLoad_DatabaseURLPartsMissingRequired(t *testing.T) {
+	// Not parallel (nor are the subtests below): t.Setenv is incompatible
+	// with t.Parallel.
+	dataDir := t.TempDir()
+	fullParts := map[string]string{
+		"LOAM_DB_HOST":     "db",
+		"LOAM_DB_USER":     "u",
+		"LOAM_DB_PASSWORD": "p",
+		"LOAM_DB_NAME":     "n",
+	}
+	for _, missing := range []string{"LOAM_DB_HOST", "LOAM_DB_USER", "LOAM_DB_PASSWORD", "LOAM_DB_NAME"} {
+		t.Run("missing "+missing, func(t *testing.T) {
+			baseEnv(t, dataDir)
+			t.Setenv("LOAM_DATABASE_URL", "")
+			for k, v := range fullParts {
+				if k == missing {
+					continue
+				}
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			require.ErrorIs(t, err, errMissingEnv)
+		})
+	}
 }
 
 func TestLoad_DataDirCreatedIfMissing(t *testing.T) {

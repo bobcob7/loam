@@ -21,7 +21,13 @@ variables are prefixed `LOAM_`; durations use Go syntax (`60s`, `5m`).
 | `LOAM_HTTP_ADDR` | Listen address for the single HTTP port: Connect RPC (CLI + admin), the embedded SPA, and git smart HTTP (`/git/*`). | no | `:8080` |
 | `LOAM_ADMIN_USER` | Basic-auth admin username. | no | `admin` |
 | `LOAM_ADMIN_PASSWORD` | Basic-auth admin password. Compared constant-time; plaintext env is accepted for the MVP (inject via a secret). | yes | — |
-| `LOAM_DATABASE_URL` | Postgres DSN (pgx). | yes | — |
+| `LOAM_DATABASE_URL` | Postgres DSN (pgx). Required unless the discrete `LOAM_DB_*` variables below are used instead — see the precedence note underneath this table. | yes\* | — |
+| `LOAM_DB_HOST` | Postgres host, used only when `LOAM_DATABASE_URL` is unset, to assemble a DSN from discrete parts. | yes\* | — |
+| `LOAM_DB_PORT` | Postgres port, discrete-parts form only. | no | `5432` |
+| `LOAM_DB_USER` | Postgres user, discrete-parts form only. | yes\* | — |
+| `LOAM_DB_PASSWORD` | Postgres password, discrete-parts form only. Percent-encoded into the assembled DSN's userinfo, so `/`, `@`, `:`, and `+` are all safe to use. | yes\* | — |
+| `LOAM_DB_NAME` | Postgres database name, discrete-parts form only. | yes\* | — |
+| `LOAM_DB_SSLMODE` | `sslmode` query parameter on the assembled DSN, discrete-parts form only. | no | `disable` |
 | `LOAM_DATA_DIR` | Root of the server's on-disk state: bare mirrors under `<dir>/mirrors/<group>/<repo_name>.git`, the pre-receive policy socket at `<dir>/hook.sock`. | no | `/var/lib/loam` |
 | `LOAM_ENCRYPTION_KEY` | 32-byte AES-GCM key, base64 — encrypts forge tokens at rest (`docs/persistence-spec.md` → Secrets). | yes | — |
 | `LOAM_SYNC_INTERVAL` | Upstream poll interval per repo (`docs/sync-spec.md`). Must be a positive duration — zero or negative is rejected at startup, not clamped. | no | `60s` |
@@ -30,6 +36,32 @@ variables are prefixed `LOAM_`; durations use Go syntax (`60s`, `5m`).
 | `LOAM_EMBEDDER_MODEL` | Embedding model; pins the `vector(N)` dimension — changing it forces a full re-embed. | no | `nomic-embed-text` |
 | `LOAM_INGEST_WORKERS` | Ingest worker pool size (cross-repo parallelism; ingest is serialized per repo regardless). Must be an integer from 1 to 256 — there is no "disabled" value; 0 and below are rejected at startup rather than silently disabling ingest. | no | `2` |
 | `LOAM_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. | no | `info` |
+
+**Postgres DSN: two forms, one required.** The server needs a Postgres DSN,
+supplied either as `LOAM_DATABASE_URL` directly or assembled at startup from
+the discrete `LOAM_DB_HOST`/`PORT`/`USER`/`PASSWORD`/`NAME`/`SSLMODE`
+variables. This exists so a Kubernetes manifest can pass one Postgres
+password to both the `postgres` image (which only initializes its
+superuser from `POSTGRES_PASSWORD`) and loam, instead of also
+hand-embedding that same password into a second, DSN-shaped copy that
+nothing keeps in sync — a drift between the two previously surfaced as
+loam reporting "database unreachable," an authentication failure that
+reads like a networking problem.
+- **`LOAM_DATABASE_URL` set, no `LOAM_DB_*` parts set:** used as-is
+  (validated, not connected to, at startup). This is the form for an
+  externally managed database.
+- **No `LOAM_DATABASE_URL`, at least one `LOAM_DB_*` part set:** a DSN is
+  assembled from the parts. `LOAM_DB_HOST`, `_USER`, `_PASSWORD`, and
+  `_NAME` are required in this form; `_PORT` and `_SSLMODE` fall back to
+  their defaults above. The password is percent-encoded into the DSN's
+  userinfo, so `/`, `@`, `:`, and `+` in `LOAM_DB_PASSWORD` are safe.
+- **Both set:** rejected as a startup error. Preferring one side silently
+  would leave the other looking configured when it is actually ignored —
+  exactly the kind of half-applied config this form exists to prevent, not
+  reproduce.
+- **Neither set:** rejected as a startup error on `LOAM_DATABASE_URL`
+  (missing required variable), the same failure as before this form
+  existed.
 
 **Fail fast.** The server validates configuration at startup and exits on the first
 problem: missing required variables, a key that isn't 32 bytes after decoding, an

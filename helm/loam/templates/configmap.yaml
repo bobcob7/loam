@@ -1,8 +1,12 @@
 # Non-secret LOAM_* env vars, mirroring the defaulted (non-required) rows of
-# internal/config/config.go's table. The three required vars
-# (LOAM_ADMIN_PASSWORD, LOAM_DATABASE_URL, LOAM_ENCRYPTION_KEY) are all
-# secrets and deliberately do NOT appear here -- see templates/deployment.yaml's
-# env block and values.yaml's secret: section.
+# internal/config/config.go's table. LOAM_ADMIN_PASSWORD and
+# LOAM_ENCRYPTION_KEY are secrets and deliberately do NOT appear here -- see
+# templates/deployment.yaml's env block and values.yaml's secret: section.
+# The Postgres DSN is split across both: when postgres.enabled is true, its
+# non-secret parts (LOAM_DB_HOST/PORT/USER/NAME/SSLMODE) are set below and
+# only LOAM_DB_PASSWORD comes from the Secret; when false, the whole DSN
+# (LOAM_DATABASE_URL) is a Secret key instead -- see values.yaml's
+# postgres.enabled comment for why.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,3 +25,18 @@ data:
   LOAM_EMBEDDER_MODEL: {{ .Values.config.embedderModel | quote }}
   LOAM_INGEST_WORKERS: {{ .Values.config.ingestWorkers | quote }}
   LOAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  {{- if .Values.postgres.enabled }}
+  # Discrete Postgres DSN parts (internal/config's resolveDatabaseURL,
+  # loam-ytt2.11) for the in-cluster postgres StatefulSet
+  # (templates/postgres-statefulset.yaml) and its headless Service
+  # (templates/postgres-service.yaml, name "postgres"). LOAM_DB_PASSWORD is
+  # NOT set here -- it is a Secret key, see templates/deployment.yaml.
+  LOAM_DB_HOST: "postgres.{{ .Release.Namespace }}.svc.cluster.local"
+  LOAM_DB_PORT: "5432"
+  LOAM_DB_USER: {{ .Values.config.postgresUser | quote }}
+  LOAM_DB_NAME: {{ .Values.config.postgresDb | quote }}
+  # "disable": the in-cluster postgres image below is not configured with
+  # any TLS certificate, so there is nothing for a stricter sslmode to
+  # negotiate against.
+  LOAM_DB_SSLMODE: "disable"
+  {{- end }}

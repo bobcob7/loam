@@ -65,18 +65,17 @@ func Load() (Config, error) {
 }
 
 // loadRequired populates and validates the environment variables that have
-// no default: LOAM_ADMIN_PASSWORD, LOAM_DATABASE_URL, LOAM_ENCRYPTION_KEY.
+// no default: LOAM_ADMIN_PASSWORD, LOAM_ENCRYPTION_KEY, and the Postgres DSN
+// (LOAM_DATABASE_URL directly, or assembled from the discrete LOAM_DB_*
+// parts -- see resolveDatabaseURL's doc comment for the precedence rule).
 func loadRequired(cfg *Config) error {
 	adminPassword, err := lookupRequired("LOAM_ADMIN_PASSWORD")
 	if err != nil {
 		return err
 	}
 	cfg.AdminPassword = adminPassword
-	databaseURL, err := lookupRequired("LOAM_DATABASE_URL")
+	databaseURL, err := resolveDatabaseURL()
 	if err != nil {
-		return err
-	}
-	if err := validateDatabaseURL(databaseURL); err != nil {
 		return err
 	}
 	cfg.DatabaseURL = databaseURL
