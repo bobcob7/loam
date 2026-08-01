@@ -50,23 +50,37 @@ func (r *StoreRepoResolver) ResolveRepo(ctx context.Context, repo RepoID) (host,
 	return row.ForgeHost, row.UpstreamURL, names, nil
 }
 
-// listWorkBranchNames pages through every work_branches row for repoID and
-// returns their bare names, in whatever order List returns them.
+// listWorkBranchNames pages through every work_branches row for repoID via
+// keyset (cursor) pagination and returns their bare names, in whatever
+// order ListByCursor returns them (newest-created first).
+//
+// This used to page by LIMIT/OFFSET, counting rows from the top on every
+// call -- unsafe here specifically because a concurrent insert landing in
+// an already-passed page shifts every later row's offset by one, silently
+// skipping exactly one row. A skipped row here is a work-branch name
+// silently missing from ResolveRepo's exclusion list, which the next
+// mirror fetch then does NOT exclude from its refspec -- an unrecoverable
+// deletion of that work branch's ref (docs/git-spec.md's Ref Policy), not
+// a mere pagination artifact (loam-coj). Keyset pagination resumes from
+// the last row actually seen rather than a row count, so it cannot be
+// shifted by inserts or deletes elsewhere in the result set. The loop
+// terminates on an empty page, never on a separately-fetched total, which
+// is exactly the kind of value that can go stale under concurrent writes.
 func (r *StoreRepoResolver) listWorkBranchNames(ctx context.Context, repoID uuid.UUID) ([]string, error) {
 	var names []string
-	var offset int32
+	var after *workbranchstore.Cursor
 	for {
-		page, total, err := r.branches.List(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, offset)
+		page, err := r.branches.ListByCursor(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, after)
 		if err != nil {
 			return nil, err
+		}
+		if len(page) == 0 {
+			return names, nil
 		}
 		for _, wb := range page {
 			names = append(names, wb.Name)
 		}
-		offset += int32(len(page))
-		if len(page) == 0 || int64(offset) >= total {
-			break
-		}
+		last := page[len(page)-1]
+		after = &workbranchstore.Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
 	}
-	return names, nil
 }

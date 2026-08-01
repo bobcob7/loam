@@ -149,24 +149,33 @@ func workBranchRef(name string) string {
 	return refnames.WorkBranch(name)
 }
 
-// listOpenWorkBranches pages through every work_branches row for repoID
-// and returns the non-terminal ones -- the "open work branches" both
-// docs/sync-spec.md's Mirror Sync step 2 (set (b)) and its Mergeability
-// Check are defined over. Complete and closed rows are excluded: their
-// recorded target no longer needs conflict detection, and MarkConflicted
-// rejects them outright.
+// listOpenWorkBranches pages through every work_branches row for repoID,
+// via keyset (cursor) pagination, and returns the non-terminal ones -- the
+// "open work branches" both docs/sync-spec.md's Mirror Sync step 2 (set
+// (b)) and its Mergeability Check are defined over. Complete and closed
+// rows are excluded: their recorded target no longer needs conflict
+// detection, and MarkConflicted rejects them outright.
 //
 // Shared by StoreAdvanceDetector (which projects Target) and
 // StoreMergeabilityChecker (which needs the whole row), so the paging loop
 // and the terminal-state predicate have one definition rather than two
 // that could drift into disagreeing about which branches are "open".
+//
+// This used to page by LIMIT/OFFSET; see listWorkBranchNames
+// (repo_resolver.go) for why that is unsafe for a full-enumeration loop
+// like this one and workBranchNameLister's doc comment for why the fix
+// belongs on the shared interface (loam-coj). The loop terminates on an
+// empty page, never on a separately-fetched total.
 func listOpenWorkBranches(ctx context.Context, lister workBranchNameLister, repoID uuid.UUID) ([]workbranchstore.WorkBranch, error) {
 	var open []workbranchstore.WorkBranch
-	var offset int32
+	var after *workbranchstore.Cursor
 	for {
-		page, total, err := lister.List(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, offset)
+		page, err := lister.ListByCursor(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, after)
 		if err != nil {
 			return nil, err
+		}
+		if len(page) == 0 {
+			return open, nil
 		}
 		for _, wb := range page {
 			if isTerminalWorkBranchState(wb.State) {
@@ -174,10 +183,8 @@ func listOpenWorkBranches(ctx context.Context, lister workBranchNameLister, repo
 			}
 			open = append(open, wb)
 		}
-		offset += int32(len(page))
-		if len(page) == 0 || int64(offset) >= total {
-			return open, nil
-		}
+		last := page[len(page)-1]
+		after = &workbranchstore.Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
 	}
 }
 

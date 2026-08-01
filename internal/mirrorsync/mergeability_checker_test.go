@@ -69,7 +69,7 @@ type checkerFixture struct {
 	mergeCalls  *[]mergeCall
 	markedIDs   *[]uuid.UUID
 	repoLookups *int
-	listOffsets *[]int32
+	listCalls   *int
 }
 
 // fixtureOptions are the per-test knobs newCheckerFixture takes: which
@@ -93,7 +93,7 @@ func newCheckerFixture(t *testing.T, opts fixtureOptions) checkerFixture {
 	mergeCalls := new([]mergeCall)
 	markedIDs := new([]uuid.UUID)
 	repoLookups := new(int)
-	listOffsets := new([]int32)
+	listCalls := new(int)
 	repos := &repoByNameLookupMock{
 		GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
 			*repoLookups++
@@ -108,24 +108,26 @@ func newCheckerFixture(t *testing.T, opts fixtureOptions) checkerFixture {
 	if pageSize <= 0 {
 		pageSize = workBranchListPageSize
 	}
+	pos := 0
 	branches := &workBranchNameListerMock{
-		ListFunc: func(_ context.Context, filter workbranchstore.ListFilter, limit, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-			*listOffsets = append(*listOffsets, offset)
+		ListByCursorFunc: func(_ context.Context, filter workbranchstore.ListFilter, limit int32, _ *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			*listCalls++
 			require.NotNil(t, filter.RepoID)
 			assert.Equal(t, repoID, *filter.RepoID)
 			assert.Equal(t, int32(workBranchListPageSize), limit)
 			if opts.listErr != nil {
-				return nil, 0, opts.listErr
+				return nil, opts.listErr
 			}
-			total := int64(len(opts.workBranches))
-			if offset >= int32(len(opts.workBranches)) {
-				return nil, total, nil
+			if pos >= len(opts.workBranches) {
+				return nil, nil
 			}
-			end := offset + pageSize
-			if end > int32(len(opts.workBranches)) {
-				end = int32(len(opts.workBranches))
+			end := pos + int(pageSize)
+			if end > len(opts.workBranches) {
+				end = len(opts.workBranches)
 			}
-			return opts.workBranches[offset:end], total, nil
+			page := opts.workBranches[pos:end]
+			pos = end
+			return page, nil
 		},
 	}
 	merger := &mergeTreeRunnerMock{
@@ -151,7 +153,7 @@ func newCheckerFixture(t *testing.T, opts fixtureOptions) checkerFixture {
 		mergeCalls:  mergeCalls,
 		markedIDs:   markedIDs,
 		repoLookups: repoLookups,
-		listOffsets: listOffsets,
+		listCalls:   listCalls,
 	}
 }
 
@@ -432,7 +434,7 @@ func TestCheckMergeability_PagesThroughEveryWorkBranch(t *testing.T) {
 	require.NoError(t, fixture.checker.CheckMergeability(t.Context(), RepoID(fixtureRepoName), []Advance{advance("main", "mainTip")}))
 	assert.Len(t, *fixture.mergeCalls, total, "every open work branch across every page must be checked")
 	assert.Len(t, *fixture.markedIDs, total)
-	assert.Equal(t, []int32{0, 3, 6}, *fixture.listOffsets, "paging must advance by the page actually returned")
+	assert.Equal(t, 4, *fixture.listCalls, "3 pages of size 3 (7 rows: 3+3+1) plus the terminating empty page")
 }
 
 // TestCheckMergeability_UsesTheRepoNameDerivedMirrorPath pins that the

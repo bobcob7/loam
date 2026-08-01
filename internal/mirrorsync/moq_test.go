@@ -956,8 +956,8 @@ var _ workBranchNameLister = &workBranchNameListerMock{}
 //
 //		// make and configure a mocked workBranchNameLister
 //		mockedworkBranchNameLister := &workBranchNameListerMock{
-//			ListFunc: func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-//				panic("mock out the List method")
+//			ListByCursorFunc: func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, after *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+//				panic("mock out the ListByCursor method")
 //			},
 //		}
 //
@@ -966,67 +966,67 @@ var _ workBranchNameLister = &workBranchNameListerMock{}
 //
 //	}
 type workBranchNameListerMock struct {
-	// ListFunc mocks the List method.
-	ListFunc func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error)
+	// ListByCursorFunc mocks the ListByCursor method.
+	ListByCursorFunc func(ctx context.Context, filter workbranchstore.ListFilter, limit int32, after *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
-		// List holds details about calls to the List method.
-		List []struct {
+		// ListByCursor holds details about calls to the ListByCursor method.
+		ListByCursor []struct {
 			// Ctx is the ctx argument value.
 			Ctx context.Context
 			// Filter is the filter argument value.
 			Filter workbranchstore.ListFilter
 			// Limit is the limit argument value.
 			Limit int32
-			// Offset is the offset argument value.
-			Offset int32
+			// After is the after argument value.
+			After *workbranchstore.Cursor
 		}
 	}
-	lockList sync.RWMutex
+	lockListByCursor sync.RWMutex
 }
 
-// List calls ListFunc.
-func (mock *workBranchNameListerMock) List(ctx context.Context, filter workbranchstore.ListFilter, limit int32, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-	if mock.ListFunc == nil {
-		panic("workBranchNameListerMock.ListFunc: method is nil but workBranchNameLister.List was just called")
+// ListByCursor calls ListByCursorFunc.
+func (mock *workBranchNameListerMock) ListByCursor(ctx context.Context, filter workbranchstore.ListFilter, limit int32, after *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+	if mock.ListByCursorFunc == nil {
+		panic("workBranchNameListerMock.ListByCursorFunc: method is nil but workBranchNameLister.ListByCursor was just called")
 	}
 	callInfo := struct {
 		Ctx    context.Context
 		Filter workbranchstore.ListFilter
 		Limit  int32
-		Offset int32
+		After  *workbranchstore.Cursor
 	}{
 		Ctx:    ctx,
 		Filter: filter,
 		Limit:  limit,
-		Offset: offset,
+		After:  after,
 	}
-	mock.lockList.Lock()
-	mock.calls.List = append(mock.calls.List, callInfo)
-	mock.lockList.Unlock()
-	return mock.ListFunc(ctx, filter, limit, offset)
+	mock.lockListByCursor.Lock()
+	mock.calls.ListByCursor = append(mock.calls.ListByCursor, callInfo)
+	mock.lockListByCursor.Unlock()
+	return mock.ListByCursorFunc(ctx, filter, limit, after)
 }
 
-// ListCalls gets all the calls that were made to List.
+// ListByCursorCalls gets all the calls that were made to ListByCursor.
 // Check the length with:
 //
-//	len(mockedworkBranchNameLister.ListCalls())
-func (mock *workBranchNameListerMock) ListCalls() []struct {
+//	len(mockedworkBranchNameLister.ListByCursorCalls())
+func (mock *workBranchNameListerMock) ListByCursorCalls() []struct {
 	Ctx    context.Context
 	Filter workbranchstore.ListFilter
 	Limit  int32
-	Offset int32
+	After  *workbranchstore.Cursor
 } {
 	var calls []struct {
 		Ctx    context.Context
 		Filter workbranchstore.ListFilter
 		Limit  int32
-		Offset int32
+		After  *workbranchstore.Cursor
 	}
-	mock.lockList.RLock()
-	calls = mock.calls.List
-	mock.lockList.RUnlock()
+	mock.lockListByCursor.RLock()
+	calls = mock.calls.ListByCursor
+	mock.lockListByCursor.RUnlock()
 	return calls
 }
 

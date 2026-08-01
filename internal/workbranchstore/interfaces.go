@@ -39,6 +39,7 @@ type querier interface {
 	GetWorkBranchByName(ctx context.Context, arg gen.GetWorkBranchByNameParams) (gen.WorkBranch, error)
 	ListWorkBranches(ctx context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error)
 	CountWorkBranches(ctx context.Context, arg gen.CountWorkBranchesParams) (int64, error)
+	ListWorkBranchesByCursor(ctx context.Context, arg gen.ListWorkBranchesByCursorParams) ([]gen.WorkBranch, error)
 	SetWorkBranchTitleDescription(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error)
 	UpdateWorkBranchState(ctx context.Context, arg gen.UpdateWorkBranchStateParams) (gen.WorkBranch, error)
 	CloseWorkBranch(ctx context.Context, arg gen.CloseWorkBranchParams) (gen.WorkBranch, error)

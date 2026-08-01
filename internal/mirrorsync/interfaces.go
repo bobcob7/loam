@@ -240,19 +240,36 @@ type repoByNameLookup interface {
 	GetRepoByName(ctx context.Context, name string) (reposstore.Repo, error)
 }
 
-// workBranchNameLister is the workbranchstore.Store surface
-// StoreRepoResolver uses to enumerate a repo's currently registered
-// work-branch names, defined here at the consumer. *workbranchstore.Store
-// satisfies it structurally.
+// workBranchNameLister is the workbranchstore.Store surface StoreRepoResolver,
+// StoreAdvanceDetector, StoreMergeabilityChecker, and StorePRPoller all use
+// to enumerate EVERY registered work-branch row for a repo, defined here at
+// the consumer. *workbranchstore.Store satisfies it structurally.
 //
-// StoreAdvanceDetector uses this same surface for a different projection:
-// not every registered branch's Name (StoreRepoResolver's use), but the
-// Target of every non-terminal one (docs/sync-spec.md -> Mirror Sync step
-// 2's set (b), "any branch that is the recorded target of an open work
-// branch"). One List method serves both, since workbranchstore.WorkBranch
-// carries every field either caller needs.
+// StoreRepoResolver projects Name (the mirror fetch's exclusion list);
+// StoreAdvanceDetector projects the Target of every non-terminal row (set
+// (b), docs/sync-spec.md -> Mirror Sync step 2); StoreMergeabilityChecker
+// and StorePRPoller both need the whole row. One ListByCursor method serves
+// all four, since workbranchstore.WorkBranch carries every field any of
+// them needs.
+//
+// ListByCursor, not List: every caller here pages through the ENTIRE
+// matching set, not one bounded screen for a human (that is
+// workbranchstore.Store.List's job, behind the admin-facing
+// loamv1.ListWorkBranchesResponse.PageInfo, untouched by this interface).
+// List's LIMIT/OFFSET pagination is unsafe for a full-enumeration loop: a
+// concurrent INSERT landing in an already-passed page shifts every later
+// row's offset by one, silently skipping exactly one row for a caller that
+// pages by count (loam-coj). For StoreRepoResolver specifically, a skipped
+// row is a work-branch name silently missing from the mirror fetch's
+// exclusion list -- an unrecoverable deletion of that work branch's ref
+// (docs/git-spec.md's Ref Policy), not a mere pagination artifact -- and
+// the other three callers share the identical loop shape over the same
+// method, so the fix belongs on this shared interface, not bolted onto one
+// caller alone. See workbranchstore.Store.ListByCursor and
+// ListWorkBranchesByCursor (internal/db/queries/work_branches.sql) for how
+// keyset pagination avoids the shift.
 type workBranchNameLister interface {
-	List(ctx context.Context, filter workbranchstore.ListFilter, limit, offset int32) ([]workbranchstore.WorkBranch, int64, error)
+	ListByCursor(ctx context.Context, filter workbranchstore.ListFilter, limit int32, after *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error)
 }
 
 // targetBranchLister is the reposstore.Store surface StoreAdvanceDetector

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -35,14 +36,16 @@ func newDetectorFixture(t *testing.T, repoID uuid.UUID, listedTargets []string, 
 			return tbs, nil
 		},
 	}
+	served := false
 	branches := &workBranchNameListerMock{
-		ListFunc: func(_ context.Context, filter workbranchstore.ListFilter, _, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
+		ListByCursorFunc: func(_ context.Context, filter workbranchstore.ListFilter, _ int32, _ *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
 			require.NotNil(t, filter.RepoID)
 			assert.Equal(t, repoID, *filter.RepoID)
-			if offset > 0 {
-				return nil, int64(len(workBranches)), nil
+			if served {
+				return nil, nil
 			}
-			return workBranches, int64(len(workBranches)), nil
+			served = true
+			return workBranches, nil
 		},
 	}
 	return NewStoreAdvanceDetector(repos, targets, branches)
@@ -208,9 +211,9 @@ func TestDetectAdvancesPropagatesGetRepoByNameError(t *testing.T) {
 		},
 	}
 	branches := &workBranchNameListerMock{
-		ListFunc: func(context.Context, workbranchstore.ListFilter, int32, int32) ([]workbranchstore.WorkBranch, int64, error) {
-			t.Fatal("List must not be called when the repo lookup already failed")
-			return nil, 0, nil
+		ListByCursorFunc: func(context.Context, workbranchstore.ListFilter, int32, *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			t.Fatal("ListByCursor must not be called when the repo lookup already failed")
+			return nil, nil
 		},
 	}
 	detector := NewStoreAdvanceDetector(repos, targets, branches)
@@ -235,9 +238,9 @@ func TestDetectAdvancesPropagatesListTargetBranchesError(t *testing.T) {
 		},
 	}
 	branches := &workBranchNameListerMock{
-		ListFunc: func(context.Context, workbranchstore.ListFilter, int32, int32) ([]workbranchstore.WorkBranch, int64, error) {
-			t.Fatal("List must not be called when ListTargetBranches already failed")
-			return nil, 0, nil
+		ListByCursorFunc: func(context.Context, workbranchstore.ListFilter, int32, *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			t.Fatal("ListByCursor must not be called when ListTargetBranches already failed")
+			return nil, nil
 		},
 	}
 	detector := NewStoreAdvanceDetector(repos, targets, branches)
@@ -262,8 +265,8 @@ func TestDetectAdvancesPropagatesWorkBranchListError(t *testing.T) {
 		},
 	}
 	branches := &workBranchNameListerMock{
-		ListFunc: func(context.Context, workbranchstore.ListFilter, int32, int32) ([]workbranchstore.WorkBranch, int64, error) {
-			return nil, 0, wantErr
+		ListByCursorFunc: func(context.Context, workbranchstore.ListFilter, int32, *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			return nil, wantErr
 		},
 	}
 	detector := NewStoreAdvanceDetector(repos, targets, branches)
@@ -286,14 +289,23 @@ func TestDetectAdvancesPagesThroughAllWorkBranches(t *testing.T) {
 			return nil, nil
 		},
 	}
-	var seenOffsets []int32
+	var seenCursors []*workbranchstore.Cursor
+	calls := 0
 	branches := &workBranchNameListerMock{
-		ListFunc: func(_ context.Context, _ workbranchstore.ListFilter, _, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-			seenOffsets = append(seenOffsets, offset)
-			if offset == 0 {
-				return []workbranchstore.WorkBranch{{Target: "a", State: workbranchstore.StateDraft}, {Target: "b", State: workbranchstore.StateDraft}}, 3, nil
+		ListByCursorFunc: func(_ context.Context, _ workbranchstore.ListFilter, _ int32, after *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			seenCursors = append(seenCursors, after)
+			calls++
+			switch calls {
+			case 1:
+				return []workbranchstore.WorkBranch{
+					{ID: uuid.New(), CreatedAt: time.Unix(200, 0), Target: "a", State: workbranchstore.StateDraft},
+					{ID: uuid.New(), CreatedAt: time.Unix(100, 0), Target: "b", State: workbranchstore.StateDraft},
+				}, nil
+			case 2:
+				return []workbranchstore.WorkBranch{{ID: uuid.New(), CreatedAt: time.Unix(50, 0), Target: "c", State: workbranchstore.StateDraft}}, nil
+			default:
+				return nil, nil
 			}
-			return []workbranchstore.WorkBranch{{Target: "c", State: workbranchstore.StateDraft}}, 3, nil
 		},
 	}
 	detector := NewStoreAdvanceDetector(repos, targets, branches)
@@ -305,5 +317,10 @@ func TestDetectAdvancesPagesThroughAllWorkBranches(t *testing.T) {
 	advanced, err := detector.DetectAdvances(t.Context(), RepoID("acme/widgets"), fetched)
 	require.NoError(t, err)
 	assert.Len(t, advanced, 3)
-	assert.Equal(t, []int32{0, 2}, seenOffsets)
+	require.Len(t, seenCursors, 3, "a third call, on the terminating empty page, must still happen")
+	assert.Nil(t, seenCursors[0], "the first call carries no cursor")
+	require.NotNil(t, seenCursors[1])
+	assert.Equal(t, time.Unix(100, 0), seenCursors[1].CreatedAt, "the second call resumes from the LAST row of page one")
+	require.NotNil(t, seenCursors[2])
+	assert.Equal(t, time.Unix(50, 0), seenCursors[2].CreatedAt, "the third call resumes from the last row of page two")
 }

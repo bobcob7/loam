@@ -231,6 +231,91 @@ WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
     )
   );
 
+-- name: ListWorkBranchesByCursor :many
+-- Keyset (cursor) pagination for FULL-ENUMERATION callers only (loam-coj) --
+-- internal/mirrorsync's StoreRepoResolver (builds the mirror fetch's
+-- work-branch exclusion list), listOpenWorkBranches (shared by
+-- StoreAdvanceDetector/StoreMergeabilityChecker), and StorePRPoller's
+-- pollSet. ListWorkBranches above (LIMIT/OFFSET) stays the wire API's
+-- paging primitive for loamv1.ListWorkBranchesResponse.PageInfo, untouched
+-- by this query: OFFSET is fine for a human paging a bounded admin screen,
+-- where a concurrent insert costing an extra duplicate row on one page is a
+-- cosmetic annoyance, not silent data loss.
+--
+-- ORDER BY created_at ASC (oldest first), the REVERSE of ListWorkBranches'
+-- DESC -- deliberately, and proven necessary, not merely different for its
+-- own sake. Every INSERT into work_branches gets created_at = now()
+-- (CreateWorkBranch's column default; no query in this file ever
+-- backdates it, and none deletes a row or changes an existing row's
+-- created_at), so a row created concurrently with an enumeration pass is
+-- always the single NEWEST row in the table at that instant. Under DESC
+-- order that places it BEHIND wherever the scan has already reached --
+-- e.g. a work branch registered the moment after this query's first page
+-- was read sorts ahead of that page, in the region the scan has already
+-- moved past -- and no forward-only, un-snapshotted scan can retroactively
+-- notice a row that appears "behind" its current position, keyset or
+-- OFFSET alike (verified empirically: an OFFSET probe and a DESC-ordered
+-- keyset probe, run against a real Postgres with a genuine concurrent
+-- INSERT landing after page 1, both permanently omitted that INSERT from
+-- every subsequent page). Under ASC order the same concurrent INSERT is
+-- instead the single newest row in the table, which sorts to the very END
+-- of the scan -- into whatever is still ahead of the cursor, never behind
+-- it -- so a still-in-progress enumeration reaches it like any other
+-- not-yet-visited row (verified the same way: the identical probe scenario
+-- re-run with ASC ordering captured the concurrent INSERT on its own
+-- trailing page). For StoreRepoResolver specifically, that is the actual
+-- property the mirror fetch's exclusion list needs: a work branch whose
+-- ref was just created must not be silently missing from THIS pass's
+-- exclusion list, or the concurrently-running fetch will not exclude it --
+-- an unrecoverable deletion of that ref (docs/git-spec.md's Ref Policy),
+-- not a mere pagination artifact.
+--
+-- OFFSET pagination cannot be patched into the same guarantee just by also
+-- flipping it to ASC: it still counts rows rather than tracking a value,
+-- so a concurrent INSERT anywhere before the current offset boundary
+-- still desyncs the running "rows already consumed" count from the query's
+-- LIMIT/OFFSET math for the rest of that pass (masked, for this
+-- insert-only table, by a duplicate of whichever row lands on the
+-- boundary -- see TestListByCursor_ConcurrentInsert_NoRowSkippedOrMissed's
+-- doc comment in internal/workbranchstore for the traced mechanics).
+-- Keyset sidesteps the counting entirely: each page asks "give me the rows
+-- that sort strictly after the value I last saw", a question a concurrent
+-- INSERT or DELETE elsewhere in the result set cannot desync, because it
+-- is never expressed as a count.
+--
+-- The comparison ($6/$7) follows created_at ASC, id ASC -- both columns
+-- now sort the same direction, so unlike a DESC-then-ASC pair this is a
+-- plain lexicographic "after": a strictly LATER created_at, or the SAME
+-- created_at paired with a GREATER id (id ASC is the tie-break, matching
+-- ORDER BY's own second key). $6/$7 (cursor_created_at/cursor_id) are NULL
+-- together on the first page (no cursor filter at all, matching every
+-- OTHER optional filter's "empty sentinel means unset" convention above);
+-- every subsequent call passes the previous page's last row.
+SELECT wb.* FROM work_branches wb
+WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
+  AND ($2::text = '' OR wb.target = $2)
+  AND ($3::text = '' OR wb.author = $3)
+  AND ($4::text = '' OR wb.state = $4)
+  AND (
+    $5::text = '' OR (
+      wb.state = 'reviewable'
+      AND NOT EXISTS (
+        SELECT 1 FROM verdicts v
+        JOIN review_rounds rr ON rr.id = v.round_id
+        WHERE rr.work_branch_id = wb.id
+          AND rr.number = (SELECT MAX(rr2.number) FROM review_rounds rr2 WHERE rr2.work_branch_id = wb.id)
+          AND v.reviewer = $5
+      )
+    )
+  )
+  AND (
+    $6::timestamptz IS NULL
+    OR wb.created_at > $6::timestamptz
+    OR (wb.created_at = $6::timestamptz AND wb.id > $7::uuid)
+  )
+ORDER BY wb.created_at ASC, wb.id
+LIMIT $8;
+
 -- name: RecordWorkBranchUpstreamPR :one
 -- Proposal Acceptance's record leg (docs/sync-spec.md "Proposal
 -- Acceptance", step 2: "record upstream_pr_url and upstream_pr_number").

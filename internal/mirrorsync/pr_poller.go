@@ -270,17 +270,27 @@ func (p *StorePRPoller) cleanupUpstreamBranch(ctx context.Context, repo RepoID, 
 	p.logger.InfoContext(ctx, "deleted upstream branch", "repo", string(repo), "work_branch", workBranchName, "ref", ref)
 }
 
-// pollSet pages through every work_branches row for repoID and returns the
-// ones worth polling: a recorded upstream_pr_number and a non-terminal
-// state, sorted by name so a repo's branches are polled in a stable order
-// regardless of what order the store paged them back in.
+// pollSet pages through every work_branches row for repoID, via keyset
+// (cursor) pagination, and returns the ones worth polling: a recorded
+// upstream_pr_number and a non-terminal state, sorted by name so a repo's
+// branches are polled in a stable order regardless of what order the store
+// paged them back in.
+//
+// This used to page by LIMIT/OFFSET; see listWorkBranchNames
+// (repo_resolver.go) for why that is unsafe for a full-enumeration loop
+// like this one and workBranchNameLister's doc comment for why the fix
+// belongs on the shared interface (loam-coj). The loop terminates on an
+// empty page, never on a separately-fetched total.
 func (p *StorePRPoller) pollSet(ctx context.Context, repoID uuid.UUID) ([]workbranchstore.WorkBranch, error) {
 	var pollable []workbranchstore.WorkBranch
-	var offset int32
+	var after *workbranchstore.Cursor
 	for {
-		page, total, err := p.branches.List(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, offset)
+		page, err := p.branches.ListByCursor(ctx, workbranchstore.ListFilter{RepoID: &repoID}, workBranchListPageSize, after)
 		if err != nil {
 			return nil, err
+		}
+		if len(page) == 0 {
+			break
 		}
 		for _, wb := range page {
 			if wb.UpstreamPRNumber == nil {
@@ -291,10 +301,8 @@ func (p *StorePRPoller) pollSet(ctx context.Context, repoID uuid.UUID) ([]workbr
 			}
 			pollable = append(pollable, wb)
 		}
-		offset += int32(len(page))
-		if len(page) == 0 || int64(offset) >= total {
-			break
-		}
+		last := page[len(page)-1]
+		after = &workbranchstore.Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
 	}
 	sort.Slice(pollable, func(i, j int) bool { return pollable[i].Name < pollable[j].Name })
 	return pollable, nil
