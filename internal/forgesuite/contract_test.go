@@ -277,6 +277,48 @@ var contractCases = []contractCase{
 		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a bound-host mismatch must be rejected on its own terms, not folded into repo-not-found")
 		assert.NotErrorIs(t, err, forge.ErrNoWriteAccess, "a bound-host mismatch is not a permissions problem")
 	}},
+	{"CheckRepo/CredentialBearingURLRedactsPassword", func(t *testing.T, e *env) {
+		// loam-giq.12: fakeforge.Client.CheckRepo used to interpolate
+		// upstreamURL into its errors verbatim, diverging from
+		// Forgejo.CheckRepo's redaction (loam-po8e) — an absence this
+		// contract never caught because nothing here asserted on
+		// credential handling at all. A caller-supplied upstreamURL can
+		// legitimately carry embedded HTTP Basic credentials (this is not
+		// the Provider's own bound token, which never appears in a URL at
+		// all); whatever those credentials are, they must never appear in
+		// an error, even though the host they're attached to is safe to
+		// name. The bound-host mismatch path is used to force a
+		// deterministic error on every leg without depending on what a
+		// live network probe would do with credentials it doesn't expect.
+		repo := e.h.SeedRepo(t)
+		foreignURL := withForeignHost(t, repo.GitURL)
+		const username, password = "loam-contract-user", "s3cr3t-p4ssw0rd"
+		err := e.provider(t, TokenFull).CheckRepo(t.Context(), withCredentials(t, foreignURL, username, password))
+		require.Error(t, err)
+		foreignHost, parseErr := url.Parse(foreignURL)
+		require.NoError(t, parseErr)
+		assert.Contains(t, err.Error(), foreignHost.Host, "the error should still name the host, which is not secret")
+		assert.NotContains(t, err.Error(), password, "the embedded password must never appear in the error")
+		assert.NotContains(t, err.Error(), username, "the embedded username must never appear in the error")
+	}},
+	{"CheckRepo/CredentialBearingURLRedactsUsernameOnlySecret", func(t *testing.T, e *env) {
+		// The empty-password PAT form ("https://<token>@host/path") is
+		// exactly the shape a Forgejo token takes when embedded in a URL —
+		// distinct from the username+password case above because a naive
+		// string-replace redaction (hunting for a ":" to find where the
+		// password starts) silently misses it: there is no ":" for it to
+		// find (loam-po8e, loam-giq.12). A correct redaction reconstructs
+		// from the parsed URL with User cleared instead.
+		repo := e.h.SeedRepo(t)
+		foreignURL := withForeignHost(t, repo.GitURL)
+		const usernameOnlySecret = "s3cr3t-t0ken-as-username"
+		err := e.provider(t, TokenFull).CheckRepo(t.Context(), withUsernameOnlyCredential(t, foreignURL, usernameOnlySecret))
+		require.Error(t, err)
+		foreignHost, parseErr := url.Parse(foreignURL)
+		require.NoError(t, parseErr)
+		assert.Contains(t, err.Error(), foreignHost.Host, "the error should still name the host, which is not secret")
+		assert.NotContains(t, err.Error(), usernameOnlySecret, "the embedded username-only secret must never appear in the error")
+	}},
 	{"CheckRepo/BogusTokenFoldsIntoRepoNotFound", func(t *testing.T, e *env) {
 		// Both implementations deliberately FOLD "the credential was
 		// rejected on the read probe" into ErrRepoNotFound, because from
@@ -601,6 +643,23 @@ func withCredentials(t *testing.T, rawURL, username, password string) string {
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	u.User = url.UserPassword(username, password)
+	return u.String()
+}
+
+// withUsernameOnlyCredential returns rawURL with ONLY a username embedded
+// (url.User, never url.UserPassword) — the empty-password PAT form
+// "https://<token>@host/path" a Forgejo token takes, distinct from
+// withCredentials' username:password form: url.UserPassword(u, "") still
+// renders a ":" before the (empty) password, which is exactly the
+// character a naive password-only redaction would hunt for and find here
+// by accident. url.User(u) renders no ":" at all, so this is the shape
+// that actually exercises the naive-redaction failure mode loam-po8e and
+// loam-giq.12 fixed.
+func withUsernameOnlyCredential(t *testing.T, rawURL, username string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	u.User = url.User(username)
 	return u.String()
 }
 
