@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -120,14 +121,22 @@ func TestRunWhoami_UnknownFlag_IsUsageError(t *testing.T) {
 // that acquired any client -- never mind called one -- is caught. The
 // end-to-end counterpart, against an unreachable LOAM_SERVER_URL through
 // the real binary, is in cmd/loam/main_test.go.
+//
+// Each accessor calls t.Fatal, not t.Error: a regression that reaches one
+// would then go on to call a method on the nil client the Func returns
+// (e.g. Meta().GetInstructions(...)), and t.Error alone would let that
+// nil-pointer dereference panic the test after the real failure was
+// already recorded -- a confusing way to observe a clean, named assertion
+// failure. t.Fatal aborts this goroutine (the test's own, so it is safe to
+// call here) before any of that can happen.
 func TestRunWhoami_MakesNoServerCall(t *testing.T) {
 	t.Parallel()
 	connectClient := &ConnectClientMock{
-		MetaFunc:       func() MetaClient { t.Error("whoami must not reach the Meta client"); return nil },
-		WorkBranchFunc: func() WorkBranchClient { t.Error("whoami must not reach the WorkBranch client"); return nil },
-		RepoFunc:       func() RepoClient { t.Error("whoami must not reach the Repo client"); return nil },
-		GraphFunc:      func() GraphClient { t.Error("whoami must not reach the Graph client"); return nil },
-		SearchFunc:     func() SearchClient { t.Error("whoami must not reach the Search client"); return nil },
+		MetaFunc:       func() MetaClient { t.Fatal("whoami must not reach the Meta client"); return nil },
+		WorkBranchFunc: func() WorkBranchClient { t.Fatal("whoami must not reach the WorkBranch client"); return nil },
+		RepoFunc:       func() RepoClient { t.Fatal("whoami must not reach the Repo client"); return nil },
+		GraphFunc:      func() GraphClient { t.Fatal("whoami must not reach the Graph client"); return nil },
+		SearchFunc:     func() SearchClient { t.Fatal("whoami must not reach the Search client"); return nil },
 	}
 	cfg := &ConfigMock{
 		AgentNameFunc:  func() string { return "ada-lovelace" },
@@ -141,6 +150,154 @@ func TestRunWhoami_MakesNoServerCall(t *testing.T) {
 	require.NoError(t, runWhoami(t.Context(), deps, nil))
 	assert.Empty(t, connectClient.MetaCalls())
 	assert.Empty(t, connectClient.WorkBranchCalls())
+}
+
+// whoamiVerifyTestDeps wires a Deps for a `whoami --verify` test: the same
+// four identity strings whoamiTestDeps resolves, a non-empty ServerURL (so
+// the LOAM_SERVER_URL guard in runWhoami does not itself short-circuit
+// these tests -- see TestRunWhoami_Verify_NoServerURL_IsUsageError for that
+// case specifically), plus client standing in for MetaService -- unlike
+// whoamiTestDeps's fakeConnect{}, which panics on any RPC attempt and is
+// therefore wrong for exercising the path that deliberately makes one.
+func whoamiVerifyTestDeps(client MetaClient, name, id, role, identifier string, encoded *any) *Deps {
+	cfg := &ConfigMock{
+		AgentNameFunc:  func() string { return name },
+		AgentIDFunc:    func() string { return id },
+		AgentRoleFunc:  func() string { return role },
+		IdentifierFunc: func() string { return identifier },
+		ServerURLFunc:  func() string { return "https://loam.example" },
+	}
+	connectClient := &ConnectClientMock{MetaFunc: func() MetaClient { return client }}
+	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+}
+
+// TestRunWhoami_Verify_NoServerURL_IsUsageError proves --verify checks
+// deps.config.ServerURL() itself, before ever touching deps.connect: a
+// blank LOAM_SERVER_URL must fail as a plain usage error (exit 2), never
+// reach the Meta client. This guards against loam-dc2v, which is expected
+// to loosen NewProductionDeps so bare `whoami` no longer requires
+// LOAM_SERVER_URL -- at which point deps.connect may not be a usable
+// client at all, and dereferencing it here would panic instead of
+// reporting the real cause (no server configured).
+func TestRunWhoami_Verify_NoServerURL_IsUsageError(t *testing.T) {
+	t.Parallel()
+	cfg := &ConfigMock{
+		AgentNameFunc:  func() string { return "ada-lovelace" },
+		AgentIDFunc:    func() string { return "7" },
+		AgentRoleFunc:  func() string { return "reviewer" },
+		IdentifierFunc: func() string { return "ada-lovelace-7-reviewer" },
+		ServerURLFunc:  func() string { return "" },
+	}
+	connectClient := &ConnectClientMock{
+		MetaFunc: func() MetaClient {
+			t.Error("whoami --verify must not reach the Meta client with no configured server")
+			return nil
+		},
+	}
+	encoder := &OutputEncoderMock{EncodeFunc: func(any) error { return nil }}
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+
+	err := runWhoami(t.Context(), deps, []string{"--verify"})
+
+	require.Error(t, err)
+	var ue *usageError
+	assert.ErrorAs(t, err, &ue)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	assert.Empty(t, connectClient.MetaCalls())
+}
+
+// TestRunWhoami_Verify_Success_CallsMetaAndReportsVerified proves --verify
+// reuses MetaService.GetInstructions -- the exact RPC `instructions` calls,
+// per loam-0pj.16's explicit instruction not to add a proto RPC for
+// something that call already answers -- and that a successful call sets
+// Verified true alongside the identity, still local-whoami-shaped
+// otherwise.
+func TestRunWhoami_Verify_Success_CallsMetaAndReportsVerified(t *testing.T) {
+	t.Parallel()
+	called := false
+	client := &MetaClientMock{
+		GetInstructionsFunc: func(context.Context, *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error) {
+			called = true
+			return connect.NewResponse(&loamv1.GetInstructionsResponse{Usage: "usage"}), nil
+		},
+	}
+	var encoded any
+	deps := whoamiVerifyTestDeps(client, "ada-lovelace", "7", "reviewer", "ada-lovelace-7-reviewer", &encoded)
+
+	err := runWhoami(t.Context(), deps, []string{"--verify"})
+	require.NoError(t, err)
+	assert.True(t, called, "--verify must call MetaService.GetInstructions")
+
+	out, ok := encoded.(whoamiOutput)
+	require.True(t, ok, "whoami --verify must still encode a whoamiOutput")
+	assert.Equal(t, "ada-lovelace", out.Name)
+	assert.Equal(t, "7", out.ID)
+	assert.Equal(t, "reviewer", out.Role)
+	assert.Equal(t, "ada-lovelace-7-reviewer", out.Identifier)
+	assert.True(t, out.Verified, "a successful verification must set verified true")
+}
+
+// TestRunWhoami_NoVerify_VerifiedFieldOmittedFromJSON proves bare `whoami`'s
+// wire shape is untouched by adding the flag: encoding a bare-whoami
+// whoamiOutput must never render a "verified" key at all -- not even
+// "verified":false -- which is what `omitempty` on a zero-value bool
+// buys, and what stops a caller from mistaking "never checked" for
+// "checked and failed" (a failed verification is a non-zero exit instead,
+// never an encoded false).
+func TestRunWhoami_NoVerify_VerifiedFieldOmittedFromJSON(t *testing.T) {
+	t.Parallel()
+	out := whoamiOutput{Name: "ada-lovelace", ID: "7", Role: "reviewer", Identifier: "ada-lovelace-7-reviewer"}
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "verified", "bare whoami's JSON must not gain a verified key")
+}
+
+// TestRunWhoami_Verify_RoleRejected_ExitsUnauthorized is loam-0pj.16's other
+// half landing with loam-a8z's mapping: a role the server does not
+// recognize answers CodePermissionDenied (not CodeInternal, thanks to
+// loam-a8z's handler-boundary fix), which classifyConnectError turns into
+// the CLI's "unauthorized" class -- exit 2, per docs/cli-spec.md's
+// authorization-denied row, not exit 1. The message must still name the
+// role, so an operator sees why, not just that something failed.
+func TestRunWhoami_Verify_RoleRejected_ExitsUnauthorized(t *testing.T) {
+	t.Parallel()
+	client := &MetaClientMock{
+		GetInstructionsFunc: func(context.Context, *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error) {
+			return nil, connect.NewError(connect.CodePermissionDenied, errors.New("role admin is not a known agent role"))
+		},
+	}
+	var encoded any
+	deps := whoamiVerifyTestDeps(client, "grace-hopper", "3", "admin", "grace-hopper-3-admin", &encoded)
+
+	err := runWhoami(t.Context(), deps, []string{"--verify"})
+
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err), "a rejected role must exit 2 (authorization denied), not 1")
+	assert.Contains(t, err.Error(), "admin", "the failure must name the offending role")
+	assert.Nil(t, encoded, "a failed verification must not encode a partial/unverified identity")
+}
+
+// TestRunWhoami_Verify_ServerUnreachable_ExitsInternal proves --verify's
+// other declared failure mode: a transport failure is a DIFFERENT claim
+// than "the role was rejected" (loam-0pj.16 explicitly requires the two
+// not be conflated), so it takes the same unclassified-connect-error path
+// `instructions` itself does -- exit 1, not 2.
+func TestRunWhoami_Verify_ServerUnreachable_ExitsInternal(t *testing.T) {
+	t.Parallel()
+	client := &MetaClientMock{
+		GetInstructionsFunc: func(context.Context, *connect.Request[loamv1.GetInstructionsRequest]) (*connect.Response[loamv1.GetInstructionsResponse], error) {
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("dial tcp: connection refused"))
+		},
+	}
+	var encoded any
+	deps := whoamiVerifyTestDeps(client, "ada-lovelace", "7", "reviewer", "ada-lovelace-7-reviewer", &encoded)
+
+	err := runWhoami(t.Context(), deps, []string{"--verify"})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, newErrorMapper().ExitCode(err), "an unreachable server must exit 1, distinct from a rejected role's exit 2")
+	assert.Nil(t, encoded)
 }
 
 // --- instructions ---
