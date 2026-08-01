@@ -193,6 +193,131 @@ func TestLoam_HumanOutputFormat_PrintsPlainMessageNotJSON(t *testing.T) {
 	assert.NotEmpty(t, strings.TrimSpace(result.stdout))
 }
 
+// emptyEnv is the opposite of validEnv(): no LOAM_* variable set at all,
+// PATH preserved so the compiled binary can still start. The loam-dc2v/
+// loam-q0ek acceptance criteria are specifically about a machine with "no
+// LOAM_* environment at all", so every test below that claims to prove one
+// of them uses this, never validEnv() with pieces removed.
+func emptyEnv() []string {
+	return []string{"PATH=" + os.Getenv("PATH")}
+}
+
+// TestLoam_Help_EmptyEnvironment_ExitsZeroWithUsage proves the bare `loam
+// help` form: loam-dc2v defect 2 ("help is gated behind config") is fixed
+// when this succeeds on emptyEnv() -- before the fix this failed with a
+// LOAM_SERVER_URL usage error, exit 2.
+func TestLoam_Help_EmptyEnvironment_ExitsZeroWithUsage(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "help")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Empty(t, result.stderr)
+	assert.NotContains(t, result.stdout, `"code"`, "help must not be a JSON error envelope")
+	assert.Contains(t, result.stdout, "whoami")
+	assert.Contains(t, result.stdout, "instructions")
+}
+
+// TestLoam_DoubleDashHelp_TopLevel_EmptyEnvironment_ExitsZeroWithUsage
+// proves `loam --help` specifically -- loam-q0ek's own reproduction of this
+// exact route: "unknown command \"--help\"", exit 2, before the fix.
+func TestLoam_DoubleDashHelp_TopLevel_EmptyEnvironment_ExitsZeroWithUsage(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "--help")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.NotContains(t, result.stdout, `"code":"usage"`)
+	assert.Contains(t, result.stdout, "work")
+}
+
+// TestLoam_SubcommandHelp_EmptyEnvironment_ExitsZeroWithUsage proves
+// `loam work start --help` -- loam-q0ek's other named reproduction
+// ("pflag: help requested", exit 2) -- now exits 0 with real usage text
+// including the flag/positional command name, and crucially requires no
+// LOAM_* configuration at all to get there.
+func TestLoam_SubcommandHelp_EmptyEnvironment_ExitsZeroWithUsage(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "work", "start", "--help")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.NotContains(t, result.stdout, `"code"`)
+	assert.NotContains(t, result.stdout, "pflag: help requested", "pflag's internal sentinel text must never reach the user")
+	assert.Contains(t, result.stdout, "work start")
+}
+
+// TestLoam_SubcommandHelp_WithFlags_EmptyEnvironment_RendersFlagUsage
+// proves a leaf WITH registered flags (work set's --title) renders that
+// flag's usage text specifically, not just a bare summary line -- the
+// "flag/usage help from the pflag FlagSet" half of the chosen design
+// (option (c), see loam-q0ek's notes).
+func TestLoam_SubcommandHelp_WithFlags_EmptyEnvironment_RendersFlagUsage(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "work", "set", "--help")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Contains(t, result.stdout, "--title")
+}
+
+// TestLoam_Whoami_NoServerURL_ExitsZeroAndReportsIdentity is loam-dc2v
+// defect 3's own reproduction, made to pass: identity vars set, but
+// LOAM_SERVER_URL entirely unset. Before the fix this exited 2 with
+// {"error":{"code":"usage","message":"LOAM_SERVER_URL is required but not
+// set"}}, contradicting whoami's own "Local only -- no server call"
+// contract (docs/cli-spec.md line 139) and its own doc comment.
+func TestLoam_Whoami_NoServerURL_ExitsZeroAndReportsIdentity(t *testing.T) {
+	t.Parallel()
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"LOAM_AGENT_NAME=grace-hopper",
+		"LOAM_AGENT_ID=1",
+		"LOAM_AGENT_ROLE=author",
+	}
+	result := runLoam(t, env, "whoami")
+	require.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Empty(t, result.stderr)
+	var out struct {
+		Name       string `json:"name"`
+		ID         string `json:"id"`
+		Role       string `json:"role"`
+		Identifier string `json:"identifier"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &out), "stdout: %s", result.stdout)
+	assert.Equal(t, "grace-hopper", out.Name)
+	assert.Equal(t, "grace-hopper-1-author", out.Identifier)
+}
+
+// TestLoam_Whoami_NoServerURL_VerifyFlag_IsUsageErrorNotPanic proves the
+// "two traps" warning: whoami --verify still requires LOAM_SERVER_URL at
+// point of use (it just shipped independently of this bead), and the
+// restructuring that lets bare whoami skip it must not leave --verify
+// dialing a nil Connect client. A nil-pointer panic would show up here as
+// a non-zero exit with no JSON error body and something on stderr; this
+// asserts the real contract instead — a clean, structured usage error.
+func TestLoam_Whoami_NoServerURL_VerifyFlag_IsUsageErrorNotPanic(t *testing.T) {
+	t.Parallel()
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"LOAM_AGENT_NAME=grace-hopper",
+		"LOAM_AGENT_ID=1",
+		"LOAM_AGENT_ROLE=author",
+	}
+	result := runLoam(t, env, "whoami", "--verify")
+	assert.Equal(t, 2, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Empty(t, result.stderr, "a nil Connect client dereference would panic to stderr, not report a clean usage error")
+	assert.Contains(t, result.stdout, `"code":"usage"`)
+	assert.Contains(t, result.stdout, "LOAM_SERVER_URL")
+}
+
+// TestLoam_MissingEverything_ReportsEveryVariableInOneRun is loam-dc2v
+// defect 1's end-to-end proof: a completely unconfigured run must name
+// every missing variable in its single structured error, not just
+// LOAM_SERVER_URL (the first one loadConfig used to check before this
+// fix).
+func TestLoam_MissingEverything_ReportsEveryVariableInOneRun(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "instructions")
+	assert.Equal(t, 2, result.exitCode)
+	assert.Contains(t, result.stdout, `"code":"usage"`)
+	for _, name := range []string{"LOAM_SERVER_URL", "LOAM_AGENT_NAME", "LOAM_AGENT_ID", "LOAM_AGENT_ROLE"} {
+		assert.Contains(t, result.stdout, name, "a fully unconfigured run must name every missing variable in one output")
+	}
+}
+
 // TestMainWiring_NoPlaceholderCollaborators is loam-qdr's own acceptance
 // criterion made concrete: main.go must wire the real Config, OutputEncoder,
 // ErrorMapper, WorkspaceResolver, and ConnectClient, with no reference to
