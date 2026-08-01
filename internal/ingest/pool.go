@@ -222,9 +222,9 @@ func NewPool(logger *slog.Logger, db *pgxpool.Pool, orchestrator Orchestrator, w
 // RequeueOrphaned before Run, never while jobs could already be claimed
 // (docs/server-spec.md "Startup" step 4 / step 5 ordering).
 func (p *Pool) Run(ctx context.Context) {
-	for range p.workers {
+	for i := range p.workers {
 		p.wg.Add(1)
-		go p.work(ctx)
+		go p.work(ctx, i)
 	}
 	p.wg.Wait()
 }
@@ -232,7 +232,28 @@ func (p *Pool) Run(ctx context.Context) {
 // work is one worker goroutine's loop: claim a job if one is available and
 // not blocked by per-repo serialization, run it, and otherwise wait for a
 // wake-up signal, the poll interval, or shutdown.
-func (p *Pool) work(ctx context.Context) {
+//
+// This is the per-WORKER panic boundary (loam-jy0p), and it exists
+// because run's per-job guard (loam-337) does not cover this whole
+// function: the claim() call below -- a driver error mishandled scanning
+// a claimed row, say -- runs BEFORE run() is ever invoked, so a panic
+// there has no per-job boundary underneath it to be caught by. Without
+// recoverWorkerPanic, that panic would unwind straight out of work(),
+// which Run spawned directly as a goroutine root, and take down the
+// entire process -- the HTTP listener, the policy socket git pushes
+// depend on, and every other worker's in-flight job -- exactly the
+// failure loam-337 already closed for the job-execution path but left
+// open here (loam-lae's close notes flagged this exact gap).
+//
+// recoverWorkerPanic is deferred FIRST, ahead of wg.Done, purely to match
+// this package's own established shape (run's recoverOutcomeRecording is
+// registered ahead of release/notifyDrainWaiters for the same reason --
+// see its doc comment). It does not change correctness here: wg.Done
+// already runs during a panic's unwind regardless of defer order, so
+// Pool.Run's wg.Wait() was never at risk from this particular panic (see
+// recoverWorkerPanic's own doc comment for what IS at risk).
+func (p *Pool) work(ctx context.Context, workerIndex int) {
+	defer p.recoverWorkerPanic(ctx, workerIndex)
 	defer p.wg.Done()
 	ticker := time.NewTicker(p.pollInterval)
 	defer ticker.Stop()
@@ -252,6 +273,36 @@ func (p *Pool) work(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// recoverWorkerPanic is work's own outermost guard, matching
+// recoverOutcomeRecording (below) and cmd/server/multirunner.go's
+// recoverMember in shape: it never re-panics -- a silent recover would be
+// strictly worse than the crash it replaces -- so every recovered panic is
+// logged at ERROR with the worker's identity, the recovered value, and a
+// stack trace.
+//
+// What dies with this worker is different from what dies with a job (see
+// recoverOutcomeRecording's doc comment): no ingest_jobs row is left
+// mid-flight, because the panic happened before any job was claimed (or
+// while claiming one, before ownership of that row transferred out of
+// claim's own transaction -- claim's deferred rollback still runs during
+// the unwind, same as any other panic in this package). What is lost is
+// this goroutine itself: one fewer worker draining claimQuery's SELECT ...
+// FOR UPDATE SKIP LOCKED, so queued jobs simply accumulate in
+// status='queued' with p.workers-1 workers left to service them --
+// silently, with no metric or /readyz change (internal/health/health.go
+// deliberately excludes the ingest pool from readiness), all the way down
+// to zero if every worker eventually panics this way. Restarting the
+// process is the only recovery; nothing in this package restarts a dead
+// worker goroutine.
+func (p *Pool) recoverWorkerPanic(ctx context.Context, workerIndex int) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	p.logger.ErrorContext(ctx, "recovered panic in ingest worker; this worker has permanently stopped claiming jobs",
+		"worker_index", workerIndex, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 }
 
 // claimQuery selects the oldest queued job whose repo is not already
@@ -636,7 +687,16 @@ func (p *Pool) abandonReason(attempts int, runErr error) string {
 // trigger for that repo+branch+kind (e.g. the following sync tick) simply
 // enqueues a fresh job via Enqueue, since Enqueue's coalescing only
 // considers status='queued' rows.
+//
+// recoverScheduleRetryPanic is deferred FIRST, ahead of wg.Done, for the
+// same reason work's recoverWorkerPanic is: fail() spawns this as its own
+// goroutine (`go p.scheduleRetry(...)`), not something run() inline-calls
+// under its own guard, so a panic in the UPDATE below -- a driver error,
+// say -- has no per-job boundary above this frame to be caught by and
+// would otherwise take down the whole process (loam-jy0p; loam-lae's
+// close notes flagged this exact gap alongside work's).
 func (p *Pool) scheduleRetry(ctx context.Context, jobID uuid.UUID, delay time.Duration) {
+	defer p.recoverScheduleRetryPanic(ctx, jobID)
 	defer p.wg.Done()
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -650,6 +710,31 @@ func (p *Pool) scheduleRetry(ctx context.Context, jobID uuid.UUID, delay time.Du
 		return
 	}
 	p.wakeUp()
+}
+
+// recoverScheduleRetryPanic is scheduleRetry's own panic boundary,
+// matching recoverWorkerPanic and recoverOutcomeRecording in shape: it
+// never re-panics, so every recovered panic is logged at ERROR with the
+// job's identity, the recovered value, and a stack trace.
+//
+// What dies here is narrower than a dead worker: exactly one job, the
+// jobID this goroutine was scheduling a retry for, never returns from
+// 'failed' to 'queued' -- no other job, and no worker, is affected. That
+// row is left stuck in status='failed' indefinitely: unlike a deliberate
+// abandonment (abandonReason), which is a terminal outcome recorded in the
+// row's own attempts/error columns, this is a silent stall an admin
+// reading the row cannot distinguish from "still waiting out its backoff"
+// without also checking whether the process logged this line. The repo's
+// serialization slot is unaffected -- fail() already released it before
+// spawning this goroutine (run's own doc comment) -- so the repo itself
+// is not blocked; only this one job's path back into the queue is lost.
+func (p *Pool) recoverScheduleRetryPanic(ctx context.Context, jobID uuid.UUID) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	p.logger.ErrorContext(ctx, "recovered panic scheduling ingest job retry; this job will not return to queued",
+		"job_id", jobID, "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 }
 
 // backoffDelay doubles base once per prior attempt (attempts is the

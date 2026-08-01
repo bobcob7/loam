@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -497,4 +498,119 @@ func TestRun_ReleasesTheSlotAndWakesDrainWaitersOnAPipelinePanic(t *testing.T) {
 	default:
 		t.Fatal("a DrainRepoID waiter must be woken on the panic path too")
 	}
+}
+
+// capturingHandler is a minimal, thread-safe slog.Handler used in place of
+// testLogger's io.Discard sink wherever a test must assert on LOG CONTENT
+// -- not merely on survival. It captures every record verbatim (Clone, so
+// a record's lazily-evaluated attrs are safe to read after Handle
+// returns) for the test to inspect once the call under test has returned.
+// Same shape as internal/mirrorsync/scheduler_test.go's own copy -- kept
+// as a package-local duplicate rather than a shared test helper package,
+// matching that file's precedent.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func newCapturingHandler() (*capturingHandler, *slog.Logger) {
+	h := &capturingHandler{}
+	return h, slog.New(h)
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// find returns the first captured record with the given message, or false
+// if none has been written.
+func (h *capturingHandler) find(msg string) (slog.Record, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+// attrString returns the string form of key's value on r, or "" if key was
+// never set -- good enough for these tests, which only assert non-empty /
+// Contains, never an exact numeric or structured comparison.
+func attrString(r slog.Record, key string) string {
+	var val string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return val
+}
+
+// TestWork_SurvivesAndLogsAPanicWhileClaiming is loam-jy0p's proof for the
+// first of the two goroutines loam-lae's close notes flagged as sitting
+// outside run()'s guard: work()'s claim loop runs BEFORE run() is ever
+// called, so a panic in claim() (a driver error mishandled scanning a
+// claimed row, say) has no per-job boundary underneath it. Before this
+// fix, that panic unwound straight out of work() -- a goroutine root Run
+// spawned directly -- and crashed the whole process.
+//
+// The injected fault is a nil *pgxpool.Pool, the same technique
+// TestRun_SurvivesAPanicWhileRecordingTheOutcome above already uses to
+// reach a panic inside this package's DB calls without a real Postgres:
+// claim's very first statement is p.db.Begin(ctx), which dereferences the
+// nil pool.
+//
+// require.NotPanics is what makes this test kill the mutation "delete the
+// recover" with an ASSERTION rather than a crash of the whole `go test`
+// binary (every sibling test in this package would go down with it,
+// exactly the production failure mode this bead removes).
+func TestWork_SurvivesAndLogsAPanicWhileClaiming(t *testing.T) {
+	t.Parallel()
+	handler, logger := newCapturingHandler()
+	pool := NewPool(logger, nil, &OrchestratorMock{}, 1)
+	pool.wg.Add(1)
+	require.NotPanics(t, func() { pool.work(t.Context(), 3) },
+		"a panic while claiming a job must not escape work() -- Run spawns work as a goroutine root with no guard of its own")
+	rec, found := handler.find("recovered panic in ingest worker; this worker has permanently stopped claiming jobs")
+	require.True(t, found, "a recovered worker panic must be logged, not silently dropped")
+	assert.Equal(t, "3", attrString(rec, "worker_index"), "the log must identify WHICH worker died")
+	assert.NotEmpty(t, attrString(rec, "panic"), "the log must carry the recovered value")
+	assert.NotEmpty(t, attrString(rec, "stack"), "the log must carry a stack trace -- a recovered panic that loses its stack is harder to diagnose than a crash")
+}
+
+// TestScheduleRetry_SurvivesAndLogsAPanicRequeueing is loam-jy0p's proof
+// for the second flagged goroutine: fail() spawns scheduleRetry as its own
+// detached goroutine (`go p.scheduleRetry(...)`), so a panic in its UPDATE
+// -- a driver error, say -- has no per-job boundary above this frame
+// either, and previously took down the whole process just like work's.
+//
+// Same nil-*pgxpool.Pool technique as the test above: scheduleRetry's
+// only DB call, p.db.Exec, dereferences the nil pool once the timer
+// fires. delay is effectively zero so the test does not wait out a real
+// backoff.
+func TestScheduleRetry_SurvivesAndLogsAPanicRequeueing(t *testing.T) {
+	t.Parallel()
+	handler, logger := newCapturingHandler()
+	pool := NewPool(logger, nil, &OrchestratorMock{}, 1)
+	jobID := uuid.New()
+	pool.wg.Add(1)
+	require.NotPanics(t, func() { pool.scheduleRetry(t.Context(), jobID, time.Millisecond) },
+		"a panic while scheduling a retry must not escape scheduleRetry -- fail() spawns it as a detached goroutine with no guard of its own")
+	rec, found := handler.find("recovered panic scheduling ingest job retry; this job will not return to queued")
+	require.True(t, found, "a recovered scheduleRetry panic must be logged, not silently dropped")
+	assert.Equal(t, jobID.String(), attrString(rec, "job_id"), "the log must identify WHICH job's retry died")
+	assert.NotEmpty(t, attrString(rec, "panic"), "the log must carry the recovered value")
+	assert.NotEmpty(t, attrString(rec, "stack"), "the log must carry a stack trace -- a recovered panic that loses its stack is harder to diagnose than a crash")
 }
