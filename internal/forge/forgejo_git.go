@@ -28,16 +28,24 @@ import (
 func (f *Forgejo) CheckRepo(ctx context.Context, upstreamURL string) error {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
-		return fmt.Errorf("checking repo %s: parsing upstream URL: %w", upstreamURL, err)
+		// upstreamURL is deliberately never interpolated into this
+		// error, and err is deliberately not %w-wrapped: *url.Error's
+		// Error() renders as `parse "<raw url>": <reason>`, so wrapping
+		// it would leak exactly what redactUserinfo below exists to
+		// prevent (loam-po8e, mirroring
+		// internal/handler/repoadmin/probe.go's identical rule for the
+		// same reason).
+		return errors.New("checking repo: parsing upstream URL: invalid URL")
 	}
+	redacted := redactUserinfo(u)
 	if boundHost := hostOf(f.host); u.Host != boundHost {
-		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q", upstreamURL, u.Host, boundHost)
+		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q", redacted, u.Host, boundHost)
 	}
 	if err := f.lsRemoteProbe(ctx, upstreamURL); err != nil {
-		return fmt.Errorf("checking repo %s: %w", upstreamURL, err)
+		return fmt.Errorf("checking repo %s: %w", redacted, err)
 	}
 	if err := f.receivePackProbe(ctx, u); err != nil {
-		return fmt.Errorf("checking repo %s: %w", upstreamURL, err)
+		return fmt.Errorf("checking repo %s: %w", redacted, err)
 	}
 	return nil
 }
@@ -49,6 +57,7 @@ func (f *Forgejo) CheckRepo(ctx context.Context, upstreamURL string) error {
 // or a missing git binary are reported unclassified so callers don't
 // mistake infrastructure trouble for a missing repo.
 func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
+	redacted := redactURLString(upstreamURL)
 	home, err := os.MkdirTemp("", "loam-forge-probe-*")
 	if err != nil {
 		return fmt.Errorf("creating isolated git environment: %w", err)
@@ -60,14 +69,14 @@ func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
 	if err == nil {
 		return nil
 	}
-	f.logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", upstreamURL, "err", err, "output", string(bytes.TrimSpace(out)))
+	f.logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", redacted, "err", err, "output", string(bytes.TrimSpace(out)))
 	if ctx.Err() != nil {
-		return fmt.Errorf("ls-remote %s: %w", upstreamURL, ctx.Err())
+		return fmt.Errorf("ls-remote %s: %w", redacted, ctx.Err())
 	}
 	if errors.Is(err, exec.ErrNotFound) {
-		return fmt.Errorf("ls-remote %s: %w", upstreamURL, err)
+		return fmt.Errorf("ls-remote %s: %w", redacted, err)
 	}
-	return fmt.Errorf("ls-remote %s: %w: %s", upstreamURL, ErrRepoNotFound, bytes.TrimSpace(out))
+	return fmt.Errorf("ls-remote %s: %w: %s", redacted, ErrRepoNotFound, bytes.TrimSpace(out))
 }
 
 // receivePackProbe issues the GET request that a `git push` makes as its
@@ -83,6 +92,7 @@ func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) er
 	probe.RawQuery = "service=git-receive-pack"
 	probe.Fragment = ""
 	probeURL := probe.String()
+	redacted := redactUserinfo(&probe)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
 		return fmt.Errorf("building receive-pack probe request: %w", err)
@@ -92,16 +102,16 @@ func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) er
 	}
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		f.logger.DebugContext(ctx, "receive-pack probe transport error", "url", probeURL, "err", err)
-		return fmt.Errorf("receive-pack probe %s: %w", probeURL, err)
+		f.logger.DebugContext(ctx, "receive-pack probe transport error", "url", redacted, "err", err)
+		return fmt.Errorf("receive-pack probe %s: %w", redacted, err)
 	}
 	defer drainAndClose(resp.Body)
-	f.logger.DebugContext(ctx, "receive-pack probe response", "url", probeURL, "status", resp.StatusCode)
+	f.logger.DebugContext(ctx, "receive-pack probe response", "url", redacted, "status", resp.StatusCode)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("receive-pack probe %s: %w", probeURL, ErrNoWriteAccess)
+		return fmt.Errorf("receive-pack probe %s: %w", redacted, ErrNoWriteAccess)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("receive-pack probe %s: unexpected status %s", probeURL, resp.Status)
+		return fmt.Errorf("receive-pack probe %s: unexpected status %s", redacted, resp.Status)
 	}
 	return nil
 }
@@ -215,4 +225,38 @@ func hostOf(hostOrURL string) string {
 		return hostOrURL
 	}
 	return u.Host
+}
+
+// redactUserinfo reconstructs u's string form with any embedded userinfo
+// (user, or user:password) cleared, rather than string-replacing the
+// password component -- which fails for the empty-password PAT form
+// "https://<token>@host/path" (no ":" for a naive replace to find).
+// Safe to render in an error message or log line: nothing CheckRepo,
+// lsRemoteProbe, or receivePackProbe derive from a *url.URL ever needs
+// the userinfo component itself.
+//
+// This is a package-local copy of
+// internal/handler/repoadmin/handler.go's identically-behaved helper of
+// the same name -- that one is unexported, so internal/forge cannot
+// import it (loam-po8e). If a third copy of this logic ever appears,
+// that is the moment to extract a shared one (loam-ldx is the precedent
+// for when duplication of a security-relevant helper stops being
+// acceptable).
+func redactUserinfo(u *url.URL) string {
+	redacted := *u
+	redacted.User = nil
+	return redacted.String()
+}
+
+// redactURLString parses raw and returns its redacted form (see
+// redactUserinfo). If raw fails to parse, a fixed placeholder is
+// returned instead of raw itself: returning raw on the parse-failure
+// path would be exactly the leak redaction exists to prevent, since a
+// parse failure says nothing about whether raw embeds a credential.
+func redactURLString(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable-url>"
+	}
+	return redactUserinfo(u)
 }

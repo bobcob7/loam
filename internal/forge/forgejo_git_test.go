@@ -308,3 +308,99 @@ func TestForgejo_LsRemoteProbe_GitBinaryMissing_NotClassified(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrRepoNotFound)
 	assert.ErrorIs(t, err, exec.ErrNotFound)
 }
+
+// credentialCases is shared by the three redaction regression tests
+// below (loam-po8e): one case with a user:password pair, and one with a
+// bare username and no password -- the empty-password PAT form
+// ("https://<token>@host/path") that a naive strings.Replace-the-password
+// redaction would miss, since there is no ":" for it to find.
+var credentialCases = []struct {
+	name   string
+	userOf func(secret string) *url.Userinfo
+}{
+	{name: "username and password", userOf: func(secret string) *url.Userinfo { return url.UserPassword("attacker-user", secret) }},
+	{name: "username only, no password", userOf: func(secret string) *url.Userinfo { return url.User(secret) }},
+}
+
+// TestForgejo_CheckRepo_RedactsCredential is the regression test for
+// loam-po8e: CheckRepo must never let a credential embedded in
+// upstreamURL reach its own error strings, even though the only caller
+// today (enroll.go) is already guarded against passing one
+// (deriveRepoIdentity, loam-ra1k). The host-mismatch branch is the
+// deterministic way to exercise CheckRepo's own redaction without
+// spawning git or a server.
+func TestForgejo_CheckRepo_RedactsCredential(t *testing.T) {
+	t.Parallel()
+	for _, tc := range credentialCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			const secret = "s3cr3t-token" //nolint:gosec // test fixture, not a real credential
+			u := &url.URL{Scheme: "https", User: tc.userOf(secret), Host: "evil.example.com", Path: "/group/repo"}
+			f := NewForgejo("forgejo.example.com", "bound-token", http.DefaultClient, testLogger())
+			err := f.CheckRepo(t.Context(), u.String())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "evil.example.com")
+			assert.NotContains(t, err.Error(), secret)
+			assert.NotContains(t, err.Error(), "attacker-user")
+		})
+	}
+}
+
+// TestForgejo_LsRemoteProbe_RedactsCredential is the regression test for
+// loam-po8e covering lsRemoteProbe directly: a credential embedded in
+// upstreamURL must never reach the returned error or the debug log line,
+// even though git's own "unable to access"/"not found" message (the `out`
+// bytes this function also folds into its error) already redacts
+// userinfo on its own -- verified empirically against the git binary on
+// this machine.
+func TestForgejo_LsRemoteProbe_RedactsCredential(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	for _, tc := range credentialCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+			su, err := url.Parse(server.URL)
+			require.NoError(t, err)
+			const secret = "s3cr3t-token" //nolint:gosec // test fixture, not a real credential
+			su.User = tc.userOf(secret)
+			f := NewForgejo(server.URL, "", server.Client(), testLogger())
+			err = f.lsRemoteProbe(t.Context(), su.String())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), su.Host)
+			assert.NotContains(t, err.Error(), secret)
+			assert.NotContains(t, err.Error(), "attacker-user")
+		})
+	}
+}
+
+// TestForgejo_ReceivePackProbe_RedactsCredential is the regression test
+// for loam-po8e covering receivePackProbe directly: a credential embedded
+// in the *url.URL it is handed must never reach the returned error or the
+// debug log line.
+func TestForgejo_ReceivePackProbe_RedactsCredential(t *testing.T) {
+	t.Parallel()
+	for _, tc := range credentialCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer server.Close()
+			su, err := url.Parse(server.URL)
+			require.NoError(t, err)
+			const secret = "s3cr3t-token" //nolint:gosec // test fixture, not a real credential
+			su.User = tc.userOf(secret)
+			f := NewForgejo(server.URL, "token", server.Client(), testLogger())
+			err = f.receivePackProbe(t.Context(), su)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrNoWriteAccess)
+			assert.Contains(t, err.Error(), su.Host)
+			assert.NotContains(t, err.Error(), secret)
+			assert.NotContains(t, err.Error(), "attacker-user")
+		})
+	}
+}
