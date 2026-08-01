@@ -131,12 +131,22 @@ do.
 Reports the calling agent's identity and role as resolved from the environment. Split out
 of `instructions` so identity can be fetched on its own without the larger payload.
 
-**Synopsis:** `loam whoami`
+**Synopsis:** `loam whoami [--verify]`
 
 **Arguments:** none.
 
+**Flags:**
+
+- `--verify` *(optional)* — additionally confirm the configured role actually resolves on
+  the server, over the same call `instructions` already makes (no separate RPC exists for
+  this). Opt-in only: without it, `whoami` makes no server call at all.
+
 **Behavior:** Reads the `LOAM_AGENT_*` environment variables and returns the resolved
-identity. Local only — no server call.
+identity. By default this is local only — no server call — which is what lets `whoami`
+still answer when every other command is failing (e.g. a misconfigured role makes every
+gated command answer "unauthorized"/"internal error", but `whoami` alone still reports who
+the agent is configured as, which is often the fastest way to isolate the cause). `--verify`
+trades that guarantee, on demand, for confirmation the role is actually valid.
 
 **Output** (JSON):
 
@@ -144,7 +154,24 @@ identity. Local only — no server call.
 { "name": "ada-lovelace", "id": "7", "role": "reviewer", "identifier": "ada-lovelace-7-reviewer" }
 ```
 
-**Errors:** exit `2` if a required identity variable is missing or malformed.
+With `--verify` and a role that resolves, the response additionally carries `"verified":
+true`; without `--verify`, or when it fails, the field is absent — never `"verified":
+false`, since a failed verification is a non-zero exit and no output at all, not a "checked
+and failed" flag alongside the identity:
+
+```json
+{ "name": "ada-lovelace", "id": "7", "role": "reviewer", "identifier": "ada-lovelace-7-reviewer", "verified": true }
+```
+
+**Errors:**
+
+- exit `2` if a required identity variable is missing or malformed.
+- With `--verify`: exit `2` (`unauthorized`) if the configured role does not resolve on the
+  server — a denial, not a "not found", so the response cannot be used to enumerate valid
+  role names. Exit `2` (`usage`) if `--verify` is given but `LOAM_SERVER_URL` is not
+  configured. Exit `1` if the server is unreachable — deliberately a different code than a
+  rejected role, so the two failure modes stay distinguishable instead of both collapsing
+  into an opaque failure.
 
 ### Git
 

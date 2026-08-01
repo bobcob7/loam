@@ -16,8 +16,15 @@ import (
 type RoleStore interface {
 	// RoleCapabilities returns the operations granted to role, from the
 	// fixed Capability vocabulary in capability.go (CapabilityWorkStart,
-	// ...). An unknown role is the store's concern to reject;
-	// CapabilityChecker only forwards whatever error it returns.
+	// ...). An unknown role is the store's concern to reject: it returns an
+	// error wrapping internal/rolestore.ErrNotFound (as
+	// internal/rolestore.Store.GetRole does), which RequireCapability
+	// specifically recognizes and rewraps as ErrPermissionDenied -- a
+	// caller presenting an unrecognized role is a denial, not a not-found
+	// (loam-a8z), and must not be able to distinguish existing role names
+	// from non-existing ones by response code. Any OTHER error (a genuine
+	// store failure) is forwarded unchanged, still headed for
+	// ErrorMapper's unmapped-and-logged CodeInternal default.
 	RoleCapabilities(ctx context.Context, role string) ([]Capability, error)
 }
 

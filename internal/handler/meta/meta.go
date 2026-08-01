@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/rolestore"
 )
 
 // Handler implements loamv1connect.MetaServiceHandler.
@@ -93,6 +95,9 @@ func (h *Handler) resolveCaller(ctx context.Context) (granted []handler.Capabili
 	}
 	granted, err = h.roles.RoleCapabilities(ctx, identity.Role)
 	if err != nil {
+		if errors.Is(err, rolestore.ErrNotFound) {
+			return nil, "", fmt.Errorf("resolving capabilities for role %s: %w: %w", identity.Role, err, handler.ErrPermissionDenied)
+		}
 		return nil, "", fmt.Errorf("resolving capabilities for role %s: %w", identity.Role, err)
 	}
 	instructions, err = h.roles.RoleInstructions(ctx, identity.Role)

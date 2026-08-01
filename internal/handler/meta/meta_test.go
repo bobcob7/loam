@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/rolestore"
 )
 
 func testLogger() *slog.Logger {
@@ -174,6 +176,43 @@ func TestGetInstructions_NoResolvedCaller_ReturnsPermissionDenied(t *testing.T) 
 	var connectErr *connect.Error
 	require.ErrorAs(t, err, &connectErr)
 	assert.Equal(t, connect.CodePermissionDenied, connectErr.Code())
+}
+
+// TestGetInstructions_UnrecognizedRole_ReturnsPermissionDeniedNotInternal is
+// loam-a8z's own reproduction, end to end through this handler: an agent
+// presenting a role the store does not recognize (RoleCapabilities
+// returning an error wrapping rolestore.ErrNotFound, exactly what
+// internal/rolestore.Store.GetRole returns and what the live
+// LOAM_AGENT_ROLE=admin incident hit) must answer CodePermissionDenied,
+// naming the role -- not fall through to ErrorMapper's unmapped-error
+// default (CodeInternal, "internal error", and a logged "unmapped handler
+// error" line). Before this bead, an unknown role reached the wire exactly
+// that way; this pins the fix and gives loam-0pj.16's `whoami --verify`
+// something other than "internal error" to report. Removing the mapping in
+// meta.go's resolveCaller makes this fail on the CodePermissionDenied
+// assertion (or observe a log line) below, not panic -- RoleCapabilitiesFunc
+// unconditionally returns the wrapped ErrNotFound regardless of what
+// resolveCaller does with it.
+func TestGetInstructions_UnrecognizedRole_ReturnsPermissionDeniedNotInternal(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	store := &meta.RoleStoreMock{
+		RoleCapabilitiesFunc: func(_ context.Context, role string) ([]handler.Capability, error) {
+			return nil, fmt.Errorf("getting role %s: %w", role, rolestore.ErrNotFound)
+		},
+		RoleInstructionsFunc: func(context.Context, string) (string, error) {
+			t.Fatal("instructions must not be resolved once RoleCapabilities has already failed")
+			return "", nil
+		},
+	}
+	h := newHandler(store, &buf)
+	_, err := h.GetInstructions(agentCtx(t, "admin"), connect.NewRequest(&loamv1.GetInstructionsRequest{}))
+	require.Error(t, err)
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodePermissionDenied, connectErr.Code(), "an unrecognized role must not surface as CodeInternal")
+	assert.Contains(t, connectErr.Message(), "admin", "the error must name the offending role")
+	assert.Empty(t, buf.String(), "a mapped permission denial must not trip ErrorMapper's unmapped-error log")
 }
 
 // TestGetInstructions_SpecificCommand_ReturnsOnlyThatEntry proves the

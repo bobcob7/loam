@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/rolestore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +69,15 @@ func TestCapabilityChecker_RequireCapability(t *testing.T) {
 			roleErr:       errors.New("role store unreachable"),
 			wantErr:       true,
 			wantStoreCall: true,
+		},
+		{
+			name:           "an unrecognized role is denied, not treated as an internal error (loam-a8z)",
+			ctx:            agentCtx,
+			capability:     handler.CapabilitySearch,
+			roleErr:        fmt.Errorf("getting role %s: %w", "author", rolestore.ErrNotFound),
+			wantErr:        true,
+			wantPermission: true,
+			wantStoreCall:  true,
 		},
 		{
 			name:          "unknown capability is rejected without consulting the role store",
@@ -141,6 +152,44 @@ func TestCapabilityChecker_RequireCapability_UnknownCapabilityIsLoggedAsInternal
 	require.NotNil(t, got)
 	assert.Equal(t, connect.CodeInternal, got.Code())
 	assert.Contains(t, buf.String(), "work.reqest_review", "the unknown capability must be logged, not silently dropped")
+}
+
+// TestCapabilityChecker_RequireCapability_UnknownRole_MapsToPermissionDeniedNamingRole
+// is loam-a8z's own end-to-end proof: a role store lookup failing with
+// rolestore.ErrNotFound (exactly what internal/rolestore.Store.GetRole
+// returns for a role name that does not exist, and what the live
+// LOAM_AGENT_ROLE=admin reproduction hit) must reach the wire as
+// CodePermissionDenied -- silently, no log line -- not fall through
+// ErrorMapper's unmapped-error default (CodeInternal, logged). It also
+// checks errors.Is still finds rolestore.ErrNotFound in the chain, so a
+// caller matching on the original cause still can, and that the message
+// names the offending role. Removing the mapping in capability.go's
+// RequireCapability makes this fail on the CodePermissionDenied/ErrorIs
+// assertions below (or observe a log line where none is wanted) -- not a
+// panic and not a vacuous pass, since RoleCapabilitiesFunc unconditionally
+// returns the wrapped ErrNotFound regardless of what RequireCapability
+// does with it.
+func TestCapabilityChecker_RequireCapability_UnknownRole_MapsToPermissionDeniedNamingRole(t *testing.T) {
+	t.Parallel()
+	agentCtx := httpauth.WithIdentity(t.Context(), httpauth.Identity{Name: "grace-hopper", ID: "3", Role: "admin"})
+	store := &handler.RoleStoreMock{
+		RoleCapabilitiesFunc: func(_ context.Context, role string) ([]handler.Capability, error) {
+			return nil, fmt.Errorf("getting role %s: %w", role, rolestore.ErrNotFound)
+		},
+	}
+	checker := handler.NewCapabilityChecker(store)
+	err := checker.RequireCapability(agentCtx, handler.CapabilityWorkStart)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, handler.ErrPermissionDenied, "an unrecognized role must be a permission denial")
+	assert.ErrorIs(t, err, rolestore.ErrNotFound, "the original store cause must still be reachable via errors.Is")
+	assert.Contains(t, err.Error(), "admin", "the error must name the offending role")
+
+	var buf bytes.Buffer
+	mapper := handler.NewErrorMapper(slog.New(slog.NewJSONHandler(&buf, nil)))
+	got := mapper.ToConnectErr(err)
+	require.NotNil(t, got)
+	assert.Equal(t, connect.CodePermissionDenied, got.Code(), "an unrecognized role must not surface as CodeInternal")
+	assert.Empty(t, buf.String(), "a mapped permission denial must not trip ErrorMapper's unmapped-error log")
 }
 
 // TestCapability_Valid is exhaustive over the ten-operation vocabulary

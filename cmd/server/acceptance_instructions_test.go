@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -46,6 +47,8 @@ func (h *acceptanceHarness) registerInstructionsSteps(sc *godog.ScenarioContext)
 	sc.Step(`^I am told my name, id, role, and full identifier$`, h.stepIAmToldMyIdentity)
 	sc.Step(`^the server is unreachable$`, h.stepTheServerIsUnreachable)
 	sc.Step(`^I still get my identity from the environment$`, h.stepIAmToldMyIdentity)
+	sc.Step(`^I ask to verify who I am$`, h.stepIAskToVerifyWhoIAm)
+	sc.Step(`^the verification is rejected as unauthorized, naming the role$`, h.stepTheVerificationIsRejectedAsUnauthorizedNamingTheRole)
 }
 
 // acceptanceWhoamiOutput mirrors internal/cli/commands_root.go's
@@ -280,6 +283,45 @@ func (h *acceptanceHarness) stepIAmToldMyIdentity(ctx context.Context) error {
 	got := world.lastWhoami
 	if got.Name != actor.name || got.ID != actor.id || got.Role != actor.role || got.Identifier != actor.identifier() {
 		return fmt.Errorf("got whoami %+v, want name=%q id=%q role=%q identifier=%q", got, actor.name, actor.id, actor.role, actor.identifier())
+	}
+	return nil
+}
+
+// stepIAskToVerifyWhoIAm runs `loam whoami --verify` as world.currentActor
+// and stashes the RAW result (world.lastCLI), not a decoded success value:
+// unlike stepIAskWhoIAm, this scenario's whole point is that the role does
+// not resolve, so the following Then step must be able to observe a
+// non-zero exit and a structured error document, which decodeLoamJSON
+// (which stepIAskWhoIAm uses) would treat as a hard failure of the step
+// itself rather than the outcome under test.
+func (h *acceptanceHarness) stepIAskToVerifyWhoIAm(ctx context.Context) error {
+	world := worldFrom(ctx)
+	world.lastCLI = h.runLoamAs(world, world.currentActor, "", "whoami", "--verify")
+	return nil
+}
+
+// stepTheVerificationIsRejectedAsUnauthorizedNamingTheRole is loam-0pj.16's
+// and loam-a8z's joint acceptance criterion, exercised together: an agent
+// whose configured role the server does not recognize (world.currentActor's
+// role here is never seeded by any Background or fixture in this suite --
+// exactly the live LOAM_AGENT_ROLE=admin reproduction the two beads were
+// filed from) must get "unauthorized" (exit 2), not "internal" (exit 1) --
+// which is what reached the wire before loam-a8z's handler-boundary mapping
+// existed -- and the message must name the offending role, not just say
+// "internal error" and leave the operator to guess. requireLoamRejected
+// (acceptance_review_test.go) asserts the code and exit class together, so
+// a harness typo that merely produces SOME non-zero exit cannot pass this.
+func (h *acceptanceHarness) stepTheVerificationIsRejectedAsUnauthorizedNamingTheRole(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if err := requireLoamRejected(world.lastCLI, "loam whoami --verify", "unauthorized", 2); err != nil {
+		return err
+	}
+	var payload acceptanceCLIError
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &payload); err != nil {
+		return fmt.Errorf("decoding loam whoami --verify error document: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if !strings.Contains(payload.Error.Message, world.currentActor.role) {
+		return fmt.Errorf("rejection message %q does not name the offending role %q", payload.Error.Message, world.currentActor.role)
 	}
 	return nil
 }

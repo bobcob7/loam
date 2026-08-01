@@ -116,32 +116,74 @@ func runInstructions(ctx context.Context, deps *Deps, args []string) error {
 // comment's author is exactly who that bug bites. Reporting both,
 // unambiguously keyed, leaves nothing to guess about which string a given
 // API wants.
+//
+// Verified is `omitempty` so it is absent from bare `whoami`'s JSON
+// entirely, not merely false: loam-0pj.16 requires bare `whoami`'s output
+// stay exactly as it was, and a caller must not be able to mistake "not
+// checked" (`--verify` never ran) for "checked and failed" (which is
+// instead a non-zero exit -- see runWhoami). It is only ever encoded true:
+// a failed verification returns an error and never reaches the encode
+// call, so this field, when present at all, always means the role
+// resolved.
 type whoamiOutput struct {
 	Name       string `json:"name"`
 	ID         string `json:"id"`
 	Role       string `json:"role"`
 	Identifier string `json:"identifier"`
+	Verified   bool   `json:"verified,omitempty"`
 }
 
-// runWhoami implements `loam whoami` (see docs/cli-spec.md -> whoami). No
-// arguments, no flags.
+// runWhoami implements `loam whoami` / `loam whoami --verify` (see
+// docs/cli-spec.md -> whoami).
 //
-// It takes no context because it makes no call that could use one: this is
-// a pure render of the already-resolved configuration, and the "Local only
-// -- no server call" promise in docs/cli-spec.md is enforced structurally,
-// by there being no client reachable from here, rather than by a comment
-// asking future edits not to add one.
+// Bare `whoami` is unchanged from before this flag existed: a pure render
+// of the already-resolved configuration, no server call, enforced
+// structurally by never reaching deps.connect on that path (see
+// docs/cli-spec.md -> whoami: "Local only -- no server call", true of the
+// DEFAULT, not of --verify). features/instructions.feature's "whoami works
+// without contacting the server" points the CLI at a bound-then-closed
+// port and depends on exactly this remaining true; --verify is opt-in
+// specifically so that guarantee survives untouched.
 //
-// The exit-2-on-missing-identity contract is satisfied before this
-// function can run at all: loadConfig (config.go) rejects a missing or
-// malformed LOAM_AGENT_* variable, and NewProductionDeps (deps.go) reports
-// that as a usage error through the encoder and returns before any Deps --
-// and therefore any dispatch -- exists. Re-validating here would be a
-// second copy of that rule, free to diverge from the one that actually
-// runs first; the right place to prove it is an end-to-end test of the
-// real binary, which cmd/loam/main_test.go has.
-func runWhoami(_ context.Context, deps *Deps, args []string) error {
+// --verify additionally calls MetaService.GetInstructions -- the same RPC
+// `instructions` already makes (runInstructions, above), reused rather than
+// a new proto RPC because none is needed: an unresolvable role already
+// fails that existing call. Its response body is discarded; only the error
+// (or lack of one) is read. Two distinct failure modes follow from that one
+// call, and conflating them would recreate the diagnostic problem this flag
+// exists to solve (loam-0pj.16, loam-a8z):
+//
+//   - The role does not resolve server-side: rolestore.ErrNotFound at the
+//     RoleStore seam is mapped to connect.CodePermissionDenied by loam-a8z's
+//     handler-boundary fix, which classifyConnectError (errormapper.go)
+//     turns into a newUnauthorizedError -- exit 2, docs/cli-spec.md's
+//     authorization-denied class, deliberately not "not found" (a caller
+//     must not distinguish real role names from typos by response code).
+//   - The server is unreachable: an unclassified transport error
+//     (connect.CodeUnavailable, or nothing *connect.Error at all) falls
+//     through mapCommandError to the unexpected-internal-error class --
+//     exit 1, identical to `instructions`' own "server is unreachable"
+//     contract. That is deliberate, not an oversight: reusing
+//     GetInstructions means --verify reuses that exact same exit-code
+//     split for free, rather than inventing a third code no other command
+//     uses.
+//
+// --verify checks deps.config.ServerURL() itself before touching
+// deps.connect at all, rather than assuming a usable client exists: today
+// NewProductionDeps (deps.go) always requires LOAM_SERVER_URL, so this
+// check cannot fail in production, but that requirement is exactly what
+// loam-dc2v is expected to loosen for bare `whoami` (identity alone needs
+// no server), which would otherwise turn a missing LOAM_SERVER_URL into a
+// nil-client panic here instead of the plain usage error this returns.
+//
+// The exit-2-on-missing-identity contract for a malformed environment is
+// satisfied before this function can run at all, exactly as for bare
+// whoami before this flag existed: loadConfig (config.go) rejects it and
+// NewProductionDeps (deps.go) reports that as a usage error through the
+// encoder before any Deps -- and therefore any dispatch -- exists.
+func runWhoami(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("whoami")
+	verify := fs.Bool("verify", false, "confirm the configured role resolves on the server (makes a server call; the default is local only)")
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -149,12 +191,23 @@ func runWhoami(_ context.Context, deps *Deps, args []string) error {
 	if len(positional) > 0 {
 		return newUsageError("whoami takes no arguments")
 	}
-	return deps.encoder.Encode(whoamiOutput{
+	out := whoamiOutput{
 		Name:       deps.config.AgentName(),
 		ID:         deps.config.AgentID(),
 		Role:       deps.config.AgentRole(),
 		Identifier: deps.config.Identifier(),
-	})
+	}
+	if !*verify {
+		return deps.encoder.Encode(out)
+	}
+	if deps.config.ServerURL() == "" {
+		return newUsageError("whoami --verify requires LOAM_SERVER_URL to be configured")
+	}
+	if _, err := deps.connect.Meta().GetInstructions(ctx, connect.NewRequest(&loamv1.GetInstructionsRequest{})); err != nil {
+		return fmt.Errorf("verifying role %s resolves on the server: %w", out.Role, err)
+	}
+	out.Verified = true
+	return deps.encoder.Encode(out)
 }
 
 // --- clone ---
