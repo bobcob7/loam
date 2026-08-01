@@ -671,6 +671,23 @@ func (p *Pool) fail(ctx context.Context, job Job, runErr error) {
 // as "permanent" would abandon a transient failure from anywhere else in
 // the pipeline (e.g. a lock-contention error) on its very first attempt,
 // which the bead's ACCEPTANCE CRITERIA explicitly forbids.
+//
+// loam-c94.16 narrowed WHEN an ollama.IsContextLengthExceeded failure can
+// even reach this function, without changing this function itself:
+// internal/ingest/vectors' embedAll now catches that specific error at the
+// embed call site, splits the offending chunk (reusing
+// internal/ingest/chunk's own splitting), and retries -- recursively, down
+// to a hard per-rune split -- before ever returning an error up through
+// Prepare to the orchestrator and finally here. So an
+// ollama.IsContextLengthExceeded that DOES reach abandonReason today means
+// the split was already attempted and still failed (the one genuinely
+// un-embeddable case: a single already-minimal piece the model's context
+// window still rejects). Treating that as permanent on attempt one remains
+// correct for the same reason as before -- a job-level retry re-runs the
+// unchanged content through that same exhausted split-and-retry and fails
+// identically -- so no change to the check itself was needed, only this
+// note on why the precondition the old comment assumed ("this input can
+// never fit") is now enforced one layer down instead of assumed here.
 func (p *Pool) abandonReason(attempts int, runErr error) string {
 	if ollama.IsPermanent(runErr) {
 		return "permanently classified failure, not retryable"
