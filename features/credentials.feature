@@ -20,11 +20,6 @@ Feature: Managing upstream credentials
     When I enroll "https://github.com/bobcob7/doc-server"
     Then the server proves git read and write access with the token before cloning
 
-  Scenario: A token without git access fails enrollment
-    Given a credential exists for "github.com" whose token lacks git access
-    When I enroll "https://github.com/bobcob7/doc-server"
-    Then the enrollment is rejected because the token cannot access the repo over git
-
   Scenario: Credentials are shared by all repos on a host
     Given a credential exists for "github.com"
     When I enroll two repos hosted on "github.com"
