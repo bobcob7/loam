@@ -217,16 +217,20 @@ func (s *Store) List(ctx context.Context, filter ListFilter, limit, offset int32
 // This method is for FULL-ENUMERATION callers only (internal/mirrorsync's
 // StoreRepoResolver, listOpenWorkBranches, and StorePRPoller's pollSet, all
 // of which page through every matching row rather than showing one bounded
-// screen to a human) and deliberately carries no companion count: a
-// caller here is expected to loop while len(page) == limit (the ordinary
-// keyset termination condition -- fewer rows than requested means there is
-// nothing left), not against a total from a second query. A total fetched
-// separately from CountWorkBranches can already be stale by the time the
-// last page is read under concurrent writes -- exactly the hazard that
-// makes List's OFFSET pagination unsafe for a caller of this shape in the
-// first place (see ListWorkBranchesByCursor's doc comment) -- so building
-// this method's termination on the same kind of value would not actually
-// fix anything.
+// screen to a human) and deliberately carries no companion count: a caller
+// here is expected to loop until a page comes back empty, not against a
+// total from a second query. A total fetched separately from
+// CountWorkBranches can already be stale by the time the last page is read
+// under concurrent writes -- exactly the hazard that makes List's OFFSET
+// pagination unsafe for a caller of this shape in the first place (see
+// ListWorkBranchesByCursor's doc comment) -- so building this method's
+// termination on the same kind of value would not actually fix anything.
+// Terminating on an empty page, rather than on a short (< limit) one, costs
+// at most one extra round trip when a real last page happens to be exactly
+// limit rows long, and makes no assumption about the backend always
+// returning a full page short of exhaustion -- which callers exercise
+// directly by having a test's mock hand back pages smaller than limit,
+// without that being mistaken for "nothing left".
 func (s *Store) ListByCursor(ctx context.Context, filter ListFilter, limit int32, after *Cursor) ([]WorkBranch, error) {
 	repoID, target, author, state, reviewer := filterColumns(filter)
 	var cursorCreatedAt pgtype.Timestamptz

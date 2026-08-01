@@ -43,15 +43,17 @@ func pollRepoFixture(repoID uuid.UUID) *repoByNameLookupMock {
 // pollBranchLister returns a workBranchNameLister serving branches as a
 // single page.
 func pollBranchLister(repoID uuid.UUID, branches ...workbranchstore.WorkBranch) *workBranchNameListerMock {
+	served := false
 	return &workBranchNameListerMock{
-		ListFunc: func(_ context.Context, filter workbranchstore.ListFilter, _, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
+		ListByCursorFunc: func(_ context.Context, filter workbranchstore.ListFilter, _ int32, _ *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
 			if filter.RepoID == nil || *filter.RepoID != repoID {
-				return nil, 0, errors.New("work branch list was not scoped to the repo")
+				return nil, errors.New("work branch list was not scoped to the repo")
 			}
-			if offset > 0 {
-				return nil, int64(len(branches)), nil
+			if served {
+				return nil, nil
 			}
-			return branches, int64(len(branches)), nil
+			served = true
+			return branches, nil
 		},
 	}
 }
@@ -456,13 +458,16 @@ func TestPollPRs_PagesThroughEveryWorkBranch(t *testing.T) {
 		all = append(all, workBranchFixture("wb-"+string(rune('a'+i%26))+uuid.NewString(), uuid.New(), int32(i+1)))
 		states[i+1] = prStateOpen
 	}
+	pos := 0
 	lister := &workBranchNameListerMock{
-		ListFunc: func(_ context.Context, _ workbranchstore.ListFilter, limit, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-			if int(offset) >= len(all) {
-				return nil, int64(len(all)), nil
+		ListByCursorFunc: func(_ context.Context, _ workbranchstore.ListFilter, limit int32, _ *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			if pos >= len(all) {
+				return nil, nil
 			}
-			end := min(int(offset+limit), len(all))
-			return all[offset:end], int64(len(all)), nil
+			end := min(pos+int(limit), len(all))
+			page := all[pos:end]
+			pos = end
+			return page, nil
 		},
 	}
 	h := newPollHarness(t, repoID, pollHarnessOpts{states: states, branchLister: lister})
@@ -497,8 +502,8 @@ func TestPollPRs_BranchListFailureAbortsTheStep(t *testing.T) {
 	repoID := uuid.New()
 	listErr := errors.New("postgres: connection refused")
 	lister := &workBranchNameListerMock{
-		ListFunc: func(context.Context, workbranchstore.ListFilter, int32, int32) ([]workbranchstore.WorkBranch, int64, error) {
-			return nil, 0, listErr
+		ListByCursorFunc: func(context.Context, workbranchstore.ListFilter, int32, *workbranchstore.Cursor) ([]workbranchstore.WorkBranch, error) {
+			return nil, listErr
 		},
 	}
 	h := newPollHarness(t, repoID, pollHarnessOpts{branchLister: lister})
