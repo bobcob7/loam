@@ -111,9 +111,12 @@ fi
 
 loam_bin=""
 if command -v loam >/dev/null 2>&1; then
-  loam_bin="loam"
+  loam_bin="$(command -v loam)"
 elif [[ -x "./bin/loam" ]]; then
-  loam_bin="./bin/loam"
+  # Resolve to an absolute path up front: every invocation below runs in a
+  # subshell that cd's into the target directory first, which would break
+  # a path still relative to the original working directory.
+  loam_bin="$(cd "$(dirname "./bin/loam")" && pwd)/$(basename "./bin/loam")"
 else
   echo "$script_name: loam CLI not found on PATH or at ./bin/loam" >&2
   echo "$script_name: build it first with: task build:bin" >&2
