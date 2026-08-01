@@ -116,6 +116,37 @@ func TestNewEncoder_UnknownFormat_FallsBackToJSON(t *testing.T) {
 	}
 }
 
+// TestNewEncoder_JSON_DoesNotEscapeAngleBrackets pins defect 4 of
+// loam-dc2v: encoding/json's default HTML-safety escaping turns a literal
+// "<" into "<", which is exactly what mangled the
+// "expected <first-name>-<last-name>" error text into unreadable unicode
+// escapes. The CLI is not HTML output, so jsonEncoder must disable it.
+func TestNewEncoder_JSON_DoesNotEscapeAngleBrackets(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("json", &buf)
+	require.NoError(t, enc.Encode(map[string]string{"message": "expected <first-name>-<last-name>"}))
+	assert.Contains(t, buf.String(), "expected <first-name>-<last-name>")
+	assert.NotContains(t, buf.String(), `\u003c`)
+}
+
+// TestMarshalNoEscape_DoesNotEscapeAngleBrackets is the toGeneric-path
+// counterpart to the jsonEncoder test above, per loam-dc2v defect 4.
+// toGeneric round-trips v through marshalNoEscape then decodes the result
+// back into a generic tree — and json decoding of "<" always yields a
+// plain "<" rune, which would make an assertion against toGeneric's final
+// output pass whether or not the marshal step escapes. So this asserts
+// against marshalNoEscape's raw JSON bytes directly, the one place the
+// escaping is actually observable and where plain json.Marshal (the
+// pre-fix code at encoder.go:58) is provably broken.
+func TestMarshalNoEscape_DoesNotEscapeAngleBrackets(t *testing.T) {
+	t.Parallel()
+	b, err := marshalNoEscape(map[string]string{"message": "expected <first-name>-<last-name>"})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "expected <first-name>-<last-name>")
+	assert.NotContains(t, string(b), `\u003c`)
+}
+
 func TestNewEncoder_EachFormat_WrittenToProvidedWriter(t *testing.T) {
 	t.Parallel()
 	for _, format := range []string{"json", "yaml", "xml", "human"} {
