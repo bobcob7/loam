@@ -62,23 +62,26 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
-	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 )
 
-// acceptanceReadOnlyForgeToken is registered once (registerCredentialsSteps)
-// via fakeforge's AddReadOnlyToken: a token that authenticates and carries
-// PR-opening REST scope (so SetUpstreamToken's ValidateToken round trip
-// still succeeds and the token can be genuinely stored and validated) but
-// is denied on git push -- the read-ok/write-denied split
-// "A token without git access fails enrollment" needs, engineered
-// specifically for this purpose (see internal/fakeforge/server.go's own doc
-// comment on AddReadOnlyToken, which names sync-spec's Upstream Transport
-// section as the real-world case this mirrors).
-const acceptanceReadOnlyForgeToken = "loam-acceptance-credentials-readonly-token"
+// The "A token without git access fails enrollment" scenario that used to
+// live here (and the acceptanceReadOnlyForgeToken const + AddReadOnlyToken
+// registration it needed) was removed by loam-2uy: it relied on
+// fakeforge.AddReadOnlyToken producing a token that validates fine (REST
+// PR-opening scope intact) but is denied at git push, and loam-2uy's live
+// verification against Forgejo 9.0.3 found that state unreachable -- git
+// push and the REST scope probe SetUpstreamToken's ValidateToken uses are
+// gated on the identical write:repository scope, so a token that clears
+// SetUpstreamToken can never then fail EnrollRepo's CheckRepo for a scope
+// reason. The generic "CheckRepo fails -> CodeFailedPrecondition" path this
+// scenario exercised is still covered without a real (or fake) forge at
+// all, via a mocked checker, in
+// internal/handler/repoadmin/enroll_test.go's
+// TestEnrollRepo_CheckRepoFails_FailedPreconditionAndNoClone.
 
 // acceptanceCredSharedGroup/RepoA/RepoB name the two repos "Credentials are
 // shared by all repos on a host" enrolls. The Gherkin names no repos at
@@ -168,14 +171,12 @@ func (h *acceptanceHarness) newCredentialServiceClient() adminv1connect.Credenti
 
 // registerCredentialsSteps wires every step features/credentials.feature
 // needs. Like registerEnrollmentSteps, it builds this file's one
-// suite-lifetime proxy and registers the read-only forge token once, since
-// this function itself runs exactly once (initializeScenario's own doc
-// comment).
+// suite-lifetime proxy, since this function itself runs exactly once
+// (initializeScenario's own doc comment).
 func (h *acceptanceHarness) registerCredentialsSteps(sc *godog.ScenarioContext) {
 	hits := &credentialsProxyHits{}
 	proxy := newCredentialsIdentityProxy(h.forge, hits)
 	h.t.Cleanup(proxy.Close)
-	h.forge.AddReadOnlyToken(acceptanceReadOnlyForgeToken)
 
 	sc.Step(`^I set an upstream token for "([^"]*)"$`, func(ctx context.Context, statedHost string) error {
 		return h.stepISetUpstreamTokenFor(ctx, proxy.URL, statedHost)
@@ -189,17 +190,11 @@ func (h *acceptanceHarness) registerCredentialsSteps(sc *godog.ScenarioContext) 
 	sc.Step(`^a credential exists for "([^"]*)"$`, func(ctx context.Context, statedHost string) error {
 		return h.stepACredentialExistsFor(ctx, proxy.URL, hits, statedHost, acceptanceForgeToken)
 	})
-	sc.Step(`^a credential exists for "([^"]*)" whose token lacks git access$`, func(ctx context.Context, statedHost string) error {
-		return h.stepACredentialExistsFor(ctx, proxy.URL, hits, statedHost, acceptanceReadOnlyForgeToken)
-	})
 	sc.Step(`^I enroll "([^"]*)"$`, func(ctx context.Context, literalUpstreamURL string) error {
 		return h.stepICredEnroll(ctx, proxy.URL, literalUpstreamURL)
 	})
 	sc.Step(`^the server proves git read and write access with the token before cloning$`, func(ctx context.Context) error {
 		return h.stepServerProvesGitReadWriteAccess(ctx, hits)
-	})
-	sc.Step(`^the enrollment is rejected because the token cannot access the repo over git$`, func(ctx context.Context) error {
-		return h.stepEnrollmentRejectedNoGitAccess(ctx, hits)
 	})
 	sc.Step(`^I enroll two repos hosted on "([^"]*)"$`, func(ctx context.Context, statedHost string) error {
 		return h.stepIEnrollTwoReposHostedOn(ctx, proxy.URL, statedHost)
@@ -321,15 +316,11 @@ func (h *acceptanceHarness) stepTheCredentialIsRejectedAsInvalid(ctx context.Con
 }
 
 // stepACredentialExistsFor is the shared Given behind "a credential exists
-// for <host>" and "a credential exists for <host> whose token lacks git
-// access" -- the only difference between the two is which token
-// registerCredentialsSteps' closures pass in (acceptanceForgeToken, full
-// access, or acceptanceReadOnlyForgeToken, git-write-denied). Driven
-// through the real SetUpstreamToken RPC, exactly like enrollment.feature's
-// own analogous Background step, so this also proves the REST validation
-// round trip genuinely ran with this token -- the REST half of "One token
-// covers REST and git". hits.reset() gives the following steps a clean
-// baseline attributable to this scenario alone.
+// for <host>". Driven through the real SetUpstreamToken RPC, exactly like
+// enrollment.feature's own analogous Background step, so this also proves
+// the REST validation round trip genuinely ran with this token -- the REST
+// half of "One token covers REST and git". hits.reset() gives the following
+// steps a clean baseline attributable to this scenario alone.
 func (h *acceptanceHarness) stepACredentialExistsFor(ctx context.Context, proxyURL string, hits *credentialsProxyHits, statedHost, token string) error {
 	hits.reset()
 	world := worldFrom(ctx)
@@ -345,20 +336,18 @@ func (h *acceptanceHarness) stepACredentialExistsFor(ctx context.Context, proxyU
 	return nil
 }
 
-// stepICredEnroll is "When I enroll <url>" (scenarios "One token covers
-// REST and git" and "A token without git access fails enrollment"): both
-// expect a DIFFERENT outcome from the same step text, so -- like this
-// package's other "When I try to ..." steps (e.g.
-// stepITryToDesignateAsIndexedBranch) -- the outcome is recorded on world
-// rather than judged here; the respective Then step decides pass or fail.
-// enrollmentPathIdentifier (acceptance_enrollment_test.go) derives the
-// "<group>/<repo_name>" identifier from literalUpstreamURL's own path,
+// stepICredEnroll is "When I enroll <url>" (scenario "One token covers REST
+// and git"), recording the outcome on world rather than judging it here --
+// like this package's other "When I try to ..." steps (e.g.
+// stepITryToDesignateAsIndexedBranch) -- so the Then step decides pass or
+// fail. enrollmentPathIdentifier (acceptance_enrollment_test.go) derives
+// the "<group>/<repo_name>" identifier from literalUpstreamURL's own path,
 // discarding its unreachable domain, exactly as that file's own
-// stepIEnroll does -- for these two scenarios that identifier is
-// literally "bobcob7/doc-server", the same literal enrollment.feature
-// itself uses, which is safe to reuse here for the same reason that file's
-// own doc comment gives: every scenario naming it cleans it up in
-// afterScenario before the next one runs.
+// stepIEnroll does -- here that identifier is literally
+// "bobcob7/doc-server", the same literal enrollment.feature itself uses,
+// which is safe to reuse here for the same reason that file's own doc
+// comment gives: every scenario naming it cleans it up in afterScenario
+// before the next one runs.
 func (h *acceptanceHarness) stepICredEnroll(ctx context.Context, proxyURL, literalUpstreamURL string) error {
 	world := worldFrom(ctx)
 	repoIdentifier, err := enrollmentPathIdentifier(literalUpstreamURL)
@@ -407,39 +396,6 @@ func (h *acceptanceHarness) stepServerProvesGitReadWriteAccess(ctx context.Conte
 	}
 	if receivePack == 0 {
 		return fmt.Errorf("no git write (receive-pack) probe request ever reached the upstream; git write access was never actually proven with this token")
-	}
-	return nil
-}
-
-// stepEnrollmentRejectedNoGitAccess is "Then the enrollment is rejected
-// because the token cannot access the repo over git" (scenario "A token
-// without git access fails enrollment"). Per loam-317m's own trap warning,
-// this asserts on the SPECIFIC reason, not merely on failure: the
-// rejection is CodeFailedPrecondition (matching
-// internal/handler/repoadmin's generic CheckRepo-failure wrap) AND its
-// message contains forge.ErrNoWriteAccess's own text -- ruling out a
-// pass on a repo-not-found, malformed-URL, or unreachable-host rejection,
-// each of which would ALSO be CodeFailedPrecondition or another code
-// entirely but never carries this text. It also requires the proxy to
-// have actually seen a receive-pack probe request (so the rejection is
-// attributable to a genuine write-access check, not a short-circuit that
-// never asked the forge at all) and that no repos row was created (CheckRepo
-// runs strictly before CreateRepo in enroll.go, so a genuine rejection here
-// never leaves one behind).
-func (h *acceptanceHarness) stepEnrollmentRejectedNoGitAccess(ctx context.Context, hits *credentialsProxyHits) error {
-	world := worldFrom(ctx)
-	if err := requireRPCRejected(world.lastRPCErr, "the enrollment attempt", connect.CodeFailedPrecondition); err != nil {
-		return err
-	}
-	const wantSubstring = "token lacks git write access"
-	if !strings.Contains(world.lastRPCErr.Error(), wantSubstring) {
-		return fmt.Errorf("enrollment was rejected, but not because git access was refused -- got %q, want it to contain %q", world.lastRPCErr.Error(), wantSubstring)
-	}
-	if _, _, receivePack := hits.snapshot(); receivePack == 0 {
-		return fmt.Errorf("no git write (receive-pack) probe request ever reached the upstream; the rejection cannot be attributed to a genuine write-access check")
-	}
-	if world.repoID != (uuid.UUID{}) {
-		return fmt.Errorf("enrollment was rejected, but a repos row was still created for %s", world.repo())
 	}
 	return nil
 }

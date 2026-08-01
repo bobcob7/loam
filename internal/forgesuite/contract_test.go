@@ -63,15 +63,17 @@
 // URL. loam-6n3 added the guard to the fake, so this is now asserted below
 // as CheckRepo/BoundHostMismatchIsRejected rather than excluded.
 //
-// One further divergence is absorbed by the harnesses rather than excluded,
-// and is worth knowing about when reading Token: the fake models a token's
-// git-push scope and its PR-opening scope as INDEPENDENT axes, while
-// Forgejo 9.0.3 gates both on the same write:repository scope (verified
-// live). So TokenNoGitWrite and TokenNoPRScope are two separate
-// registrations against the fake and ONE read:repository token against
-// Forgejo. Every row below holds on both readings; the underlying
-// difference — a read-only fake token passes ValidateToken where its real
-// counterpart would not — is filed as loam-2uy.
+// A divergence used to be absorbed by the harnesses rather than excluded
+// here: the fake modeled a token's git-push scope and its PR-opening scope
+// as INDEPENDENT axes (TokenNoGitWrite and TokenNoPRScope, two separate
+// registrations), while Forgejo 9.0.3 gates both on the same
+// write:repository scope (verified live) — one read:repository token,
+// denied on both. loam-2uy collapsed the fake's model to match: there is
+// now a single TokenReadOnly, reachable on every leg with one registration,
+// and ValidateToken/ReadOnlyTokenIsInsufficientScope below asserts it fails
+// ValidateToken exactly as CheckRepo/ReadOnlyTokenIsNoWriteAccess asserts it
+// fails the git write probe — the row that would have caught the drift had
+// it existed before.
 package forgesuite
 
 import (
@@ -89,25 +91,27 @@ import (
 	"github.com/bobcob7/loam/internal/forge"
 )
 
-// TokenKind names the four credential shapes the contract needs. A Harness
-// maps each onto whatever its forge can actually issue; two kinds may map
-// to the same underlying token where the forge cannot separate them (real
-// Forgejo gates git push and PR creation on the SAME write:repository
-// scope, so its TokenNoGitWrite and TokenNoPRScope are one read:repository
-// token — verified live against Forgejo 9.0.3).
+// TokenKind names the three credential shapes the contract needs. A
+// Harness maps each onto whatever its forge can actually issue.
+//
+// TokenNoGitWrite and TokenNoPRScope used to be two separate kinds here,
+// on the premise that a forge could grant git push without PR-opening
+// scope or vice versa. loam-2uy verified live against Forgejo 9.0.3 that
+// it cannot: both are gated on the identical write:repository scope, so
+// there is exactly one reachable "authenticates but lacks write access"
+// token, not two — TokenReadOnly.
 type TokenKind int
 
 const (
 	// TokenFull authenticates and carries every scope the Provider needs:
 	// git read, git push, and PR creation.
 	TokenFull TokenKind = iota
-	// TokenNoGitWrite authenticates and can read over git, but is denied on
-	// git push — CheckRepo's ErrNoWriteAccess case, i.e. credentials.feature's
-	// "A token without git access fails enrollment".
-	TokenNoGitWrite
-	// TokenNoPRScope authenticates but lacks the scope CreatePR needs —
-	// ValidateToken's ErrInsufficientScope case.
-	TokenNoPRScope
+	// TokenReadOnly authenticates and can read over git, but lacks
+	// write:repository scope, so it is denied identically on git push
+	// (CheckRepo's ErrNoWriteAccess case) and on PR-opening
+	// (ValidateToken's ErrInsufficientScope case) — verified live against
+	// Forgejo 9.0.3 (loam-2uy).
+	TokenReadOnly
 	// TokenBogus is a well-formed token string the forge has never issued.
 	TokenBogus
 )
@@ -116,10 +120,8 @@ func (k TokenKind) String() string {
 	switch k {
 	case TokenFull:
 		return "full"
-	case TokenNoGitWrite:
-		return "no-git-write"
-	case TokenNoPRScope:
-		return "no-pr-scope"
+	case TokenReadOnly:
+		return "read-only"
 	case TokenBogus:
 		return "bogus"
 	}
@@ -224,9 +226,16 @@ var contractCases = []contractCase{
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrInvalidToken)
 	}},
-	{"ValidateToken/UnscopedTokenIsInsufficientScope", func(t *testing.T, e *env) {
+	{"ValidateToken/ReadOnlyTokenIsInsufficientScope", func(t *testing.T, e *env) {
+		// This is the row loam-2uy added: before it, nothing in the
+		// contract asserted that the SAME token CheckRepo/
+		// ReadOnlyTokenIsNoWriteAccess proves is denied git push also fails
+		// ValidateToken -- the fake modeled those as reachable independently
+		// (AddReadOnlyToken kept PR scope), which real Forgejo 9.0.3 cannot
+		// produce (verified live: a read:repository token 403s identically
+		// on the git-receive-pack advertisement and on POST .../pulls).
 		p := e.provider(t, TokenFull)
-		err := p.ValidateToken(t.Context(), e.h.Host(t), e.h.Token(t, TokenNoPRScope))
+		err := p.ValidateToken(t.Context(), e.h.Host(t), e.h.Token(t, TokenReadOnly))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrInsufficientScope)
 		assert.NotErrorIs(t, err, forge.ErrInvalidToken, "a scope failure must not also read as an auth failure")
@@ -246,7 +255,7 @@ var contractCases = []contractCase{
 	}},
 	{"CheckRepo/ReadOnlyTokenIsNoWriteAccess", func(t *testing.T, e *env) {
 		repo := e.h.SeedRepo(t)
-		err := e.provider(t, TokenNoGitWrite).CheckRepo(t.Context(), repo.GitURL)
+		err := e.provider(t, TokenReadOnly).CheckRepo(t.Context(), repo.GitURL)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrNoWriteAccess)
 		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "the read probe passed, so this is not a missing repo")
@@ -267,6 +276,48 @@ var contractCases = []contractCase{
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a bound-host mismatch must be rejected on its own terms, not folded into repo-not-found")
 		assert.NotErrorIs(t, err, forge.ErrNoWriteAccess, "a bound-host mismatch is not a permissions problem")
+	}},
+	{"CheckRepo/CredentialBearingURLRedactsPassword", func(t *testing.T, e *env) {
+		// loam-giq.12: fakeforge.Client.CheckRepo used to interpolate
+		// upstreamURL into its errors verbatim, diverging from
+		// Forgejo.CheckRepo's redaction (loam-po8e) — an absence this
+		// contract never caught because nothing here asserted on
+		// credential handling at all. A caller-supplied upstreamURL can
+		// legitimately carry embedded HTTP Basic credentials (this is not
+		// the Provider's own bound token, which never appears in a URL at
+		// all); whatever those credentials are, they must never appear in
+		// an error, even though the host they're attached to is safe to
+		// name. The bound-host mismatch path is used to force a
+		// deterministic error on every leg without depending on what a
+		// live network probe would do with credentials it doesn't expect.
+		repo := e.h.SeedRepo(t)
+		foreignURL := withForeignHost(t, repo.GitURL)
+		const username, password = "loam-contract-user", "s3cr3t-p4ssw0rd"
+		err := e.provider(t, TokenFull).CheckRepo(t.Context(), withCredentials(t, foreignURL, username, password))
+		require.Error(t, err)
+		foreignHost, parseErr := url.Parse(foreignURL)
+		require.NoError(t, parseErr)
+		assert.Contains(t, err.Error(), foreignHost.Host, "the error should still name the host, which is not secret")
+		assert.NotContains(t, err.Error(), password, "the embedded password must never appear in the error")
+		assert.NotContains(t, err.Error(), username, "the embedded username must never appear in the error")
+	}},
+	{"CheckRepo/CredentialBearingURLRedactsUsernameOnlySecret", func(t *testing.T, e *env) {
+		// The empty-password PAT form ("https://<token>@host/path") is
+		// exactly the shape a Forgejo token takes when embedded in a URL —
+		// distinct from the username+password case above because a naive
+		// string-replace redaction (hunting for a ":" to find where the
+		// password starts) silently misses it: there is no ":" for it to
+		// find (loam-po8e, loam-giq.12). A correct redaction reconstructs
+		// from the parsed URL with User cleared instead.
+		repo := e.h.SeedRepo(t)
+		foreignURL := withForeignHost(t, repo.GitURL)
+		const usernameOnlySecret = "s3cr3t-t0ken-as-username"
+		err := e.provider(t, TokenFull).CheckRepo(t.Context(), withUsernameOnlyCredential(t, foreignURL, usernameOnlySecret))
+		require.Error(t, err)
+		foreignHost, parseErr := url.Parse(foreignURL)
+		require.NoError(t, parseErr)
+		assert.Contains(t, err.Error(), foreignHost.Host, "the error should still name the host, which is not secret")
+		assert.NotContains(t, err.Error(), usernameOnlySecret, "the embedded username-only secret must never appear in the error")
 	}},
 	{"CheckRepo/BogusTokenFoldsIntoRepoNotFound", func(t *testing.T, e *env) {
 		// Both implementations deliberately FOLD "the credential was
@@ -314,7 +365,7 @@ var contractCases = []contractCase{
 		// case asserts the PROBE's verdict, this one asserts the verdict is
 		// true — a real push with the same credential is actually refused.
 		repo := e.h.SeedRepo(t)
-		dir := cloneWithProviderCredentials(t, e, TokenNoGitWrite, repo)
+		dir := cloneWithProviderCredentials(t, e, TokenReadOnly, repo)
 		makeSyntheticBranch(t, dir, repo, "wb-denied")
 		out, err := tryGit(t, dir, "push", "origin", "refs/heads/wb-denied:refs/heads/wb-denied")
 		assert.Error(t, err, "a token without push scope must not be able to push: %s", out)
@@ -592,6 +643,23 @@ func withCredentials(t *testing.T, rawURL, username, password string) string {
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	u.User = url.UserPassword(username, password)
+	return u.String()
+}
+
+// withUsernameOnlyCredential returns rawURL with ONLY a username embedded
+// (url.User, never url.UserPassword) — the empty-password PAT form
+// "https://<token>@host/path" a Forgejo token takes, distinct from
+// withCredentials' username:password form: url.UserPassword(u, "") still
+// renders a ":" before the (empty) password, which is exactly the
+// character a naive password-only redaction would hunt for and find here
+// by accident. url.User(u) renders no ":" at all, so this is the shape
+// that actually exercises the naive-redaction failure mode loam-po8e and
+// loam-giq.12 fixed.
+func withUsernameOnlyCredential(t *testing.T, rawURL, username string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	u.User = url.User(username)
 	return u.String()
 }
 

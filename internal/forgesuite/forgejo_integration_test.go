@@ -142,10 +142,10 @@ func newForgejoHarness(t *testing.T) *forgejoHarness {
 	h.fullToken = forgejoExec(t, container, "issuing the full-scope token",
 		"forgejo", "admin", "user", "generate-access-token",
 		"-u", forgejoAdminUser, "--token-name", "contract-full", "--scopes", "all", "--raw")
-	// ONE read:repository token covers both TokenNoGitWrite and
-	// TokenNoPRScope, because Forgejo 9.0.3 gates git push and PR creation
-	// on the SAME write:repository scope (verified live): there is no real
-	// token that can push but not open PRs. See Token below.
+	// ONE read:repository token covers TokenReadOnly, because Forgejo 9.0.3
+	// gates git push and PR creation on the SAME write:repository scope
+	// (verified live): there is no real token that can push but not open
+	// PRs, or vice versa. See Token below.
 	h.scopedToken = forgejoExec(t, container, "issuing the read-only token",
 		"forgejo", "admin", "user", "generate-access-token",
 		"-u", forgejoAdminUser, "--token-name", "contract-readonly", "--scopes", "read:repository", "--raw")
@@ -176,11 +176,7 @@ func (h *forgejoHarness) Token(t *testing.T, kind TokenKind) string {
 	switch kind {
 	case TokenFull:
 		return h.fullToken
-	case TokenNoGitWrite, TokenNoPRScope:
-		// Deliberately the same token: on Forgejo 9.0.3 both restrictions
-		// are the absence of write:repository. The fake models them as two
-		// independent axes; that difference is the harness's to absorb, not
-		// the contract's to encode.
+	case TokenReadOnly:
 		return h.scopedToken
 	case TokenBogus:
 		return forgejoBogusToken

@@ -22,13 +22,15 @@ func TestClientValidateToken(t *testing.T) {
 // TestClientValidateTokenMissingPRScope covers ValidateToken's "the token
 // authenticates but lacks the scopes needed to open PRs" case (loam-li0.9's
 // design names this as a required ValidateToken scenario), distinct from an
-// entirely unregistered token.
+// entirely unregistered token. A read-only token is the reachable case
+// (loam-2uy): AddTokenWithoutPRScope's "can push but not open PRs" state
+// was removed because real Forgejo has no scope that produces it.
 func TestClientValidateTokenMissingPRScope(t *testing.T) {
 	t.Parallel()
 	srv, ts := newTestServer(t)
-	srv.AddTokenWithoutPRScope("push-only-token")
-	client := NewClient(ts.URL, "push-only-token")
-	err := client.ValidateToken(t.Context(), "example.invalid", "push-only-token")
+	srv.AddReadOnlyToken("read-only-token")
+	client := NewClient(ts.URL, "read-only-token")
+	err := client.ValidateToken(t.Context(), "example.invalid", "read-only-token")
 	assert.ErrorIs(t, err, errMissingScope)
 }
 

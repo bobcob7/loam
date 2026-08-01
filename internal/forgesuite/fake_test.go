@@ -33,16 +33,12 @@ func TestProviderContract_FakeForge(t *testing.T) {
 	Run(t, newFakeHarness(t))
 }
 
-// fakeTokens are the four credentials the fake forge registers, one per
-// TokenKind. The fake models canPush and canPR as INDEPENDENT axes, which
-// real Forgejo does not (see the harness's Token method), so the two
-// restricted tokens here are genuinely different registrations where
-// Forgejo needs only one.
+// fakeTokens are the three credentials the fake forge registers, one per
+// TokenKind.
 const (
-	fakeTokenFull       = "contract-full-token"
-	fakeTokenNoGitWrite = "contract-read-only-token"
-	fakeTokenNoPRScope  = "contract-no-pr-scope-token"
-	fakeTokenBogus      = "contract-never-issued-token"
+	fakeTokenFull     = "contract-full-token"
+	fakeTokenReadOnly = "contract-read-only-token"
+	fakeTokenBogus    = "contract-never-issued-token"
 )
 
 // fakeHarness drives the contract against internal/fakeforge. One Server
@@ -67,8 +63,7 @@ func newFakeHarness(t *testing.T) *fakeHarness {
 	t.Cleanup(ts.Close)
 	server.SetBaseURL(ts.URL)
 	server.AddToken(fakeTokenFull)
-	server.AddReadOnlyToken(fakeTokenNoGitWrite)
-	server.AddTokenWithoutPRScope(fakeTokenNoPRScope)
+	server.AddReadOnlyToken(fakeTokenReadOnly)
 	return &fakeHarness{server: server, http: ts}
 }
 
@@ -84,10 +79,8 @@ func (h *fakeHarness) Token(t *testing.T, kind TokenKind) string {
 	switch kind {
 	case TokenFull:
 		return fakeTokenFull
-	case TokenNoGitWrite:
-		return fakeTokenNoGitWrite
-	case TokenNoPRScope:
-		return fakeTokenNoPRScope
+	case TokenReadOnly:
+		return fakeTokenReadOnly
 	case TokenBogus:
 		return fakeTokenBogus
 	}
