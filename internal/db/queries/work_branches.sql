@@ -231,6 +231,70 @@ WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
     )
   );
 
+-- name: ListWorkBranchesByCursor :many
+-- Keyset (cursor) pagination for FULL-ENUMERATION callers only (loam-coj) --
+-- internal/mirrorsync's StoreRepoResolver (builds the mirror fetch's
+-- work-branch exclusion list) and listOpenWorkBranches (shared by
+-- StoreAdvanceDetector/StoreMergeabilityChecker). ListWorkBranches above
+-- (LIMIT/OFFSET) stays the wire API's paging primitive for
+-- loamv1.ListWorkBranchesResponse.PageInfo, untouched by this query: OFFSET
+-- is fine for a human paging a bounded admin screen, where a concurrent
+-- insert shifting the window by one row is a cosmetic annoyance, not silent
+-- data loss.
+--
+-- OFFSET pagination is unsafe for the enumeration callers above for a
+-- different reason: a caller that pages through with OFFSET while a
+-- concurrent INSERT lands in an already-passed page shifts every later
+-- row's offset by one, silently skipping exactly one row for a caller that
+-- keeps paging by count rather than re-deriving its position from the rows
+-- it has actually seen. For StoreRepoResolver, a skipped row is a
+-- work-branch name silently missing from the mirror fetch's exclusion
+-- list, which the next fetch then does NOT exclude -- an unrecoverable
+-- deletion of that work branch's ref (docs/git-spec.md's Ref Policy), not
+-- a mere pagination artifact.
+--
+-- Keyset pagination sidesteps the shift entirely: instead of "skip N rows",
+-- each page asks "give me the rows that sort strictly after the last row I
+-- saw", a condition unaffected by rows inserted or deleted elsewhere in the
+-- result set. It keys on the same (created_at, id) total order
+-- ListWorkBranches already sorts by, but the comparison must follow each
+-- column's own sort direction, not a single lexicographic tuple comparison
+-- ((a,b) < (c,d) in Postgres assumes both columns sort the same way, and a
+-- mismatched pair here silently skips or repeats rows -- see this bead's
+-- mutation-tested concurrency test, TestListByCursor_ConcurrentInsert...):
+-- created_at sorts DESC, so "after" means a STRICTLY EARLIER created_at, or
+-- the SAME created_at paired with a GREATER id (id sorts ASC, the implicit
+-- tie-break direction).
+--
+-- $6/$7 (cursor_created_at/cursor_id) are NULL together on the first page
+-- (no cursor filter at all, matching every OTHER optional filter's "empty
+-- sentinel means unset" convention above); every subsequent call passes the
+-- previous page's last row.
+SELECT wb.* FROM work_branches wb
+WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
+  AND ($2::text = '' OR wb.target = $2)
+  AND ($3::text = '' OR wb.author = $3)
+  AND ($4::text = '' OR wb.state = $4)
+  AND (
+    $5::text = '' OR (
+      wb.state = 'reviewable'
+      AND NOT EXISTS (
+        SELECT 1 FROM verdicts v
+        JOIN review_rounds rr ON rr.id = v.round_id
+        WHERE rr.work_branch_id = wb.id
+          AND rr.number = (SELECT MAX(rr2.number) FROM review_rounds rr2 WHERE rr2.work_branch_id = wb.id)
+          AND v.reviewer = $5
+      )
+    )
+  )
+  AND (
+    $6::timestamptz IS NULL
+    OR wb.created_at < $6::timestamptz
+    OR (wb.created_at = $6::timestamptz AND wb.id > $7::uuid)
+  )
+ORDER BY wb.created_at DESC, wb.id
+LIMIT $8;
+
 -- name: RecordWorkBranchUpstreamPR :one
 -- Proposal Acceptance's record leg (docs/sync-spec.md "Proposal
 -- Acceptance", step 2: "record upstream_pr_url and upstream_pr_number").
