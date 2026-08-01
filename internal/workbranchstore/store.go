@@ -76,6 +76,19 @@ type ListFilter struct {
 	AwaitingVerdictReviewer string
 }
 
+// Cursor is a keyset-pagination position over the same (created_at DESC,
+// id) total order List sorts by (loam-coj). A nil *Cursor to ListByCursor
+// means "first page"; every subsequent call passes the previous page's
+// last row (its CreatedAt and ID) so paging can resume exactly where it
+// left off regardless of rows inserted or deleted elsewhere in the result
+// set -- unlike List's OFFSET, which counts rows from the top on every
+// call and so silently skips or repeats rows when a concurrent insert
+// shifts the count out from under it.
+type Cursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
 // Store implements the work_branches aggregate. Construct with New over a
 // querier (typically gen.New(pool) or gen.New(tx)), or NewInTx as a named
 // shorthand for the latter.
@@ -190,6 +203,56 @@ func (s *Store) List(ctx context.Context, filter ListFilter, limit, offset int32
 		result = append(result, fromGenWorkBranch(row))
 	}
 	return result, total, nil
+}
+
+// ListByCursor returns filter's matching work branches ordered newest-created
+// first -- the same (created_at DESC, id) order List sorts by -- one keyset
+// page at a time (loam-coj). after nil requests the first page; every
+// subsequent call must pass a Cursor built from the last row of the
+// previous page (its CreatedAt and ID) so the query can resume exactly
+// where it left off via ListWorkBranchesByCursor's WHERE clause
+// (internal/db/queries/work_branches.sql), rather than by counting rows
+// from the top the way List's OFFSET does.
+//
+// This method is for FULL-ENUMERATION callers only (internal/mirrorsync's
+// StoreRepoResolver, listOpenWorkBranches, and StorePRPoller's pollSet, all
+// of which page through every matching row rather than showing one bounded
+// screen to a human) and deliberately carries no companion count: a
+// caller here is expected to loop while len(page) == limit (the ordinary
+// keyset termination condition -- fewer rows than requested means there is
+// nothing left), not against a total from a second query. A total fetched
+// separately from CountWorkBranches can already be stale by the time the
+// last page is read under concurrent writes -- exactly the hazard that
+// makes List's OFFSET pagination unsafe for a caller of this shape in the
+// first place (see ListWorkBranchesByCursor's doc comment) -- so building
+// this method's termination on the same kind of value would not actually
+// fix anything.
+func (s *Store) ListByCursor(ctx context.Context, filter ListFilter, limit int32, after *Cursor) ([]WorkBranch, error) {
+	repoID, target, author, state, reviewer := filterColumns(filter)
+	var cursorCreatedAt pgtype.Timestamptz
+	var cursorID pgtype.UUID
+	if after != nil {
+		cursorCreatedAt = pgtype.Timestamptz{Time: after.CreatedAt, Valid: true}
+		cursorID = pgUUID(after.ID)
+	}
+	rows, err := s.q.ListWorkBranchesByCursor(ctx, gen.ListWorkBranchesByCursorParams{
+		Column1: repoID,
+		Column2: target,
+		Column3: author,
+		Column4: state,
+		Column5: reviewer,
+		Column6: cursorCreatedAt,
+		Column7: cursorID,
+		Limit:   limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing work branches by cursor: %w", err)
+	}
+	result := make([]WorkBranch, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, fromGenWorkBranch(row))
+	}
+	return result, nil
 }
 
 // SetTitleDescription replaces id's title and description with the given

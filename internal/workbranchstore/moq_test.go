@@ -44,6 +44,9 @@ var _ querier = &querierMock{}
 //			ListWorkBranchesFunc: func(ctx context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error) {
 //				panic("mock out the ListWorkBranches method")
 //			},
+//			ListWorkBranchesByCursorFunc: func(ctx context.Context, arg gen.ListWorkBranchesByCursorParams) ([]gen.WorkBranch, error) {
+//				panic("mock out the ListWorkBranchesByCursor method")
+//			},
 //			MarkWorkBranchConflictedFunc: func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error) {
 //				panic("mock out the MarkWorkBranchConflicted method")
 //			},
@@ -89,6 +92,9 @@ type querierMock struct {
 
 	// ListWorkBranchesFunc mocks the ListWorkBranches method.
 	ListWorkBranchesFunc func(ctx context.Context, arg gen.ListWorkBranchesParams) ([]gen.WorkBranch, error)
+
+	// ListWorkBranchesByCursorFunc mocks the ListWorkBranchesByCursor method.
+	ListWorkBranchesByCursorFunc func(ctx context.Context, arg gen.ListWorkBranchesByCursorParams) ([]gen.WorkBranch, error)
 
 	// MarkWorkBranchConflictedFunc mocks the MarkWorkBranchConflicted method.
 	MarkWorkBranchConflictedFunc func(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
@@ -163,6 +169,13 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.ListWorkBranchesParams
 		}
+		// ListWorkBranchesByCursor holds details about calls to the ListWorkBranchesByCursor method.
+		ListWorkBranchesByCursor []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.ListWorkBranchesByCursorParams
+		}
 		// MarkWorkBranchConflicted holds details about calls to the MarkWorkBranchConflicted method.
 		MarkWorkBranchConflicted []struct {
 			// Ctx is the ctx argument value.
@@ -207,6 +220,7 @@ type querierMock struct {
 	lockGetWorkBranchByID             sync.RWMutex
 	lockGetWorkBranchByName           sync.RWMutex
 	lockListWorkBranches              sync.RWMutex
+	lockListWorkBranchesByCursor      sync.RWMutex
 	lockMarkWorkBranchConflicted      sync.RWMutex
 	lockRecordWorkBranchAcceptedTip   sync.RWMutex
 	lockRecordWorkBranchUpstreamPR    sync.RWMutex
@@ -499,6 +513,42 @@ func (mock *querierMock) ListWorkBranchesCalls() []struct {
 	mock.lockListWorkBranches.RLock()
 	calls = mock.calls.ListWorkBranches
 	mock.lockListWorkBranches.RUnlock()
+	return calls
+}
+
+// ListWorkBranchesByCursor calls ListWorkBranchesByCursorFunc.
+func (mock *querierMock) ListWorkBranchesByCursor(ctx context.Context, arg gen.ListWorkBranchesByCursorParams) ([]gen.WorkBranch, error) {
+	if mock.ListWorkBranchesByCursorFunc == nil {
+		panic("querierMock.ListWorkBranchesByCursorFunc: method is nil but querier.ListWorkBranchesByCursor was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.ListWorkBranchesByCursorParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockListWorkBranchesByCursor.Lock()
+	mock.calls.ListWorkBranchesByCursor = append(mock.calls.ListWorkBranchesByCursor, callInfo)
+	mock.lockListWorkBranchesByCursor.Unlock()
+	return mock.ListWorkBranchesByCursorFunc(ctx, arg)
+}
+
+// ListWorkBranchesByCursorCalls gets all the calls that were made to ListWorkBranchesByCursor.
+// Check the length with:
+//
+//	len(mockedquerier.ListWorkBranchesByCursorCalls())
+func (mock *querierMock) ListWorkBranchesByCursorCalls() []struct {
+	Ctx context.Context
+	Arg gen.ListWorkBranchesByCursorParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.ListWorkBranchesByCursorParams
+	}
+	mock.lockListWorkBranchesByCursor.RLock()
+	calls = mock.calls.ListWorkBranchesByCursor
+	mock.lockListWorkBranchesByCursor.RUnlock()
 	return calls
 }
 
