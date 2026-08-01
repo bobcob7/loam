@@ -8,11 +8,16 @@ template it. Provision it yourself (e.g. as a vega-infra sealed-secret)
 with these keys:
 
   {{ .Values.secret.keys.adminPassword }}     -- loam admin UI password
-  {{ .Values.secret.keys.databaseUrl }}       -- full postgres:// DSN{{ if .Values.postgres.enabled }}, password matching {{ .Values.secret.keys.postgresPassword }} below{{ end }}
-  {{ .Values.secret.keys.encryptionKey }}     -- base64-encoded 32-byte AES-GCM key (NOT rotatable in place)
 {{- if .Values.postgres.enabled }}
-  {{ .Values.secret.keys.postgresPassword }}  -- must match the password embedded in {{ .Values.secret.keys.databaseUrl }} above
+  {{ .Values.secret.keys.postgresPassword }}  -- Postgres password, used for BOTH the in-cluster
+                                    postgres StatefulSet's superuser AND loam's
+                                    LOAM_DB_PASSWORD -- one value, two consumers,
+                                    by construction (loam-ytt2.11). {{ .Values.secret.keys.databaseUrl }}
+                                    is NOT read while postgres.enabled is true.
+{{- else }}
+  {{ .Values.secret.keys.databaseUrl }}       -- full postgres:// DSN for your external database
 {{- end }}
+  {{ .Values.secret.keys.encryptionKey }}     -- base64-encoded 32-byte AES-GCM key (NOT rotatable in place)
 
 Until that Secret exists, the loam pod will not start (secretKeyRef with a
 missing key/Secret blocks the pod at CreateContainerConfigError).
@@ -22,10 +27,10 @@ missing key/Secret blocks the pod at CreateContainerConfigError).
 POSTGRES: IN-CLUSTER (postgres.enabled=true)
 ----------------------------------------------
 This release runs its own Postgres/pgvector StatefulSet ("postgres" in
-this namespace). {{ .Values.secret.keys.databaseUrl }} in your Secret
-should point at it, e.g.:
-
-  postgres://{{ .Values.config.postgresUser }}:<password>@postgres.{{ .Release.Namespace }}.svc.cluster.local:5432/{{ .Values.config.postgresDb }}
+this namespace). loam connects to it using internal/config's
+discrete-parts form, assembled from the loam-config ConfigMap
+(host/port/user/db/sslmode) and {{ .Values.secret.keys.postgresPassword }}
+in your Secret above -- there is no DSN to hand-build or keep in sync here.
 {{- else }}
 
 *** POSTGRES: EXTERNAL (postgres.enabled=false) ***

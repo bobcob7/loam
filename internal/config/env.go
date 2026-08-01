@@ -4,12 +4,21 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// databaseURLPartKeys lists the discrete LOAM_DB_* variables
+// assembleDatabaseURL reads, checked collectively to decide whether the
+// discrete form is in use at all.
+var databaseURLPartKeys = []string{
+	"LOAM_DB_HOST", "LOAM_DB_PORT", "LOAM_DB_USER",
+	"LOAM_DB_PASSWORD", "LOAM_DB_NAME", "LOAM_DB_SSLMODE",
+}
 
 // lookupDefault returns the value of the named environment variable, or def
 // if it is unset or empty.
@@ -105,6 +114,101 @@ func parseLogLevel(v string) (slog.Level, error) {
 	default:
 		return 0, fmt.Errorf("LOAM_LOG_LEVEL: %w: %s", errInvalidLogLevel, v)
 	}
+}
+
+// isEnvSet reports whether key is present in the environment with a
+// non-empty value, matching the "unset" convention lookupDefault and the
+// parse*Env helpers above already use: not-present and present-but-empty
+// are treated the same.
+func isEnvSet(key string) bool {
+	v, ok := os.LookupEnv(key)
+	return ok && v != ""
+}
+
+// resolveDatabaseURL determines the Postgres DSN the server needs, either by
+// reading LOAM_DATABASE_URL directly or by assembling one from the discrete
+// LOAM_DB_* parts, and returns it already checked by validateDatabaseURL.
+//
+// Precedence: LOAM_DATABASE_URL wins when it is the only one set -- an
+// operator pointed at a managed database supplies a DSN and nothing else.
+// LOAM_DB_* parts are used when they are the only ones set -- this is what
+// lets a Kubernetes manifest pass one POSTGRES_PASSWORD value to both the
+// postgres image (which only initializes its superuser from
+// POSTGRES_PASSWORD) and loam, instead of also hand-embedding that same
+// password into a second, DSN-shaped copy that nothing keeps in sync.
+// Setting BOTH is rejected as a conflict rather than silently preferring
+// one side: silently ignoring half of a config an operator actually set is
+// its own footgun, and a quiet mismatch between the two is exactly the
+// misdiagnosable "database unreachable" failure this form exists to
+// prevent. Setting NEITHER falls through to lookupRequired's own "not set"
+// error on LOAM_DATABASE_URL, unchanged from before this form existed.
+func resolveDatabaseURL() (string, error) {
+	urlSet := isEnvSet("LOAM_DATABASE_URL")
+	partsSet := false
+	for _, key := range databaseURLPartKeys {
+		if isEnvSet(key) {
+			partsSet = true
+			break
+		}
+	}
+	if urlSet && partsSet {
+		return "", fmt.Errorf("LOAM_DATABASE_URL: %w: set LOAM_DATABASE_URL or the discrete LOAM_DB_* variables, not both", errDatabaseConfigConflict)
+	}
+	var (
+		databaseURL string
+		err         error
+	)
+	if partsSet {
+		databaseURL, err = assembleDatabaseURL()
+	} else {
+		databaseURL, err = lookupRequired("LOAM_DATABASE_URL")
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := validateDatabaseURL(databaseURL); err != nil {
+		return "", err
+	}
+	return databaseURL, nil
+}
+
+// assembleDatabaseURL builds a Postgres DSN from the discrete LOAM_DB_*
+// parts. LOAM_DB_HOST, LOAM_DB_USER, LOAM_DB_PASSWORD, and LOAM_DB_NAME are
+// required; LOAM_DB_PORT defaults to 5432 and LOAM_DB_SSLMODE to "disable"
+// (the in-cluster Postgres addon this form exists for terminates no TLS of
+// its own). url.UserPassword percent-encodes the userinfo, so a password
+// containing '/', '@', ':', or '+' -- all legal in POSTGRES_PASSWORD -- is
+// carried correctly instead of corrupting the DSN the way naive string
+// concatenation would. The returned string is never logged or wrapped into
+// an error by this function or its caller: it carries the password in
+// cleartext.
+func assembleDatabaseURL() (string, error) {
+	host, err := lookupRequired("LOAM_DB_HOST")
+	if err != nil {
+		return "", err
+	}
+	user, err := lookupRequired("LOAM_DB_USER")
+	if err != nil {
+		return "", err
+	}
+	password, err := lookupRequired("LOAM_DB_PASSWORD")
+	if err != nil {
+		return "", err
+	}
+	name, err := lookupRequired("LOAM_DB_NAME")
+	if err != nil {
+		return "", err
+	}
+	port := lookupDefault("LOAM_DB_PORT", "5432")
+	sslmode := lookupDefault("LOAM_DB_SSLMODE", "disable")
+	dsn := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     net.JoinHostPort(host, port),
+		Path:     "/" + name,
+		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
+	}
+	return dsn.String(), nil
 }
 
 // validateDatabaseURL parses the DSN string and checks it looks like a

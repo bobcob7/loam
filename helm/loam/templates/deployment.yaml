@@ -85,8 +85,8 @@ spec:
             - configMapRef:
                 name: loam-config
           env:
-            # The three required secrets from internal/config/config.go's
-            # loadRequired. All three come from ONE consumer-supplied
+            # The required secrets from internal/config/config.go's
+            # loadRequired. All of them come from ONE consumer-supplied
             # Secret (values.yaml's secret.name, default loam-secrets, in
             # this Namespace) that this chart never creates, generates, or
             # templates -- see loam-ytt2.4 and values.yaml's secret:
@@ -97,11 +97,29 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secret.name }}
                   key: {{ .Values.secret.keys.adminPassword }}
+            {{- if .Values.postgres.enabled }}
+            # In-cluster Postgres: internal/config's discrete-parts form
+            # (loam-ytt2.11), not a hand-built DSN. LOAM_DB_PASSWORD reads
+            # the SAME Secret key the postgres StatefulSet reads
+            # POSTGRES_PASSWORD from (values.yaml's secret.keys.
+            # postgresPassword) -- one value feeds both consumers, so the
+            # two credentials cannot drift apart. The non-secret parts
+            # (HOST/PORT/USER/NAME/SSLMODE) come from the loam-config
+            # ConfigMap instead of being repeated here.
+            - name: LOAM_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.postgresPassword }}
+            {{- else }}
+            # External Postgres: the DSN form. See values.yaml's
+            # postgres.enabled comment.
             - name: LOAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secret.name }}
                   key: {{ .Values.secret.keys.databaseUrl }}
+            {{- end }}
             - name: LOAM_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
