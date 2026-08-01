@@ -76,14 +76,17 @@ type ListFilter struct {
 	AwaitingVerdictReviewer string
 }
 
-// Cursor is a keyset-pagination position over the same (created_at DESC,
-// id) total order List sorts by (loam-coj). A nil *Cursor to ListByCursor
+// Cursor is a keyset-pagination position over ListByCursor's (created_at
+// ASC, id) total order -- the REVERSE of List's (created_at DESC, id)
+// order, deliberately (loam-coj): see ListWorkBranchesByCursor
+// (internal/db/queries/work_branches.sql) for why oldest-first is what
+// actually keeps a full-enumeration pass safe against a concurrent
+// INSERT, which DESC order alone does not. A nil *Cursor to ListByCursor
 // means "first page"; every subsequent call passes the previous page's
 // last row (its CreatedAt and ID) so paging can resume exactly where it
-// left off regardless of rows inserted or deleted elsewhere in the result
-// set -- unlike List's OFFSET, which counts rows from the top on every
-// call and so silently skips or repeats rows when a concurrent insert
-// shifts the count out from under it.
+// left off regardless of rows inserted elsewhere in the result set --
+// unlike List's OFFSET, which counts rows from the top on every call and
+// so desyncs when a concurrent insert changes what that count means.
 type Cursor struct {
 	CreatedAt time.Time
 	ID        uuid.UUID
@@ -205,9 +208,11 @@ func (s *Store) List(ctx context.Context, filter ListFilter, limit, offset int32
 	return result, total, nil
 }
 
-// ListByCursor returns filter's matching work branches ordered newest-created
-// first -- the same (created_at DESC, id) order List sorts by -- one keyset
-// page at a time (loam-coj). after nil requests the first page; every
+// ListByCursor returns filter's matching work branches ordered
+// OLDEST-created first -- the REVERSE of List's newest-first order,
+// deliberately (see ListWorkBranchesByCursor's doc comment,
+// internal/db/queries/work_branches.sql, for why) -- one keyset page at a
+// time (loam-coj). after nil requests the first page; every
 // subsequent call must pass a Cursor built from the last row of the
 // previous page (its CreatedAt and ID) so the query can resume exactly
 // where it left off via ListWorkBranchesByCursor's WHERE clause
