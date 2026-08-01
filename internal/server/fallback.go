@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -33,36 +32,36 @@ func (rt *Router) groupFallback(path string) (handler http.Handler, ok bool) {
 	}
 }
 
-// connectWireErrorBody mirrors the Connect protocol's unary error envelope
-// (connectrpc.com/connect's unexported connectWireError, same field
-// names/tags) so a hand-written 404 for an unregistered service is
-// byte-for-byte the shape a connect-go client already knows how to
-// unmarshal -- never an html catch-all page.
-type connectWireErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message,omitempty"`
-}
-
 // connectNotFoundHandler answers any request under group (a registered
-// service was not matched by mux) with a Connect CodeNotFound envelope:
-// JSON body, Content-Type application/json, HTTP status per the Connect
-// protocol's code-to-HTTP mapping (404 for CodeNotFound). This applies to
-// both GET and POST alike -- there is no method guard here, unlike
-// spaHandler's, since every request under an RPC group prefix is an API
-// request, never a browser navigation.
+// service was not matched by mux) with a Connect CodeNotFound error,
+// rendered in whichever of the three protocols connect-go handlers serve by
+// default -- Connect, gRPC, or gRPC-Web (loam-i0v) -- the request's
+// Content-Type indicates. This applies to both GET and POST alike -- there
+// is no method guard here, unlike spaHandler's, since every request under
+// an RPC group prefix is an API request, never a browser navigation.
+//
+// The error's code is always CodeNotFound, never CodeUnimplemented, on all
+// three wires: a registered service answering an absent PROCEDURE would
+// itself return Unimplemented, but here the whole SERVICE is unregistered,
+// and CodeNotFound is what the Connect protocol path returned before this
+// fix (loam-cjq). Keeping it, rather than switching to Unimplemented for
+// gRPC/gRPC-Web, keeps the reported code consistent across every protocol
+// instead of the bug this fixes: previously the fallback always wrote a
+// bare HTTP 404, which a real gRPC client decoded as "unimplemented",
+// silently discarding both the intended code and the message.
+//
+// connect.ErrorWriter (connectrpc.com/connect's own error_writer.go) does
+// the protocol detection and wire encoding: it classifies the request from
+// Content-Type/method exactly as a real connect.Handler would, and for the
+// Connect protocol its JSON envelope and connectCodeToHTTP status mapping
+// are byte-for-byte what a registered service's own error path emits --
+// this is the same connect-go type a genuine client already knows how to
+// decode, so there is no hand-rolled trailer or envelope encoding here.
 func connectNotFoundHandler(group, path string) http.Handler {
+	rpcErr := connect.NewError(connect.CodeNotFound, fmt.Errorf("no %s service registered for %s", group, path))
+	errWriter := connect.NewErrorWriter()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		codeText, _ := connect.CodeNotFound.MarshalText()
-		body, err := json.Marshal(connectWireErrorBody{
-			Code:    string(codeText),
-			Message: fmt.Sprintf("no %s service registered for %s", group, path),
-		})
-		if err != nil {
-			body = []byte(`{"code":"not_found"}`)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write(body)
+		_ = errWriter.Write(w, r, rpcErr)
 	})
 }
 

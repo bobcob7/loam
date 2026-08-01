@@ -231,3 +231,86 @@ func TestRouter_UnregisteredCLIServicePrefix_RealConnectClientDecodesNotFound(t 
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
+
+// wantConnectNotFoundMessage is the exact message connectNotFoundHandler
+// builds for an unregistered /loam.v1.NoSuchService/DoThing request --
+// shared by every case in TestConnectNotFoundHandler_AnswersInRequestProtocol
+// below since all three protocols carry the identical underlying
+// connect.Error, only encoded differently on the wire (loam-i0v).
+const wantConnectNotFoundMessage = "no /loam.v1. service registered for /loam.v1.NoSuchService/DoThing"
+
+// TestConnectNotFoundHandler_AnswersInRequestProtocol proves loam-i0v's
+// fix: an unregistered service prefix now answers in whichever of the
+// three protocols connect-go handlers serve by default -- Connect, gRPC,
+// or gRPC-Web -- rather than always emitting a bare Connect-shaped 404,
+// which is the wire format a real gRPC client used to misread as
+// "unimplemented: HTTP status 404 Not Found", losing both the code and
+// the message the bead reported.
+//
+// Every case's underlying error is CodeNotFound: on the Connect wire that
+// is HTTP 404 (connectCodeToHTTP), and on gRPC/gRPC-Web the matching
+// status is 5 (NOT_FOUND) -- chosen over Unimplemented (12) precisely
+// because it is the code the Connect path already reported before this
+// fix, and unifying on it keeps the reported code consistent across all
+// three protocols instead of silently downgrading gRPC/gRPC-Web callers
+// to the less specific Unimplemented.
+func TestConnectNotFoundHandler_AnswersInRequestProtocol(t *testing.T) {
+	t.Parallel()
+	const unregisteredCLIPath = "/loam.v1.NoSuchService/DoThing"
+	testCases := []struct {
+		name        string
+		method      string
+		contentType string
+		check       func(t *testing.T, rec *httptest.ResponseRecorder)
+	}{
+		{
+			name:   "connect_unchanged_from_pre-fix_bytes",
+			method: http.MethodGet,
+			check: func(t *testing.T, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				assert.Equal(t, http.StatusNotFound, rec.Code)
+				assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+				wantBody := `{"code":"not_found","message":"` + wantConnectNotFoundMessage + `"}`
+				assert.Equal(t, wantBody, rec.Body.String(), "the Connect wire envelope must stay byte-for-byte identical to the pre-loam-i0v hand-rolled body")
+			},
+		},
+		{
+			name:        "grpc",
+			method:      http.MethodPost,
+			contentType: "application/grpc",
+			check: func(t *testing.T, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				assert.Equal(t, http.StatusOK, rec.Code, "gRPC errors are trailers-only: HTTP status must stay 200")
+				assert.Equal(t, "5", rec.Header().Get("Grpc-Status"), "5 is NOT_FOUND, chosen to match the Connect path's CodeNotFound rather than downgrading to Unimplemented (12)")
+				assert.Equal(t, wantConnectNotFoundMessage, rec.Header().Get("Grpc-Message"))
+				assert.Empty(t, rec.Body.String(), "gRPC error responses carry no body, only trailers")
+			},
+		},
+		{
+			name:        "grpc_web",
+			method:      http.MethodPost,
+			contentType: "application/grpc-web",
+			check: func(t *testing.T, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				assert.Equal(t, http.StatusOK, rec.Code, "gRPC-Web errors are trailers-only, same as gRPC")
+				assert.Equal(t, "application/grpc-web", rec.Header().Get("Content-Type"), "gRPC-Web echoes the request's content type")
+				assert.Equal(t, "5", rec.Header().Get("Grpc-Status"))
+				assert.Equal(t, wantConnectNotFoundMessage, rec.Header().Get("Grpc-Message"))
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			router := newTestRouter(t)
+			req := httptest.NewRequest(tc.method, unregisteredCLIPath, nil)
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			withValidAdminAuth(req)
+			rec := httptest.NewRecorder()
+			router.Handler().ServeHTTP(rec, req)
+			tc.check(t, rec)
+		})
+	}
+}
