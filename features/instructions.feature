@@ -28,3 +28,8 @@ Feature: Agent orientation
     Given the server is unreachable
     When I ask who I am
     Then I still get my identity from the environment
+
+  Scenario: whoami --verify reports a role the server does not recognize
+    Given I am the agent "grace-hopper-3-ghost" with the "ghost" role
+    When I ask to verify who I am
+    Then the verification is rejected as unauthorized, naming the role
