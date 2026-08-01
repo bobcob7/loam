@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/chunkstore"
+	"github.com/bobcob7/loam/internal/ingest/chunk"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
 )
 
@@ -259,19 +260,23 @@ func TestIngestFileChunks_OneBadVectorAmongGoodOnes_AbortsTheWholeBatch(t *testi
 	assert.Empty(t, *calls)
 }
 
-// chunkInputsFor is the guard that keeps a chunk-list/vector-list mismatch
+// groupByFile is the guard that keeps a chunk-list/vector-list mismatch
 // from becoming an index-out-of-range panic partway through the write loop.
 // It gets direct tests because it is unreachable through IngestFileChunks
-// once embedAll's per-batch check is in place, and a panic here would be
+// once embedAll's per-call checks are in place, and a panic here would be
 // far worse than an error: it would unwind past the orchestrator's deferred
 // rollback rather than failing the ingest cleanly.
-func TestChunkInputsFor_FewerVectorsThanChunks_ErrorsInsteadOfPanicking(t *testing.T) {
+func TestGroupByFile_FewerVectorsThanItems_ErrorsInsteadOfPanicking(t *testing.T) {
 	t.Parallel()
-	files := []chunker.FileChunks{unitsFor(testFileA, "alpha", "beta"), unitsFor(testFileB, "gamma")}
+	items := []flatUnit{
+		{fileIdx: 0, unit: chunk.Unit{StartLine: 1, EndLine: 1, Content: "alpha"}},
+		{fileIdx: 0, unit: chunk.Unit{StartLine: 2, EndLine: 2, Content: "beta"}},
+		{fileIdx: 1, unit: chunk.Unit{StartLine: 1, EndLine: 1, Content: "gamma"}},
+	}
 
 	var got [][]chunkstore.ChunkInput
 	var err error
-	require.NotPanics(t, func() { got, err = chunkInputsFor(files, [][]float32{vectorFor("alpha")}) },
+	require.NotPanics(t, func() { got, err = groupByFile(2, items, [][]float32{vectorFor("alpha")}) },
 		"a short vector list must be rejected up front, never indexed past the end mid-write")
 
 	assert.Nil(t, got)
@@ -279,24 +284,24 @@ func TestChunkInputsFor_FewerVectorsThanChunks_ErrorsInsteadOfPanicking(t *testi
 	assert.Contains(t, err.Error(), "3 chunks to pair with 1 vectors")
 }
 
-func TestChunkInputsFor_MoreVectorsThanChunks_Errors(t *testing.T) {
+func TestGroupByFile_MoreVectorsThanItems_Errors(t *testing.T) {
 	t.Parallel()
-	files := []chunker.FileChunks{unitsFor(testFileA, "alpha")}
+	items := []flatUnit{{fileIdx: 0, unit: chunk.Unit{StartLine: 1, EndLine: 1, Content: "alpha"}}}
 
-	_, err := chunkInputsFor(files, [][]float32{vectorFor("alpha"), vectorFor("beta")})
+	_, err := groupByFile(1, items, [][]float32{vectorFor("alpha"), vectorFor("beta")})
 
 	assert.ErrorIs(t, err, errVectorCount, "a surplus vector means the alignment is unknowable too, not merely wasteful")
 }
 
-func TestChunkInputsFor_PairsEachFilesUnitsWithItsOwnVectorsInOrder(t *testing.T) {
+func TestGroupByFile_PairsEachFilesUnitsWithItsOwnVectorsInOrder(t *testing.T) {
 	t.Parallel()
-	files := []chunker.FileChunks{
-		{Path: "empty.go"},
-		unitsFor(testFileA, "alpha", "beta"),
-		unitsFor(testFileB, "gamma"),
+	items := []flatUnit{
+		{fileIdx: 1, unit: chunk.Unit{StartLine: 1, EndLine: 1, Content: "alpha"}},
+		{fileIdx: 1, unit: chunk.Unit{StartLine: 2, EndLine: 2, Content: "beta"}},
+		{fileIdx: 2, unit: chunk.Unit{StartLine: 1, EndLine: 1, Content: "gamma"}},
 	}
 
-	got, err := chunkInputsFor(files, [][]float32{vectorFor("alpha"), vectorFor("beta"), vectorFor("gamma")})
+	got, err := groupByFile(3, items, [][]float32{vectorFor("alpha"), vectorFor("beta"), vectorFor("gamma")})
 	require.NoError(t, err)
 
 	require.Len(t, got, 3, "one inputs slice per file, zero-unit files included")

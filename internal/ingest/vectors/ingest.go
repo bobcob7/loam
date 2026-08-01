@@ -9,7 +9,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/chunkstore"
+	"github.com/bobcob7/loam/internal/ingest/chunk"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
+	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
 )
 
 // maxEmbedBatch caps how many chunk texts go into a single Embed call.
@@ -36,11 +38,17 @@ var (
 	// its vector with any confidence. Persisting anything after that would
 	// mean pairing chunk content with some OTHER chunk's embedding -- a
 	// corrupt index that looks healthy and misranks silently forever --
-	// so this aborts the ingest instead. It is raised from two places on
-	// purpose: embedAll checks each batch's response as it arrives (the
-	// message names the offset), and chunkInputsFor re-checks the total
-	// before pairing anything, so a mismatch can never walk off the end of
-	// the vector list mid-write (see chunkInputsFor's doc comment).
+	// so this aborts the ingest instead. It is checked at every actual
+	// Embed call embedAll or its split-retry path makes (a batch call in
+	// embedAll's main loop, or a single-text call in embedWithSplit), each
+	// time comparing that ONE call's own request/response pair -- never a
+	// separate total computed from two lists assembled independently.
+	// groupByFile's defensive recount (see its doc comment) is the last
+	// line of defense against a mismatch this per-call checking somehow
+	// missed, not the primary guard: a chunk is paired with its vector at
+	// the moment that vector is returned (see flatUnit/embedAll), so there
+	// is no later zip step that could misalign the two lists in the first
+	// place.
 	errVectorCount = errors.New("vectors: embedder returned the wrong number of vectors")
 	// errDimensionMismatch means a returned vector's width is not the
 	// Embedder's own reported Dimension(). It is checked here, at the
@@ -216,13 +224,13 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 	if dimension <= 0 {
 		return Prepared{}, stats, fmt.Errorf("embedding chunks for %s@%s: %w: %d", repoID, targetBranch, errBadDimension, dimension)
 	}
-	texts := flattenTexts(files)
-	embeddings, calls, err := ix.embedAll(ctx, texts, dimension)
+	items := flattenUnits(files)
+	finalItems, embeddings, calls, err := ix.embedAll(ctx, items, dimension)
 	stats.EmbedCalls = calls
 	if err != nil {
 		return Prepared{}, stats, fmt.Errorf("embedding chunks for %s@%s: %w", repoID, targetBranch, err)
 	}
-	perFile, err := chunkInputsFor(files, embeddings)
+	perFile, err := groupByFile(len(files), finalItems, embeddings)
 	if err != nil {
 		return Prepared{}, stats, fmt.Errorf("pairing chunks with vectors for %s@%s: %w", repoID, targetBranch, err)
 	}
@@ -280,92 +288,241 @@ func (s *Stats) merge(other Stats) {
 	s.EmbedCalls += other.EmbedCalls
 }
 
-// chunkInputsFor pairs each file's units with the vectors embedAll produced
-// for them, by position, returning one ChunkInput slice per file in files'
-// own order (an empty, non-nil slice for a file with no units -- exactly
-// what ReplaceFileChunks's delete-without-inserting case takes).
-//
-// It validates the total count BEFORE indexing anything, rather than
-// walking the vector list as it writes. That ordering is the point: this
-// whole call runs inside the swap orchestrator's transaction, and an
-// index-out-of-range panic there unwinds past the deferred rollback
-// (internal/chunkstore's transactor doc comment says so explicitly) instead
-// of failing the ingest cleanly and letting the previous index stay live.
-// embedAll's own per-batch check already makes a mismatch unreachable in
-// practice; this is the cheap guarantee that a weakened check upstream
-// degrades into an error rather than a crash.
-func chunkInputsFor(files []chunker.FileChunks, embeddings [][]float32) ([][]chunkstore.ChunkInput, error) {
+// flatUnit is one chunk unit flattened out of its file, tagged with the
+// index of that file in the Prepare call's own files slice so a unit (or,
+// after a split retry, one of its pieces) can find its way back to the
+// right preparedFile without carrying a full path string around.
+type flatUnit struct {
+	fileIdx int
+	unit    chunk.Unit
+}
+
+// flattenUnits flattens every file's chunk units into one slice, in input
+// order (every unit of files[0], then every unit of files[1], ...), so
+// embedAll can batch across file boundaries the same way flattenTexts used
+// to. Unlike that predecessor, each entry keeps its originating file index
+// and its full chunk.Unit (not just Content), because a unit that the
+// embedder rejects as oversized must be split by embedWithSplit using its
+// line numbers, and the pieces that result must still know which file they
+// belong to.
+func flattenUnits(files []chunker.FileChunks) []flatUnit {
 	total := 0
 	for _, f := range files {
 		total += len(f.Units)
 	}
-	if len(embeddings) != total {
-		return nil, fmt.Errorf("%w: %d chunks to pair with %d vectors", errVectorCount, total, len(embeddings))
-	}
-	perFile := make([][]chunkstore.ChunkInput, len(files))
-	next := 0
-	for i, f := range files {
-		inputs := make([]chunkstore.ChunkInput, len(f.Units))
-		for j, u := range f.Units {
-			inputs[j] = chunkstore.ChunkInput{
-				StartLine: u.StartLine,
-				EndLine:   u.EndLine,
-				Content:   u.Content,
-				Embedding: embeddings[next],
-			}
-			next++
+	out := make([]flatUnit, 0, total)
+	for fi, f := range files {
+		for _, u := range f.Units {
+			out = append(out, flatUnit{fileIdx: fi, unit: u})
 		}
-		perFile[i] = inputs
+	}
+	return out
+}
+
+// groupByFile buckets items (and their positionally-paired embeddings) back
+// into one ChunkInput slice per file, by each item's own fileIdx -- an
+// empty, non-nil slice for a file with no units, exactly what
+// ReplaceFileChunks's delete-without-inserting case takes.
+//
+// Every item in items was paired with its vector at the exact moment that
+// vector was returned from an Embed call (see embedAll and embedWithSplit),
+// so there is no separate "vector list" this function zips against a
+// differently-built "unit list" -- the classic way that kind of pairing
+// silently drifts. The len(items) != len(embeddings) check below can only
+// ever fire if a future change to embedAll breaks that invariant; it exists
+// so such a bug degrades into errVectorCount here (still inside the swap
+// orchestrator's transaction, so the caller rolls back cleanly) rather than
+// an index-out-of-range panic that unwinds past the deferred rollback
+// (internal/chunkstore's transactor doc comment says so explicitly).
+func groupByFile(numFiles int, items []flatUnit, embeddings [][]float32) ([][]chunkstore.ChunkInput, error) {
+	if len(items) != len(embeddings) {
+		return nil, fmt.Errorf("%w: %d chunks to pair with %d vectors", errVectorCount, len(items), len(embeddings))
+	}
+	perFile := make([][]chunkstore.ChunkInput, numFiles)
+	for i := range perFile {
+		perFile[i] = []chunkstore.ChunkInput{}
+	}
+	for i, it := range items {
+		perFile[it.fileIdx] = append(perFile[it.fileIdx], chunkstore.ChunkInput{
+			StartLine: it.unit.StartLine,
+			EndLine:   it.unit.EndLine,
+			Content:   it.unit.Content,
+			Embedding: embeddings[i],
+		})
 	}
 	return perFile, nil
 }
 
-// flattenTexts concatenates every file's chunk contents into one slice, in
-// input order, so embedAll can batch across file boundaries.
-// IngestFileChunks walks files in that same order afterward to hand each
-// chunk back its own vector by position.
-func flattenTexts(files []chunker.FileChunks) []string {
-	total := 0
-	for _, f := range files {
-		total += len(f.Units)
-	}
-	texts := make([]string, 0, total)
-	for _, f := range files {
-		for _, u := range f.Units {
-			texts = append(texts, u.Content)
-		}
-	}
-	return texts
-}
-
-// embedAll embeds texts in groups of at most maxEmbedBatch, returning every
-// vector in the same order as texts plus the number of Embed calls it
-// made. Each batch's result is validated against dimension before it is
-// accepted (see errVectorCount and errDimensionMismatch); an empty texts
-// makes no call at all.
-func (ix *Indexer) embedAll(ctx context.Context, texts []string, dimension int) ([][]float32, int, error) {
-	out := make([][]float32, 0, len(texts))
+// embedAll embeds items in groups of at most maxEmbedBatch, returning every
+// item actually embedded (finalItems) paired positionally with its vector
+// (embeddings), plus the number of Embed calls made. finalItems is
+// items itself on the fast path -- one vector per input item, same order --
+// EXCEPT for any item the embedder rejected as too long for the model's
+// context window (ollama.IsContextLengthExceeded): that item is replaced,
+// in place, by the pieces embedWithSplit split it into and successfully
+// embedded, so finalItems can be longer than items. This is loam-c94.16's
+// fix: internal/ingest/chunk's byte-budget estimate (bytesPerTokenBudget)
+// cannot bound a real token count for every content type -- dense JSON and
+// base64 can still exceed the model's context window despite fitting the
+// estimate's byte budget -- so rather than let that one embed call fail the
+// whole ingest job (as ollama.IsContextLengthExceeded's own doc comment
+// says was always the intended reaction point), this function reacts to the
+// embedder's own rejection and splits, reusing chunk.SplitUnit -- the exact
+// routine EnforceBudget already uses -- rather than re-guessing a ratio.
+//
+// Each batch's response is validated against dimension before it is
+// accepted (see errVectorCount and errDimensionMismatch), both on the fast
+// batch path and inside embedWithSplit's single-item retries; an empty
+// items makes no call at all.
+func (ix *Indexer) embedAll(ctx context.Context, items []flatUnit, dimension int) ([]flatUnit, [][]float32, int, error) {
+	finalItems := make([]flatUnit, 0, len(items))
+	embeddings := make([][]float32, 0, len(items))
 	calls := 0
-	for start := 0; start < len(texts); start += maxEmbedBatch {
+	for start := 0; start < len(items); start += maxEmbedBatch {
 		if err := ctx.Err(); err != nil {
-			return nil, calls, fmt.Errorf("embedding batch at offset %d: %w", start, err)
+			return nil, nil, calls, fmt.Errorf("embedding batch at offset %d: %w", start, err)
 		}
-		end := min(start+maxEmbedBatch, len(texts))
-		batch := texts[start:end]
-		vecs, err := ix.embedder.Embed(ctx, batch)
+		batch := items[start:min(start+maxEmbedBatch, len(items))]
+		texts := make([]string, len(batch))
+		for i, it := range batch {
+			texts[i] = it.unit.Content
+		}
+		vecs, err := ix.embedder.Embed(ctx, texts)
 		calls++
 		if err != nil {
-			return nil, calls, fmt.Errorf("embedding %d chunks at offset %d: %w", len(batch), start, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, nil, calls, ctxErr
+			}
+			if !ollama.IsContextLengthExceeded(err) {
+				return nil, nil, calls, fmt.Errorf("embedding %d chunks at offset %d: %w", len(batch), start, err)
+			}
+			recItems, recVecs, recCalls, recErr := ix.recoverBatch(ctx, batch, dimension)
+			calls += recCalls
+			if recErr != nil {
+				return nil, nil, calls, fmt.Errorf("embedding %d chunks at offset %d: %w", len(batch), start, recErr)
+			}
+			finalItems = append(finalItems, recItems...)
+			embeddings = append(embeddings, recVecs...)
+			continue
 		}
 		if len(vecs) != len(batch) {
-			return nil, calls, fmt.Errorf("%w: sent %d texts at offset %d, got %d vectors", errVectorCount, len(batch), start, len(vecs))
+			return nil, nil, calls, fmt.Errorf("%w: sent %d texts at offset %d, got %d vectors", errVectorCount, len(batch), start, len(vecs))
 		}
 		for i, vec := range vecs {
 			if len(vec) != dimension {
-				return nil, calls, fmt.Errorf("%w: vector %d has width %d, want %d", errDimensionMismatch, start+i, len(vec), dimension)
+				return nil, nil, calls, fmt.Errorf("%w: vector %d has width %d, want %d", errDimensionMismatch, start+i, len(vec), dimension)
 			}
 		}
-		out = append(out, vecs...)
+		finalItems = append(finalItems, batch...)
+		embeddings = append(embeddings, vecs...)
 	}
-	return out, calls, nil
+	return finalItems, embeddings, calls, nil
+}
+
+// recoverBatch re-embeds batch one item at a time after the whole batch was
+// rejected with ollama.IsContextLengthExceeded: Ollama's /api/embed rejects
+// the whole request when ANY one input in it is too long (per this bead's
+// own live measurements, batching itself is not the problem), so the
+// batched response gives no way to tell which input in the batch was the
+// culprit. Embedding one at a time re-establishes that: an item that
+// succeeds alone is kept as-is, and only the one(s) that still fail alone
+// go through embedWithSplit. This only runs on the rare failing batch, not
+// on every batch, so the fast path's throughput is unaffected.
+func (ix *Indexer) recoverBatch(ctx context.Context, batch []flatUnit, dimension int) ([]flatUnit, [][]float32, int, error) {
+	items := make([]flatUnit, 0, len(batch))
+	embeddings := make([][]float32, 0, len(batch))
+	calls := 0
+	for _, it := range batch {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, calls, err
+		}
+		gotItems, gotVecs, n, err := ix.embedWithSplit(ctx, it, dimension)
+		calls += n
+		if err != nil {
+			return nil, nil, calls, err
+		}
+		items = append(items, gotItems...)
+		embeddings = append(embeddings, gotVecs...)
+	}
+	return items, embeddings, calls, nil
+}
+
+// embedWithSplit embeds one item alone. If the embedder accepts it, that is
+// the whole answer -- one item, one vector, paired at the point the vector
+// is returned. If the embedder rejects it specifically as too long
+// (ollama.IsContextLengthExceeded), it splits it via chunk.SplitUnit and
+// recurses on each piece, so a chunk that is still too big after one split
+// (rare, but possible for a large enough dense blob) keeps halving until
+// every piece embeds or splitForRetry reports the content cannot be reduced
+// any further -- the same terminal case chunk.splitUnit's own doc comment
+// describes: a single line (here, a single already-unsplittable piece) that
+// alone exceeds the budget is hard-split on rune boundaries, and a piece
+// that hard-splitting cannot shrink any more is genuinely un-embeddable, so
+// that case's original rejection is returned rather than looping forever.
+//
+// Every returned item is paired with its vector in the same return
+// statement that produced the vector -- there is no later pass that
+// re-associates pieces with vectors by position, which is what keeps a
+// split chunk's persisted content and its persisted embedding from ever
+// disagreeing (see groupByFile's doc comment and errVectorCount).
+func (ix *Indexer) embedWithSplit(ctx context.Context, it flatUnit, dimension int) ([]flatUnit, [][]float32, int, error) {
+	vecs, err := ix.embedder.Embed(ctx, []string{it.unit.Content})
+	if err == nil {
+		if len(vecs) != 1 {
+			return nil, nil, 1, fmt.Errorf("%w: sent 1 text, got %d vectors", errVectorCount, len(vecs))
+		}
+		if len(vecs[0]) != dimension {
+			return nil, nil, 1, fmt.Errorf("%w: vector has width %d, want %d", errDimensionMismatch, len(vecs[0]), dimension)
+		}
+		return []flatUnit{it}, vecs, 1, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, 1, ctxErr
+	}
+	if !ollama.IsContextLengthExceeded(err) {
+		return nil, nil, 1, err
+	}
+	pieces := splitForRetry(it.unit)
+	if pieces == nil {
+		return nil, nil, 1, fmt.Errorf("splitting a %d-byte chunk the embedder still rejects as too long for the model's context window: %w", len(it.unit.Content), err)
+	}
+	ix.logger.WarnContext(ctx, "embed call rejected a chunk as exceeding the model's context window; splitting and retrying",
+		"file_index", it.fileIdx, "start_line", it.unit.StartLine, "end_line", it.unit.EndLine, "content_bytes", len(it.unit.Content), "pieces", len(pieces))
+	items := make([]flatUnit, 0, len(pieces))
+	embeddings := make([][]float32, 0, len(pieces))
+	calls := 1
+	for _, piece := range pieces {
+		gotItems, gotVecs, n, perr := ix.embedWithSplit(ctx, flatUnit{fileIdx: it.fileIdx, unit: piece}, dimension)
+		calls += n
+		if perr != nil {
+			return nil, nil, calls, perr
+		}
+		items = append(items, gotItems...)
+		embeddings = append(embeddings, gotVecs...)
+	}
+	return items, embeddings, calls, nil
+}
+
+// splitForRetry halves u's byte budget and reuses chunk.SplitUnit -- the
+// same line-accumulating, rune-boundary-safe splitting EnforceBudget uses
+// at chunk time -- to produce smaller pieces. It returns nil, the terminal
+// signal embedWithSplit treats as "cannot be reduced any further," when
+// u.Content is a single byte already or when SplitUnit at that halved
+// budget could not actually split it (chunk.splitUnit returns the content
+// unchanged, as one piece, when it is a single rune that a rune-boundary
+// split cannot cut any smaller -- see its own doc comment). Halving rather
+// than computing a new byte/token estimate is deliberate: this package has
+// no access to the embedding model's ContextWindow (see the embedder
+// interface's doc comment for why) and does not need one -- it is reacting
+// to the embedder's own truth about what fits, not predicting it, which is
+// this bead's whole point.
+func splitForRetry(u chunk.Unit) []chunk.Unit {
+	if len(u.Content) <= 1 {
+		return nil
+	}
+	pieces := chunk.SplitUnit(u, len(u.Content)/2)
+	if len(pieces) <= 1 {
+		return nil
+	}
+	return pieces
 }
