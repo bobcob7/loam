@@ -225,6 +225,54 @@ type workShowOutput struct {
 	// Round is nil (and therefore omitted, via omitempty) for a branch with
 	// no review round yet; see the type doc comment above.
 	Round *workShowRoundOutput `json:"round,omitempty"`
+	// LatestVerdict is the branch's single most recent verdict overall,
+	// fetched via a second RPC (ListVerdicts) rather than derived from
+	// `state`. `state` reports workflow POSITION, not outcome --
+	// internal/reviewpublish/publish.go's publishInTx flips
+	// reviewable -> reviewed on ANY verdict outcome, approve or
+	// disapprove alike -- so an agent polling `show` alone could
+	// otherwise read "reviewed" as "approved" (loam-o718). It stays a
+	// client-side merge rather than a WorkBranch proto field specifically
+	// to avoid a field-9 collision with loam-giq.11's conflict/
+	// upstream_drift fields on the same message.
+	//
+	// Nil (and therefore omitted via omitempty) when the branch has no
+	// verdicts yet, matching Round/UpstreamPRURL's presence/absence
+	// convention above -- a zeroed object would be a fabrication under a
+	// different name (loam-0pj.10).
+	LatestVerdict *workShowVerdictOutput `json:"latest_verdict,omitempty"`
+}
+
+// workShowVerdictOutput is workShowOutput's latest_verdict shape. All four
+// fields travel together deliberately -- Outcome alone, without Stale,
+// would let a stale approve read as a live one, replacing one foot-gun
+// (state) with a worse one (loam-o718).
+type workShowVerdictOutput struct {
+	Outcome  string `json:"outcome"`
+	Reviewer string `json:"reviewer"`
+	Round    uint32 `json:"round"`
+	Stale    bool   `json:"stale"`
+}
+
+// workShowLatestVerdict picks the single most recent verdict overall from
+// ListVerdicts's response -- not a per-reviewer roll-up and not filtered to
+// non-stale ones. ListVerdicts already collapses to one row per reviewer
+// (their latest round) and returns newest round first
+// (internal/handler/workbranch/review.go -> ListVerdicts:
+// "dedupeLatestPerReviewer relies on VerdictStore.List returning newest
+// round first"), so "most recent overall" is the entry with the highest
+// round number; nothing in the wire shape (no timestamp) can break a tie
+// more precisely than "whichever the server listed first" and doing so
+// would re-implement the proposal-queue rule the server already owns. Nil
+// for no verdicts at all.
+func workShowLatestVerdict(verdicts []*loamv1.VerdictSummary) *loamv1.VerdictSummary {
+	var latest *loamv1.VerdictSummary
+	for _, v := range verdicts {
+		if latest == nil || v.GetRound() > latest.GetRound() {
+			latest = v
+		}
+	}
+	return latest
 }
 
 // workShowRoundOutput is workShowOutput's round shape, matching
@@ -239,6 +287,15 @@ type workShowRoundOutput struct {
 // (docs/cli-spec.md -> show). An unresolvable identifier is a usage error
 // (exit 2) from resolveWorkBranchIdentity; a server NotFound is exit 3 via
 // the %w wrap below.
+//
+// It makes a second RPC, ListVerdicts, purely to populate LatestVerdict --
+// the client-side merge loam-o718 chose over a WorkBranch proto field. That
+// choice is deliberately not defended with a graceful-degradation branch: an
+// error from ListVerdicts is a real error and surfaces as one, because
+// ListVerdicts and GetWorkBranch are gated by the same CapabilityWorkRead
+// (internal/handler/workbranch/review.go:74, workbranch.go:331), so no role
+// that can reach this far can have GetWorkBranch succeed and ListVerdicts
+// fail on permissions.
 func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 	fs := newFlagSet("work show")
 	positional, err := parseCommandArgs(fs, args)
@@ -275,6 +332,18 @@ func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 	}
 	if round := resp.Msg.GetRound(); round != nil {
 		out.Round = &workShowRoundOutput{Number: round.GetNumber(), RequestedBy: round.GetRequestedBy()}
+	}
+	verdictsResp, err := deps.connect.WorkBranch().ListVerdicts(ctx, connect.NewRequest(&loamv1.ListVerdictsRequest{Repo: repo, WorkBranch: workBranch}))
+	if err != nil {
+		return fmt.Errorf("listing verdicts for work branch %s/%s: %w", repo, workBranch, err)
+	}
+	if latest := workShowLatestVerdict(verdictsResp.Msg.GetVerdicts()); latest != nil {
+		out.LatestVerdict = &workShowVerdictOutput{
+			Outcome:  verdictOutcomeString(latest.GetOutcome()),
+			Reviewer: latest.GetReviewer(),
+			Round:    latest.GetRound(),
+			Stale:    latest.GetStale(),
+		}
 	}
 	return deps.encoder.Encode(out)
 }

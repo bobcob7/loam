@@ -224,6 +224,14 @@ func TestRunWorkList_UnenrolledRepo_ExitsThree(t *testing.T) {
 
 // --- work show ---
 
+// noVerdictsFunc stubs ListVerdicts with an empty response. runWorkShow
+// always calls ListVerdicts now, to populate latest_verdict (loam-o718), so
+// every WorkBranchClientMock a `work show` test exercises must stub this
+// method or the mock panics on the unconfigured call.
+func noVerdictsFunc(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+	return connect.NewResponse(&loamv1.ListVerdictsResponse{}), nil
+}
+
 func TestRunWorkShow_Success_EncodesFullMetadata(t *testing.T) {
 	t.Parallel()
 	var captured *loamv1.GetWorkBranchRequest
@@ -236,6 +244,7 @@ func TestRunWorkShow_Success_EncodesFullMetadata(t *testing.T) {
 				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
 			}}), nil
 		},
+		ListVerdictsFunc: noVerdictsFunc,
 	}
 	var encoded any
 	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
@@ -266,6 +275,7 @@ func TestRunWorkShow_WithReviewRound_IncludesRound(t *testing.T) {
 				Round: &loamv1.GetWorkBranchResponse_Round{Number: 2, RequestedBy: "grace-hopper-3-author"},
 			}), nil
 		},
+		ListVerdictsFunc: noVerdictsFunc,
 	}
 	var encoded any
 	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
@@ -292,6 +302,7 @@ func TestRunWorkShow_AcceptedProposal_ReportsItsUpstreamPRURL(t *testing.T) {
 				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED, UpstreamPrUrl: &prURL,
 			}}), nil
 		},
+		ListVerdictsFunc: noVerdictsFunc,
 	}
 	var encoded any
 	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
@@ -322,6 +333,7 @@ func TestRunWorkShow_ServerSendsAnEmptyPRURL_IsNotTreatedAsAbsent(t *testing.T) 
 				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED, UpstreamPrUrl: &empty,
 			}}), nil
 		},
+		ListVerdictsFunc: noVerdictsFunc,
 	}
 	var encoded any
 	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
@@ -340,6 +352,7 @@ func TestRunWorkShow_OmittedPositionals_InferFromWorkspace(t *testing.T) {
 			captured = req.Msg
 			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{Repo: testRepo, Name: testWorkBranch}}), nil
 		},
+		ListVerdictsFunc: noVerdictsFunc,
 	}
 	ws := &WorkspaceResolverMock{
 		ResolveRepoFunc:       func() (string, error) { return testRepo, nil },
@@ -364,6 +377,121 @@ func TestRunWorkShow_NotFound_ExitsThree(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
 	assert.Nil(t, encoded)
+}
+
+// TestRunWorkShow_DisapproveVerdict_LatestVerdictCarriesOutcomeReviewerRoundAndStale
+// is loam-o718's headline case: after a DISAPPROVE, `state` alone reads
+// "reviewed" -- the same value an APPROVE would leave -- because
+// internal/reviewpublish/publish.go's publishInTx flips reviewable ->
+// reviewed on any outcome. latest_verdict is what lets an agent polling
+// `show` alone tell the two apart, so this pins both halves together: state
+// stays "reviewed" (unchanged, per the bead's constraint) AND latest_verdict
+// reports the disapprove with all four fields.
+func TestRunWorkShow_DisapproveVerdict_LatestVerdictCarriesOutcomeReviewerRoundAndStale(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, Target: "main", Title: "Add login",
+				Description: "adds a login form", Author: "grace-hopper-3-author",
+				State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED,
+			}}), nil
+		},
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{Verdicts: []*loamv1.VerdictSummary{
+				{Reviewer: testReviewer, Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE, Round: 3, Stale: false},
+			}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","name":"wb-9c2f1a","target":"main","title":"Add login",
+		"description":"adds a login form","state":"reviewed","author":"grace-hopper-3-author",
+		"latest_verdict":{"outcome":"disapprove","reviewer":"ada-lovelace-7-reviewer","round":3,"stale":false}}`,
+		jsonOf(t, encoded))
+}
+
+// TestRunWorkShow_NoVerdicts_OmitsLatestVerdictKeyEntirely proves
+// latest_verdict is a pointer omitted via omitempty, not a zeroed object,
+// when the branch has no verdicts yet -- matching Round/UpstreamPRURL's
+// presence/absence convention (loam-0pj.10: a zeroed object would be a
+// fabrication under a different name).
+func TestRunWorkShow_NoVerdicts_OmitsLatestVerdictKeyEntirely(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, State: loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT,
+			}}), nil
+		},
+		ListVerdictsFunc: noVerdictsFunc,
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	assert.NotContains(t, jsonOf(t, encoded), `"latest_verdict"`, "no verdicts means the key must be absent, not present-and-zero")
+	out, ok := encoded.(workShowOutput)
+	require.True(t, ok, "work show must encode a workShowOutput")
+	assert.Nil(t, out.LatestVerdict)
+}
+
+// TestRunWorkShow_LatestVerdictIsMostRecentOverall_EvenWhenStale is
+// "latest" as the bead defines it: the most recent verdict overall,
+// including a stale one -- not the most recent NON-stale verdict (that is
+// the approval-bar rule the server owns) and not a per-reviewer roll-up.
+// Both rows here are already stale (a later round has been requested with
+// no vote yet), and the higher-round one -- an approve -- must still win
+// and still report stale:true, since a caller reading latest_verdict:
+// approve on a stale verdict would be misled worse than by today's honest
+// "reviewed".
+func TestRunWorkShow_LatestVerdictIsMostRecentOverall_EvenWhenStale(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+				Repo: testRepo, Name: testWorkBranch, State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWABLE,
+			}}), nil
+		},
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return connect.NewResponse(&loamv1.ListVerdictsResponse{Verdicts: []*loamv1.VerdictSummary{
+				{Reviewer: "alan-turing-4-reviewer", Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE, Round: 2, Stale: true},
+				{Reviewer: testReviewer, Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL, Round: 1, Stale: true},
+			}}), nil
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	out, ok := encoded.(workShowOutput)
+	require.True(t, ok, "work show must encode a workShowOutput")
+	require.NotNil(t, out.LatestVerdict)
+	assert.Equal(t, &workShowVerdictOutput{
+		Outcome: "approve", Reviewer: "alan-turing-4-reviewer", Round: 2, Stale: true,
+	}, out.LatestVerdict, "the higher-round verdict wins even though it is stale, and reports stale:true rather than being dropped or laundered")
+}
+
+// TestRunWorkShow_ListVerdictsErrors_SurfacesAsAnError proves a ListVerdicts
+// failure is a real error, not swallowed into an omitted latest_verdict.
+// This is deliberately NOT a graceful-degradation path: ListVerdicts and
+// GetWorkBranch are gated by the same CapabilityWorkRead
+// (internal/handler/workbranch/review.go:74, workbranch.go:331), so no role
+// that reaches this call can have GetWorkBranch succeed while ListVerdicts
+// fails on permissions -- an error here is always a genuine failure.
+func TestRunWorkShow_ListVerdictsErrors_SurfacesAsAnError(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{Repo: testRepo, Name: testWorkBranch}}), nil
+		},
+		ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("verdict store unreachable"))
+		},
+	}
+	var encoded any
+	err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	require.Error(t, err)
+	assert.Nil(t, encoded, "a ListVerdicts failure must not encode a partial work show response")
 }
 
 // TestRunWorkReadCommands_UnresolvableIdentifier_ExitTwoWithoutCallingServer
