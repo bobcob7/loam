@@ -460,10 +460,11 @@ convention above).
 yet — e.g. still `draft`, before the first `request-review`.
 
 `latest_verdict` is the single most recent verdict overall — across all reviewers and rounds,
-including stale ones — NOT whether the branch was approved: `state` reports workflow position
-(a round closed and a verdict landed), the same `"reviewed"` after an approve or a disapprove,
-and `latest_verdict` is what distinguishes the two. It carries `outcome`, `reviewer`, `round`,
-and `stale` together, and is omitted entirely (not a zeroed object) for a work branch with no
+including stale ones, and when several reviewers voted in the same round, the most recently
+cast of them — NOT whether the branch was approved: `state` reports workflow position (a round
+closed and a verdict landed), the same `"reviewed"` after an approve or a disapprove, and
+`latest_verdict` is what distinguishes the two. It carries `outcome`, `reviewer`, `round`, and
+`stale` together, and is omitted entirely (not a zeroed object) for a work branch with no
 verdicts yet, matching `round`'s convention. This costs one extra RPC (`ListVerdicts`) beyond
 the metadata fetch.
 

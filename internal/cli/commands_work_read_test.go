@@ -471,6 +471,68 @@ func TestRunWorkShow_LatestVerdictIsMostRecentOverall_EvenWhenStale(t *testing.T
 	}, out.LatestVerdict, "the higher-round verdict wins even though it is stale, and reports stale:true rather than being dropped or laundered")
 }
 
+// TestRunWorkShow_SameRoundMultipleReviewers_PicksTheLaterCastVote is the
+// case review round 1 caught: ListVerdicts dedupes per REVIEWER, not per
+// ROUND (internal/handler/workbranch/review.go -> dedupeLatestPerReviewer),
+// and the schema explicitly allows many reviewers per round (`UNIQUE
+// (round_id, reviewer)`, internal/db/migrations/files/0001_init.up.sql:113;
+// exercised with two reviewers and none stale in
+// features/reviewing.feature:52-57). So two rows can legitimately share the
+// branch's highest round number, and picking between them matters: the
+// server orders `ORDER BY r.number DESC, v.created_at ASC`
+// (internal/db/queries/review_rounds.sql:50) -- oldest-cast first within a
+// round -- so the LAST same-round row in the response is the one actually
+// cast most recently, and that is the one workShowLatestVerdict must return
+// regardless of which reviewer happens to appear first.
+//
+// Both arrival orders are exercised deliberately: a test that seeds only
+// one order can pass by luck under a comparison bug that keeps the FIRST
+// same-round entry instead of the last (exactly what shipped in round 1),
+// since one of the two orders happens to agree with "first" by coincidence
+// of which name sorts where. Asserting both closes that loophole.
+func TestRunWorkShow_SameRoundMultipleReviewers_PicksTheLaterCastVote(t *testing.T) {
+	t.Parallel()
+	approve := &loamv1.VerdictSummary{Reviewer: "alan-turing-4-reviewer", Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE, Round: 3, Stale: false}
+	disapprove := &loamv1.VerdictSummary{Reviewer: testReviewer, Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_DISAPPROVE, Round: 3, Stale: false}
+	tests := []struct {
+		name     string
+		verdicts []*loamv1.VerdictSummary
+		want     *workShowVerdictOutput
+	}{
+		{
+			name:     "alan approves, then ada disapproves -- ada's disapprove was cast later and must win",
+			verdicts: []*loamv1.VerdictSummary{approve, disapprove},
+			want:     &workShowVerdictOutput{Outcome: "disapprove", Reviewer: testReviewer, Round: 3, Stale: false},
+		},
+		{
+			name:     "ada disapproves, then alan approves -- alan's approve was cast later and must win",
+			verdicts: []*loamv1.VerdictSummary{disapprove, approve},
+			want:     &workShowVerdictOutput{Outcome: "approve", Reviewer: "alan-turing-4-reviewer", Round: 3, Stale: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := &WorkBranchClientMock{
+				GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+					return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: &loamv1.WorkBranch{
+						Repo: testRepo, Name: testWorkBranch, State: loamv1.WorkBranchState_WORK_BRANCH_STATE_REVIEWED,
+					}}), nil
+				},
+				ListVerdictsFunc: func(context.Context, *connect.Request[loamv1.ListVerdictsRequest]) (*connect.Response[loamv1.ListVerdictsResponse], error) {
+					return connect.NewResponse(&loamv1.ListVerdictsResponse{Verdicts: tt.verdicts}), nil
+				},
+			}
+			var encoded any
+			err := runWorkShow(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+			require.NoError(t, err)
+			out, ok := encoded.(workShowOutput)
+			require.True(t, ok, "work show must encode a workShowOutput")
+			assert.Equal(t, tt.want, out.LatestVerdict, "the later-cast same-round verdict must win regardless of arrival order")
+		})
+	}
+}
+
 // TestRunWorkShow_ListVerdictsErrors_SurfacesAsAnError proves a ListVerdicts
 // failure is a real error, not swallowed into an omitted latest_verdict.
 // This is deliberately NOT a graceful-degradation path: ListVerdicts and

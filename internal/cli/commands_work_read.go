@@ -257,18 +257,23 @@ type workShowVerdictOutput struct {
 // workShowLatestVerdict picks the single most recent verdict overall from
 // ListVerdicts's response -- not a per-reviewer roll-up and not filtered to
 // non-stale ones. ListVerdicts already collapses to one row per reviewer
-// (their latest round) and returns newest round first
-// (internal/handler/workbranch/review.go -> ListVerdicts:
-// "dedupeLatestPerReviewer relies on VerdictStore.List returning newest
-// round first"), so "most recent overall" is the entry with the highest
-// round number; nothing in the wire shape (no timestamp) can break a tie
-// more precisely than "whichever the server listed first" and doing so
-// would re-implement the proposal-queue rule the server already owns. Nil
-// for no verdicts at all.
+// (their latest round) but NOT to one row per round: the schema allows many
+// reviewers per round (`UNIQUE (round_id, reviewer)`,
+// internal/db/migrations/files/0001_init.up.sql:113), so several rows can
+// share the branch's highest round number.
+//
+// VerdictSummary carries no timestamp, but list position still encodes
+// recency: the server orders `ORDER BY r.number DESC, v.created_at ASC`
+// (internal/db/queries/review_rounds.sql:50) -- newest round first, and
+// OLDEST-CAST FIRST within a round. So among rows tied at the maximum
+// round, the LAST one in the response is the most recently cast, and `>=`
+// below (not `>`) is what selects it; `>` would silently keep the oldest
+// vote of that round instead, letting one reviewer's stale-looking earlier
+// verdict outrank another's live one just because it was cast first.
 func workShowLatestVerdict(verdicts []*loamv1.VerdictSummary) *loamv1.VerdictSummary {
 	var latest *loamv1.VerdictSummary
 	for _, v := range verdicts {
-		if latest == nil || v.GetRound() > latest.GetRound() {
+		if latest == nil || v.GetRound() >= latest.GetRound() {
 			latest = v
 		}
 	}
