@@ -106,6 +106,30 @@ type FileResult struct {
 // call at all for this file and leaves its existing rows exactly as they
 // were.
 //
+// loam-1z0 (the graph-track half of loam-8uo) considered and rejected
+// dropping this file's rows anyway to mirror the chunk track's binary-sniff
+// fix: symbol_history references symbols(id) ON DELETE CASCADE, so dropping
+// a file's symbols destroys its history once loam-c94.7 lands, and the
+// trigger here is a transient TOOL fault (the parser itself failing), not a
+// fact about the file's content the way a binary sniff is -- there is
+// nothing true to assert about what the file now defines. The decision is
+// to KEEP this behaviour: a file's rows can go stale for exactly as long as
+// this failure keeps recurring across reparses of the same file -- a known,
+// bounded staleness window that closes the next time the file parses
+// successfully (or the file is dropped via a later diffplan.Plan.DropFiles,
+// e.g. a rename or deletion), never an unbounded one.
+// TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched
+// (ingest_test.go) pins this: a file's pre-existing symbols row set is
+// asserted to survive, byte-for-byte, a batch in which that file's reparse
+// hits this exact path. That test injects the failure at the fileParser
+// seam rather than driving it with real source: Tree-sitter's error
+// tolerance (see above) means this branch has no known real-input trigger
+// in production -- parser.Parse's own "no tree returned" case is reachable
+// only via ctx cancellation (which ExtractFiles handles separately, never
+// reaching here) or its internal errParseFailed precondition failure, which
+// this repo's grammars never actually return for real, even maximally
+// broken or binary, source.
+//
 // A syntax error inside an otherwise-usable tree (tree.HasError) is
 // different: Tree-sitter still produced real structure, so ExtractFile
 // returns ok=true with FileResult.HasSyntaxError=true and whatever
