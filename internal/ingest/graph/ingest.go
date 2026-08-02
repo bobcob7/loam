@@ -30,11 +30,13 @@ type Stats struct {
 	// "Files with no grammar are skipped for the graph") -- skipped and
 	// counted, never silently dropped with no trace.
 	FilesSkippedUnsupportedLanguage int
-	// FilesFailed is how many files a registered grammar could not
-	// actually parse into any tree (see ExtractFile's doc comment for how
-	// rare this is in practice). No store call was made for these files;
-	// their existing rows, if any, are left untouched -- a deliberate,
-	// known, and bounded staleness window (loam-1z0), not an oversight.
+	// FilesFailed is how many files had no usable extraction result: a
+	// registered grammar that could not actually parse into any tree, or a
+	// Captures query failing over a tree that DID parse (see ExtractFile's
+	// doc comment for both sub-cases and how reachable each is in
+	// practice). No store call was made for these files; their existing
+	// rows, if any, are left untouched -- a deliberate, known, and bounded
+	// staleness window (loam-1z0), not an oversight.
 	FilesFailed int
 	// SymbolsWritten and ReferencesWritten are the total row counts
 	// inserted across every successfully extracted file (the sum of each

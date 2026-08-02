@@ -199,35 +199,45 @@ func TestIngestFiles_SyntaxError_StillWritesBestEffort(t *testing.T) {
 }
 
 // TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched is
-// loam-1z0's required test: it drives ExtractFile's no-tree path (err!=nil,
-// ok=false, not a ctx error) through a full IngestFiles call and asserts the
-// resulting symbols ROW STATE, not merely that a store call was skipped --
-// TestIngestFiles_HardParseFailure_SkipsFileNotBatch above already proves
-// the latter. Here, broken.go's store rows are seeded as if a prior
-// successful ingest had already written them (a stand-in for real,
-// pre-existing symbols/symbol_references rows), then a batch reparses it
-// and hits a hard parse failure; the seeded rows must come out the far side
-// byte-for-byte identical, proving the swap left them exactly alone rather
-// than deleting or blanking them.
+// loam-1z0's required test: it drives ExtractFile's hard-failure path
+// (err!=nil, ok=false, not a ctx error) through a full IngestFiles call and
+// asserts the resulting symbols ROW STATE, not merely that a store call was
+// skipped -- TestIngestFiles_HardParseFailure_SkipsFileNotBatch above
+// already proves the latter, by call-recording alone.
+//
+// Two things make the assertions here actually discriminate, both fixed
+// during loam-1z0's review round 1 after being caught by mutation:
+//
+//  1. staleSymbols is a value ExtractFile's real extraction of broken.go
+//     could never produce (moduleSymbol("broken.go") is
+//     {Name:"broken",Kind:kindModule}; this seed is neither that nor any
+//     shape a function/type match would build) -- so a mutation that
+//     "helpfully" writes moduleSymbol(f.Path) on the failure path instead of
+//     making no call at all is now distinguishable from a genuinely
+//     untouched row, not accidentally identical to one.
+//  2. The "no call was made" half of the claim is asserted directly against
+//     st.ReplaceFileSymbolsCalls() (moq-generated), not inferred from the
+//     row map staying put -- the row map alone cannot tell "never called"
+//     apart from "called with this exact value again".
+//
+// fine.py's written symbols are asserted BY CONTENT (module symbol "fine"
+// plus function symbol "add"), not merely "some non-nil, non-stale value" --
+// otherwise a mutation that writes every successfully extracted file with
+// symbols:nil would still pass.
 //
 // This test injects the failure via a fake fileParser rather than driving
-// it with real source. That is a deliberate finding, not a shortcut: Tree-
-// sitter is error-tolerant by construction (see ExtractFile's doc comment
-// and TestExtractFile_PartialSyntaxError_StillExtractsCleanConstructs) --
-// broken, truncated, or binary-garbage content still comes back as a
-// partial tree with ERROR nodes, never as parser.Parse's internal "no tree
-// returned" failure. Reading internal/parser/parser.go confirms this: the
-// only way Parse's underlying call returns a nil tree is Tree-sitter's
-// ProgressCallback observing ctx cancellation on a large (>=256KiB) file
-// mid-parse, and that path already carries a live ctx.Err() by construction
-// -- Parse's own check right after immediately reclassifies it as a wrapped
-// ctx error, which ExtractFiles treats as batch-aborting, never as a
-// FilesFailed count. So there is no real-input path left that reaches
-// FilesFailed at all in this codebase as it stands today; the fake at the
-// fileParser seam is standing in for a class of failure (the underlying C
-// library returning ErrorKindUnknown / a hard grammar fault) that this
-// package must still handle correctly if it were ever to occur, even though
-// production traffic cannot currently trigger it.
+// it with real source, and that choice covers only PART of what err!=nil
+// means (see ExtractFile's doc comment for the full breakdown): Parse's own
+// "no tree at all" sub-case has been traced, including into the vendored
+// Tree-sitter C, and confirmed to have NO real-input trigger in this build.
+// But err!=nil also covers query.Captures failing with ErrQueryClosed on a
+// tree that parsed fine, which IS reachable in production -- via a file's
+// extraction racing extractor.Close during graceful shutdown, not via any
+// input. Neither sub-case is practically reproducible from a unit test
+// without faking a seam (a real shutdown race is inherently timing-
+// dependent), so the fake fileParser stands in for both: this test is
+// pinning the CONTRACT for "extraction produced no usable result", not
+// reproducing either sub-case's real trigger.
 func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -244,7 +254,7 @@ func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *test
 	e, err := New(mock, testLogger())
 	require.NoError(t, err)
 	defer e.Close()
-	staleSymbols := []codegraph.SymbolInput{{Name: "broken", Kind: kindModule}}
+	staleSymbols := []codegraph.SymbolInput{{Line: int32Ptr(7), Name: "StaleFromPreviousIngest", Kind: kindFunction}}
 	symbolRows := map[string][]codegraph.SymbolInput{"broken.go": staleSymbols}
 	st := &storeMock{
 		ReplaceFileSymbolsFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, symbols []codegraph.SymbolInput) ([]codegraph.Symbol, error) {
@@ -265,9 +275,16 @@ func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *test
 	stats, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", files)
 	require.NoError(t, err, "a single file's hard parse failure must not abort the batch")
 	assert.Equal(t, 1, stats.FilesFailed)
-	assert.Equal(t, staleSymbols, symbolRows["broken.go"], "broken.go's pre-existing symbols row must survive the swap untouched -- no ReplaceFileSymbols call was ever made for it")
+	for _, c := range st.ReplaceFileSymbolsCalls() {
+		assert.NotEqual(t, "broken.go", c.File, "no ReplaceFileSymbols call must ever be made for a file whose extraction hard-failed")
+	}
+	assert.Equal(t, staleSymbols, symbolRows["broken.go"], "broken.go's pre-existing symbols row must be exactly what it was seeded as -- nothing overwrote it")
 	require.Contains(t, symbolRows, "fine.py", "the file after the failed one must still be reparsed and written")
-	assert.NotEqual(t, staleSymbols, symbolRows["fine.py"], "fine.py's rows must be the freshly extracted ones, not leftover from broken.go's seed")
+	fineNames := make([]string, len(symbolRows["fine.py"]))
+	for i, s := range symbolRows["fine.py"] {
+		fineNames[i] = s.Name
+	}
+	assert.ElementsMatch(t, []string{"fine", "add"}, fineNames, "fine.py must be written with its freshly extracted module and function symbols, not an empty or stale set")
 }
 
 // TestIngestFiles_StoreErrorAbortsBatch proves a store write failure stops
