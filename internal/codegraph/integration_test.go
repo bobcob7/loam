@@ -1013,7 +1013,17 @@ func TestLookupReferencesByName_TruncatesAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	store, pool, repoID := newTestStore(t)
 	ctx := t.Context()
-	for i := range 4 {
+	// Seeded in REVERSE on purpose. insertReference mints monotonic UUIDv7s,
+	// so seeding f0..f3 ascending makes insertion order, alphabetical
+	// file order and id order all coincide -- and truncating in plain
+	// UUID order then becomes indistinguishable from truncating in file
+	// order. That is precisely the failure mode this test's own doc
+	// comment above claims parity with
+	// (TestDependents_NearestDepthFirst_NotUUIDOrder, whose whole design
+	// point is that UUID order and the intended order actively
+	// disagree). Reversing makes them disagree here too. Do not "tidy"
+	// this back to `range 4`.
+	for i := 3; i >= 0; i-- {
 		insertReference(ctx, t, pool, repoID, fmt.Sprintf("f%d.go", i), "Login", int32(i+1))
 	}
 
