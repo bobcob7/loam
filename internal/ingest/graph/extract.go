@@ -142,29 +142,21 @@ type FileResult struct {
 // here (a parser/query tool fault) is not a fact about the file's content
 // the way a binary sniff is, so there is nothing true to assert by writing
 // "this file now defines nothing". (symbol_history's ON DELETE CASCADE from
-// symbols is real, but it is not an argument for keeping these rows in
-// particular: codegraph.Store.ReplaceFileSymbols deletes and reinserts with
-// fresh uuid.NewV7 ids on every SUCCESSFUL reparse too, so that CASCADE
-// already fires and symbol_history is rebuilt on the common path regardless
-// of what this bead decides; symbol_history is also documented as derived
-// and rebuildable from git, not precious -- internal/db/queries/
-// code_graph.sql's own header and docs/ingestion-spec.md. So dropping this
-// file's rows on a hard failure would only widen, by one more reparse, a
-// history-rebuild gap that already exists on every successful reparse -- a
-// real but small and already-accepted cost, not the decisive one.) A file's
-// symbols/references rows can go stale for exactly as long as the failure
-// keeps recurring across reparses of the same file -- a known, bounded
-// staleness window that closes the next time the file's extraction
+// symbols is real, but it is not what decides this -- see loam-1z0's own
+// review history for two rounds of a since-deleted argument built on it.)
+// A file's symbols/references rows can go stale for exactly as long as the
+// failure keeps recurring across reparses of the same file -- a known,
+// bounded staleness window that closes the next time the file's extraction
 // succeeds (or the file is dropped via a later diffplan.Plan.DropFiles,
 // e.g. a rename or deletion), never an unbounded one.
 // TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched
-// (ingest_test.go) pins this: a file's pre-existing symbols row set is
-// asserted to survive, byte-for-byte, a batch in which that file's reparse
-// hits this exact path -- and that no ReplaceFileSymbols call was made for
-// it at all. That test injects the failure at the fileParser seam rather
-// than driving it with real source, since the no-tree sub-case above has no
-// real-input trigger; the shutdown-race sub-case is real but not
-// practically reproducible from a unit test without faking the same seam.
+// (ingest_test.go) pins this at the fileParser seam, covering both err!=nil
+// sub-cases uniformly; TestIngestFiles_ClosedExtractor_LeavesExistingSymbolsRowsUntouched
+// (same file) pins the ErrQueryClosed sub-case specifically with the REAL
+// parser and no fake at all -- reaching it needs only the shutdown STATE
+// (an already-Closed Extractor), not the shutdown TIMING, so it needs no
+// fake to reproduce. The no-tree sub-case has no such real-input
+// reproduction (see above), so it is pinned only at the fake seam.
 //
 // A syntax error inside an otherwise-usable tree (tree.HasError) is
 // different: Tree-sitter still produced real structure, so ExtractFile

@@ -229,15 +229,17 @@ func TestIngestFiles_SyntaxError_StillWritesBestEffort(t *testing.T) {
 // it with real source, and that choice covers only PART of what err!=nil
 // means (see ExtractFile's doc comment for the full breakdown): Parse's own
 // "no tree at all" sub-case has been traced, including into the vendored
-// Tree-sitter C, and confirmed to have NO real-input trigger in this build.
-// But err!=nil also covers query.Captures failing with ErrQueryClosed on a
-// tree that parsed fine, which IS reachable in production -- via a file's
-// extraction racing extractor.Close during graceful shutdown, not via any
-// input. Neither sub-case is practically reproducible from a unit test
-// without faking a seam (a real shutdown race is inherently timing-
-// dependent), so the fake fileParser stands in for both: this test is
-// pinning the CONTRACT for "extraction produced no usable result", not
-// reproducing either sub-case's real trigger.
+// Tree-sitter C, and confirmed to have NO real-input trigger in this build,
+// so THAT sub-case genuinely needs a fake to pin defensively. But err!=nil
+// also covers query.Captures failing with ErrQueryClosed on a tree that
+// parsed fine, and unlike the no-tree sub-case, THAT one does not need a
+// fake at all: reaching it needs only the shutdown STATE (an
+// already-Closed Extractor), not the shutdown TIMING of a real race --
+// see TestIngestFiles_ClosedExtractor_LeavesExistingSymbolsRowsUntouched
+// below, which reproduces it with the real parser and zero fakes. This
+// test is pinning the CONTRACT for "extraction produced no usable result"
+// generically, at the one sub-case (no-tree) that has no real-input
+// reproduction; the other (ErrQueryClosed) gets its own real-trigger test.
 func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -275,6 +277,7 @@ func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *test
 	stats, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", files)
 	require.NoError(t, err, "a single file's hard parse failure must not abort the batch")
 	assert.Equal(t, 1, stats.FilesFailed)
+	assert.Equal(t, 0, stats.FilesSkippedUnsupportedLanguage, "a hard failure must be counted once, in FilesFailed only -- Stats documents the four counters as mutually exclusive")
 	for _, c := range st.ReplaceFileSymbolsCalls() {
 		assert.NotEqual(t, "broken.go", c.File, "no ReplaceFileSymbols call must ever be made for a file whose extraction hard-failed")
 	}
@@ -285,6 +288,45 @@ func TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched(t *test
 		fineNames[i] = s.Name
 	}
 	assert.ElementsMatch(t, []string{"fine", "add"}, fineNames, "fine.py must be written with its freshly extracted module and function symbols, not an empty or stale set")
+}
+
+// TestIngestFiles_ClosedExtractor_LeavesExistingSymbolsRowsUntouched pins
+// the OTHER err!=nil sub-case ExtractFile's doc comment describes --
+// query.Captures returning parser.ErrQueryClosed on a tree that parsed
+// perfectly -- and does so with the REAL parser and no fake fileParser at
+// all, unlike the test above. This is possible because reaching
+// ErrQueryClosed does not require winning a real shutdown race: Query.
+// Captures checks q.closed before ctx.Err() (parser/query.go), so it is
+// enough to reproduce the shutdown STATE (an Extractor that has already had
+// Close called on it, exactly what run()'s deferred closeIngest does at
+// cmd/server/main.go:286) rather than the shutdown TIMING. Constructing the
+// Extractor, closing it, and only then calling IngestFiles reproduces the
+// real trigger deterministically.
+func TestIngestFiles_ClosedExtractor_LeavesExistingSymbolsRowsUntouched(t *testing.T) {
+	t.Parallel()
+	e := newRealIngestExtractor(t)
+	e.Close()
+	staleSymbols := []codegraph.SymbolInput{{Line: int32Ptr(7), Name: "StaleFromPreviousIngest", Kind: kindFunction}}
+	symbolRows := map[string][]codegraph.SymbolInput{"broken.go": staleSymbols}
+	st := &storeMock{
+		ReplaceFileSymbolsFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, symbols []codegraph.SymbolInput) ([]codegraph.Symbol, error) {
+			symbolRows[file] = symbols
+			return nil, nil
+		},
+		ReplaceFileReferencesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, refs []codegraph.ReferenceInput) (int64, error) {
+			return int64(len(refs)), nil
+		},
+		RecomputeGraphEdgesFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) (int64, error) {
+			return fakeRecomputedEdgeCount, nil
+		},
+	}
+	files := []FileInput{{Path: "broken.go", Content: []byte("package a\n")}}
+	stats, err := e.IngestFiles(t.Context(), st, uuid.Must(uuid.NewV7()), "main", files)
+	require.NoError(t, err, "ErrQueryClosed is not a ctx error: it must not abort the batch")
+	assert.Equal(t, 1, stats.FilesFailed)
+	assert.Equal(t, 0, stats.FilesSkippedUnsupportedLanguage, "a hard failure must be counted once, in FilesFailed only -- Stats documents the four counters as mutually exclusive")
+	assert.Empty(t, st.ReplaceFileSymbolsCalls(), "no store call must be made for a file whose extraction failed via a closed query")
+	assert.Equal(t, staleSymbols, symbolRows["broken.go"], "broken.go's pre-existing symbols row must survive untouched, exactly like the no-tree sub-case")
 }
 
 // TestIngestFiles_StoreErrorAbortsBatch proves a store write failure stops
