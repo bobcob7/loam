@@ -512,17 +512,24 @@ immediate, via `reply`.
 **Input:**
 
 - `repo`, `work-branch` positional — identify the work branch (see the convention above).
-- **stdin** — the comment body. Required unless only `--resolve` or `--discard` is given.
+- **stdin** — the comment body. Required unless only `--resolve` or `--discard` is given. A
+  lone `--resolve` or a lone `--discard` (see below) never reads stdin at all — not even to
+  check whether one was piped — so it cannot hang on an interactive or un-redirected stdin,
+  and a body piped alongside either is silently ignored rather than attached or rejected.
 - `--file <path>` + `--line <n>` *(optional)* — anchor the new thread to a line.
 - `--resolve <thread-id>` *(optional)* — mark a thread resolved. Only the thread's original
-  author may resolve it. May carry a body or be used alone.
+  author may resolve it. Used alone (no `--file`/`--line`), it never reads stdin, so it
+  cannot carry a body — any body piped alongside a lone `--resolve` is silently ignored.
+  Combined with `--file`/`--line` it is a new anchored comment and still reads and attaches
+  the body as usual.
 - `--edit <staged-id>` *(optional)* — replace the body of a previously staged comment (new
   body from stdin), before it is submitted.
-- `--discard <staged-id>` *(optional)* — remove a staged comment from the staging area.
+- `--discard <staged-id>` *(optional)* — remove a staged comment from the staging area. Never
+  reads stdin; any body piped alongside it is silently ignored, not rejected.
 
 The modes are mutually exclusive: a single invocation either opens a new thread (top-level or
 `--file`/`--line`-anchored), `--edit`s a staged comment, or `--discard`s one. `--resolve` may
-accompany a new comment or stand alone.
+accompany a new anchored comment or stand alone.
 
 **Behavior:** Operates on the caller's **local staging area** for this work branch (in
 `.loam`). New-thread comments and resolves append to it; `--edit` and `--discard` modify or
