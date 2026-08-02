@@ -27,4 +27,9 @@ message GetInstructionsResponse {
 message CommandInfo {
   string name = 1;
   string summary = 2;
+  // Positional-argument shape (docs/cli-spec.md's <...>/[...] convention),
+  // e.g. "<repo> <from>" for "work start". Empty when the command takes no
+  // positional arguments. Flag usage is not included here -- the CLI's own
+  // --help already renders that from the FlagSet it parses with.
+  string synopsis = 3;
 }

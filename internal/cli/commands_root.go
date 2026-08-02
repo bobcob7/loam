@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -25,11 +26,16 @@ import (
 // --- instructions ---
 
 // instructionsCommandOutput is one entry of `instructions`' command list
-// (docs/cli-spec.md -> instructions -> Output: `{ "name": "work list",
-// "summary": "List work branches" }`).
+// (docs/cli-spec.md -> instructions -> Output: `{ "name": "work start",
+// "summary": "Start a work branch from a target branch.", "synopsis":
+// "<repo> <from>" }`). Synopsis carries the positional argument shape
+// (loam-hi5o.4): before this field existed, `loam instructions "work
+// start"` answered only the summary, restating the command's title rather
+// than the question an agent asked it -- how to actually call the thing.
 type instructionsCommandOutput struct {
-	Name    string `json:"name"`
-	Summary string `json:"summary"`
+	Name     string `json:"name"`
+	Summary  string `json:"summary"`
+	Synopsis string `json:"synopsis"`
 }
 
 // instructionsOutput is `instructions`' shape (docs/cli-spec.md ->
@@ -47,9 +53,28 @@ type instructionsOutput struct {
 func instructionsCommandsFrom(commands []*loamv1.CommandInfo) []instructionsCommandOutput {
 	rows := make([]instructionsCommandOutput, 0, len(commands))
 	for _, c := range commands {
-		rows = append(rows, instructionsCommandOutput{Name: c.GetName(), Summary: c.GetSummary()})
+		rows = append(rows, instructionsCommandOutput{Name: c.GetName(), Summary: c.GetSummary(), Synopsis: c.GetSynopsis()})
 	}
 	return rows
+}
+
+// parseInstructionsArgs parses instructions' own positional argument:
+// a bare newFlagSet (instructions takes no flags) with at most one
+// positional token surviving. Factored out of runInstructions so
+// help.go's `loam instructions <command>` suggestion can be checked
+// against this exact function (loam-hi5o.4 acceptance criterion 3 --
+// every suggestion help prints must be runnable verbatim) rather than a
+// hand-rolled copy of the same check that could silently drift from it.
+func parseInstructionsArgs(args []string) ([]string, error) {
+	fs := newFlagSet("instructions")
+	positional, err := parseCommandArgs(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(positional) > 1 {
+		return nil, errors.New("instructions takes at most one command argument")
+	}
+	return positional, nil
 }
 
 // runInstructions implements `loam instructions [command]` (see
@@ -81,13 +106,9 @@ func instructionsCommandsFrom(commands []*loamv1.CommandInfo) []instructionsComm
 // not mention at all; that is the server's existing contract, not
 // something invented here.
 func runInstructions(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("instructions")
-	positional, err := parseCommandArgs(fs, args)
+	positional, err := parseInstructionsArgs(args)
 	if err != nil {
 		return newUsageError(err.Error())
-	}
-	if len(positional) > 1 {
-		return newUsageError("instructions takes at most one command argument")
 	}
 	req := &loamv1.GetInstructionsRequest{}
 	if len(positional) == 1 {

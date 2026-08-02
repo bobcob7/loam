@@ -22,6 +22,7 @@ import (
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/handler"
+	"github.com/bobcob7/loam/internal/handler/meta"
 	"github.com/bobcob7/loam/internal/refnames"
 )
 
@@ -75,32 +76,43 @@ type acceptanceInstructionsOutput struct {
 	RoleInstructions string                          `json:"role_instructions"`
 }
 
-// acceptanceCommandCapability mirrors internal/handler/meta/catalog.go's
-// commandCatalog -- the pairing of each GATED CLI command to the single
-// capability that gates it -- reproduced here because that table is
-// unexported. This is NOT a second copy of the fixed ten-capability
-// vocabulary (loam-ofg.13's own concern): every value here is one of the
-// handler.Capability constants, never a restated string literal, and the
-// FIXED SET of which capabilities exist still comes from
-// handler.AllCapabilities()/handler.Capability.Valid alone. What this map
-// restates is the separate, stable CLI-surface question "which command
-// does this capability gate" (docs/cli-spec.md's Commands table), which
-// has no exported form to read instead.
-var acceptanceCommandCapability = map[string]handler.Capability{
-	"clone":               handler.CapabilityGitClone,
-	"work start":          handler.CapabilityWorkStart,
-	"work set":            handler.CapabilityWorkSet,
-	"work request-review": handler.CapabilityWorkRequestReview,
-	"work list":           handler.CapabilityWorkRead,
-	"work show":           handler.CapabilityWorkRead,
-	"work diff":           handler.CapabilityWorkRead,
-	"work comments":       handler.CapabilityWorkRead,
-	"work verdicts":       handler.CapabilityWorkRead,
-	"work comment":        handler.CapabilityWorkVerdict,
-	"work reply":          handler.CapabilityWorkReply,
-	"work verdict":        handler.CapabilityWorkVerdict,
-	"graph":               handler.CapabilityGraphQuery,
-	"search":              handler.CapabilitySearch,
+// acceptanceCommandCapability is the pairing of each GATED CLI command to
+// the single capability that gates it (docs/cli-spec.md's Commands
+// table), used to predict which commands a role's `loam instructions`
+// response should list.
+//
+// This used to be a hand-maintained literal map, reproduced here because
+// internal/handler/meta/catalog.go's own table was unexported. loam-hi5o.4's
+// review round found that out the hard way: this file still said
+// `"graph": handler.CapabilityGraphQuery` after catalog.go split "graph"
+// into five separate commands, so `wantPresent` and `present` disagreed on
+// "graph" in four scenarios, and no build-time check caught it -- the
+// exact drift trap the bead's own cross-package test
+// (internal/cli/synopsis_test.go) was written to avoid, one package over
+// and unguarded.
+//
+// meta.AllCommands() is exported precisely so this can be DISCOVERED
+// instead of restated: every entry with a non-empty Capability, keyed by
+// name. Ungated entries (Capability == "") are excluded -- every step
+// below already checks instructions/whoami as "always present regardless
+// of role" on its own, separately from this map. Building it from
+// meta.AllCommands() at package-var-init time (not a func init(), just a
+// plain function call in a var initializer) means a future catalog rename
+// or split, like the one that broke this, updates this map automatically
+// with no second edit required.
+var acceptanceCommandCapability = buildAcceptanceCommandCapability()
+
+// buildAcceptanceCommandCapability does the discovery acceptanceCommandCapability's
+// doc comment describes.
+func buildAcceptanceCommandCapability() map[string]handler.Capability {
+	out := make(map[string]handler.Capability)
+	for _, entry := range meta.AllCommands() {
+		if entry.Capability == "" {
+			continue
+		}
+		out[entry.Name] = entry.Capability
+	}
+	return out
 }
 
 // stepTheRoleHasInstructionsConfigured sets role's instructions text
