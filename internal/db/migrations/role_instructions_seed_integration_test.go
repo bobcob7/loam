@@ -127,12 +127,19 @@ func TestRoleInstructionsSeedMigration_GuardPreservesNonEmptyText(t *testing.T) 
 // would have. This applies 0006 for real, reverts it with the package's
 // own Down machinery (m.Steps(-1), the same *migrate.Migrate the up path
 // used), and asserts BOTH built-ins still carry their seeded text
-// afterward.
+// afterward. It also checks the bookkeeping version itself dropped from 6
+// to 5: without that, "the down file ran and left the data alone" and
+// "the down file was never actually executed" would be indistinguishable
+// from the data assertions alone.
 func TestRoleInstructionsSeedMigration_DownIsANoOp(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	m, db := newMigratedTo5(t)
 	require.NoError(t, m.Steps(1), "applying migration 0006")
+	version, dirty, err := m.Version()
+	require.NoError(t, err)
+	require.EqualValues(t, 6, version, "expected version 6 after applying migration 0006")
+	require.False(t, dirty)
 
 	author := roleInstructions(ctx, t, db, "author")
 	reviewer := roleInstructions(ctx, t, db, "reviewer")
@@ -140,6 +147,10 @@ func TestRoleInstructionsSeedMigration_DownIsANoOp(t *testing.T) {
 	require.NotEmpty(t, reviewer)
 
 	require.NoError(t, m.Steps(-1), "reverting migration 0006")
+	version, dirty, err = m.Version()
+	require.NoError(t, err)
+	assert.EqualValues(t, 5, version, "reverting migration 0006 must actually run its down file, dropping the bookkeeping version to 5")
+	assert.False(t, dirty)
 
 	assert.Equal(t, author, roleInstructions(ctx, t, db, "author"), "reverting 0006 must not blank author's instructions")
 	assert.Equal(t, reviewer, roleInstructions(ctx, t, db, "reviewer"), "reverting 0006 must not blank reviewer's instructions")

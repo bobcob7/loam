@@ -32,6 +32,21 @@ import (
 // exercises the real Handler.GetInstructions end to end against a real,
 // freshly migrated database, rather than the RoleStoreMock every other
 // test in this package uses.
+//
+// This is a HAND COPY of production's adapter, not the production type
+// itself (which is unexported in package main and cannot be imported
+// here): a regression in cmd/server/main.go's own roleStoreAdapter -- a
+// field read wrong, an error wrapped differently -- would NOT fail this
+// test, since it exercises the copy, not the real wiring. What closes
+// that gap is the acceptance suite: features/instructions.feature's "the
+// instructions configured for my role" drives the compiled loam CLI
+// against the real, in-process server (cmd/server's own composition
+// root), and features/roles.feature:14 covers the reviewer built-in
+// specifically. Both were confirmed passing (104/104 scenarios) alongside
+// this file. So loam-0pj.17's acceptance criterion 5 -- GetInstructions
+// returns non-empty role_instructions for both built-ins on a freshly
+// migrated database -- is met by this test and the acceptance suite
+// JOINTLY, not by this file alone.
 type roleStoreAdapter struct {
 	store *rolestore.Store
 }

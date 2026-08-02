@@ -40,9 +40,9 @@
 -- that flag, so no non-builtin row can match `AND builtin` in the first
 -- place regardless of its instructions value.
 UPDATE roles
-SET instructions = $instructions$An author starts work branches (work start), sets a title and description (work set) -- both required before request-review -- and requests review when ready, opening a numbered review round. A push lands only on your own, non-terminal work branch; requesting review again after changes opens a fresh round and marks the prior round's verdicts stale. Submitting a verdict belongs to the reviewer role, not this one.$instructions$
+SET instructions = $instructions$An author starts work branches (work start), sets a title and description (work set) -- both required before request-review -- and requests review when ready, opening a numbered review round; request-review is rejected while already reviewable (exit 2), so between rounds use work reply, not another request-review. A push lands only on your own, non-terminal work branch. Once reviewed, requesting review again opens a fresh round and marks the prior round's verdicts stale. Submitting a verdict belongs to the reviewer role, not this one.$instructions$
 WHERE name = 'author' AND builtin AND coalesce(instructions, '') = '';
 
 UPDATE roles
-SET instructions = $instructions$A reviewer reads work branches, replies to threads, and submits verdicts -- never starts a work branch or pushes to one. Open threads with work comment: it stages comments locally, and they stay invisible to everyone else until work verdict publishes them together with an outcome (approve/disapprove/neutral) and clears the staging area. Nothing you write is visible to the author until verdict runs, even if the comments are already staged.$instructions$
+SET instructions = $instructions$A reviewer reads work branches, replies to threads, and submits verdicts -- never starts a work branch or pushes to one. Open new threads with work comment, which stages comments locally and keeps them invisible to everyone else until work verdict publishes them together with an outcome (approve/disapprove/neutral) and clears the staging area. Replies (work reply) are the exception: they post immediately, unstaged.$instructions$
 WHERE name = 'reviewer' AND builtin AND coalesce(instructions, '') = '';
