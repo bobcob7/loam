@@ -485,11 +485,13 @@ func TestRunWorkShow_LatestVerdictIsMostRecentOverall_EvenWhenStale(t *testing.T
 // cast most recently, and that is the one workShowLatestVerdict must return
 // regardless of which reviewer happens to appear first.
 //
-// Both arrival orders are exercised deliberately: a test that seeds only
-// one order can pass by luck under a comparison bug that keeps the FIRST
-// same-round entry instead of the last (exactly what shipped in round 1),
-// since one of the two orders happens to agree with "first" by coincidence
-// of which name sorts where. Asserting both closes that loophole.
+// Both arrival orders are exercised deliberately, though a comparison bug
+// that keeps the FIRST same-round entry instead of the last (exactly what
+// shipped in round 1) fails under either single order on its own -- "first"
+// is always wrong here, not luckily right half the time. The table exists
+// to make that point explicit: the fix is about POSITION within the round
+// (last wins), not about which reviewer's name happens to arrive first, and
+// asserting only one order would leave that distinction unstated.
 func TestRunWorkShow_SameRoundMultipleReviewers_PicksTheLaterCastVote(t *testing.T) {
 	t.Parallel()
 	approve := &loamv1.VerdictSummary{Reviewer: "alan-turing-4-reviewer", Outcome: loamv1.VerdictOutcome_VERDICT_OUTCOME_APPROVE, Round: 3, Stale: false}

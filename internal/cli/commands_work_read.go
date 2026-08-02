@@ -268,8 +268,10 @@ type workShowVerdictOutput struct {
 // OLDEST-CAST FIRST within a round. So among rows tied at the maximum
 // round, the LAST one in the response is the most recently cast, and `>=`
 // below (not `>`) is what selects it; `>` would silently keep the oldest
-// vote of that round instead, letting one reviewer's stale-looking earlier
-// verdict outrank another's live one just because it was cast first.
+// vote of that round instead of the newest one. (`stale` is not what
+// distinguishes them: it is `!is_current_round`, derived purely from the
+// round number, so every row tied at the same round carries the identical
+// stale value -- the two rows differ only in which one was cast later.)
 func workShowLatestVerdict(verdicts []*loamv1.VerdictSummary) *loamv1.VerdictSummary {
 	var latest *loamv1.VerdictSummary
 	for _, v := range verdicts {
