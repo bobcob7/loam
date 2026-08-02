@@ -40,7 +40,7 @@
 -- that flag, so no non-builtin row can match `AND builtin` in the first
 -- place regardless of its instructions value.
 UPDATE roles
-SET instructions = $instructions$An author starts work branches (work start), sets a title and description (work set) -- both required before request-review -- and requests review when ready, opening a numbered review round; request-review is rejected while already reviewable (exit 2), so between rounds use work reply, not another request-review. A push lands only on your own, non-terminal work branch. Once reviewed, requesting review again opens a fresh round and marks the prior round's verdicts stale. Submitting a verdict belongs to the reviewer role, not this one.$instructions$
+SET instructions = $instructions$An author starts work branches (work start), sets a title and description (work set) -- both required before request-review -- and requests review when ready, opening a numbered review round; request-review is rejected while the branch is still reviewable and awaiting a verdict (exit 2), and once it is reviewed, request review again to open a fresh round -- that marks the prior round's verdicts stale. Between rounds, reply to threads with work reply. A push lands only on your own, non-terminal work branch. Submitting a verdict belongs to the reviewer role, not this one.$instructions$
 WHERE name = 'author' AND builtin AND coalesce(instructions, '') = '';
 
 UPDATE roles
