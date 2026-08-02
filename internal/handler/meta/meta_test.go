@@ -269,11 +269,12 @@ func TestGetInstructions_SpecificCommand_ReturnsOnlyThatEntry(t *testing.T) {
 		RoleInstructionsFunc: func(context.Context, string) (string, error) { return "", nil },
 	}
 	h := newHandler(store, &buf)
-	command := "graph"
+	command := "graph def"
 	resp, err := h.GetInstructions(agentCtx(t, "author"), connect.NewRequest(&loamv1.GetInstructionsRequest{Command: &command}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetCommands(), 1)
-	assert.Equal(t, "graph", resp.Msg.GetCommands()[0].GetName())
+	assert.Equal(t, "graph def", resp.Msg.GetCommands()[0].GetName())
+	assert.Equal(t, "<target>", resp.Msg.GetCommands()[0].GetSynopsis(), "the narrowed entry must carry the argument shape, not just the summary (loam-hi5o.4)")
 }
 
 // TestGetInstructions_UnknownCommand_ReturnsNotFound proves an unrecognized

@@ -3,6 +3,7 @@ package meta
 import (
 	"slices"
 
+	"github.com/bobcob7/loam/internal/cmdspec"
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/handler"
 )
@@ -25,9 +26,16 @@ const usageText = `Loam CLI: agents orient with "instructions" (this command) an
 // Capability marks a command as ungated -- always included regardless of
 // the caller's granted operations, matching docs/web-spec.md: "instructions
 // and whoami are always available and ungated".
+//
+// synopsis is filled in by newCatalog (not written out by hand alongside
+// name/summary below) from cmdspec.Synopsis, keyed by name -- the same map
+// internal/cli/router.go reads its own copy from for `loam <command>
+// --help` -- so the CLI's and the server's idea of a command's positional
+// argument shape cannot drift apart (loam-hi5o.4).
 type catalogEntry struct {
 	name       string
 	summary    string
+	synopsis   string
 	capability handler.Capability
 }
 
@@ -38,7 +46,18 @@ type catalogEntry struct {
 // gates plain `git push` at the smart-HTTP transport, not a `loam`
 // subcommand (docs/cli-spec.md -> clone: "there are no loam commit or loam
 // push commands").
-var commandCatalog = []catalogEntry{
+//
+// One entry per DISPATCHABLE command -- matching internal/cli/router.go's
+// commandTree() leaves exactly, name for name (loam-hi5o.4's cross-package
+// drift test, internal/cli/synopsis_test.go, enforces this both
+// directions). Graph's
+// five subqueries (def/refs/deps/dependents/history) are listed
+// separately here for that reason, even though docs/cli-spec.md -> Graph
+// DB queries covers them in one prose section: `loam graph def` and `loam
+// graph refs` are two different runnable commands with two different
+// synopses, the same way `work start` and `work set` already were two
+// catalog entries before this comment existed.
+var commandCatalog = newCatalog([]catalogEntry{
 	{name: "instructions", summary: "Return role-specific instructions, available commands, and general CLI usage.", capability: ""},
 	{name: "whoami", summary: "Report the calling agent's identity and role, resolved locally from the environment.", capability: ""},
 	{name: "clone", summary: "Clone an enrolled repo at a branch and bootstrap it for plain git.", capability: handler.CapabilityGitClone},
@@ -53,8 +72,23 @@ var commandCatalog = []catalogEntry{
 	{name: "work comment", summary: "Stage a review comment on a work branch locally, published later by verdict (body required on stdin unless --resolve or --discard alone).", capability: handler.CapabilityWorkVerdict},
 	{name: "work reply", summary: "Reply immediately to an existing comment thread (body required on stdin).", capability: handler.CapabilityWorkReply},
 	{name: "work verdict", summary: "Publish the caller's staged comments as a verdict with an outcome.", capability: handler.CapabilityWorkVerdict},
-	{name: "graph", summary: "Run a structural query over the Tree-sitter code graph.", capability: handler.CapabilityGraphQuery},
+	{name: "graph def", summary: "Find where a symbol is defined in the Tree-sitter code graph.", capability: handler.CapabilityGraphQuery},
+	{name: "graph refs", summary: "Find everywhere a symbol is referenced in the Tree-sitter code graph.", capability: handler.CapabilityGraphQuery},
+	{name: "graph deps", summary: "Find what a target depends on in the Tree-sitter code graph.", capability: handler.CapabilityGraphQuery},
+	{name: "graph dependents", summary: "Find what depends on a target in the Tree-sitter code graph (blast radius).", capability: handler.CapabilityGraphQuery},
+	{name: "graph history", summary: "Return a symbol's commit/ref history in the Tree-sitter code graph.", capability: handler.CapabilityGraphQuery},
 	{name: "search", summary: "Run a natural-language semantic search over ingested docs/code.", capability: handler.CapabilitySearch},
+})
+
+// newCatalog fills in each entry's synopsis from cmdspec.Synopsis, keyed
+// by its own name -- so the literal above only ever writes name, summary,
+// and capability by hand, and the argument shape comes from the one
+// shared source instead of a second hand-typed copy next to it.
+func newCatalog(entries []catalogEntry) []catalogEntry {
+	for i := range entries {
+		entries[i].synopsis = cmdspec.Synopsis[entries[i].name]
+	}
+	return entries
 }
 
 // filterCommands returns the commandCatalog entries the caller may use:
@@ -66,9 +100,36 @@ func filterCommands(granted []handler.Capability) []*loamv1.CommandInfo {
 		if entry.capability != "" && !slices.Contains(granted, entry.capability) {
 			continue
 		}
-		commands = append(commands, &loamv1.CommandInfo{Name: entry.name, Summary: entry.summary})
+		commands = append(commands, &loamv1.CommandInfo{Name: entry.name, Summary: entry.summary, Synopsis: entry.synopsis})
 	}
 	return commands
+}
+
+// CatalogEntry is an exported, capability-agnostic view of one
+// commandCatalog row: name, summary, and synopsis, with no capability
+// field -- a caller outside this package has no use for the internal
+// gating detail, only the name/synopsis pair.
+type CatalogEntry struct {
+	Name     string
+	Summary  string
+	Synopsis string
+}
+
+// AllCommands returns the FULL command catalog, unfiltered by capability
+// -- unlike filterCommands (used by GetInstructions itself), which always
+// scopes to one caller's granted operations. This exists for
+// introspection across the package boundary: today, only
+// internal/cli's cross-package synopsis-consistency test (loam-hi5o.4),
+// which discovers this package's command names and synopses independently
+// of internal/cli/router.go's commandTree() and asserts the two agree for
+// every command, rather than trusting a hand-maintained list on either
+// side to have been kept in sync.
+func AllCommands() []CatalogEntry {
+	entries := make([]CatalogEntry, 0, len(commandCatalog))
+	for _, entry := range commandCatalog {
+		entries = append(entries, CatalogEntry{Name: entry.name, Summary: entry.summary, Synopsis: entry.synopsis})
+	}
+	return entries
 }
 
 // findCommand looks up name within commands (the caller's already-filtered

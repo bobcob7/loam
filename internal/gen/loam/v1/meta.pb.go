@@ -130,9 +130,14 @@ func (x *GetInstructionsResponse) GetRoleInstructions() string {
 }
 
 type CommandInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Summary       string                 `protobuf:"bytes,2,opt,name=summary,proto3" json:"summary,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Summary string                 `protobuf:"bytes,2,opt,name=summary,proto3" json:"summary,omitempty"`
+	// Positional-argument shape (docs/cli-spec.md's <...>/[...] convention),
+	// e.g. "<repo> <from>" for "work start". Empty when the command takes no
+	// positional arguments. Flag usage is not included here -- the CLI's own
+	// --help already renders that from the FlagSet it parses with.
+	Synopsis      string `protobuf:"bytes,3,opt,name=synopsis,proto3" json:"synopsis,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -181,6 +186,13 @@ func (x *CommandInfo) GetSummary() string {
 	return ""
 }
 
+func (x *CommandInfo) GetSynopsis() string {
+	if x != nil {
+		return x.Synopsis
+	}
+	return ""
+}
+
 var File_loam_v1_meta_proto protoreflect.FileDescriptor
 
 const file_loam_v1_meta_proto_rawDesc = "" +
@@ -193,10 +205,11 @@ const file_loam_v1_meta_proto_rawDesc = "" +
 	"\x17GetInstructionsResponse\x12\x14\n" +
 	"\x05usage\x18\x01 \x01(\tR\x05usage\x120\n" +
 	"\bcommands\x18\x02 \x03(\v2\x14.loam.v1.CommandInfoR\bcommands\x12+\n" +
-	"\x11role_instructions\x18\x03 \x01(\tR\x10roleInstructions\";\n" +
+	"\x11role_instructions\x18\x03 \x01(\tR\x10roleInstructions\"W\n" +
 	"\vCommandInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
-	"\asummary\x18\x02 \x01(\tR\asummary2c\n" +
+	"\asummary\x18\x02 \x01(\tR\asummary\x12\x1a\n" +
+	"\bsynopsis\x18\x03 \x01(\tR\bsynopsis2c\n" +
 	"\vMetaService\x12T\n" +
 	"\x0fGetInstructions\x12\x1f.loam.v1.GetInstructionsRequest\x1a .loam.v1.GetInstructionsResponseB\x8a\x01\n" +
 	"\vcom.loam.v1B\tMetaProtoP\x01Z3github.com/bobcob7/loam/internal/gen/loam/v1;loamv1\xa2\x02\x03LXX\xaa\x02\aLoam.V1\xca\x02\aLoam\\V1\xe2\x02\x13Loam\\V1\\GPBMetadata\xea\x02\bLoam::V1b\x06proto3"

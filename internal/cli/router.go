@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/pflag"
+
+	"github.com/bobcob7/loam/internal/cmdspec"
 )
 
 // handlerFunc implements one leaf command. args holds everything after the
@@ -25,10 +27,18 @@ type handlerFunc func(ctx context.Context, deps *Deps, args []string) error
 // reason this exists: it renders `loam <command> --help`'s flag usage from
 // this closure alone, entirely before main() ever builds a Deps (see
 // loam-dc2v/loam-q0ek — help must never require LOAM_* configuration).
+//
+// synopsis is set on every LEAF only too, filled in by applySynopsis right
+// after the tree literal below is built. It comes from cmdspec.Synopsis,
+// keyed by the leaf's own full dispatch name -- the same package
+// internal/handler/meta's catalog reads its copy from (loam-hi5o.4), so
+// the two cannot drift the way a hardcoded "[flags]" and an absent catalog
+// synopsis once did.
 type command struct {
 	summary     string
 	run         handlerFunc
 	newFlags    func() *pflag.FlagSet
+	synopsis    string
 	subcommands map[string]*command
 }
 
@@ -81,7 +91,7 @@ func dispatchGroup(ctx context.Context, deps *Deps, groupName string, group *com
 // source control is plain git, authorized server-side at receive time (see
 // docs/git-spec.md).
 func commandTree() map[string]*command {
-	return map[string]*command{
+	tree := map[string]*command{
 		"instructions": {summary: "Role-specific instructions and CLI usage", run: runInstructions, newFlags: flaglessCommand("instructions")},
 		"whoami":       {summary: "Report the calling agent's resolved identity", run: runWhoami, newFlags: func() *pflag.FlagSet { fs, _ := newWhoamiFlags(); return fs }},
 		"clone":        {summary: "Clone an enrolled repo from the server", run: runClone, newFlags: flaglessCommand("clone")},
@@ -106,6 +116,25 @@ func commandTree() map[string]*command {
 			"history":    {summary: "A symbol's commit/ref history", run: runGraphHistory, newFlags: graphQueryCommand("graph history")},
 		}},
 		"search": {summary: "Natural-language semantic search", run: runSearch, newFlags: func() *pflag.FlagSet { fs, _, _, _ := newSearchFlags(); return fs }},
+	}
+	applySynopsis(tree)
+	return tree
+}
+
+// applySynopsis fills in every leaf's synopsis field from cmdspec.Synopsis,
+// keyed by the exact same name Dispatch and leafCommandKeys already use for
+// that leaf -- a bare name at the top level, "<group> <sub>" nested under a
+// group -- so there is no second hand-typed key anywhere in this package
+// for that name to drift against.
+func applySynopsis(tree map[string]*command) {
+	for name, cmd := range tree {
+		if cmd.subcommands == nil {
+			cmd.synopsis = cmdspec.Synopsis[name]
+			continue
+		}
+		for sub, subcmd := range cmd.subcommands {
+			subcmd.synopsis = cmdspec.Synopsis[name+" "+sub]
+		}
 	}
 }
 

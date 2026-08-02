@@ -69,12 +69,15 @@ command legitimately is.
   on which of these a given role may actually use.
 - `loam <command> [<subcommand>] --help`/`-h` (a help token anywhere among that command's
   own arguments — flags may appear anywhere, see Argument Ordering above) prints that one
-  command's usage: its summary and its registered flags, rendered from the same
-  `pflag.FlagSet` the real command parses with, so the two can never drift apart. It does
-  **not** print a positional-argument synopsis (e.g. the shape of `work set`'s `[repo]
-  [work-branch]`) — that has no single shared source to render from without maintaining a
-  second, driftable copy per command; this document and `loam instructions <command>`
-  remain the one place each command's full argument shape is written down.
+  command's real usage line — positional arguments, a stdin note where one applies, and a
+  trailing `[flags]` **only** when the command actually registers at least one flag — plus
+  its summary and its registered flags in full, rendered from the same `pflag.FlagSet` the
+  real command parses with. The positional/stdin portion comes from `internal/cmdspec`, the
+  one shared table `loam instructions <command>`'s `synopsis` field is also built from, so
+  the CLI's own `--help` and the server's answer cannot disagree. The suggested
+  `loam instructions <command>` line it prints is always runnable verbatim, including
+  quoting: a subcommand's name contains a space (e.g. `work start`), so it is printed
+  pre-quoted (`loam instructions "work start"`) rather than left for the reader to work out.
 - `loam <group> --help`/`-h`/`help` (e.g. `loam work --help`) lists that group's
   subcommands the same way the top-level listing does. A bare `loam work` with no
   subcommand and no help token is unaffected by any of this — it is still the usual usage
@@ -156,10 +159,18 @@ do.
 ```json
 {
   "usage": "…overall usage and conventions…",
-  "commands": [ { "name": "work list", "summary": "List work branches" } ],
+  "commands": [
+    { "name": "work start", "summary": "Start a work branch from a target branch.", "synopsis": "<repo> <from>" }
+  ],
   "role_instructions": "…configured for this role…"
 }
 ```
+
+`synopsis` is each command's positional-argument shape (docs/cli-spec.md's own `<...>`/`[...]`
+convention below), plus a trailing note when the command also reads a body from stdin (see
+`work set`, `work comment`, `work reply` below) — the same text `loam <command> --help` prints
+(see Help below), sourced from one shared table (`internal/cmdspec`) so the two cannot
+disagree. It is empty for a command with no positional arguments (e.g. `work list`).
 
 **Errors:** exit `1` if the server is unreachable while fetching role instructions.
 
@@ -632,6 +643,10 @@ Structural queries over the Tree-sitter graph (see README → Graph DB). A fixed
 subqueries rather than a query language.
 
 **Synopsis:** `loam graph <subquery> <target> [--repo <repo>] [--all] [--file <path>] [--limit <n>]`
+
+Each subquery below is its own runnable command and its own `loam instructions` catalog
+entry (`graph def`, `graph refs`, `graph deps`, `graph dependents`, `graph history`) — this
+section covers all five together since they share everything but `<subquery>` itself.
 
 **Subqueries:**
 
