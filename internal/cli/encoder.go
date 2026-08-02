@@ -229,15 +229,30 @@ func scalarString(v any) string {
 	return fmt.Sprint(v)
 }
 
+// humanText is implemented by outputs whose human rendering is a single
+// verbatim block rather than indented key: value lines — e.g. a unified
+// diff, where a human reading it in a terminal is the primary use and any
+// added structure (indentation, a "diff:" prefix) just gets in the way of
+// piping it straight to a pager or `git apply`. See loam-hi5o.1.
+type humanText interface{ humanText() string }
+
 // humanEncoder renders a plain, readable rendering for interactive use.
 type humanEncoder struct{ w io.Writer }
 
 // Encode special-cases errorPayload — per docs/cli-spec.md -> Exit Codes &
 // Errors, human mode prints just the message instead of the structured
-// error object — and otherwise renders v as indented "key: value" lines.
+// error object — and humanText (see above), which is written out verbatim
+// with no trailing newline added: the underlying value is expected to carry
+// its own, and appending one (e.g. via Fprintln) would leave a blank line
+// at the end that a diff does not round-trip through `git apply` with.
+// Anything else renders as indented "key: value" lines.
 func (e *humanEncoder) Encode(v any) error {
 	if payload, ok := v.(errorPayload); ok {
 		_, err := fmt.Fprintln(e.w, payload.Error.Message)
+		return err
+	}
+	if text, ok := v.(humanText); ok {
+		_, err := fmt.Fprint(e.w, text.humanText())
 		return err
 	}
 	generic, err := toGeneric(v)

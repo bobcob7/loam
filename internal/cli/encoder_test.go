@@ -147,6 +147,63 @@ func TestMarshalNoEscape_DoesNotEscapeAngleBrackets(t *testing.T) {
 	assert.NotContains(t, string(b), `\u003c`)
 }
 
+// TestNewEncoder_Human_RendersWorkDiffOutputVerbatim proves the fix for
+// loam-hi5o.1: work diff's human rendering is the raw unified diff, byte
+// for byte, with no wrapper and no added or stripped trailing newline. The
+// exact-bytes assertion (not a trimmed one) is deliberate — a test that
+// trims the newline before comparing would not notice Fprintln
+// reintroducing one.
+func TestNewEncoder_Human_RendersWorkDiffOutputVerbatim(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("human", &buf)
+	diff := "--- a/auth.go\n+++ b/auth.go\n@@ -1 +1 @@\n-old\n+new\n"
+	require.NoError(t, enc.Encode(workDiffOutput{Diff: diff}))
+	assert.Equal(t, diff, buf.String())
+}
+
+// TestNewEncoder_Human_WorkDiffOutput_EmptyDiff_WritesNothing pins the
+// zero-value edge case — a freshly started branch with no changes yet —
+// which must render as zero bytes, not a blank line.
+func TestNewEncoder_Human_WorkDiffOutput_EmptyDiff_WritesNothing(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("human", &buf)
+	require.NoError(t, enc.Encode(workDiffOutput{Diff: ""}))
+	assert.Equal(t, "", buf.String())
+}
+
+// TestNewEncoder_JSON_WorkDiffOutput_KeepsWrappedShape,
+// TestNewEncoder_YAML_WorkDiffOutput_KeepsWrappedShape, and
+// TestNewEncoder_XML_WorkDiffOutput_KeepsWrappedShape pin acceptance
+// criterion 2 of loam-hi5o.1: only human rendering changes, so the other
+// three formats keep the existing { "diff": "..." } shape.
+func TestNewEncoder_JSON_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("json", &buf)
+	require.NoError(t, enc.Encode(workDiffOutput{Diff: "--- a/x\n+++ b/x\n"}))
+	assert.JSONEq(t, `{"diff":"--- a/x\n+++ b/x\n"}`, buf.String())
+}
+
+func TestNewEncoder_YAML_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("yaml", &buf)
+	require.NoError(t, enc.Encode(workDiffOutput{Diff: "line1\nline2\n"}))
+	var decoded map[string]any
+	require.NoError(t, yaml.Unmarshal(buf.Bytes(), &decoded))
+	assert.Equal(t, "line1\nline2\n", decoded["diff"])
+}
+
+func TestNewEncoder_XML_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	enc := newEncoder("xml", &buf)
+	require.NoError(t, enc.Encode(workDiffOutput{Diff: "x"}))
+	assert.Equal(t, "<response><diff>x</diff></response>\n", buf.String())
+}
+
 func TestNewEncoder_EachFormat_WrittenToProvidedWriter(t *testing.T) {
 	t.Parallel()
 	for _, format := range []string{"json", "yaml", "xml", "human"} {

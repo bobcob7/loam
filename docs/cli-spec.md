@@ -470,7 +470,10 @@ Return the work branch's diff against its target, separately from `show` to keep
 convention above).
 
 **Output:** the unified diff of the work branch against its target branch, as a field in the
-active `LOAM_OUTPUT_FORMAT` (e.g. `{ "diff": "…" }` for JSON).
+active `LOAM_OUTPUT_FORMAT` (e.g. `{ "diff": "…" }` for JSON). In `human` mode this is the
+one exception to that wrapping: the diff is written verbatim, with no field wrapper and no
+added or stripped trailing newline, so it can be read directly or piped to a pager instead
+of requiring the caller to unwrap the JSON first.
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved.
