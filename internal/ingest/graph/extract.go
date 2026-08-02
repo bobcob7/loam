@@ -89,22 +89,74 @@ type FileResult struct {
 // Stats.FilesSkippedUnsupportedLanguage, never silently doing nothing with
 // no visible trace.
 //
-// err non-nil (ok always false) means Tree-sitter produced no tree at all
-// -- not the same as a tree containing syntax errors, see below. In
-// practice this is only reachable via ctx's own cancellation/deadline
-// (propagated wrapped) or parser.Parse's internal "no tree returned"
-// precondition failure (parser.errParseFailed), since Tree-sitter is
-// error-tolerant and returns a partial tree for ordinary broken source
-// rather than failing Parse outright (internal/parser/parser_test.go's
-// TestParse_SyntaxErrorIsReportedOnTreeAndNode pins exactly this: "Tree-
-// sitter always returns a (partial) tree for broken input; the error is
-// signaled via HasError, never through err"). The caller must not treat a
-// non-ctx err as fatal to the whole batch (see IngestFiles' doc comment),
-// but must also not paper over it by writing an empty symbol set for this
-// file: doing so would assert "this file now defines nothing", which is
-// actively wrong, not merely incomplete, so IngestFiles makes no store
-// call at all for this file and leaves its existing rows exactly as they
-// were.
+// err non-nil (ok always false) is NOT only "Tree-sitter produced no tree at
+// all" -- that describes just the Parse failure below, and both it and a
+// second, unrelated failure land in the same err-non-nil return and the
+// same Stats.FilesFailed counter (IngestFiles' own doc comment), so callers
+// must not read err!=nil as "this file's syntax defeated the parser":
+//
+//   - parser.Parse returning no tree at all -- not the same as a tree
+//     containing syntax errors, see below. In practice this is only
+//     reachable via ctx's own cancellation/deadline (propagated wrapped) or
+//     parser.Parse's internal "no tree returned" precondition failure
+//     (parser.errParseFailed), since Tree-sitter is error-tolerant and
+//     returns a partial tree for ordinary broken source rather than failing
+//     Parse outright (internal/parser/parser_test.go's
+//     TestParse_SyntaxErrorIsReportedOnTreeAndNode pins exactly this: "Tree-
+//     sitter always returns a (partial) tree for broken input; the error is
+//     signaled via HasError, never through err"). errParseFailed itself is
+//     unreachable in this build: reading internal/parser/parser.go and, one
+//     layer deeper, the vendored Tree-sitter C (go-tree-sitter's
+//     ts_parser_parse) shows every route to a NULL tree reduces to a
+//     cancellation/timeout check, and this repo arms none of the three
+//     things that check can fire on (no CancellationFlag, no
+//     ts_parser_set_timeout_micros, and the one live route -- the progress
+//     callback -- is wired to ctx.Err(), which parser.go's own check
+//     reclassifies as a wrapped ctx error before errParseFailed is ever
+//     reached). So this specific sub-case has NO real-input trigger at all
+//     today; it is pinned defensively, in case that ever changes (a sixth
+//     grammar, a parse timeout).
+//   - query.Captures failing on a tree that parsed PERFECTLY -- a real,
+//     currently-reachable case, and not a no-tree case at all. Captures
+//     returns a wrapped parser.ErrQueryClosed if its Query has been Closed
+//     (parser/query.go's own doc comment), and it checks that before it
+//     checks ctx.Err(). extractor.Close is exactly the cleanup func wired
+//     into graceful shutdown (cmd/server/main.go's buildIngestOrchestrator),
+//     so a file whose extraction races that shutdown can observe
+//     ErrQueryClosed -- landing here, in Stats.FilesFailed, with its
+//     existing rows left alone -- rather than the ctx-cancellation path
+//     IngestFiles aborts the whole batch for. This makes the staleness
+//     window below reachable in production via a shutdown race, even though
+//     the no-tree sub-case above is not.
+//
+// The caller must not treat a non-ctx err as fatal to the whole batch (see
+// IngestFiles' doc comment), but must also not paper over it by writing an
+// empty symbol set for this file: doing so would assert "this file now
+// defines nothing", which is actively wrong, not merely incomplete, so
+// IngestFiles makes no store call at all for this file and leaves its
+// existing rows exactly as they were.
+//
+// loam-1z0 (the graph-track half of loam-8uo) considered and rejected
+// dropping this file's rows anyway to mirror the chunk track's binary-sniff
+// fix. The decision is to KEEP this behaviour, on one ground: the trigger
+// here (a parser/query tool fault) is not a fact about the file's content
+// the way a binary sniff is, so there is nothing true to assert by writing
+// "this file now defines nothing". (symbol_history's ON DELETE CASCADE from
+// symbols is real, but it is not what decides this -- see loam-1z0's own
+// review history for two rounds of a since-deleted argument built on it.)
+// A file's symbols/references rows can go stale for exactly as long as the
+// failure keeps recurring across reparses of the same file -- a known,
+// bounded staleness window that closes the next time the file's extraction
+// succeeds (or the file is dropped via a later diffplan.Plan.DropFiles,
+// e.g. a rename or deletion), never an unbounded one.
+// TestIngestFiles_HardParseFailure_LeavesExistingSymbolsRowsUntouched
+// (ingest_test.go) pins this at the fileParser seam, covering both err!=nil
+// sub-cases uniformly; TestIngestFiles_ClosedExtractor_LeavesExistingSymbolsRowsUntouched
+// (same file) pins the ErrQueryClosed sub-case specifically with the REAL
+// parser and no fake at all -- reaching it needs only the shutdown STATE
+// (an already-Closed Extractor), not the shutdown TIMING, so it needs no
+// fake to reproduce. The no-tree sub-case has no such real-input
+// reproduction (see above), so it is pinned only at the fake seam.
 //
 // A syntax error inside an otherwise-usable tree (tree.HasError) is
 // different: Tree-sitter still produced real structure, so ExtractFile
