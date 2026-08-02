@@ -30,6 +30,18 @@ import (
 // runInstructions) rejects more than one positional argument -- so an
 // unquoted "work start" printed into a suggested command line would parse
 // as two positionals and fail exactly the way loam-hi5o.4 found it did.
+//
+// fmt.Sprintf("%q", ...) is GO quoting, not SHELL quoting -- they coincide
+// for every name in cmdspec today (plain ASCII words joined by single
+// spaces), and were verified to coincide in a real shell, not just against
+// help_synopsis_test.go's own tokenizer (which models what this function
+// produces, not shell semantics in general). If a command name ever
+// contained a character a shell treats specially inside double quotes --
+// `$`, a backtick, a backslash -- %q would leave it unescaped and a real
+// shell would expand it where Go's quoting rules would not. Every name
+// here is a literal written by this codebase, never user input, so that
+// day is a `commandTree()`/cmdspec edit away rather than an attacker-
+// controlled one, but it is not automatically caught if it happens.
 func quoteIfMulti(name string) string {
 	if strings.Contains(name, " ") {
 		return fmt.Sprintf("%q", name)
@@ -106,18 +118,30 @@ func tryGroupHelp(name string, group *command, rest []string) (string, bool) {
 	return tryLeafHelp(name+" "+rest[0], sub, rest[1:])
 }
 
-// leafUsageLine renders a leaf's "Usage: loam <name> ..." line: the
-// command's real positional synopsis (from cmd.synopsis, see router.go's
-// applySynopsis), and a trailing "[flags]" token if and only if fs
-// actually registers at least one flag (loam-hi5o.4 acceptance criterion
-// 2 -- a flagless command like `work start` must never claim "[flags]").
-func leafUsageLine(name, synopsis string, fs *pflag.FlagSet) string {
+// leafUsageLine renders a leaf's "Usage: loam <name> ..." line, in
+// exactly the order docs/cli-spec.md's own synopsis lines use (e.g. line
+// 351: "`loam work set [repo] [work-branch] [--title <title>]` (optional
+// description read from stdin)"): the command's real positional synopsis
+// (from cmd.synopsis, see router.go's applySynopsis), then a trailing
+// "[flags]" token if and only if fs actually registers at least one flag
+// (loam-hi5o.4 acceptance criterion 2 -- a flagless command like `work
+// start` must never claim "[flags]"), then -- LAST, after flags, never
+// before -- a parenthetical stdin note (cmd.stdinNote) for the few
+// commands that read one. Putting the note before "[flags]" (an earlier
+// version of this function did) made the printed line read as if the note
+// were still positional arguments and left "[flags]" trailing prose,
+// which is exactly the kind of un-copyable usage line this bead exists to
+// eliminate -- so the ordering here is load-bearing, not cosmetic.
+func leafUsageLine(name, synopsis, stdinNote string, fs *pflag.FlagSet) string {
 	usage := "Usage: loam " + name
 	if synopsis != "" {
 		usage += " " + synopsis
 	}
 	if fs.HasFlags() {
 		usage += " [flags]"
+	}
+	if stdinNote != "" {
+		usage += " (" + stdinNote + ")"
 	}
 	return usage
 }
@@ -130,7 +154,7 @@ func tryLeafHelp(name string, cmd *command, rest []string) (string, bool) {
 	if !containsHelpToken(rest) {
 		return "", false
 	}
-	return renderLeafHelp(name, cmd.summary, cmd.synopsis, cmd.newFlags()), true
+	return renderLeafHelp(name, cmd.summary, cmd.synopsis, cmd.stdinNote, cmd.newFlags()), true
 }
 
 // renderTopLevelHelp lists every top-level command (and, for a group, its
@@ -172,19 +196,21 @@ func renderGroupHelp(name string, group *command) string {
 }
 
 // renderLeafHelp renders one leaf command's usage: its real positional
-// synopsis, its pflag-registered flags (if any), and a pointer to the
-// authoritative source for the rest of its argument shape.
+// synopsis (and stdin note, where one applies), its pflag-registered flags
+// (if any), and a pointer to the authoritative source for the rest of its
+// argument shape.
 //
-// The positional synopsis (e.g. "work set [repo] [work-branch]") comes
-// from cmdspec.Synopsis (via router.go's applySynopsis), the same map
-// internal/handler/meta/catalog.go reads its own copy from -- so the two
-// cannot drift the way loam-hi5o.4 found a hardcoded "[flags]" already had
-// (a command with zero flags claiming it took some). Flag usage itself is
-// still rendered straight from fs, the same FlagSet the real handler
-// parses with, for the same non-drift reason as before this changed.
-func renderLeafHelp(name, summary, synopsis string, fs *pflag.FlagSet) string {
+// The positional synopsis (e.g. "work set [repo] [work-branch]") and the
+// stdin note come from cmdspec.Synopsis/cmdspec.StdinNote (via router.go's
+// applySynopsis), the same maps internal/handler/meta/catalog.go reads its
+// own copy from (via cmdspec.Compose) -- so the two cannot drift the way
+// loam-hi5o.4 found a hardcoded "[flags]" already had (a command with zero
+// flags claiming it took some). Flag usage itself is still rendered
+// straight from fs, the same FlagSet the real handler parses with, for the
+// same non-drift reason as before this changed.
+func renderLeafHelp(name, summary, synopsis, stdinNote string, fs *pflag.FlagSet) string {
 	var b strings.Builder
-	b.WriteString(leafUsageLine(name, synopsis, fs) + "\n\n")
+	b.WriteString(leafUsageLine(name, synopsis, stdinNote, fs) + "\n\n")
 	b.WriteString(summary + "\n")
 	if usage := fs.FlagUsagesWrapped(0); usage != "" {
 		b.WriteString("\nFlags:\n" + usage)

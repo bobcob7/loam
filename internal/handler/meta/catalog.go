@@ -80,13 +80,16 @@ var commandCatalog = newCatalog([]catalogEntry{
 	{name: "search", summary: "Run a natural-language semantic search over ingested docs/code.", capability: handler.CapabilitySearch},
 })
 
-// newCatalog fills in each entry's synopsis from cmdspec.Synopsis, keyed
-// by its own name -- so the literal above only ever writes name, summary,
-// and capability by hand, and the argument shape comes from the one
-// shared source instead of a second hand-typed copy next to it.
+// newCatalog fills in each entry's synopsis from cmdspec.Synopsis and
+// cmdspec.StdinNote, keyed by its own name and joined by cmdspec.Compose
+// (the same composition rule internal/cli/synopsis_test.go's
+// cross-package check uses to build the equivalent value from the CLI
+// side) -- so the literal above only ever writes name, summary, and
+// capability by hand, and the argument shape comes from the one shared
+// source instead of a second hand-typed copy next to it.
 func newCatalog(entries []catalogEntry) []catalogEntry {
 	for i := range entries {
-		entries[i].synopsis = cmdspec.Synopsis[entries[i].name]
+		entries[i].synopsis = cmdspec.Compose(cmdspec.Synopsis[entries[i].name], cmdspec.StdinNote[entries[i].name])
 	}
 	return entries
 }
@@ -105,29 +108,40 @@ func filterCommands(granted []handler.Capability) []*loamv1.CommandInfo {
 	return commands
 }
 
-// CatalogEntry is an exported, capability-agnostic view of one
-// commandCatalog row: name, summary, and synopsis, with no capability
-// field -- a caller outside this package has no use for the internal
-// gating detail, only the name/synopsis pair.
+// CatalogEntry is an exported view of one commandCatalog row: name,
+// summary, synopsis, AND capability (handler.Capability, itself already
+// exported -- an empty value means ungated, exactly as catalogEntry's own
+// doc comment describes). Capability was originally left off this type as
+// an "internal gating detail" a caller outside this package would have no
+// use for; loam-hi5o.4's review round proved that wrong the hard way --
+// cmd/server's acceptance suite needed exactly this pairing to predict
+// which commands a role should see, hand-maintained it in a third copy
+// (acceptanceCommandCapability), and that copy went stale the moment this
+// file's graph entry split into five, breaking four scenarios no build-time
+// check could have caught. Exposing Capability here lets that map be
+// DISCOVERED instead of restated.
 type CatalogEntry struct {
-	Name     string
-	Summary  string
-	Synopsis string
+	Name       string
+	Summary    string
+	Synopsis   string
+	Capability handler.Capability
 }
 
 // AllCommands returns the FULL command catalog, unfiltered by capability
 // -- unlike filterCommands (used by GetInstructions itself), which always
 // scopes to one caller's granted operations. This exists for
-// introspection across the package boundary: today, only
-// internal/cli's cross-package synopsis-consistency test (loam-hi5o.4),
-// which discovers this package's command names and synopses independently
-// of internal/cli/router.go's commandTree() and asserts the two agree for
-// every command, rather than trusting a hand-maintained list on either
-// side to have been kept in sync.
+// introspection across the package boundary: internal/cli's cross-package
+// synopsis-consistency test (loam-hi5o.4) discovers this package's command
+// names and synopses independently of internal/cli/router.go's
+// commandTree() and asserts the two agree for every command; cmd/server's
+// acceptance suite (acceptance_roles_test.go's acceptanceCommandCapability)
+// discovers the name-to-capability pairing from here too, rather than
+// trusting a hand-maintained copy on either side to have been kept in
+// sync.
 func AllCommands() []CatalogEntry {
 	entries := make([]CatalogEntry, 0, len(commandCatalog))
 	for _, entry := range commandCatalog {
-		entries = append(entries, CatalogEntry{Name: entry.name, Summary: entry.summary, Synopsis: entry.synopsis})
+		entries = append(entries, CatalogEntry{Name: entry.name, Summary: entry.summary, Synopsis: entry.synopsis, Capability: entry.capability})
 	}
 	return entries
 }
