@@ -35,68 +35,9 @@
    became per-file and collapsible (loam-ba6a.2); this screen no longer styles
    a diff of its own. */
 
-.threadList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: 0;
-  list-style: none;
-}
-
-.thread {
-  padding: var(--space-3);
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.threadHeading {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-block-end: var(--space-2);
-}
-
-.commentList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: 0;
-  margin: 0;
-  list-style: none;
-}
-
-/* A comment is a block, not a sentence: metadata line, then a markdown body
-   that may itself be headings, lists or fenced code (loam-ba6a.3). The rule
-   between comments is what keeps two adjacent bodies from reading as one. */
-.comment {
-  padding-block-start: var(--space-3);
-  border-block-start: 1px solid var(--color-border);
-}
-
-.commentList > .comment:first-child {
-  padding-block-start: 0;
-  border-block-start: 0;
-}
-
-.commentMeta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-3);
-  margin-block-end: var(--space-2);
-}
-
-.commentAuthor {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-}
-
-.commentRound {
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-}
+/* The thread and comment presentation moved to
+   components/ThreadList.module.css when threads gained anchor grouping,
+   round runs and per-thread collapsing (loam-ba6a.3/.4). */
 
 .acceptedPanel {
   display: flex;

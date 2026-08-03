@@ -12,6 +12,7 @@ import { Markdown } from "../components/Markdown";
 import { Pager } from "../components/Pager";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, type TableColumn } from "../components/Table";
+import { ThreadList } from "../components/ThreadList";
 import { verdictSummaryIntent, workBranchStateIntent } from "../components/statusIntent";
 import { useMutationInvalidating } from "../data/invalidation";
 import { mapConnectError, type ErrorOutcome } from "../data/mapConnectError";
@@ -21,7 +22,7 @@ import {
   closeWorkBranch,
   listProposals,
 } from "../gen/loam/admin/v1/proposal-ProposalService_connectquery";
-import type { Thread, VerdictSummary } from "../gen/loam/v1/common_pb";
+import type { VerdictSummary } from "../gen/loam/v1/common_pb";
 import {
   getWorkBranch,
   getWorkBranchDiff,
@@ -49,14 +50,6 @@ function errorMessage(outcome: ErrorOutcome): string {
     return "Authentication required. Refresh the page to sign in again.";
   }
   return outcome.message;
-}
-
-/** A thread's anchor rendered as a location, or "General comment" when unanchored. */
-function anchorLabel(thread: Thread): string {
-  if (thread.anchor === undefined) return "General comment";
-  return thread.anchor.line === undefined
-    ? thread.anchor.file
-    : `${thread.anchor.file}:${thread.anchor.line}`;
 }
 
 const verdictRowKey = (verdict: VerdictSummary): string => `${verdict.reviewer}-${verdict.round}`;
@@ -234,36 +227,7 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
             {threads.length === 0 ? (
               <p>No comment threads yet.</p>
             ) : (
-              <ul className={styles.threadList}>
-                {threads.map((thread) => (
-                  <li key={thread.id} className={styles.thread}>
-                    <p className={styles.threadHeading}>
-                      <span className={styles.mono}>{anchorLabel(thread)}</span>
-                      {thread.resolved && <StatusBadge intent="success">Resolved</StatusBadge>}
-                    </p>
-                    <ul className={styles.commentList}>
-                      {thread.comments.map((comment, index) => (
-                        <li key={`${thread.id}-${index}`} className={styles.comment}>
-                          {/* Metadata on its own line, not a "author (round
-                              N): " prefix -- a body that opens with a heading
-                              or a list used to run straight on from it. */}
-                          <p className={styles.commentMeta}>
-                            <span className={styles.commentAuthor}>{comment.author}</span>
-                            <span className={styles.commentRound}>Round {comment.round}</span>
-                          </p>
-                          {/* Written by a DIFFERENT agent to the branch's
-                              author -- a reviewer, whose role is to be
-                              adversarial about this change -- and rendered in
-                              the console that accepts it. Same untrusted
-                              renderer as the description, deliberately the
-                              same one (components/Markdown.tsx). */}
-                          <Markdown source={comment.body} />
-                        </li>
-                      ))}
-                    </ul>
-                  </li>
-                ))}
-              </ul>
+              <ThreadList threads={threads} />
             )}
             {commentsQuery.data.pageInfo !== undefined && (
               <Pager

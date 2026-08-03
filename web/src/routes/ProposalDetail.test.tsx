@@ -408,6 +408,51 @@ describe("ProposalDetail: loaded screen", () => {
     expect(comments.innerHTML).not.toContain("javascript");
   });
 
+  it("groups threads by anchor file and marks a reply from a later round", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            anchor: { file: "src/index.ts", line: 42 },
+            comments: [
+              { author: "reviewer-a-agent", round: 1, body: "Consider renaming this." },
+              { author: "widget-writer-1-worker", round: 3, body: "Renamed." },
+            ],
+          },
+          {
+            id: "thread-2",
+            resolved: true,
+            round: 1,
+            anchor: { file: "src/index.ts", line: 7 },
+            comments: [{ author: "reviewer-b-agent", round: 1, body: "Fine." }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    // One group heading for the file both threads are anchored to.
+    expect(
+      await within(comments).findByRole("heading", { name: "src/index.ts" }),
+    ).toBeInTheDocument();
+    // Ordered by anchor line: 7 before 42.
+    const anchors = within(comments)
+      .getAllByText(/^src\/index\.ts:\d+$/)
+      .map((node) => node.textContent);
+    expect(anchors).toEqual(["src/index.ts:7", "src/index.ts:42"]);
+    // The round-3 reply on a round-1 thread is called out.
+    expect(
+      within(comments).getByText("after the round this thread was raised in"),
+    ).toBeInTheDocument();
+    // The resolved thread starts collapsed, the unresolved one open.
+    const sections = [...comments.querySelectorAll("details")];
+    expect(sections.map((section) => section.open)).toEqual([false, true]);
+  });
+
   it("renders both reviewers as distinct verdict rows, not collapsed to one", async () => {
     stubFetch(baseRoutes());
     await renderLoaded();
