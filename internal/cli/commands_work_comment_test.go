@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
@@ -166,14 +168,37 @@ func TestRunWorkComment_ResolveOnly_NeedsNoBody(t *testing.T) {
 	assert.Empty(t, items[0].Body)
 }
 
-// TestRunWorkComment_ResolveWithBody_StagesBoth covers "--resolve may
-// accompany a new comment": one staged item carrying both.
-func TestRunWorkComment_ResolveWithBody_StagesBoth(t *testing.T) {
+// TestRunWorkComment_ResolveAlone_BodyIsSilentlyIgnored used to be named
+// TestRunWorkComment_ResolveWithBody_StagesBoth and proved a lone --resolve
+// with a body piped on stdin attached both. loam-hi5o.6 narrows that
+// deliberately (see the bead's NOTES): reading stdin unconditionally before
+// knowing the mode is what made a lone --resolve or --discard hang forever
+// on an un-redirected stdin, so a lone --resolve (no --file/--line) is now
+// one of the two shapes that complete WITHOUT ever reading stdin (see
+// commentModeSkipsBody). A body piped alongside it is therefore no longer
+// attached to the resolve -- it is silently unread, not rejected either.
+// --resolve combined with --file/--line is a genuinely new anchored
+// comment, not a lone --resolve, and is unaffected: see
+// TestRunWorkComment_ResolveWithAnchor_StillReadsAndAttachesBody below.
+func TestRunWorkComment_ResolveAlone_BodyIsSilentlyIgnored(t *testing.T) {
 	t.Parallel()
 	srv := newCommentServer(publishedThread("t1", testReviewer))
 	encoded, err := runComment(t, realTempDir(t), testReviewer, srv, "fixed, thanks", explicitArgs("--resolve", "t1")...)
 	require.NoError(t, err)
-	assert.Equal(t, stagedCommentOutput{Staged: true, ID: "s1", Body: "fixed, thanks", Resolve: "t1"}, encoded)
+	assert.Equal(t, stagedCommentOutput{Staged: true, ID: "s1", Resolve: "t1"}, encoded, "a body piped alongside a lone --resolve must be silently ignored, not attached")
+}
+
+// TestRunWorkComment_ResolveWithAnchor_StillReadsAndAttachesBody is
+// acceptance criterion 3: --resolve combined with --file/--line is a
+// genuinely new anchored comment, not the "lone --resolve" shape
+// loam-hi5o.6 narrows away, so it must still read stdin and attach the body
+// exactly as before -- the disambiguation this bead was careful to preserve.
+func TestRunWorkComment_ResolveWithAnchor_StillReadsAndAttachesBody(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer(publishedThread("t1", testReviewer))
+	encoded, err := runComment(t, realTempDir(t), testReviewer, srv, "fixed, thanks", explicitArgs("--resolve", "t1", "--file", "auth.go", "--line", "3")...)
+	require.NoError(t, err)
+	assert.Equal(t, stagedCommentOutput{Staged: true, ID: "s1", File: "auth.go", Line: 3, Body: "fixed, thanks", Resolve: "t1"}, encoded)
 }
 
 // TestRunWorkComment_ResolveTargetOnALaterPage_IsFound proves the thread
@@ -228,6 +253,142 @@ func TestRunWorkComment_Discard_RemovesTheItemAndReportsItUnstaged(t *testing.T)
 	assert.Equal(t, "keep me", items[0].Body)
 }
 
+// TestRunWorkComment_DiscardWithBody_BodyIsSilentlyIgnoredNotRejected used
+// to be the "discard with a body" case in
+// TestRunWorkComment_ConflictingModes_ExitTwoWithoutCallingServer, which
+// expected exit 2 with no rpc made. loam-hi5o.6 narrows that (see the
+// bead's NOTES): a lone --discard is now one of the two shapes that
+// complete without ever reading stdin, so it can no longer detect -- and
+// therefore can no longer reject -- a body piped alongside it. The
+// discard now succeeds and the body is silently unread, not rejected.
+func TestRunWorkComment_DiscardWithBody_BodyIsSilentlyIgnoredNotRejected(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	srv := newCommentServer()
+	_, err := runComment(t, workspaceRoot, testReviewer, srv, "keep me", explicitArgs()...)
+	require.NoError(t, err)
+	encoded, err := runComment(t, workspaceRoot, testReviewer, srv, "an ignored body", explicitArgs("--discard", "s1")...)
+	require.NoError(t, err)
+	assert.Equal(t, stagedCommentOutput{Staged: false, ID: "s1", Body: "keep me"}, encoded)
+	items, err := openTestStore(t, workspaceRoot, testReviewer).list()
+	require.NoError(t, err)
+	assert.Empty(t, items)
+}
+
+// --- stdin (loam-hi5o.6: a lone --discard/--resolve must not read stdin) ---
+
+// blockingStdin returns a reader that never reaches EOF and never yields
+// any bytes until the test closes it, standing in for an interactive or
+// un-redirected stdin. strings.NewReader("") would pass the tests below
+// vacuously even against the pre-fix bug, because it returns EOF instantly
+// either way -- only a reader that genuinely blocks can tell "never
+// touched stdin" apart from "touched it and got lucky".
+func blockingStdin(t *testing.T) io.Reader {
+	t.Helper()
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	return pr
+}
+
+// runCommentAsync starts runWorkComment on its own goroutine and reports
+// its result on the returned channel, so a caller can bound how long it
+// waits without hanging the whole test binary the way the pre-fix bug hangs
+// a real process. It takes no *testing.T, deliberately: if the call under
+// test really does hang, this goroutine outlives the test (until the
+// blocking reader above is closed by cleanup), and touching t from a
+// goroutine after the test has finished is unsafe.
+func runCommentAsync(ctx context.Context, workspaceRoot, agent string, srv *commentServer, stdin io.Reader, args []string) <-chan struct {
+	encoded any
+	err     error
+} {
+	out := make(chan struct {
+		encoded any
+		err     error
+	}, 1)
+	go func() {
+		cfg := &ConfigMock{IdentifierFunc: func() string { return agent }}
+		connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
+		var encoded any
+		encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }}
+		deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, agent), connectClient, nil, stdin)
+		err := runWorkComment(ctx, deps, args)
+		out <- struct {
+			encoded any
+			err     error
+		}{encoded, err}
+	}()
+	return out
+}
+
+// TestRunWorkComment_DiscardAlone_CompletesWithoutReadingStdin is
+// acceptance criterion 1 for loam-hi5o.6: a lone --discard must complete
+// even when stdin blocks forever, because it must never touch stdin at all.
+func TestRunWorkComment_DiscardAlone_CompletesWithoutReadingStdin(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	srv := newCommentServer()
+	_, err := runComment(t, workspaceRoot, testReviewer, srv, "keep me", explicitArgs()...)
+	require.NoError(t, err)
+	results := runCommentAsync(t.Context(), workspaceRoot, testReviewer, srv, blockingStdin(t), explicitArgs("--discard", "s1"))
+	select {
+	case r := <-results:
+		require.NoError(t, r.err)
+		assert.Equal(t, stagedCommentOutput{Staged: false, ID: "s1", Body: "keep me"}, r.encoded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("work comment --discard blocked on stdin instead of completing without reading it")
+	}
+}
+
+// TestRunWorkComment_ResolveAlone_CompletesWithoutReadingStdin is the
+// --resolve half of criterion 1.
+func TestRunWorkComment_ResolveAlone_CompletesWithoutReadingStdin(t *testing.T) {
+	t.Parallel()
+	srv := newCommentServer(publishedThread("t1", testReviewer))
+	results := runCommentAsync(t.Context(), realTempDir(t), testReviewer, srv, blockingStdin(t), explicitArgs("--resolve", "t1"))
+	select {
+	case r := <-results:
+		require.NoError(t, r.err)
+		assert.Equal(t, stagedCommentOutput{Staged: true, ID: "s1", Resolve: "t1"}, r.encoded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("work comment --resolve blocked on stdin instead of completing without reading it")
+	}
+}
+
+// TestRunWorkComment_FlagOnlyModes_NilStdinDoesNotPanic is acceptance
+// criterion 6: since a lone --discard or --resolve must never touch stdin,
+// a nil deps.stdin -- which readStdin would nil-pointer-dereference on --
+// must not panic in those two modes.
+func TestRunWorkComment_FlagOnlyModes_NilStdinDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		args []string
+		srv  func() *commentServer
+	}{
+		"discard alone": {explicitArgs("--discard", "s1"), func() *commentServer { return newCommentServer() }},
+		"resolve alone": {explicitArgs("--resolve", "t1"), func() *commentServer { return newCommentServer(publishedThread("t1", testReviewer)) }},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			workspaceRoot := realTempDir(t)
+			srv := tt.srv()
+			if name == "discard alone" {
+				_, err := runComment(t, workspaceRoot, testReviewer, srv, "keep me", explicitArgs()...)
+				require.NoError(t, err)
+			}
+			cfg := &ConfigMock{IdentifierFunc: func() string { return testReviewer }}
+			connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
+			var encoded any
+			encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }}
+			deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, testReviewer), connectClient, nil, nil)
+			var runErr error
+			assert.NotPanics(t, func() { runErr = runWorkComment(t.Context(), deps, tt.args) })
+			require.NoError(t, runErr)
+			assert.NotNil(t, encoded)
+		})
+	}
+}
+
 // --- persistence ---
 
 // TestRunWorkComment_StagedItemsAccumulateAcrossInvocations is the property
@@ -279,6 +440,13 @@ func TestRunWorkComment_StagingIsInvisible(t *testing.T) {
 // TestRunWorkComment_ConflictingModes_ExitTwoWithoutCallingServer walks
 // every combination docs/cli-spec.md rules out. Each must be rejected from
 // the arguments alone: no rpc, and nothing left in the staging area.
+//
+// "discard with a body" used to live in this table and expected rejection.
+// loam-hi5o.6 narrows that (see the bead's NOTES): a lone --discard is now
+// one of the two shapes that complete without ever reading stdin, so a body
+// piped alongside it can no longer be detected, and therefore can no longer
+// be rejected -- it is silently ignored instead. That case moved to
+// TestRunWorkComment_DiscardWithBody_BodyIsSilentlyIgnoredNotRejected below.
 func TestRunWorkComment_ConflictingModes_ExitTwoWithoutCallingServer(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct {
@@ -291,7 +459,6 @@ func TestRunWorkComment_ConflictingModes_ExitTwoWithoutCallingServer(t *testing.
 		"edit with a resolve":           {"body", explicitArgs("--edit", "s1", "--resolve", "t1")},
 		"discard with an anchor":        {"", explicitArgs("--discard", "s1", "--file", "auth.go")},
 		"discard with a resolve":        {"", explicitArgs("--discard", "s1", "--resolve", "t1")},
-		"discard with a body":           {"body", explicitArgs("--discard", "s1")},
 		"edit with no body":             {"", explicitArgs("--edit", "s1")},
 		"no body and no resolve":        {"", explicitArgs()},
 		"blank stdin only":              {"\n", explicitArgs()},
@@ -483,4 +650,106 @@ func TestRunWorkComment_UnopenableStagingArea_PropagatesTheClassification(t *tes
 	err := runWorkComment(t.Context(), deps, explicitArgs())
 	require.ErrorIs(t, err, errStagingArea)
 	assert.Nil(t, encoded)
+}
+
+// --- resolveCommentMode and commentModeSkipsBody (loam-hi5o.6) ---
+
+// flagsFor builds a commentFlags with every field set explicitly, so a
+// table-driven test can construct one per case without depending on
+// newWorkCommentFlags' pflag defaults.
+func flagsFor(file string, line int, resolve, edit, discard string) *commentFlags {
+	return &commentFlags{file: &file, line: &line, resolve: &resolve, edit: &edit, discard: &discard}
+}
+
+// TestResolveCommentMode_TruthTable pins resolveCommentMode's full decision
+// table directly (acceptance criterion 5) -- independent of whether a real
+// caller would have read stdin to produce body, since resolveCommentMode's
+// signature and behaviour are unchanged by loam-hi5o.6 (criterion 2): it is
+// still the single authority for what a given (flags, body) pair means,
+// called with the real body whenever runWorkComment actually reads one.
+func TestResolveCommentMode_TruthTable(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		flags   *commentFlags
+		body    string
+		wantErr bool
+		want    commentMode
+	}{
+		"edit and discard together is an error regardless of body": {
+			flagsFor("", 0, "", "s1", "s2"), "body", true, commentModeNew,
+		},
+		"edit with an anchor is an error": {flagsFor("auth.go", 0, "", "s1", ""), "body", true, commentModeNew},
+		"edit with a line is an error":    {flagsFor("", 42, "", "s1", ""), "body", true, commentModeNew},
+		"edit with a resolve is an error": {flagsFor("", 0, "t1", "s1", ""), "body", true, commentModeNew},
+		"edit alone with no body is an error": {
+			flagsFor("", 0, "", "s1", ""), "", true, commentModeNew,
+		},
+		"edit alone with a body is commentModeEdit": {
+			flagsFor("", 0, "", "s1", ""), "revised", false, commentModeEdit,
+		},
+		"discard with an anchor is an error": {flagsFor("auth.go", 0, "", "", "s1"), "", true, commentModeNew},
+		"discard with a resolve is an error": {flagsFor("", 0, "t1", "", "s1"), "", true, commentModeNew},
+		"discard alone with a body is an error": {
+			flagsFor("", 0, "", "", "s1"), "a body", true, commentModeNew,
+		},
+		"discard alone with no body is commentModeDiscard": {
+			flagsFor("", 0, "", "", "s1"), "", false, commentModeDiscard,
+		},
+		"negative line is an error":              {flagsFor("", -3, "", "", ""), "body", true, commentModeNew},
+		"line without file is an error":          {flagsFor("", 42, "", "", ""), "body", true, commentModeNew},
+		"no body and no resolve is an error":     {flagsFor("", 0, "", "", ""), "", true, commentModeNew},
+		"anchor with no body is an error":        {flagsFor("auth.go", 0, "", "", ""), "", true, commentModeNew},
+		"anchor on a resolve-only is an error":   {flagsFor("auth.go", 0, "t1", "", ""), "", true, commentModeNew},
+		"top-level comment with a body is legal": {flagsFor("", 0, "", "", ""), "a comment", false, commentModeNew},
+		"anchored comment with a body is legal":  {flagsFor("auth.go", 42, "", "", ""), "a comment", false, commentModeNew},
+		"resolve-only with no body is legal":     {flagsFor("", 0, "t1", "", ""), "", false, commentModeNew},
+		"resolve with a body stages both":        {flagsFor("", 0, "t1", "", ""), "fixed", false, commentModeNew},
+		"resolve and anchor and body is legal":   {flagsFor("auth.go", 3, "t1", "", ""), "fixed", false, commentModeNew},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := resolveCommentMode(tt.flags, tt.body)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestCommentModeSkipsBody_MatchesTheNarrowedContract pins
+// commentModeSkipsBody's cases (loam-hi5o.6): true only for a lone
+// --discard (with or without a conflicting --edit) and a lone --resolve
+// (no --file/--line), false everywhere else -- forcing body="" through
+// resolveCommentMode for every "false" case here would change the outcome
+// a real body produces, which is exactly why those must still read stdin.
+func TestCommentModeSkipsBody_MatchesTheNarrowedContract(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		flags *commentFlags
+		want  bool
+	}{
+		"discard alone":                   {flagsFor("", 0, "", "", "s1"), true},
+		"discard with edit conflict":      {flagsFor("", 0, "", "s2", "s1"), true},
+		"discard with an anchor":          {flagsFor("auth.go", 0, "", "", "s1"), true},
+		"discard with a resolve":          {flagsFor("", 0, "t1", "", "s1"), true},
+		"edit alone":                      {flagsFor("", 0, "", "s1", ""), false},
+		"edit with an anchor":             {flagsFor("auth.go", 0, "", "s1", ""), false},
+		"resolve alone":                   {flagsFor("", 0, "t1", "", ""), true},
+		"resolve with a file":             {flagsFor("auth.go", 0, "t1", "", ""), false},
+		"resolve with a line":             {flagsFor("", 3, "t1", "", ""), false},
+		"resolve with file and line":      {flagsFor("auth.go", 3, "t1", "", ""), false},
+		"top-level comment, no flags set": {flagsFor("", 0, "", "", ""), false},
+		"anchored comment, no resolve":    {flagsFor("auth.go", 3, "", "", ""), false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, commentModeSkipsBody(tt.flags))
+		})
+	}
 }

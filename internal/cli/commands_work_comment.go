@@ -91,9 +91,12 @@ func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := readStdin(deps.stdin)
-	if err != nil {
-		return err
+	body := ""
+	if !commentModeSkipsBody(f) {
+		body, err = readStdin(deps.stdin)
+		if err != nil {
+			return err
+		}
 	}
 	mode, err := resolveCommentMode(f, body)
 	if err != nil {
@@ -103,6 +106,46 @@ func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
 		return err
 	}
 	return stageComment(deps, repo, workBranch, mode, f, body)
+}
+
+// commentModeSkipsBody decides, from flags alone, whether an invocation can
+// be resolved and legally completed without ever reading stdin (loam-hi5o.6:
+// reading stdin unconditionally before knowing the mode is what makes a
+// lone --discard or --resolve hang forever on an interactive or
+// un-redirected terminal, since EOF never comes).
+//
+// It is deliberately narrow: it returns true only where forcing body="" into
+// resolveCommentMode below lands on the SAME legal outcome a real body
+// would have, which holds for exactly two shapes --
+//
+//   - --discard, alone or in the --edit-and-discard conflict: every check
+//     resolveCommentMode makes for this shape other than the body-presence
+//     rejection at its "case *f.discard != \"\"" branch is flag-only, and
+//     that one body check is the behaviour this bead deliberately narrows
+//     away (see the bead's NOTES) -- a body piped alongside a lone --discard
+//     is no longer read, so it can no longer be detected and rejected; it is
+//     silently ignored.
+//   - --resolve alone, with no --file/--line/--edit/--discard: resolved with
+//     body="" this is always the legal "resolve-only" outcome, so a body
+//     piped alongside it is likewise silently ignored now rather than
+//     attached to the resolve.
+//
+// Every other shape's legality or content depends on the actual body (a new
+// top-level or --file/--line-anchored comment needs the body text itself;
+// --edit needs it as the replacement text and to know whether one was
+// given at all), so those must still read stdin -- this function must not
+// grow to cover them.
+func commentModeSkipsBody(f *commentFlags) bool {
+	switch {
+	case *f.discard != "":
+		return true
+	case *f.edit != "":
+		return false
+	case *f.resolve != "" && *f.file == "" && *f.line == 0:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveCommentMode decides which mode an invocation selected and rejects
