@@ -171,12 +171,17 @@ func (s *Store) CreateRole(ctx context.Context, params RoleParams) (Role, error)
 //
 // It applies to built-in roles as well as custom ones, deliberately. Only
 // DELETION is refused for a built-in (docs/web-spec.md -> RoleService:
-// "built-in roles cannot be deleted", and nothing more), and built-ins
-// ship with instructions set to the empty string (0001_init.up.sql), so
-// refusing to update them would leave the author and reviewer instruction text permanently
-// empty -- the exact thing features/roles.feature's "A role's instructions
-// reach its agents" configures on the *reviewer*, a built-in. builtin
-// itself is never written by this method.
+// "built-in roles cannot be deleted", and nothing more). Built-ins
+// originally shipped with instructions set to the empty string
+// (0001_init.up.sql); refusing to update them would have left the author
+// and reviewer instruction text permanently empty -- the exact thing
+// features/roles.feature's "A role's instructions reach its agents"
+// configures on the *reviewer*, a built-in. Migration
+// 0006_role_instructions_seed (loam-0pj.17) now fills that empty default
+// on a fresh database, but only where it is still empty, so this method is
+// still the only way to replace a built-in's already-non-empty text (e.g.
+// operator-written filler predating 0006). builtin itself is never
+// written by this method.
 //
 // Returns a wrapped ErrNotFound if params.Name does not exist.
 func (s *Store) UpdateRole(ctx context.Context, params RoleParams) (Role, error) {

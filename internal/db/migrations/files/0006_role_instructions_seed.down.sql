@@ -1,0 +1,17 @@
+-- Reverses 0006_role_instructions_seed.up.sql: intentionally a no-op.
+--
+-- The up migration is a guarded data fill, not a schema change, and
+-- blanking it back out on a "down" would actively destroy data the up
+-- migration went out of its way to protect: the guard
+-- (`coalesce(instructions, '') = ''`) exists specifically so an operator's
+-- own instructions text -- typed before or after this migration ran -- is
+-- never overwritten. A down migration that reset instructions to '' would
+-- erase that same operator text on rollback, which is the opposite of what
+-- 0005_credentials_host_canonical.down.sql's own precedent establishes for
+-- a data migration in this package: reversing a data fill/rewrite is only
+-- safe when the prior state is recoverable, and here it is not --
+-- 0006's own UPDATE does not record which rows it touched versus which
+-- were already non-empty, so there is no way to tell "this text came from
+-- the seed" from "an admin wrote this before or after the migration ran".
+-- golang-migrate requires a down file to exist for every up file; this one
+-- deliberately does nothing.

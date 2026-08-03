@@ -36,7 +36,12 @@ type RoleStore interface {
 	// error is forwarded unchanged.
 	RoleCapabilities(ctx context.Context, role string) ([]handler.Capability, error)
 	// RoleInstructions returns the instructions text configured for role
-	// (roles.instructions, docs/persistence-spec.md "roles"), empty until
-	// an admin sets one in the web console.
+	// (roles.instructions, docs/persistence-spec.md "roles"). A built-in
+	// role's instructions are no longer empty by default: migration
+	// 0006_role_instructions_seed fills 'author' and 'reviewer' with
+	// shipped policy text on a freshly migrated database (loam-0pj.17).
+	// An admin can still replace that text (or a custom role's, which
+	// ships with whatever CreateRole was given) at any time in the web
+	// console -- see queries/roles.sql's UpdateRoleInstructions.
 	RoleInstructions(ctx context.Context, role string) (string, error)
 }

@@ -38,12 +38,23 @@ RETURNING *;
 -- Rewrites a role's instruction text (the body
 -- loam.v1.MetaService.GetInstructions returns) by name, the natural key
 -- every RoleService RPC carries. Applies to built-in roles too: a built-in
--- ships with instructions set to the empty string (0001_init.up.sql), so
--- refusing this here would leave the author/reviewer instruction text permanently empty and
--- make features/roles.feature's "A role's instructions reach its agents"
--- unimplementable for the very roles it names. name itself is not
--- updatable -- RoleService has no rename RPC and UpdateRoleRequest carries
--- one name, which identifies the role rather than renaming it.
+-- originally shipped with instructions set to the empty string
+-- (0001_init.up.sql), so refusing this here would have left the
+-- author/reviewer instruction text permanently empty and made
+-- features/roles.feature's "A role's instructions reach its agents"
+-- unimplementable for the very roles it names. Migration
+-- 0006_role_instructions_seed (loam-0pj.17) now fills that empty default
+-- with shipped policy text, but ONLY where instructions is still the
+-- empty string (that migration's own coalesce-empty guard) -- it
+-- deliberately will not touch a built-in that already carries
+-- operator-written text. That makes
+-- this statement, run through RoleService's UpdateRole, the ONLY route by
+-- which already-non-empty built-in text (e.g. a stale or filler value an
+-- admin typed before 0006 landed) can ever be replaced; a rerun of 0006 or
+-- any future migration guarded the same way will not touch it either.
+-- name itself is not updatable -- RoleService has no rename RPC and
+-- UpdateRoleRequest carries one name, which identifies the role rather
+-- than renaming it.
 UPDATE roles
 SET instructions = $2, updated_at = now()
 WHERE name = $1
