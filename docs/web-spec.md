@@ -274,10 +274,13 @@ with no per-line elements — which is what keeps collapsed sections cheap enoug
 mounted, so find-in-page still reaches them. The unified diff is split by tracking each
 `@@` hunk's declared line counts rather than by splitting on `diff --git`, for two reasons
 a split cannot serve: a diff may carry **no `diff --git` lines at all** (a bare
-`--- `/`+++ ` pair, which is what `git diff --no-index` produces), and the `---`/`+++`
-header lines start with `-` and `+`, so per-file added/removed counts are only correct if
-the parser knows where each hunk's body begins. A header-shaped line in a file's *content*
-arrives prefixed (`+diff --git …`) and is respected as content, which is asserted.
+`--- `/`+++ ` pair, as POSIX `diff -u` and this screen's own test fixture produce — note
+that `GetWorkBranchDiff` itself always emits `diff --git`, since the server shells out to
+`git diff --no-ext-diff`, so this defends fixtures and hand-written patches rather than the
+live path), and the `---`/`+++` header lines start with `-` and `+`, so per-file
+added/removed counts are only correct if the parser knows where each hunk's body begins. A
+header-shaped line in a file's *content* arrives prefixed (`+diff --git …`) and is
+respected as content, which is asserted.
 
 **Threads are arranged from what the data model actually carries.** `Thread` has no
 parent, reply-to or continuation field (`proto/loam/v1/common.proto`), so no cross-thread

@@ -132,8 +132,10 @@ describe("parseUnifiedDiff", () => {
   });
 
   it("treats a bare empty line inside a hunk as a context line", () => {
-    // git emits "" rather than " " for an empty context line. A parser that
-    // requires a leading space here loses the rest of the hunk.
+    // NOT what git emits -- git writes " " for a blank context line. This
+    // covers the trailing element `split("\n")` yields on a newline-terminated
+    // diff, and any transport that strips trailing whitespace in flight. A
+    // parser that demands a leading space loses the rest of the hunk to either.
     const diff = [
       "diff --git a/a.txt b/a.txt",
       "--- a/a.txt",
@@ -150,8 +152,9 @@ describe("parseUnifiedDiff", () => {
   });
 
   it("handles a diff with no 'diff --git' headers at all", () => {
-    // What `git diff --no-index` produces, and what this screen's own test
-    // fixture has always used.
+    // What POSIX `diff -u` produces, and what this screen's own test fixture
+    // has always used. Not what the server sends: `git diff --no-ext-diff`
+    // (internal/gitdiff/diff.go:243) always emits `diff --git`.
     const diff = "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new\n";
     const { files } = parseUnifiedDiff(diff);
     expect(files).toHaveLength(1);

@@ -69,15 +69,20 @@ function gitHeaderPath(line: string): string {
  * What they actually buy is two things a split cannot do at all:
  *
  * 1. HEADERLESS DIFFS. A diff may carry no `diff --git` lines whatsoever --
- *    just a `--- `/`+++ ` pair, which is what `git diff --no-index` produces
- *    and what this screen's own test fixture has always used. Splitting on
- *    `diff --git` yields one section containing everything.
+ *    just a `--- `/`+++ ` pair, which is what POSIX `diff -u` produces (with
+ *    a tab and a timestamp appended to each path, which is why
+ *    `stripPathPrefix` splits on `\t`) and what this screen's own test
+ *    fixture has always used. Splitting on `diff --git` yields one section
+ *    containing everything. Note the scope: the server runs `git diff
+ *    --no-ext-diff <target>...<wb>` (internal/gitdiff/diff.go:243), which
+ *    ALWAYS emits `diff --git`, so a headerless diff never arrives from
+ *    production traffic -- this reason defends fixtures and hand-written
+ *    patches, not the live path.
  * 2. CORRECT COUNTS. `--- a/x` and `+++ b/x` start with `-` and `+`, so
  *    counting by first character alone reports one spurious removal and one
  *    spurious addition per file. Only knowing where the hunk BODY starts
  *    gets `added`/`removed` right, and the body's extent is exactly what the
- *    `@@` header declares. Git also emits a bare empty line for an empty
- *    context line rather than `" "`, which the same counters absorb.
+ *    `@@` header declares.
  *
  * So the parser tracks how many old and new lines each `@@` hunk declared and
  * treats every line until those are consumed as body, whatever it looks like;
@@ -137,6 +142,10 @@ export function parseUnifiedDiff(diff: string): ParsedDiff {
         continue;
       }
       if (marker === " " || line === "") {
+        // Git writes `" "` for a blank context line, not `""`. The `""` case
+        // is still handled, but for different reasons than git's output: the
+        // trailing element `split("\n")` yields on a newline-terminated diff,
+        // and any transport that strips trailing whitespace in flight.
         oldLeft -= 1;
         newLeft -= 1;
         push(line);
