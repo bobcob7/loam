@@ -289,6 +289,15 @@ type workDiffOutput struct {
 	Diff string `json:"diff"`
 }
 
+// humanText implements the humanText interface (encoder.go): in human
+// output mode, `work diff` renders the unified diff verbatim rather than as
+// an indented "diff: ..." field, so it can be read directly or piped to a
+// pager instead of requiring the caller to unwrap the JSON first. See
+// loam-hi5o.1.
+func (o workDiffOutput) humanText() string {
+	return o.Diff
+}
+
 // runWorkDiff implements `loam work diff [repo] [work-branch]`
 // (docs/cli-spec.md -> diff).
 //
