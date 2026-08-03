@@ -252,7 +252,13 @@ shared renderer (`web/src/components/Markdown.tsx`, react-markdown + remark-gfm)
   case-insensitively, so `JaVaScRiPt:` and the character-reference form
   `&#106;avascript&#x3A;` are denied too;
 - **`rel="noreferrer noopener"`** on every link, so an untrusted destination cannot reach
-  `window.opener` or learn the proposal URL from the referrer.
+  `window.opener` or learn the proposal URL from the referrer;
+- **images are not auto-loaded.** `![](https://evil.example/beacon.png)` in a comment body
+  is a read receipt: it fires on page open with no interaction and hands the reader's IP,
+  user-agent and a timestamp to whoever wrote the comment. A `referrerPolicy` does not fix
+  that — it removes the proposal URL from the request, but the request itself is the leak.
+  An image therefore renders as a link the reader can choose to open; one whose source
+  failed the scheme check renders as inert text with no destination at all.
 
 These are asserted against the rendered DOM, both on the component and at the comment-body
 call site, never against the configuration. There is **no syntax highlighting**: a fenced
@@ -266,8 +272,12 @@ exception for a single-file diff, so the page's height is a function of the file
 alone and the sections below the diff stay reachable. Diff bodies are one `<pre>` per file
 with no per-line elements — which is what keeps collapsed sections cheap enough to leave
 mounted, so find-in-page still reaches them. The unified diff is split by tracking each
-`@@` hunk's declared line counts rather than by splitting on `diff --git`, because a file's
-own content can contain a line that looks like a header.
+`@@` hunk's declared line counts rather than by splitting on `diff --git`, for two reasons
+a split cannot serve: a diff may carry **no `diff --git` lines at all** (a bare
+`--- `/`+++ ` pair, which is what `git diff --no-index` produces), and the `---`/`+++`
+header lines start with `-` and `+`, so per-file added/removed counts are only correct if
+the parser knows where each hunk's body begins. A header-shaped line in a file's *content*
+arrives prefixed (`+diff --git …`) and is respected as content, which is asserted.
 
 **Threads are arranged from what the data model actually carries.** `Thread` has no
 parent, reply-to or continuation field (`proto/loam/v1/common.proto`), so no cross-thread

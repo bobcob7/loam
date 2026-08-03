@@ -408,6 +408,39 @@ describe("ProposalDetail: loaded screen", () => {
     expect(comments.innerHTML).not.toContain("javascript");
   });
 
+  it("loads no remote image from a comment body, which would be a read receipt", async () => {
+    // The trust boundary this matters at: a REVIEWER's comment body, rendered
+    // in the author's console on page open. An <img> here needs no click to
+    // hand the reader's IP, user-agent and a timestamp to whoever wrote it.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "![](https://evil.example/beacon.png)\n\n![shot](https://evil.example/2.png)",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText("reviewer-a-agent");
+    expect(comments.querySelectorAll("img")).toHaveLength(0);
+    // Offered as links instead -- nothing is fetched until the admin chooses.
+    const beacon = within(comments).getByRole("link", { name: /^image/ });
+    expect(beacon).toHaveAttribute("href", "https://evil.example/beacon.png");
+    expect(beacon).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
   it("groups threads by anchor file and marks a reply from a later round", async () => {
     stubFetch({
       ...baseRoutes(),

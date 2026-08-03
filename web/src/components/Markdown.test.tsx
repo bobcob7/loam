@@ -165,14 +165,48 @@ describe("Markdown: hostile input renders inert", () => {
     expect(container.querySelector("a")?.getAttribute("href")).toBe("");
   });
 
-  it("strips a javascript: image source", () => {
-    // The image element survives (with its alt text); its source does not.
-    // React omits the attribute entirely rather than emitting src="", hence
-    // the `?? ""` -- the claim is "nothing loadable", either shape satisfies it.
+  it.each([
+    ["irc:", "[x](irc://irc.example/chan)"],
+    ["ircs:", "[x](ircs://irc.example/chan)"],
+    ["xmpp:", "[x](xmpp:someone@example.com)"],
+  ])("denies %s, which react-markdown's own default transform allows", (_scheme, source) => {
+    // These three exist to PIN safeUrl. Every other hostile case in this file
+    // is also caught by react-markdown's built-in urlTransform, so deleting
+    // the `urlTransform` prop entirely would leave them green and silently
+    // hand the guarantee back to the library's default. `irc`, `ircs` and
+    // `xmpp` are on that default's allow-list and are not on ours, so these
+    // fail the moment the prop stops being passed.
+    const { container } = render(<Markdown source={source} />);
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("");
+  });
+
+  it("renders an image as a link rather than loading it", () => {
+    // A remote image in a comment body is a read receipt: it fires on page
+    // open with no interaction and hands the reader's IP, user-agent and a
+    // timestamp to whoever wrote the comment. `referrerPolicy` would not fix
+    // that -- the request itself is the leak -- so no <img> is created at all.
+    const { container } = render(
+      <Markdown source="![the failing screen](https://example.com/shot.png)" />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    const link = screen.getByRole("link", { name: /the failing screen/ });
+    expect(link).toHaveAttribute("href", "https://example.com/shot.png");
+    expect(link).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(link).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
+  it("labels an image with no alt text rather than rendering an empty link", () => {
+    // `![](url)` is the beacon's natural form -- no alt, nothing to see.
+    const { container } = render(<Markdown source="![](https://evil.example/beacon.png)" />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByRole("link", { name: /^image/ })).toBeInTheDocument();
+  });
+
+  it("gives a javascript: image nowhere to go at all", () => {
     const { container } = render(<Markdown source="![alt](javascript:alert(1))" />);
-    const image = container.querySelector("img");
-    expect(image).not.toBeNull();
-    expect(image?.getAttribute("src") ?? "").toBe("");
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("a")).toBeNull();
+    expect(screen.getByText(/image source blocked/)).toBeInTheDocument();
     expect(container.innerHTML).not.toContain("javascript:");
   });
 

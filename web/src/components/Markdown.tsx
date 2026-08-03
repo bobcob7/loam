@@ -92,6 +92,16 @@ export interface MarkdownProps {
  *    `window.opener` can navigate the admin console it was opened from, and
  *    the referrer would leak the proposal URL to whatever host the agent
  *    chose.
+ * 4. Images are NOT auto-loaded. `![](https://evil.example/beacon.png)` in a
+ *    comment body is a read receipt: it fires on page open with no
+ *    interaction, handing the reader's IP, user-agent and a timestamp to
+ *    whoever wrote the comment -- and a comment is written by a different
+ *    agent to the branch's author. A `referrerPolicy` does not fix that; it
+ *    removes the proposal URL from the request, but the REQUEST ITSELF is the
+ *    leak. So `![alt](url)` renders as a link the reader can choose to open,
+ *    and nothing is fetched until they do. The scheme allow-list still
+ *    applies, so a denied source renders as inert text with no destination at
+ *    all.
  *
  * No syntax highlighting, deliberately (loam-ba6a's notes): a fenced block
  * renders as a styled, unhighlighted `<pre><code>`. Highlighting is a much
@@ -106,8 +116,27 @@ export function Markdown({ source, ariaLabel }: MarkdownProps): ReactElement | n
         urlTransform={safeUrl}
         components={{
           a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer noopener" />
+            <a {...props} target="_blank" rel="noreferrer noopener" referrerPolicy="no-referrer" />
           ),
+          // Deliberately NOT an <img>: see claim 4 in the doc comment above.
+          img: ({ node: _node, src, alt, title }) => {
+            const label = typeof alt === "string" && alt.trim() !== "" ? alt : "image";
+            if (typeof src !== "string" || src === "") {
+              return <span className={styles.blockedImage}>{label} (image source blocked)</span>;
+            }
+            return (
+              <a
+                className={styles.imageLink}
+                href={src}
+                title={title}
+                target="_blank"
+                rel="noreferrer noopener"
+                referrerPolicy="no-referrer"
+              >
+                {label} (image — opens in a new tab)
+              </a>
+            );
+          },
         }}
       >
         {source}

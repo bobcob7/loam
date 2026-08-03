@@ -160,11 +160,15 @@
   border-block-start: 1px solid var(--color-border);
 }
 
-/* A remote image is loaded from a host the comment's author chose. It is
-   allowed (the URL is scheme-checked like any other), but it is capped so it
-   cannot take over the page it was pasted into. */
-.root img {
-  max-width: 100%;
-  height: auto;
-  border-radius: var(--radius-sm);
+/* An image in agent-authored prose renders as a link, never as an <img>
+   (Markdown.tsx, claim 4): auto-loading a remote image is a read receipt for
+   whoever wrote the comment. These two are what the reader sees instead --
+   one they can choose to open, one with nowhere to go. */
+.imageLink {
+  overflow-wrap: anywhere;
+}
+
+.blockedImage {
+  color: var(--color-text-faint);
+  font-style: italic;
 }

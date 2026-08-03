@@ -58,23 +58,39 @@ function gitHeaderPath(line: string): string {
 /**
  * Splits a unified diff into per-file sections.
  *
- * WHY THIS IS A STATE MACHINE AND NOT `diff.split(/^diff --git/m)`. A file's
- * CONTENT can contain a line that looks like a diff header -- this repo's
- * docs quote diffs, and any proposal that edits a `.patch` fixture does the
- * same. Inside a hunk those lines arrive prefixed (`+diff --git ...`), which
- * a line-anchored split already survives, but two further cases break a
- * naive split and are the reason for the counters: git emits a bare empty
- * line for an empty context line rather than `" "`, and a diff may carry no
- * `diff --git` headers at all (a plain `--- `/`+++ ` pair, which is what
- * `git diff --no-index` and this repo's own test fixture produce). So the
- * parser tracks how many old and new lines each `@@` hunk declared and
- * treats EVERY line until those are consumed as content, whatever it looks
- * like. A header is only recognised outside a hunk body.
+ * WHY THIS IS A STATE MACHINE AND NOT `diff.split(/^diff --git/m)`, stated
+ * precisely, because the tempting version of this argument is wrong.
  *
- * Every input line is appended to exactly one bucket, so nothing is dropped
- * on a malformed diff -- worst case it lands in a section that is bigger than
- * it should be, never in no section at all. DiffView.test.tsx asserts that
- * round-trip.
+ * The tempting version is "a file's content can contain a diff header". It
+ * can -- this repo's docs quote diffs -- but inside a hunk those lines arrive
+ * PREFIXED (`+diff --git ...`), so a line-anchored split already survives
+ * them. That is not what the counters buy.
+ *
+ * What they actually buy is two things a split cannot do at all:
+ *
+ * 1. HEADERLESS DIFFS. A diff may carry no `diff --git` lines whatsoever --
+ *    just a `--- `/`+++ ` pair, which is what `git diff --no-index` produces
+ *    and what this screen's own test fixture has always used. Splitting on
+ *    `diff --git` yields one section containing everything.
+ * 2. CORRECT COUNTS. `--- a/x` and `+++ b/x` start with `-` and `+`, so
+ *    counting by first character alone reports one spurious removal and one
+ *    spurious addition per file. Only knowing where the hunk BODY starts
+ *    gets `added`/`removed` right, and the body's extent is exactly what the
+ *    `@@` header declares. Git also emits a bare empty line for an empty
+ *    context line rather than `" "`, which the same counters absorb.
+ *
+ * So the parser tracks how many old and new lines each `@@` hunk declared and
+ * treats every line until those are consumed as body, whatever it looks like;
+ * a header is only recognised outside a hunk body.
+ *
+ * THE LIMIT, stated so nobody reads more into the above than is there: if a
+ * hunk's declared counts run out early -- a truncated or hand-edited patch --
+ * the escape hatch below leaves hunk mode, and a following header-shaped line
+ * WOULD start a new section. Git does not produce that, and it costs nothing
+ * either way, because every input line is appended to exactly one bucket:
+ * nothing is ever dropped, worst case a section is bigger than it should be.
+ * DiffView.test.tsx asserts that round-trip on four shapes, including input
+ * that is not a diff at all.
  */
 export function parseUnifiedDiff(diff: string): ParsedDiff {
   const preamble: string[] = [];

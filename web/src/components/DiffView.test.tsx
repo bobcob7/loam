@@ -73,7 +73,9 @@ describe("parseUnifiedDiff", () => {
 
   it("does not split on a 'diff --git' line that is a file's CONTENT", () => {
     // A proposal that edits a document quoting a diff -- which this repo's own
-    // docs do. The added lines below look exactly like file headers.
+    // docs do. Bead .2's criterion 4 is this case. The quoted header arrives
+    // prefixed (`+diff --git ...`), so what is asserted is that the prefix is
+    // respected and the section is not cut in two.
     const diff = [
       "diff --git a/docs/git-spec.md b/docs/git-spec.md",
       "--- a/docs/git-spec.md",
@@ -93,11 +95,12 @@ describe("parseUnifiedDiff", () => {
     expect(files[0]?.text).toContain("+diff --git a/src/x.ts b/src/x.ts");
   });
 
-  it("does not split on an unprefixed 'diff --git' line inside a hunk body", () => {
-    // The hunk declares 4 new lines, so the parser must treat all four as
-    // content even though one of them starts at column 0 with a header word.
-    // Only the declared counts can tell it apart; a line-anchored regex split
-    // cannot.
+  it("starts the next file even when a blank line separates the two sections", () => {
+    // Not a claim about header-shaped content: this hunk declares +1,3 and
+    // `+a/+b/+c` consume it, so the second header arrives with hunk mode
+    // already exited. What it pins is that the blank line between sections
+    // stays with the first file rather than ending it, and that a /dev/null
+    // pre-image still names the file from the `+++` side.
     const diff = [
       "diff --git a/patch.txt b/patch.txt",
       "--- /dev/null",
@@ -115,6 +118,17 @@ describe("parseUnifiedDiff", () => {
     ].join("\n");
     const { files } = parseUnifiedDiff(diff);
     expect(files.map((file) => file.path)).toEqual(["patch.txt", "second.txt"]);
+    expect(files[0]?.text).toContain("\n");
+    expect(files[0]).toMatchObject({ added: 3, removed: 0 });
+  });
+
+  it("counts only hunk-body lines, not the --- and +++ header lines", () => {
+    // This is one of the two things the counters actually buy (DiffView.tsx).
+    // A parser that counts by first character alone reports 2 added and 2
+    // removed here, because `--- a/x.ts` and `+++ b/x.ts` start with the same
+    // characters a body line does.
+    const diff = "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new";
+    expect(parseUnifiedDiff(diff).files[0]).toMatchObject({ added: 1, removed: 1 });
   });
 
   it("treats a bare empty line inside a hunk as a context line", () => {
