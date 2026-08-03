@@ -158,12 +158,15 @@ stages on purpose**, because the two halves of "did `deploy/docker-compose.yml` 
 cost wildly different amounts to answer:
 
 - The half that needs no daemon runs **per-PR**, as an ordinary unit test:
-  `internal/deploycheck` parses the compose files, `helm/loam/values.yaml` and
-  `internal/config`'s AST, and fails when the Postgres image drifts between the
+  `internal/deploycheck`. It fails when the Postgres image drifts between the
   deployment stack, the e2e stack and the chart; when the compose file sets a `LOAM_*`
-  variable `internal/config` does not read; or when a must-set secret acquires a
-  working default. Milliseconds, no Docker, so there is no reason for it to wait for
-  nightly.
+  variable `internal/config` does not read; when a credential-shaped variable acquires
+  a working default; and — because it runs `config.Load()` against the environment the
+  compose file actually produces, rather than modelling which variables are required —
+  when the compose file stops setting something `internal/config` requires, or
+  `internal/config` starts requiring something the compose file does not set. Both
+  directions of a rename are therefore covered, required and optional alike.
+  Milliseconds, no Docker, so there is no reason for it to wait for nightly.
 - The half that needs a real boot runs **nightly**: `task test:compose` pulls the
   pinned published image, brings the stack up from clean, asserts the startup ordering
   and readiness, checks the admin console is the real SPA, and tears down with `-v`.

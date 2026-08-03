@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bobcob7/loam/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -165,34 +166,124 @@ func TestComposeSetsOnlyRealConfigVariables(t *testing.T) {
 	}
 }
 
-// TestComposeSetsEveryRequiredConfigVariable is the other direction, and
-// the one that turns a rot into a boot failure instead of a wrong default.
-// These three have no default in internal/config at all: without them the
-// server exits during config load. LOAM_EMBEDDER_URL is included even
-// though internal/config defaults it, because that default
-// (http://localhost:11434) resolves to the loam container itself and is
-// never right here -- an unset value would leave ingest failing against
-// nothing, which is worse than not starting.
-func TestComposeSetsEveryRequiredConfigVariable(t *testing.T) {
+// TestComposeEnvironmentSatisfiesConfigLoad is the direction that turns rot
+// into a server that will not boot, and it does not hold an opinion about
+// WHICH variables are required -- it asks internal/config, by running
+// config.Load() against the environment this compose file actually
+// produces.
+//
+// The earlier version of this test carried a hand-written list of the
+// required names, which is the very pattern TestPostgresImageAgrees exists
+// to avoid, and it had exactly the hole that pattern always has. Two
+// mutations survived it, both compiling, both leaving the whole tree green
+// while producing a server that exits during config load: adding a
+// lookupRequired("LOAM_WEBHOOK_SECRET") to internal/config without adding it
+// to the compose file, and deleting LOAM_DB_NAME from the compose file. A
+// list cannot catch a requirement it was never told about.
+//
+// Running the loader catches both, and every future one, for free: it is
+// not a model of internal/config's required set, it IS internal/config. It
+// also subsumes the exclusive-or between LOAM_DATABASE_URL and the discrete
+// LOAM_DB_* parts (resolveDatabaseURL rejects both together AND rejects
+// neither) without this test having to know that rule exists.
+//
+// Not parallel: t.Setenv is process-global and the testing package forbids
+// combining the two.
+func TestComposeEnvironmentSatisfiesConfigLoad(t *testing.T) {
+	deploy := loadCompose(t, deployComposePath)
+	loam, ok := deploy.Services["loam"]
+	require.True(t, ok)
+	// Blank every name internal/config reads before setting anything, so an
+	// ambient LOAM_* in the developer's or CI's shell can neither rescue a
+	// compose file that stopped setting a variable nor break one that
+	// didn't. Discovered from the same AST walk, so a newly-read variable
+	// is blanked without anyone remembering to add it here.
+	for _, name := range configEnvNames(t) {
+		t.Setenv(name, "")
+	}
+	for name, raw := range loam.Environment {
+		t.Setenv(name, resolveComposeValue(t, name, raw))
+	}
+	// The one deliberate substitution. The compose file points
+	// LOAM_DATA_DIR at the container's /var/lib/loam, which this test's
+	// host neither has nor should create; Load's final step probes it for
+	// writability. Pointing it at a temp dir keeps that probe honest
+	// without asserting anything about the host. Ownership of the real
+	// path is the container's problem and is covered by internal/config's
+	// own TestLoad_UnwritableDataDirErrorNamesUIDAndPath.
+	t.Setenv("LOAM_DATA_DIR", t.TempDir())
+	_, err := config.Load()
+	require.NoError(t, err,
+		"the environment deploy/docker-compose.yml gives the loam service does not satisfy internal/config: a server started from this file would exit during config load with exactly this error")
+}
+
+// composeMustSet reports the environment keys of one service whose value
+// uses compose's ${VAR:?message} form -- the ones an operator has to supply
+// before compose will render the file at all.
+func composeMustSet(env map[string]string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for name, raw := range env {
+		if mustSetInterpolation.MatchString(raw) {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
+var mustSetInterpolation = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:\?`)
+
+// operatorSuppliedValues stands in for the human filling out deploy/.env.
+// This side of the contract genuinely cannot be discovered -- nothing in
+// the repository knows what your admin password is -- so it is written
+// down, and TestOperatorSuppliedValuesCoverEveryMustSetVariable below fails
+// the moment the compose file grows a must-set variable this map does not
+// answer for. That check is what keeps the map from going stale silently,
+// which is the failure mode of every hand-written list in this package.
+//
+// LOAM_ENCRYPTION_KEY is base64 of exactly 32 bytes because internal/config
+// validates the decoded length; the rest are shaped like what a real
+// operator would paste.
+var operatorSuppliedValues = map[string]string{
+	"LOAM_ADMIN_PASSWORD": "deploycheck-admin-password",
+	"LOAM_DB_PASSWORD":    "deploycheck-db-password",
+	"LOAM_ENCRYPTION_KEY": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+	"LOAM_EMBEDDER_URL":   "http://embedder.invalid:11434",
+	"POSTGRES_PASSWORD":   "deploycheck-db-password",
+}
+
+// resolveComposeValue turns one compose environment value into the string a
+// container would actually receive: a ${VAR:?...} becomes what the operator
+// supplies, a ${VAR:-default} becomes its default (nothing here exports the
+// outer variable), and anything else is already literal.
+func resolveComposeValue(t *testing.T, name, raw string) string {
+	t.Helper()
+	if mustSetInterpolation.MatchString(raw) {
+		value, ok := operatorSuppliedValues[name]
+		require.True(t, ok, "%s is must-set in the compose file but operatorSuppliedValues has no value for it", name)
+		return value
+	}
+	if m := interpolationDefault.FindStringSubmatch(raw); m != nil {
+		return m[1]
+	}
+	require.NotContains(t, raw, "${", "%s uses an interpolation form this test does not model: %s", name, raw)
+	return raw
+}
+
+// TestOperatorSuppliedValuesCoverEveryMustSetVariable keeps the one
+// hand-written map in this package from rotting. Without it, adding a new
+// ${VAR:?...} to the compose file would leave
+// TestComposeEnvironmentSatisfiesConfigLoad unable to supply a value --
+// and the point is that the failure names the missing variable rather than
+// arriving as a confusing config error.
+func TestOperatorSuppliedValuesCoverEveryMustSetVariable(t *testing.T) {
 	t.Parallel()
 	deploy := loadCompose(t, deployComposePath)
-	loam := deploy.Services["loam"]
-	for _, name := range []string{
-		"LOAM_ADMIN_PASSWORD",
-		"LOAM_ENCRYPTION_KEY",
-		"LOAM_EMBEDDER_URL",
-	} {
-		assert.Contains(t, loam.Environment, name,
-			"%s has no usable default; a compose file that stops setting it produces a server that will not boot", name)
+	for service, spec := range deploy.Services {
+		for name := range composeMustSet(spec.Environment) {
+			assert.Contains(t, operatorSuppliedValues, name,
+				"%s.%s is must-set in deploy/docker-compose.yml but operatorSuppliedValues (compose_test.go) has no value for it", service, name)
+		}
 	}
-	// The database DSN, in exactly one of its two accepted forms.
-	// internal/config REJECTS both at once (env.go's resolveDatabaseURL)
-	// and rejects neither, so this is an exclusive-or, not a presence
-	// check on either one.
-	_, hasURL := loam.Environment["LOAM_DATABASE_URL"]
-	_, hasParts := loam.Environment["LOAM_DB_HOST"]
-	assert.NotEqual(t, hasURL, hasParts,
-		"the compose file must set the database EITHER as LOAM_DATABASE_URL or as the discrete LOAM_DB_* parts; internal/config rejects both together and rejects neither")
 }
 
 // TestMustSetVariablesHaveNoWorkingDefault is the security decision from
@@ -224,6 +315,23 @@ func TestMustSetVariablesHaveNoWorkingDefault(t *testing.T) {
 		require.NotEmpty(t, value, "%s is not set at all", name)
 		assert.Contains(t, value, ":?",
 			"%s must use compose's ${VAR:?message} form so an unset value is a legible render-time error, never a working default", name)
+	}
+	// The list above is the POLICY -- these specific values must never
+	// have a default -- and a policy is not discoverable from anywhere in
+	// the repository, so it is written down. What IS discoverable is the
+	// general shape of the mistake, and this second pass catches it for
+	// variables nobody has thought of yet: any name that announces itself
+	// as credential material must not carry a working default, whichever
+	// service it belongs to and whenever it is added.
+	credentialish := regexp.MustCompile(`(?i)(password|secret|token|_key$|encryption)`)
+	for service, spec := range deploy.Services {
+		for name, value := range spec.Environment {
+			if !credentialish.MatchString(name) {
+				continue
+			}
+			assert.Regexp(t, mustSetInterpolation, value,
+				"%s.%s looks like credential material but has a working default; a stack that boots with a secret published in this repository is indistinguishable from a correctly configured one", service, name)
+		}
 	}
 }
 

@@ -341,8 +341,29 @@ ownership has to already be right:
 mkdir -p ./data && sudo chown -R 10001:10001 ./data
 ```
 
-before the first `up`. The error names the uid it is running as and the path it
-tried, so `docker compose logs loam` tells you both.
+before the first `up`.
+
+**What the log actually says on the currently pinned image** — verified against
+`registry.bobcob7.com/loam/server:bdea9ab7c5b0…`, which is what
+`deploy/docker-compose.yml` runs today:
+
+```
+{"level":"ERROR","msg":"loading configuration","error":"LOAM_DATA_DIR: data
+ directory not writable: open /var/lib/loam/.loam-write-check-1977453151:
+ permission denied"}
+```
+
+It names the path and **not** the uid that was denied, which is the fact you
+need — so if you are reading this because of that message, the answer is above:
+the process is uid/gid **10001**, and the mount has to let that uid write.
+`docker compose exec loam id` confirms it on a running container, and
+`ls -ldn ./data` shows who owns the directory now.
+
+`internal/config` was fixed as part of this work to name the uid, the gid, the
+directory and the exact `chown` in that error. That fix is in the tree but
+**not in the pinned image**, which predates it; it reaches you the next time
+the image tag here is bumped past that commit. Until then, the message is the
+one quoted above.
 
 **loam restarts forever, log mentions `LOAM_ENCRYPTION_KEY does not match`** —
 the key in `deploy/.env` is not the one that encrypted the stored credentials.
