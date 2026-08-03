@@ -275,6 +275,19 @@ is a manual RPC check, not a probe.
 
 ## Running Locally
 
+**If what you want is a working loam on one machine rather than a rehearsal of the
+Kubernetes path, stop here and read
+[`compose-quickstart.md`](compose-quickstart.md).** `deploy/docker-compose.yml`
+(`loam-lzxo`) runs the same published image this document describes, against its own
+pgvector, with `docker compose up -d` and a `.env` — no cluster, no chart, no build
+toolchain. It is a sibling to this document, not a subset of it: it shares the image,
+the `LOAM_*` contract and the `LOAM_ENCRYPTION_KEY` hazard below, and shares none of
+the Argo/sealed-secret/ingress/PVC surface that makes up most of this one. The
+Postgres image is pinned identically in both, and `internal/deploycheck` fails the
+build if that ever stops being true.
+
+The rest of this section is about the Kubernetes path specifically.
+
 There is no local Kubernetes story in this repo — no `kind`/`k3d` target, no
 `helm install` walkthrough — because nothing has actually run the chart against a
 real cluster from this repo yet (that first real run is `loam-ytt2.8`). `helm lint

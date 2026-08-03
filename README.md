@@ -22,6 +22,21 @@ issues and scopes its own) and the **REST API** used to open upstream PRs. Git t
 the forge rides the same token over HTTPS, so a single credential per forge host covers
 everything Loam does against it (see [`docs/sync-spec.md`](docs/sync-spec.md)).
 
+### Try it
+
+One machine, Docker, no Kubernetes and no build toolchain:
+
+```sh
+cp deploy/.env.example deploy/.env   # then fill in four values it explains
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+The walkthrough from there to an enrolled repo and a working agent identity —
+including the one key that cannot be rotated and is not in your database backup
+— is [`docs/compose-quickstart.md`](docs/compose-quickstart.md). For the
+Kubernetes deployment instead, see [`helm/loam`](helm/loam) and
+[`docs/deployment-spec.md`](docs/deployment-spec.md).
+
 ### Components at a glance
 
 - **Server** — the single source of truth. Holds the mirrored git repos (on disk) plus a
