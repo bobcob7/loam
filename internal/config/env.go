@@ -236,18 +236,47 @@ func validateDatabaseURL(raw string) error {
 // hold private repo content) if it does not yet exist.
 func checkDataDirWritable(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("LOAM_DATA_DIR: %w: %w", errDataDirNotWritable, err)
+		return dataDirError(dir, err)
 	}
 	f, err := os.CreateTemp(dir, ".loam-write-check-*")
 	if err != nil {
-		return fmt.Errorf("LOAM_DATA_DIR: %w: %w", errDataDirNotWritable, err)
+		return dataDirError(dir, err)
 	}
 	name := f.Name()
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("LOAM_DATA_DIR: %w: %w", errDataDirNotWritable, err)
+		return dataDirError(dir, err)
 	}
 	if err := os.Remove(name); err != nil {
-		return fmt.Errorf("LOAM_DATA_DIR: %w: %w", errDataDirNotWritable, err)
+		return dataDirError(dir, err)
 	}
 	return nil
+}
+
+// dataDirError wraps a failed LOAM_DATA_DIR probe with the two facts an
+// operator needs in order to act on it in one step: the directory that was
+// probed, and the uid/gid this process is actually running as.
+//
+// The pairing is the whole point. The underlying os error names the path
+// and says "permission denied", which is true and not actionable -- the
+// question it leaves open is "denied to whom", and the answer is rarely the
+// user reading the log. This is the single most likely first-run failure
+// for the container image, which runs as uid/gid 10001 (Dockerfile):
+// deploy/docker-compose.yml's named volume is seeded from the image with
+// that ownership and works, but the moment someone swaps in a bind mount to
+// see the mirrors on their host, Docker creates a root-owned directory,
+// chowns nothing, and the server crashloops here. Kubernetes has fsGroup
+// (helm/loam sets 10001) for exactly this; compose has no equivalent, so
+// the error message is the only thing standing between the operator and a
+// mystery. Naming the uid turns it into a one-line diagnosis and points
+// directly at the chown that fixes it.
+//
+// It deliberately does NOT stat dir to report its current owner, tempting
+// though that is: fs.FileInfo.Sys()'s concrete type is platform-specific,
+// so reading it would trade a portable package for one more fact the
+// operator can get themselves with `ls -ldn`.
+func dataDirError(dir string, err error) error {
+	uid, gid := os.Getuid(), os.Getgid()
+	return fmt.Errorf(
+		"LOAM_DATA_DIR: %w: %s: this process runs as uid %d gid %d and must be able to write there (a bind-mounted host directory is not chowned for you -- `chown -R %d:%d <host path>` before first start): %w",
+		errDataDirNotWritable, dir, uid, gid, uid, gid, err)
 }

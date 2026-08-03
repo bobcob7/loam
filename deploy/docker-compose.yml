@@ -1,0 +1,313 @@
+# Single-machine DEPLOYMENT stack for loam (loam-lzxo): the loam server and
+# its Postgres, and nothing else. `docker compose -f deploy/docker-compose.yml
+# up -d` from the repo root is the whole install.
+#
+#   Quickstart, including the first-run path to an enrolled repo:
+#   ../docs/compose-quickstart.md
+#
+# RELATIONSHIP TO deploy/docker-compose.e2e.yml (loam-lzxo.7). That file is
+# the TEST stack for `task test:e2e`, not a deployment, and the two differ
+# on purpose:
+#
+#   - This file RUNS the server as a container. The e2e file deliberately
+#     does NOT: `task test:e2e` builds the real binaries with `task
+#     build:bin` and runs the server on the HOST against that file's
+#     containers, so the artifact under test is byte-for-byte what the
+#     build produces. See that file's own header.
+#   - The e2e file also runs a seeded real Forgejo. A deployment has no
+#     business shipping an upstream forge; you point loam at your own.
+#   - The e2e file publishes Postgres on a fixed host port and uses fixed
+#     container names, because a host process and `docker exec` have to
+#     reach them by a predictable address. Neither applies here, so this
+#     file does neither (see the postgres service's `ports` comment).
+#
+# What the two MUST agree on is the Postgres image, since a pgvector
+# version skew means one of them is exercising something nobody runs.
+# That agreement is enforced by a test, not by this comment:
+# internal/deploycheck/compose_test.go parses both files and compares the
+# tags it finds. Do not "fix" a failure there by editing only one file.
+#
+# COMPOSE VERSION. This file uses `depends_on.<service>.required` (the
+# ollama profile below), which needs the Compose Spec support shipped in
+# Docker Compose v2.20 (2023-07) or newer, or a standalone `docker-compose`
+# of equivalent vintage. Verified working on Docker Compose v5.0.2.
+
+name: loam
+
+services:
+  postgres:
+    # pgvector, NOT plain postgres. loam's migrations create vector columns
+    # for the RAG index (docs/persistence-spec.md); against stock
+    # `postgres:16` the very first boot fails at migration time with
+    # `type "vector" does not exist`, which reads like a loam bug and is
+    # not one. Pinned to the same tag deploy/docker-compose.e2e.yml and
+    # helm/loam/values.yaml's postgres.image pin -- see the header.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${LOAM_DB_USER:-loam}
+      # One password, read here AND by the loam service below from the same
+      # variable, so there is no second hand-synced copy to drift. This is
+      # the compose equivalent of helm/loam's single
+      # secret.keys.postgresPassword feeding both POSTGRES_PASSWORD and
+      # LOAM_DB_PASSWORD (loam-ytt2.11).
+      POSTGRES_PASSWORD: ${LOAM_DB_PASSWORD:?set LOAM_DB_PASSWORD in deploy/.env -- copy deploy/.env.example and read its comments}
+      POSTGRES_DB: ${LOAM_DB_NAME:-loam}
+      # The pgvector/postgres image only initialises a data directory it
+      # finds empty, so this is consumed exactly once, on the first `up`.
+      # Changing LOAM_DB_PASSWORD later does NOT change the password of an
+      # already-initialised database -- see ../docs/compose-quickstart.md.
+    volumes:
+      # NAMED volume, not a bind mount. The postgres image's entrypoint
+      # runs as root and chowns PGDATA to its own `postgres` user before
+      # dropping privileges, so a bind mount here does work -- but it
+      # leaves a host directory owned by the image's uid (999 on the
+      # pgvector pg16 image) that your host user cannot read, which is a
+      # worse outcome than the loam bind-mount trap below because it fails
+      # LATER, when you try to inspect the backup you thought you had. Back
+      # up with `pg_dump` through the container, not by copying files off a
+      # mount (../docs/compose-quickstart.md -> Backups).
+      - postgres-data:/var/lib/postgresql/data
+    # NO `ports:` STANZA, deliberately. Nothing outside this compose network
+    # needs to reach Postgres: the loam service resolves it as
+    # `postgres:5432` over the project's own network. Publishing it is
+    # attack surface for a deployment, and the debugging convenience it
+    # buys is available on demand without a config change:
+    #   docker compose -f deploy/docker-compose.yml exec postgres psql -U loam
+    # (deploy/docker-compose.e2e.yml DOES publish it, on 127.0.0.1 only,
+    # because there the server runs on the host and has no other route to
+    # it.) If you want it published anyway, add:
+    #   ports:
+    #     - "127.0.0.1:15432:5432"
+    # and keep the 127.0.0.1 prefix, or you have published your database to
+    # every host that can route to this machine.
+    healthcheck:
+      # pg_isready against the actual database, not a port probe: a
+      # listening socket during initdb is not a database that can answer.
+      # `depends_on: condition: service_healthy` on the loam service reads
+      # this, and it has to be true readiness because loam runs its
+      # migrations during boot (cmd/server/main.go's connectDatabase) and
+      # dies against a database that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${LOAM_DB_USER:-loam} -d ${LOAM_DB_NAME:-loam}"]
+      interval: 2s
+      timeout: 3s
+      # 60 * 2s = 2 minutes. First boot has to run initdb before it can
+      # answer, which on a slow disk is not instant.
+      retries: 60
+    restart: unless-stopped
+
+  loam:
+    # PINNED to a published multi-arch (linux/amd64 + linux/arm64) image
+    # from registry.bobcob7.com, built by .forgejo/workflows/build.yaml.
+    # Two deliberate non-defaults:
+    #
+    #   NOT :latest. The registry publishes :latest too, and using it makes
+    #   "which version am I running" unanswerable and an upgrade invisible
+    #   -- the same trap helm/loam/values.yaml's image.tag comment
+    #   documents for the GitOps path. The tag below is an immutable
+    #   commit-sha manifest list; upgrading is a one-line reviewable diff.
+    #
+    #   NOT `build:`. A first-time user should not need Go, Node, cgo and a
+    #   C toolchain to try loam -- internal/parser statically links
+    #   tree-sitter C sources, so a local build is a real toolchain
+    #   commitment, not a `docker build` away. To build the current tree
+    #   instead, run `task docker:build` (which produces
+    #   registry.bobcob7.com/loam/server:dev) and set LOAM_IMAGE=... in
+    #   deploy/.env; or uncomment the build: stanza below.
+    image: ${LOAM_IMAGE:-registry.bobcob7.com/loam/server:bdea9ab7c5b07f5f9086b81f61ed4a7536024af2}
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        # Not `service_started`. loam runs migrations on boot; against a
+        # Postgres that is merely up it exits non-zero and, with the
+        # restart policy below, would spin until Postgres happened to win
+        # the race. `task test:compose` asserts this ordering holds rather
+        # than trusting it.
+        condition: service_healthy
+      ollama-init:
+        # Only meaningful with `--profile ollama`. `required: false` is
+        # what makes that opt-in work without splitting this into two
+        # files: with the profile off, ollama-init is not in the project
+        # and compose drops this edge silently; with it on, loam does not
+        # start until the model pull has EXITED SUCCESSFULLY. See the
+        # ollama services below.
+        condition: service_completed_successfully
+        required: false
+    environment:
+      # ---- must be set by you (deploy/.env) ----------------------------
+      # No fallback on purpose. Compose refuses to render this file at all
+      # if either is unset, which is a legible error before anything
+      # starts, rather than a stack that boots with a guessable password
+      # or a shared key. The reasoning is recorded in deploy/.env.example.
+      LOAM_ADMIN_PASSWORD: ${LOAM_ADMIN_PASSWORD:?set LOAM_ADMIN_PASSWORD in deploy/.env -- copy deploy/.env.example and read its comments}
+      LOAM_ENCRYPTION_KEY: ${LOAM_ENCRYPTION_KEY:?set LOAM_ENCRYPTION_KEY in deploy/.env -- generate with `openssl rand -base64 32` and BACK IT UP; it cannot be rotated}
+      # ---- database ----------------------------------------------------
+      # The discrete LOAM_DB_* form, not LOAM_DATABASE_URL. internal/config
+      # accepts either but REJECTS both at once (env.go's
+      # resolveDatabaseURL), and the discrete form is what lets the one
+      # LOAM_DB_PASSWORD above feed the postgres service and loam without a
+      # second, DSN-shaped copy of the password -- which would also have to
+      # be percent-encoded by hand for a password containing @ / : or +.
+      # Same reasoning, same shape as helm/loam with postgres.enabled=true.
+      # To use an EXTERNAL database instead: delete the postgres service and
+      # these six vars, and set LOAM_DATABASE_URL. Setting it while these
+      # remain is a startup error, by design.
+      LOAM_DB_HOST: postgres
+      LOAM_DB_PORT: "5432"
+      LOAM_DB_USER: ${LOAM_DB_USER:-loam}
+      LOAM_DB_PASSWORD: ${LOAM_DB_PASSWORD:?set LOAM_DB_PASSWORD in deploy/.env -- copy deploy/.env.example and read its comments}
+      LOAM_DB_NAME: ${LOAM_DB_NAME:-loam}
+      # The bundled Postgres terminates no TLS of its own and is reachable
+      # only over this project's private network. Change this if you point
+      # LOAM_DB_HOST somewhere else.
+      LOAM_DB_SSLMODE: disable
+      # ---- everything else, defaulted to match helm/loam/values.yaml ----
+      LOAM_ADMIN_USER: ${LOAM_ADMIN_USER:-admin}
+      # Must agree with the loam-data mount path below AND the image's own
+      # ENV default. Three places, nothing checks they stay in sync --
+      # docs/deployment-spec.md says the same about the Helm path.
+      LOAM_DATA_DIR: /var/lib/loam
+      # Container-internal listen address. This is NOT how you change the
+      # host port -- use LOAM_HTTP_PORT under `ports` below, which leaves
+      # the healthcheck and the container port alone.
+      LOAM_HTTP_ADDR: ":8080"
+      # No default that silently works. See the ollama services below and
+      # deploy/.env.example: `http://ollama:11434` with `--profile ollama`,
+      # your own ollama otherwise. (internal/config's own default is
+      # http://localhost:11434, which inside a container means the loam
+      # container itself and is never right here.)
+      LOAM_EMBEDDER_URL: ${LOAM_EMBEDDER_URL:?set LOAM_EMBEDDER_URL in deploy/.env -- see the ollama notes there}
+      # Changing this is NOT a pure configuration change: loam-c94.16 fixed
+      # an ingest failure where a fixed bytes-per-token ratio could not
+      # bound nomic-embed-text's 2048-token context, and that bound is
+      # model-specific. A different model needs that arithmetic revisited,
+      # and existing vectors were produced by the old one.
+      LOAM_EMBEDDER_MODEL: ${LOAM_EMBEDDER_MODEL:-nomic-embed-text}
+      LOAM_INGEST_WORKERS: ${LOAM_INGEST_WORKERS:-2}
+      LOAM_LOG_LEVEL: ${LOAM_LOG_LEVEL:-info}
+      LOAM_PR_ATTRIBUTION: ${LOAM_PR_ATTRIBUTION:-true}
+      LOAM_SYNC_INTERVAL: ${LOAM_SYNC_INTERVAL:-60s}
+    ports:
+      # Bound to LOOPBACK by default, and that is a security decision, not
+      # a convenience one: loam's MVP has NO agent authentication. Identity
+      # and role are trusted exactly as asserted in the LOAM_AGENT_*
+      # environment (README -> Agent Identity & Roles), so anyone who can
+      # reach this port can claim to be any agent in any role. The admin
+      # console is behind basic auth; the agent RPC surface is not.
+      # To expose it on the network, set LOAM_HTTP_BIND=0.0.0.0 in
+      # deploy/.env -- and put it behind something that authenticates, or
+      # keep it on a network where you trust every host.
+      - "${LOAM_HTTP_BIND:-127.0.0.1}:${LOAM_HTTP_PORT:-8080}:8080"
+    volumes:
+      # NAMED volume, and this one is load-bearing. The image runs as
+      # uid/gid 10001 and pre-chowns /var/lib/loam (Dockerfile). Docker
+      # seeds a fresh NAMED volume from the image's directory at that path
+      # INCLUDING its ownership, so the server can write on first boot with
+      # no setup.
+      #
+      # A BIND MOUNT DOES NOT DO THAT. Replace this with, say,
+      # `- ./data:/var/lib/loam` and Docker creates a host directory owned
+      # by root (or by you), does not chown it, and the server exits during
+      # config load with `LOAM_DATA_DIR: data directory not writable`, then
+      # crashloops. This is the compose-shaped version of the problem
+      # helm/loam solves with `fsGroup: 10001` in the Pod securityContext
+      # (the Dockerfile's closing comment explains that half); compose has
+      # no fsGroup equivalent, so there is nothing to set -- the ownership
+      # has to already be right.
+      #
+      # If you want the mirrors visible on the host anyway, run this BEFORE
+      # the first `up`, and again after anything recreates the directory:
+      #   mkdir -p ./data && sudo chown -R 10001:10001 ./data
+      #
+      # This is NOT a cache. It holds the bare git mirrors, and a work
+      # branch that has not been accepted upstream exists ONLY here --
+      # docs/deployment-spec.md -> The Stateful Surface.
+      - loam-data:/var/lib/loam
+    healthcheck:
+      # Both real endpoints, not a port probe. /healthz is unconditional
+      # liveness; /readyz (internal/health) additionally pings the pool and
+      # checks the migration state, and returns 503 until both pass, which
+      # is what makes it honest about a server that is up but mid-migration.
+      # busybox wget (present in the alpine runtime image) exits non-zero on
+      # a non-2xx status, so this needs no status parsing.
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8080/healthz && wget -q -O /dev/null http://127.0.0.1:8080/readyz",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      # First boot runs every migration against an empty database before it
+      # can answer /readyz. start_period keeps those failures from counting
+      # against `retries` (and, on compose implementations that honour it,
+      # from marking the container unhealthy early).
+      start_period: 60s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------
+  # OPT-IN ollama, `--profile ollama`. NOT part of the default stack, on
+  # purpose: the image is ~2.1 GB (amd64) / ~3.0 GB (arm64) compressed
+  # before it has done anything, nomic-embed-text is another ~274 MB, and
+  # there is no GPU passthrough configured here -- on a machine that
+  # already runs ollama, or has a GPU this compose file knows nothing
+  # about, all of that is waste. Budget roughly 5 GB of disk and ~1 GB of
+  # RAM for the two services together.
+  #
+  #   docker compose -f deploy/docker-compose.yml --profile ollama up -d
+  #
+  # and set LOAM_EMBEDDER_URL=http://ollama:11434 in deploy/.env.
+  # Pointing at an ollama you already run is the DEFAULT path and needs no
+  # profile -- deploy/.env.example has the exact URL for Docker Desktop and
+  # for plain Linux, which differ.
+  # --------------------------------------------------------------------
+  ollama:
+    profiles: ["ollama"]
+    # Pinned, same reasoning as the loam image: :latest makes an upgrade
+    # invisible.
+    image: ${LOAM_OLLAMA_IMAGE:-ollama/ollama:0.13.2}
+    volumes:
+      # Named, so the ~274 MB model survives `down` and is pulled once
+      # rather than on every `up`. `down -v` discards it and the next `up`
+      # re-downloads.
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama --version >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+    restart: unless-stopped
+
+  ollama-init:
+    profiles: ["ollama"]
+    image: ${LOAM_OLLAMA_IMAGE:-ollama/ollama:0.13.2}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # A one-shot: pull the model, exit 0. This exists to kill a race, not
+    # for convenience. An ollama container starts with no models; loam's
+    # first ingest would otherwise reach a running-but-empty ollama and
+    # fail in a way that looks like a loam bug. The loam service's
+    # `ollama-init: service_completed_successfully` above means loam does
+    # not start until this has exited zero, so there is no window in which
+    # the model is missing.
+    #
+    # `ollama pull` is idempotent, so a second `up` re-runs this and
+    # returns almost immediately once the model is in the volume.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama pull "${LOAM_EMBEDDER_MODEL:-nomic-embed-text}"'
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    restart: "no"
+
+volumes:
+  # Both named, both survive `down` and are reused by the next `up`. Only
+  # `down -v` destroys them -- which for loam-data means destroying any
+  # work branch that was never accepted upstream, since nothing else has a
+  # copy (docs/deployment-spec.md -> The Stateful Surface).
+  loam-data:
+  postgres-data:
+  ollama-data:

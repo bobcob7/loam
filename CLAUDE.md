@@ -85,6 +85,7 @@ task test:acceptance         # godog acceptance suite vs internal/fakeforge (nee
 task test:contract:forgejo   # NIGHTLY-only: provider contract vs a REAL Forgejo (LOAM_TEST_FORGEJO=1, needs Docker)
 task test:e2e                # NIGHTLY-only: compose e2e smoke + Playwright admin journeys (needs Docker; see task desc)
 task test:e2e:golden         # NIGHTLY-only: compose e2e golden path + conflict/catch-up/re-accept (needs Docker)
+task test:compose            # NIGHTLY-only: deploy/docker-compose.yml smoke -- up from clean, /readyz, admin console, down -v (loam-lzxo.6; needs Docker)
 
 task web:install   # npm ci in web/
 task web:generate  # go tool buf generate --template web/buf.gen.yaml -- refresh web/src/gen after a proto/ change
@@ -95,7 +96,11 @@ task docker:build  # build the server image (loam-ytt2.1) from the repo-root Doc
 ```
 
 See `docs/deployment-spec.md` for how that image, the `helm/loam` chart, and
-the running service are configured, backed up, and rolled back.
+the running service are configured, backed up, and rolled back, and
+`docs/compose-quickstart.md` for the single-machine `deploy/docker-compose.yml`
+path (same image, no cluster). `internal/deploycheck` is the per-PR guard that
+keeps those two and the e2e stack from silently disagreeing about the Postgres
+image or the `LOAM_*` contract.
 
 CI runs on **Forgejo Actions** at git.bobcob7.com, not GitHub — the repo
 moved (loam-ytt2.6) and `.github/workflows/` was deleted, because Forgejo

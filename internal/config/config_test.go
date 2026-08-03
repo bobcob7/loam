@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -364,4 +365,33 @@ func TestLoad_UnwritableDataDir(t *testing.T) {
 	baseEnv(t, dir)
 	_, err := Load()
 	require.ErrorIs(t, err, errDataDirNotWritable)
+}
+
+// TestLoad_UnwritableDataDirErrorNamesUIDAndPath pins the diagnosability
+// half of the failure above, which the sentinel assertion alone does not
+// reach. This is the first-run failure a compose or Kubernetes operator is
+// most likely to hit -- a bind mount or a volume whose ownership does not
+// match the image's uid 10001 (deploy/docker-compose.yml's loam-data
+// comment, helm/loam's fsGroup) -- and "permission denied" without the uid
+// asking for permission is what makes it a mystery rather than a one-line
+// fix. Asserting the uid, the gid and the probed path together is the
+// contract; without all three the message is back to being unactionable.
+func TestLoad_UnwritableDataDirErrorNamesUIDAndPath(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "readonly")
+	require.NoError(t, os.Mkdir(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	baseEnv(t, dir)
+	_, err := Load()
+	require.ErrorIs(t, err, errDataDirNotWritable)
+	assert.Contains(t, err.Error(), dir, "the operator cannot act on a permission error that does not name the directory")
+	assert.Contains(t, err.Error(), fmt.Sprintf("uid %d", os.Getuid()),
+		"the actionable fact is which uid was denied, not merely that something was")
+	assert.Contains(t, err.Error(), fmt.Sprintf("gid %d", os.Getgid()))
+	assert.Contains(t, err.Error(), fmt.Sprintf("chown -R %d:%d", os.Getuid(), os.Getgid()),
+		"the message should carry the fix, not only the diagnosis")
 }

@@ -147,11 +147,34 @@ E2E exists to prove the shipped artifacts compose; behavioral coverage lives in 
 | Stage | Suites | Budget |
 | --- | --- | --- |
 | Per-PR gate | lint, unit (existing standards), integration, acceptance (fake forge) | minutes |
-| Nightly | provider contract vs. real Forgejo, e2e smoke, Playwright | tens of minutes |
+| Nightly | provider contract vs. real Forgejo, e2e smoke, Playwright, compose deployment smoke | tens of minutes |
 | Pre-release | full nightly set, green required | — |
 
 Taskfile targets mirror the stages: `task test:integration`, `task test:acceptance`,
-`task test:e2e` (and `task test` = the PR gate).
+`task test:e2e`, `task test:compose` (and `task test` = the PR gate).
+
+**The compose deployment smoke (`task test:compose`, loam-lzxo.6) is split across two
+stages on purpose**, because the two halves of "did `deploy/docker-compose.yml` rot"
+cost wildly different amounts to answer:
+
+- The half that needs no daemon runs **per-PR**, as an ordinary unit test:
+  `internal/deploycheck`. It fails when the Postgres image drifts between the
+  deployment stack, the e2e stack and the chart; when the compose file sets a `LOAM_*`
+  variable `internal/config` does not read; when a credential-shaped variable acquires
+  a working default; and — because it runs `config.Load()` against the environment the
+  compose file actually produces, rather than modelling which variables are required —
+  when the compose file stops setting something `internal/config` requires, or
+  `internal/config` starts requiring something the compose file does not set. Both
+  directions of a rename are therefore covered, required and optional alike.
+  Milliseconds, no Docker, so there is no reason for it to wait for nightly.
+- The half that needs a real boot runs **nightly**: `task test:compose` pulls the
+  pinned published image, brings the stack up from clean, asserts the startup ordering
+  and readiness, checks the admin console is the real SPA, and tears down with `-v`.
+  It catches what static parsing cannot — an image tag that no longer resolves, a
+  migration that fails on a fresh database, a health path that moved — and costs an
+  image pull plus a Postgres boot. `.forgejo/workflows/ci.yaml`'s runners have capacity
+  1 and same-architecture jobs serialise, so putting that in the per-PR gate would
+  delay every other PR behind it.
 
 ## Fixtures
 
