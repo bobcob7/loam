@@ -76,6 +76,22 @@ const commentsFixture: RouteBody = {
   pageInfo: { total: 1 },
 };
 
+/** A `ListComments` body carrying exactly the threads a test cares about. */
+const threadsFixture = (threads: readonly RouteBody[]): RouteBody => ({
+  threads,
+  pageInfo: { total: threads.length },
+});
+
+/**
+ * The Comments section as an element to scope queries to. Reviewer names
+ * appear in the Verdicts table too, so an unscoped query is ambiguous.
+ */
+const commentsSection = (): HTMLElement => {
+  const section = screen.getByRole("heading", { name: "Comments" }).closest("section");
+  if (section === null) throw new Error("Comments section is not inside a <section>");
+  return section;
+};
+
 /** The full set of GET queries this screen fires, with sane defaults. */
 const baseRoutes = (): Record<string, Route> => ({
   [workBranchPath]: ok({ workBranch: workBranchFixture() }),
@@ -241,6 +257,155 @@ describe("ProposalDetail: loaded screen", () => {
     if (comments === null) throw new Error("unreachable: asserted above");
     expect(within(comments).getByText("reviewer-a-agent")).toBeInTheDocument();
     expect(within(comments).getByText(/Consider renaming this\./)).toBeInTheDocument();
+  });
+
+  it("renders a comment body through the shared markdown renderer", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "### Rename this\n\n- `parseDiff` is ambiguous\n- prefer `parseUnifiedDiff`",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    expect(
+      await within(comments).findByRole("heading", { name: "Rename this" }),
+    ).toBeInTheDocument();
+    expect(within(comments).getAllByRole("listitem").length).toBeGreaterThan(1);
+  });
+
+  it("keeps the author and round out of the body, so a heading does not run on", async () => {
+    // The pre-markdown rendering was `{author} (round N): {body}` on one line;
+    // a body opening with a heading continued the metadata sentence. The
+    // assertion is that the heading's text is exactly the heading's -- if the
+    // metadata were still inline it would be part of the same text node's
+    // ancestor chain, and the heading element itself would not exist at all.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 2,
+            comments: [{ author: "reviewer-a-agent", round: 2, body: "# Blocking" }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    expect(await within(comments).findByRole("heading", { name: "Blocking" })).toBeInTheDocument();
+    expect(within(comments).getByText("reviewer-a-agent")).toBeInTheDocument();
+    expect(within(comments).getByText("Round 2")).toBeInTheDocument();
+  });
+
+  it("renders a fenced block nested inside a comment inside a thread list", async () => {
+    // Three levels of nesting -- <ul> thread > <li> comment > markdown block.
+    // The check is that the block-level content survives as a real pre > code
+    // rather than being collapsed into the list item's inline flow.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "This fails:\n\n```\nTypeError: x is not a function\n```\n",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText(/This fails/);
+    const block = comments.querySelector("li pre > code");
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toBe("TypeError: x is not a function\n");
+  });
+
+  it("renders no body block for a comment with an empty body", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [{ author: "reviewer-a-agent", round: 1, body: "" }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    const author = await within(comments).findByText("reviewer-a-agent");
+    const item = author.closest("li");
+    // Metadata only: the Markdown renderer emits nothing at all rather than
+    // an empty block that would read as a body that failed to load.
+    expect(item?.children).toHaveLength(1);
+    expect(item?.firstElementChild?.tagName).toBe("P");
+  });
+
+  it("renders a hostile COMMENT BODY inert at this call site, not only in the component", async () => {
+    // A comment body is written by a different agent to the branch's author --
+    // a reviewer, under a separate identity, whose role is adversarial. This
+    // asserts the wiring here, because a correct Markdown component reached
+    // through a second, inline renderer would leave Markdown.test.tsx green.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body:
+                  "<script>window.stolen = 1</script>\n\n" +
+                  '<img src="x" onerror="window.stolen = 2">\n\n' +
+                  "[approve it](javascript:document.querySelector('button').click())\n\n" +
+                  "[or this](&#106;avascript&#x3A;alert&#40;1&#41;)",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText("reviewer-a-agent");
+    expect(comments.querySelector("script")).toBeNull();
+    expect(comments.querySelector("img")).toBeNull();
+    expect(comments.querySelectorAll("[onerror]")).toHaveLength(0);
+    const links = [...comments.querySelectorAll("a")];
+    expect(links).toHaveLength(2);
+    for (const link of links) expect(link.getAttribute("href")).toBe("");
+    expect(comments.innerHTML).not.toContain("javascript");
   });
 
   it("renders both reviewers as distinct verdict rows, not collapsed to one", async () => {

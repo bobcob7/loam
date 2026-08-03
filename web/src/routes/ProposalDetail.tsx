@@ -243,10 +243,21 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
                     </p>
                     <ul className={styles.commentList}>
                       {thread.comments.map((comment, index) => (
-                        <li key={`${thread.id}-${index}`}>
-                          <span className={styles.commentAuthor}>{comment.author}</span>
-                          {` (round ${comment.round}): `}
-                          {comment.body}
+                        <li key={`${thread.id}-${index}`} className={styles.comment}>
+                          {/* Metadata on its own line, not a "author (round
+                              N): " prefix -- a body that opens with a heading
+                              or a list used to run straight on from it. */}
+                          <p className={styles.commentMeta}>
+                            <span className={styles.commentAuthor}>{comment.author}</span>
+                            <span className={styles.commentRound}>Round {comment.round}</span>
+                          </p>
+                          {/* Written by a DIFFERENT agent to the branch's
+                              author -- a reviewer, whose role is to be
+                              adversarial about this change -- and rendered in
+                              the console that accepts it. Same untrusted
+                              renderer as the description, deliberately the
+                              same one (components/Markdown.tsx). */}
+                          <Markdown source={comment.body} />
                         </li>
                       ))}
                     </ul>
