@@ -61,6 +61,11 @@ Feature: Reviewing a work branch
     When I try to submit a verdict on it
     Then the attempt is rejected as a failed precondition
 
+  Scenario: A comment anchored beyond the file's length is rejected
+    When I stage a comment beyond the file's length and submit a verdict
+    Then the verdict is rejected as a usage error naming the file's actual length
+    And no comments are published
+
   Scenario: Staged comments survive a new review round
     Given I have staged two comments
     And another reviewer's verdict has marked the work branch "reviewed"

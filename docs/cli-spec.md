@@ -638,9 +638,16 @@ agent's verdict for the round.
 { "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "outcome": "approve", "published": 3 }
 ```
 
-**Errors:** exit `2` on a missing or invalid outcome, or if the work branch is not open
-for review (`draft` or a terminal state — see State gates); exit `3` if it does not
-exist.
+**Errors:** exit `2` on a missing or invalid outcome, if the work branch is not open
+for review (`draft` or a terminal state — see State gates), or if any staged comment's
+`--file`/`--line` anchor is invalid **at the work branch's current tip** — a nonpositive
+line, a line beyond the file's actual length (the error names that length), or a file not
+present there at all. This check runs server-side, against the mirror, not against
+whatever the CLI staged against: a comment staged when the anchor was valid can still be
+rejected here if the author pushed a shrinking change during review. A rejected anchor
+fails the **whole** verdict — nothing in the batch publishes, and every staged item
+(including the ones with valid anchors) stays in the local staging area for the reviewer
+to fix or drop and resubmit. Exit `3` if the work branch does not exist.
 
 Once a work branch is `reviewed` with at least one approve verdict, it becomes a proposal in
 the admin's queue (see `docs/web-spec.md` → ProposalService). There is no agent `complete`

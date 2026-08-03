@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/gitanchor"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/reviewpublish"
 	"github.com/bobcob7/loam/internal/reviewstore"
@@ -382,6 +383,10 @@ func TestSubmitVerdict_PublisherErrors_MappedToConnectCodes(t *testing.T) {
 		{name: "resolving another agent's thread", publish: fmt.Errorf("wrapped: %w", reviewstore.ErrNotThreadAuthor), wantCode: connect.CodePermissionDenied},
 		{name: "resolving a thread that does not exist", publish: fmt.Errorf("wrapped: %w", reviewstore.ErrThreadNotFound), wantCode: connect.CodeNotFound},
 		{name: "work branch vanished mid-publish", publish: fmt.Errorf("wrapped: %w", workbranchstore.ErrNotFound), wantCode: connect.CodeNotFound},
+		{name: "anchor line zero or negative", publish: fmt.Errorf("wrapped: %w", reviewpublish.ErrAnchorLineInvalid), wantCode: connect.CodeInvalidArgument},
+		{name: "anchor file not present at the tip", publish: fmt.Errorf("wrapped: %w", reviewpublish.ErrAnchorFileNotFound), wantCode: connect.CodeInvalidArgument},
+		{name: "anchor line beyond the file's length", publish: fmt.Errorf("wrapped: %w", reviewpublish.ErrAnchorLineOutOfRange), wantCode: connect.CodeInvalidArgument},
+		{name: "work branch ref missing from the mirror", publish: fmt.Errorf("wrapped: %w", gitanchor.ErrRefMissing), wantCode: connect.CodeFailedPrecondition},
 		{name: "anything else is internal", publish: errors.New("connection reset"), wantCode: connect.CodeInternal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

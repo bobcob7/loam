@@ -43,6 +43,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/gitanchor"
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/testdb"
 	"github.com/bobcob7/loam/internal/workbranchstore"
@@ -86,6 +87,17 @@ func TestMain(m *testing.M) {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
+// noAnchorChecker returns an AnchorCheckerMock with no FileLineCountFunc
+// set, for every test in this file whose comments carry no file anchor at
+// all (validateAnchors skips a File == nil comment entirely, see
+// publish.go). Calling FileLineCount on it panics -- moq's own default for
+// an unset func -- which is deliberate: if a change ever made Publish
+// consult the anchor checker for an unanchored comment, these tests must
+// fail loudly on that panic, not silently pass by coincidence.
+func noAnchorChecker() *AnchorCheckerMock {
+	return &AnchorCheckerMock{}
 }
 
 // newPool opens an independent pool against the shared container.
@@ -204,7 +216,7 @@ func TestPublish_InvisibleToConcurrentReadersUntilCommit(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := New(writerPool, testLogger()).Publish(context.WithoutCancel(ctx), Request{
+		_, err := New(writerPool, noAnchorChecker(), testLogger()).Publish(context.WithoutCancel(ctx), Request{
 			WorkBranchID: workBranchID,
 			Reviewer:     "ada-lovelace-7-reviewer",
 			Outcome:      reviewstore.OutcomeApprove,
@@ -262,7 +274,7 @@ func TestPublish_RejectedResolve_PublishesNothing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, countThreads(ctx, t, pool, workBranchID))
 
-	_, err = New(pool, testLogger()).Publish(ctx, Request{
+	_, err = New(pool, noAnchorChecker(), testLogger()).Publish(ctx, Request{
 		WorkBranchID:     workBranchID,
 		Reviewer:         "ada-lovelace-7-reviewer",
 		Outcome:          reviewstore.OutcomeApprove,
@@ -289,7 +301,7 @@ func TestPublish_FirstVerdictFlipsReviewableToReviewed(t *testing.T) {
 	ctx := t.Context()
 	pool := newPool(t)
 	workBranchID, _ := seedWorkBranch(ctx, t, pool, "flip-repo", workbranchstore.StateReviewable, true)
-	publisher := New(pool, testLogger())
+	publisher := New(pool, noAnchorChecker(), testLogger())
 
 	first, err := publisher.Publish(ctx, Request{WorkBranchID: workBranchID, Reviewer: "ada-lovelace-7-reviewer", Outcome: reviewstore.OutcomeApprove})
 	require.NoError(t, err)
@@ -311,7 +323,7 @@ func TestPublish_ResubmissionReplacesInPlace(t *testing.T) {
 	ctx := t.Context()
 	pool := newPool(t)
 	workBranchID, _ := seedWorkBranch(ctx, t, pool, "resubmit-repo", workbranchstore.StateReviewable, true)
-	publisher := New(pool, testLogger())
+	publisher := New(pool, noAnchorChecker(), testLogger())
 	_, err := publisher.Publish(ctx, Request{WorkBranchID: workBranchID, Reviewer: "ada-lovelace-7-reviewer", Outcome: reviewstore.OutcomeDisapprove})
 	require.NoError(t, err)
 	_, err = publisher.Publish(ctx, Request{WorkBranchID: workBranchID, Reviewer: "ada-lovelace-7-reviewer", Outcome: reviewstore.OutcomeApprove})
@@ -335,7 +347,7 @@ func TestPublish_SecondRoundMakesPriorVerdictsStale(t *testing.T) {
 	ctx := t.Context()
 	pool := newPool(t)
 	workBranchID, round1 := seedWorkBranch(ctx, t, pool, "stale-repo", workbranchstore.StateReviewable, true)
-	publisher := New(pool, testLogger())
+	publisher := New(pool, noAnchorChecker(), testLogger())
 	_, err := publisher.Publish(ctx, Request{WorkBranchID: workBranchID, Reviewer: "alan-turing-4-reviewer", Outcome: reviewstore.OutcomeApprove})
 	require.NoError(t, err)
 
@@ -400,7 +412,7 @@ func TestPublish_StateGate(t *testing.T) {
 			ctx := t.Context()
 			pool := newPool(t)
 			workBranchID, _ := seedWorkBranch(ctx, t, pool, "gate-"+uuid.NewString()[:8], tc.state, tc.withRound)
-			_, err := New(pool, testLogger()).Publish(ctx, Request{
+			_, err := New(pool, noAnchorChecker(), testLogger()).Publish(ctx, Request{
 				WorkBranchID: workBranchID,
 				Reviewer:     "ada-lovelace-7-reviewer",
 				Outcome:      reviewstore.OutcomeApprove,
@@ -428,7 +440,7 @@ func TestPublish_ReviewableWithNoRound_ReportsNoCurrentRound(t *testing.T) {
 	ctx := t.Context()
 	pool := newPool(t)
 	workBranchID, _ := seedWorkBranch(ctx, t, pool, "roundless-repo", workbranchstore.StateReviewable, false)
-	_, err := New(pool, testLogger()).Publish(ctx, Request{
+	_, err := New(pool, noAnchorChecker(), testLogger()).Publish(ctx, Request{
 		WorkBranchID: workBranchID,
 		Reviewer:     "ada-lovelace-7-reviewer",
 		Outcome:      reviewstore.OutcomeApprove,
@@ -447,11 +459,188 @@ func TestPublish_UnknownWorkBranch_ReportsNotFound(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	pool := newPool(t)
-	_, err := New(pool, testLogger()).Publish(ctx, Request{
+	_, err := New(pool, noAnchorChecker(), testLogger()).Publish(ctx, Request{
 		WorkBranchID: uuid.New(),
 		Reviewer:     "ada-lovelace-7-reviewer",
 		Outcome:      reviewstore.OutcomeApprove,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, workbranchstore.ErrNotFound)
+}
+
+// fixedAnchorChecker returns an AnchorCheckerMock reporting lines[file] for
+// FileLineCount, panicking (via the zero-value's own nil-func behavior) if
+// asked about a file the test did not expect -- so an assertion never
+// passes because the mock silently answered zero for the wrong key.
+func fixedAnchorChecker(t *testing.T, lines map[string]int) *AnchorCheckerMock {
+	t.Helper()
+	return &AnchorCheckerMock{
+		FileLineCountFunc: func(_ context.Context, _ workbranchstore.WorkBranch, file string) (int, error) {
+			n, ok := lines[file]
+			require.True(t, ok, "unexpected FileLineCount(%q)", file)
+			return n, nil
+		},
+	}
+}
+
+// TestPublish_AnchorAtExactBoundary_Accepted is loam-hi5o.15's acceptance
+// criterion 6: an anchor on the LAST line of a file -- line == the file's
+// own length, not merely "some valid line" -- must publish. 53 is
+// deliberately not a round number (not 100, not the file's actual length
+// rounded any particular way) so an off-by-one in either direction cannot
+// pass by coincidence with a seed chosen for convenience.
+func TestPublish_AnchorAtExactBoundary_Accepted(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newPool(t)
+	workBranchID, _ := seedWorkBranch(ctx, t, pool, "boundary-repo", workbranchstore.StateReviewable, true)
+	line := int32(53)
+	anchors := fixedAnchorChecker(t, map[string]int{"f.go": 53})
+	file := "f.go"
+	result, err := New(pool, anchors, testLogger()).Publish(ctx, Request{
+		WorkBranchID: workBranchID,
+		Reviewer:     "ada-lovelace-7-reviewer",
+		Outcome:      reviewstore.OutcomeApprove,
+		Comments:     []NewComment{{File: &file, Line: &line, Body: "the last line, exactly"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Published)
+	assert.Equal(t, 1, countThreads(ctx, t, pool, workBranchID))
+}
+
+// TestPublish_AnchorOneBeyondBoundary_RejectsWholeVerdict_NothingPersists is
+// this package's own recorded answer to loam-hi5o.15's design question: what
+// happens when a comment's anchor is out of range at publish time, whether
+// it was always wrong or drifted there because the author pushed a
+// shrinking change during review. The mock's FileLineCount answers with
+// whatever the CURRENT tip reports -- 53, one less than the anchored line
+// -- which is indistinguishable, from the server's point of view, from "the
+// reviewer staged against a 54-line file and the author has since removed a
+// line": the server never saw the comment before this call (staging is
+// local-only) and has no earlier value to compare against. See this
+// package's own doc comment for why the decision is "fail the whole
+// Publish call" rather than degrading to a stale flag.
+//
+// The request carries a SECOND, perfectly valid comment ahead of the bad
+// one, so this test also proves the rejection is not merely reported but
+// genuinely atomic: if anchor validation ran per-comment mid-transaction
+// instead of as a single up-front gate, the valid comment would already be
+// an OpenThread call by the time the second one failed, and this test's
+// zero-threads assertion would catch that.
+func TestPublish_AnchorOneBeyondBoundary_RejectsWholeVerdict_NothingPersists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newPool(t)
+	workBranchID, _ := seedWorkBranch(ctx, t, pool, "raced-repo", workbranchstore.StateReviewable, true)
+	validLine := int32(1)
+	validFile := "other.go"
+	staleLine := int32(54)
+	staleFile := "f.go"
+	anchors := fixedAnchorChecker(t, map[string]int{"other.go": 10, "f.go": 53})
+	_, err := New(pool, anchors, testLogger()).Publish(ctx, Request{
+		WorkBranchID: workBranchID,
+		Reviewer:     "ada-lovelace-7-reviewer",
+		Outcome:      reviewstore.OutcomeApprove,
+		Comments: []NewComment{
+			{File: &validFile, Line: &validLine, Body: "a perfectly good comment"},
+			{File: &staleFile, Line: &staleLine, Body: "line 54 of a now-53-line file"},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAnchorLineOutOfRange)
+	assert.Contains(t, err.Error(), "53 line", "the error must name the file's actual length")
+	assert.Equal(t, 0, countThreads(ctx, t, pool, workBranchID), "the earlier, valid comment must not have survived the later rejection")
+	assert.Equal(t, 0, countVerdicts(ctx, t, pool, workBranchID))
+	assert.Equal(t, "reviewable", readState(ctx, t, pool, workBranchID), "not flipped to reviewed by a verdict that never landed")
+}
+
+// TestPublish_AnchorOnMissingFile_Rejected proves loam-hi5o.15's acceptance
+// criterion 3 (a comment on a file not present at the tip is rejected)
+// through a DIFFERENT AnchorChecker failure than the out-of-range case
+// above -- ErrFileNotFound, not a line count -- so a test double that
+// happened to reject every anchor regardless of cause could not pass this
+// and TestPublish_AnchorAtExactBoundary_Accepted at once.
+func TestPublish_AnchorOnMissingFile_Rejected(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newPool(t)
+	workBranchID, _ := seedWorkBranch(ctx, t, pool, "missing-file-repo", workbranchstore.StateReviewable, true)
+	file := "never-committed.go"
+	anchors := &AnchorCheckerMock{
+		FileLineCountFunc: func(context.Context, workbranchstore.WorkBranch, string) (int, error) {
+			return 0, fmt.Errorf("never-committed.go: %w", gitanchor.ErrFileNotFound)
+		},
+	}
+	_, err := New(pool, anchors, testLogger()).Publish(ctx, Request{
+		WorkBranchID: workBranchID,
+		Reviewer:     "ada-lovelace-7-reviewer",
+		Outcome:      reviewstore.OutcomeApprove,
+		Comments:     []NewComment{{File: &file, Body: "wrong path entirely"}},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAnchorFileNotFound)
+	assert.Equal(t, 0, countThreads(ctx, t, pool, workBranchID))
+}
+
+// TestPublish_ZeroOrNegativeLine_RejectedWithoutConsultingTheMirror proves
+// loam-hi5o.15's acceptance criterion 2 (line 0 and negative lines are
+// rejected) AND that this check runs before any mirror read: it uses
+// noAnchorChecker(), whose FileLineCount panics if called at all, so a
+// regression that moved the <= 0 check after the file lookup would fail
+// this test on the panic, not merely on a wrong error.
+func TestPublish_ZeroOrNegativeLine_RejectedWithoutConsultingTheMirror(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		line int32
+	}{
+		{name: "zero", line: 0},
+		{name: "negative (unreachable on the wire, reachable via uint32->int32 overflow)", line: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			pool := newPool(t)
+			workBranchID, _ := seedWorkBranch(ctx, t, pool, "zeroline-"+uuid.NewString()[:8], workbranchstore.StateReviewable, true)
+			file := "f.go"
+			line := tc.line
+			_, err := New(pool, noAnchorChecker(), testLogger()).Publish(ctx, Request{
+				WorkBranchID: workBranchID,
+				Reviewer:     "ada-lovelace-7-reviewer",
+				Outcome:      reviewstore.OutcomeApprove,
+				Comments:     []NewComment{{File: &file, Line: &line, Body: "bad line"}},
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAnchorLineInvalid)
+			assert.Equal(t, 0, countThreads(ctx, t, pool, workBranchID))
+		})
+	}
+}
+
+// TestPublish_UnanchoredAndWholeFileComments_NeverConsultTheMirror proves a
+// top-level thread (no File) and a whole-file anchor (File set, Line nil)
+// take the cheap paths validateAnchors documents: the former is skipped
+// outright, the latter only needs the file to exist, never a line bound.
+// noAnchorChecker's FileLineCount would panic if the top-level comment
+// triggered a lookup; the whole-file comment DOES trigger exactly one,
+// answered by fixedAnchorChecker.
+func TestPublish_UnanchoredAndWholeFileComments_NeverConsultTheMirror(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newPool(t)
+	workBranchID, _ := seedWorkBranch(ctx, t, pool, "wholefile-repo", workbranchstore.StateReviewable, true)
+	file := "f.go"
+	anchors := fixedAnchorChecker(t, map[string]int{"f.go": 10})
+	result, err := New(pool, anchors, testLogger()).Publish(ctx, Request{
+		WorkBranchID: workBranchID,
+		Reviewer:     "ada-lovelace-7-reviewer",
+		Outcome:      reviewstore.OutcomeApprove,
+		Comments: []NewComment{
+			{Body: "a top-level thread, no anchor at all"},
+			{File: &file, Body: "a whole-file anchor, no line"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Published)
+	assert.Equal(t, 2, countThreads(ctx, t, pool, workBranchID))
 }

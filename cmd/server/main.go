@@ -93,6 +93,7 @@ import (
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/gen/loam/v1/loamv1connect"
 	"github.com/bobcob7/loam/internal/gitancestry"
+	"github.com/bobcob7/loam/internal/gitanchor"
 	"github.com/bobcob7/loam/internal/gitdiff"
 	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
@@ -487,7 +488,8 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	rounds := reviewstore.NewRoundStore(pool, cfg.Logger)
 	threads := reviewstore.NewThreadStore(pool, cfg.Logger)
 	verdicts := reviewstore.NewVerdictStore(pool, cfg.Logger)
-	publisher := reviewpublish.New(pool, cfg.Logger)
+	anchors := gitanchor.New(cfg.DataDir, repos)
+	publisher := reviewpublish.New(pool, anchors, cfg.Logger)
 	diff := gitdiff.New(cfg.DataDir, repos)
 	// The work-branch ref writer: docs/git-spec.md -> Ref Policy makes the
 	// server the ONLY creator of a work-branch ref (loam-5iu), and the

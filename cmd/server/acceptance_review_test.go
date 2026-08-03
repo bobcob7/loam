@@ -40,6 +40,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
+
+	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // acceptanceActor is one agent identity the CLI runs as: the three
@@ -219,6 +222,9 @@ func (h *acceptanceHarness) registerReviewSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^none are marked stale$`, h.stepNoneAreMarkedStale)
 	sc.Step(`^I try to submit a verdict on it$`, h.stepITryToSubmitAVerdictOnIt)
 	sc.Step(`^the attempt is rejected as a failed precondition$`, h.stepTheAttemptIsRejectedAsFailedPrecondition)
+	sc.Step(`^I stage a comment beyond the file's length and submit a verdict$`, h.stepIStageACommentBeyondTheFilesLengthAndSubmitAVerdict)
+	sc.Step(`^the verdict is rejected as a usage error naming the file's actual length$`, h.stepTheVerdictIsRejectedAsAUsageErrorNamingTheFilesActualLength)
+	sc.Step(`^no comments are published$`, h.stepNoCommentsArePublished)
 	sc.Step(`^another reviewer's verdict has marked the work branch "([^"]*)"$`, h.stepAnotherReviewersVerdictHasMarkedTheWorkBranch)
 	sc.Step(`^the author requests review again$`, h.stepTheAuthorRequestsReviewAgain)
 	sc.Step(`^my comments are published in the new round$`, h.stepMyCommentsArePublishedInTheNewRound)
@@ -370,11 +376,45 @@ func (h *acceptanceHarness) showWorkBranch(world *acceptanceWorld, actor accepta
 	return out, err
 }
 
+// ensureAnchorFixtureMirror lazily builds a real bare git mirror at
+// mirrorpath.Dir(h.server.dataDir, world.repo()), with acceptanceAuthFile
+// committed onto workBranch's OWN ref, so a file-anchored comment has a
+// real blob for internal/gitanchor to read (loam-hi5o.15: SubmitVerdict now
+// validates every staged comment's anchor server-side, against the mirror,
+// before publishing). reviewing.feature and replies.feature otherwise never
+// touch git at all -- see stepRepoIsEnrolled's own doc comment -- so this is
+// the one place they now must.
+//
+// Idempotent per repo: a mirror directory that already exists is left
+// alone, so a scenario staging a second anchored comment against the same
+// work branch (stepIHaveStagedTwoComments) does not try to bare-clone over
+// an existing directory and fail.
+func (h *acceptanceHarness) ensureAnchorFixtureMirror(ctx context.Context, world *acceptanceWorld, workBranch string) error {
+	mirrorDir := mirrorpath.Dir(h.server.dataDir, world.repo())
+	if _, err := os.Stat(mirrorDir); err == nil {
+		return nil
+	}
+	if _, err := seedBareMirrorWithBranches(ctx, h.server.dataDir, world.repo(), world.targetBranch, workBranch); err != nil {
+		return fmt.Errorf("seeding an anchor-validation mirror for %s: %w", world.repo(), err)
+	}
+	if _, err := commitIntoMirror(ctx, mirrorDir, refnames.WorkBranch(workBranch), "", acceptanceAuthFile, acceptanceAuthContent, "acceptance: seed a file for anchor validation"); err != nil {
+		return fmt.Errorf("seeding %s onto work branch %s for anchor validation: %w", acceptanceAuthFile, workBranch, err)
+	}
+	return nil
+}
+
 // stageComment stages one new-thread comment as actor and returns the
-// staged item the CLI reports.
-func (h *acceptanceHarness) stageComment(world *acceptanceWorld, actor acceptanceActor, workBranch, body string, line int) (acceptanceStagedComment, error) {
+// staged item the CLI reports. When line names an anchor, this first
+// ensures the work branch's mirror carries a real acceptanceAuthFile blob
+// long enough to hold it (ensureAnchorFixtureMirror) -- the anchor is
+// validated server-side at publish time (loam-hi5o.15), so the file must
+// genuinely exist there, not merely be a plausible-looking name.
+func (h *acceptanceHarness) stageComment(ctx context.Context, world *acceptanceWorld, actor acceptanceActor, workBranch, body string, line int) (acceptanceStagedComment, error) {
 	args := []string{"work", "comment", world.repo(), workBranch}
 	if line > 0 {
+		if err := h.ensureAnchorFixtureMirror(ctx, world, workBranch); err != nil {
+			return acceptanceStagedComment{}, err
+		}
 		args = append(args, "--file", acceptanceAuthFile, "--line", fmt.Sprintf("%d", line))
 	}
 	res := h.runLoamAs(world, actor, body, args...)
@@ -550,9 +590,12 @@ func verdictByReviewer(verdicts []acceptanceVerdict, reviewer string) (acceptanc
 // the branch's CURRENT round, and a branch with none is a failed
 // precondition by design.
 //
-// No mirror is built and no clone is made: every command these two feature
-// files drive names its repo and work branch explicitly, so none of them
-// touches git.
+// No mirror is built HERE, and most commands these two feature files drive
+// never touch git at all -- every one names its repo and work branch
+// explicitly. The one exception is a comment carrying a --file anchor:
+// loam-hi5o.15 validates that server-side against the mirror, so
+// stageComment (via ensureAnchorFixtureMirror) builds one lazily, the first
+// time a scenario actually stages an anchored comment, not here.
 func (h *acceptanceHarness) stepAWorkBranchNamedIsInState(ctx context.Context, name, state string) error {
 	world := worldFrom(ctx)
 	world.setPrimaryWorkBranch(name)
@@ -688,7 +731,7 @@ func (h *acceptanceHarness) stepIsIncluded(ctx context.Context, name string) err
 // couple it to diff computation for no gain.
 func (h *acceptanceHarness) stepIStageACommentOnALineOfTheDiff(ctx context.Context) error {
 	world := worldFrom(ctx)
-	_, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceFirstStagedBody, 8)
+	_, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, acceptanceFirstStagedBody, 8)
 	return err
 }
 
@@ -735,11 +778,11 @@ func (h *acceptanceHarness) stepICanSeeItAmongMyStagedComments(ctx context.Conte
 // stepIHaveStagedTwoComments stages two distinct comments as the reviewer.
 func (h *acceptanceHarness) stepIHaveStagedTwoComments(ctx context.Context) error {
 	world := worldFrom(ctx)
-	first, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceFirstStagedBody, 8)
+	first, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, acceptanceFirstStagedBody, 8)
 	if err != nil {
 		return err
 	}
-	second, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceSecondStagedBody, 18)
+	second, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, acceptanceSecondStagedBody, 18)
 	if err != nil {
 		return err
 	}
@@ -915,7 +958,7 @@ func (h *acceptanceHarness) stepTheVerdictIsRecordedWithOutcome(ctx context.Cont
 // thread back to learn the server-assigned id the resolve steps need.
 func (h *acceptanceHarness) stepAThreadIOpened(ctx context.Context) error {
 	world := worldFrom(ctx)
-	if _, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceReviewerThread, 8); err != nil {
+	if _, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, acceptanceReviewerThread, 8); err != nil {
 		return err
 	}
 	if _, err := h.submitVerdict(world, world.reviewer, world.workBranch, "neutral"); err != nil {
@@ -937,7 +980,7 @@ func (h *acceptanceHarness) stepAThreadIOpened(ctx context.Context) error {
 // different reviewer identity, through the same real publish path.
 func (h *acceptanceHarness) stepAThreadOpenedByAnotherReviewer(ctx context.Context) error {
 	world := worldFrom(ctx)
-	if _, err := h.stageComment(world, world.otherReviewer, world.workBranch, acceptanceOtherThreadBody, 18); err != nil {
+	if _, err := h.stageComment(ctx, world, world.otherReviewer, world.workBranch, acceptanceOtherThreadBody, 18); err != nil {
 		return err
 	}
 	if _, err := h.submitVerdict(world, world.otherReviewer, world.workBranch, "neutral"); err != nil {
@@ -1123,6 +1166,79 @@ func (h *acceptanceHarness) stepTheAttemptIsRejectedAsFailedPrecondition(ctx con
 	return requireLoamRejected(world.lastCLI, "the attempted operation", "precondition_failed", 2)
 }
 
+// stepIStageACommentBeyondTheFilesLengthAndSubmitAVerdict is loam-hi5o.15's
+// own reported shape, end to end through the real CLI, the real server, and
+// the real gitanchor.Checker reading the real mirror ensureAnchorFixtureMirror
+// builds -- no mock anywhere in this path, unlike every other anchor test in
+// this repo. That matters: a mutant reducing validateAnchors to `return nil`
+// (the whole feature, silently gone) still passed every other gate BEFORE
+// this scenario existed, because nothing at the acceptance layer had ever
+// exercised a REJECTED anchor -- only accepted ones (stepIStageACommentOnALineOfTheDiff
+// and friends).
+//
+// 270 is deliberately the bead's own reported line number, not a
+// convenient one-past-the-end: acceptanceAuthContent (the file
+// ensureAnchorFixtureMirror seeds) is 21 lines long, so this reproduces
+// "line 270 against a ~100-line file" almost exactly, just with a smaller
+// file. Staging itself always succeeds -- anchor validation is server-side,
+// at publish time, never at stage time (docs/cli-spec.md's own "comment"
+// section) -- so the rejection this scenario is about can only show up on
+// the verdict, which is why the intermediate stage error is returned
+// directly (a staging failure here would itself be the wrong kind of
+// scenario failure) while the verdict's own result is merely recorded on
+// world.lastCLI for the following Then step, exactly like
+// stepITryToSubmitAVerdictOnIt does for a state-gate rejection.
+func (h *acceptanceHarness) stepIStageACommentBeyondTheFilesLengthAndSubmitAVerdict(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if _, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, "line 270 of a much shorter file", 270); err != nil {
+		return fmt.Errorf("staging the out-of-range comment (which must itself succeed -- anchors are not validated at stage time): %w", err)
+	}
+	_, _ = h.submitVerdict(world, world.reviewer, world.workBranch, "approve")
+	return nil
+}
+
+// stepTheVerdictIsRejectedAsAUsageErrorNamingTheFilesActualLength asserts
+// loam-hi5o.15's acceptance criterion 1: exit 2, error code "usage" (the
+// CLI's own name for connect.CodeInvalidArgument -- internal/cli/errormapper.go's
+// classifyConnectError), and a message that names the file's ACTUAL length
+// (21, acceptanceAuthContent's own line count), not merely SOME rejection --
+// a mapPublishErr regression that let every anchor error fall through to
+// CodeInternal (which round 1 of this bead's own review caught and fixed)
+// would fail this on the code, not merely on the message.
+func (h *acceptanceHarness) stepTheVerdictIsRejectedAsAUsageErrorNamingTheFilesActualLength(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if err := requireLoamRejected(world.lastCLI, "the verdict", "usage", 2); err != nil {
+		return err
+	}
+	var payload acceptanceCLIError
+	if err := json.Unmarshal([]byte(world.lastCLI.stdout), &payload); err != nil {
+		return fmt.Errorf("decoding the rejected verdict's error document: %w\nstdout: %s", err, world.lastCLI.stdout)
+	}
+	if !strings.Contains(payload.Error.Message, "21 line") {
+		return fmt.Errorf("rejected verdict's message %q does not name the file's actual length (21 lines)", payload.Error.Message)
+	}
+	return nil
+}
+
+// stepNoCommentsArePublished asserts the rejected verdict's comment never
+// reached anyone -- the same "a rejected verdict publishes nothing"
+// property TestPublish_AnchorOneBeyondBoundary_RejectsWholeVerdict_NothingPersists
+// proves at the reviewpublish integration layer, checked here through the
+// CLI as a different agent (the author), which is what makes "published"
+// mean "visible to someone else" rather than merely "not visible to the
+// reviewer who tried to publish it".
+func (h *acceptanceHarness) stepNoCommentsArePublished(ctx context.Context) error {
+	world := worldFrom(ctx)
+	threads, err := h.listThreads(world, world.author, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if len(threads) != 0 {
+		return fmt.Errorf("%d thread(s) are published after a rejected verdict, want 0 (%+v)", len(threads), threads)
+	}
+	return nil
+}
+
 // stepAnotherReviewersVerdictHasMarkedTheWorkBranch has the second reviewer
 // cast a verdict and asserts it moved the branch into state -- the real
 // reviewable -> reviewed flip, not a forced one.
@@ -1213,7 +1329,7 @@ func (h *acceptanceHarness) stepTheWorkBranchIsOnItsSecondRound(ctx context.Cont
 // with outcome, in one step, as reviewing.feature's last scenario words it.
 func (h *acceptanceHarness) stepIStageACommentAndSubmitAVerdict(ctx context.Context, outcome string) error {
 	world := worldFrom(ctx)
-	if _, err := h.stageComment(world, world.reviewer, world.workBranch, acceptanceRoundStagedBody, 8); err != nil {
+	if _, err := h.stageComment(ctx, world, world.reviewer, world.workBranch, acceptanceRoundStagedBody, 8); err != nil {
 		return err
 	}
 	out, err := h.submitVerdict(world, world.reviewer, world.workBranch, outcome)
@@ -1284,7 +1400,7 @@ func (h *acceptanceHarness) stepItHasAThreadOpenedByTheReviewer(ctx context.Cont
 		return err
 	}
 	world.reviewer = reviewer
-	if _, err := h.stageComment(world, reviewer, world.workBranch, acceptanceReviewerThread, 8); err != nil {
+	if _, err := h.stageComment(ctx, world, reviewer, world.workBranch, acceptanceReviewerThread, 8); err != nil {
 		return err
 	}
 	if _, err := h.submitVerdict(world, reviewer, world.workBranch, "neutral"); err != nil {

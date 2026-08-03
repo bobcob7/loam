@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/gitanchor"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
 	"github.com/bobcob7/loam/internal/reviewpublish"
@@ -334,6 +335,23 @@ func replyAuthorIdentifier(ctx context.Context) (string, error) {
 // %s: %w") names the actual state, and dropping it left the message
 // terminate in the generic "handler: failed precondition" -- the same
 // defect loam-blc, loam-dq0o, and loam-c4ab fixed elsewhere (loam-jv8f).
+//
+// The three reviewpublish.ErrAnchor* cases (loam-hi5o.15) are CodeInvalidArgument,
+// not CodeFailedPrecondition: an out-of-range, zero, negative, or
+// missing-file anchor is wrong about the request itself -- the same
+// argument, resubmitted unchanged, is never going to succeed -- unlike a
+// state gate, which a caller can satisfy simply by trying again once the
+// work branch moves. err's own wrapping (e.g. "line %d for %s exceeds its
+// %d line(s) at the work branch tip") already names the file's actual
+// length, which is this bead's own acceptance criterion 1, so it is kept,
+// not discarded. gitanchor.ErrRefMissing, surfaced through
+// classifyAnchorErr's default branch, is mapped the same way
+// mapDiffComputerErr maps gitdiff.ErrRefMissing: FailedPrecondition, since
+// both mean the mirror has not caught up with a work branch the caller
+// named correctly. gitanchor.ErrMirrorMissing is deliberately left
+// unmapped, falling to CodeInternal-and-log like gitdiff.ErrMirrorMissing
+// does -- an absent or corrupt mirror is this server's own operational
+// fault, not anything the caller can fix by changing the request.
 func mapPublishErr(err error, context string) error {
 	switch {
 	case errors.Is(err, reviewpublish.ErrNotOpenForReview), errors.Is(err, reviewstore.ErrNoCurrentRound):
@@ -344,6 +362,12 @@ func mapPublishErr(err error, context string) error {
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
 	case errors.Is(err, workbranchstore.ErrNotFound):
 		return fmt.Errorf("%s: %w", context, handler.ErrNotFound)
+	case errors.Is(err, reviewpublish.ErrAnchorLineInvalid),
+		errors.Is(err, reviewpublish.ErrAnchorFileNotFound),
+		errors.Is(err, reviewpublish.ErrAnchorLineOutOfRange):
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrInvalidArgument)
+	case errors.Is(err, gitanchor.ErrRefMissing):
+		return fmt.Errorf("%s: %w: %w", context, err, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("%s: %w", context, err)
 	}
