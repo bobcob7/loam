@@ -452,11 +452,21 @@ convention above).
 ```json
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login",
   "description": "…", "state": "reviewable", "author": "grace-hopper-3-author",
-  "round": { "number": 2, "requested_by": "grace-hopper-3-author" } }
+  "round": { "number": 2, "requested_by": "grace-hopper-3-author" },
+  "latest_verdict": { "outcome": "disapprove", "reviewer": "ada-lovelace-7-reviewer", "round": 2, "stale": false } }
 ```
 
 `round` is omitted entirely (not `{ "number": 0 }`) for a work branch with no review round
 yet — e.g. still `draft`, before the first `request-review`.
+
+`latest_verdict` is the single most recent verdict overall — across all reviewers and rounds,
+including stale ones, and when several reviewers voted in the same round, the most recently
+cast of them — NOT whether the branch was approved: `state` reports workflow position (a round
+closed and a verdict landed), the same `"reviewed"` after an approve or a disapprove, and
+`latest_verdict` is what distinguishes the two. It carries `outcome`, `reviewer`, `round`, and
+`stale` together, and is omitted entirely (not a zeroed object) for a work branch with no
+verdicts yet, matching `round`'s convention. This costs one extra RPC (`ListVerdicts`) beyond
+the metadata fetch.
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved (not in a clone and arguments omitted).
