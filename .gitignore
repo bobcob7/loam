@@ -24,3 +24,8 @@
 # Agent gate-run logs. An agent chain committed .gatelogs/integration_run.log
 # alongside loam-blc; these are per-run scratch output, not source.
 /.gatelogs/
+
+# Compose deployment secrets (loam-lzxo.2). deploy/.env carries the admin
+# password, the Postgres password, and LOAM_ENCRYPTION_KEY in cleartext.
+# deploy/.env.example is the committed template and holds no real values.
+/deploy/.env
