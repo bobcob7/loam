@@ -16,7 +16,10 @@ why `loamhook` ships beside the server — is in `docs/deployment-spec.md` and t
 `Dockerfile`'s header, and is not repeated here.
 
 This walkthrough was executed end to end against a clean machine while it was
-written. Steps that are known to differ between platforms say so.
+written — from an unedited `.env` through an enrolled repo, a verified agent
+identity, and a plain `git push` that the server accepted and attributed to
+`ada-lovelace-7-author`. Every command and every quoted output below is real.
+Steps that are known to differ between platforms say so.
 
 ---
 
@@ -79,13 +82,18 @@ openssl rand -base64 24   # -> LOAM_DB_PASSWORD
 
 The compose file will refuse to render at all if any of the four is unset —
 that is deliberate, and the reasoning is recorded in `deploy/.env.example`.
-The error looks like this, and is the whole of it:
+Nothing starts, and the error is the whole of it (this is the actual output of
+`up -d` against a freshly copied, unedited `.env`):
 
 ```
-error while interpolating services.loam.environment.LOAM_ADMIN_PASSWORD:
-required variable LOAM_ADMIN_PASSWORD is missing a value:
-set LOAM_ADMIN_PASSWORD in deploy/.env -- copy deploy/.env.example and read its comments
+error while interpolating services.postgres.environment.POSTGRES_PASSWORD:
+required variable LOAM_DB_PASSWORD is missing a value:
+set LOAM_DB_PASSWORD in deploy/.env -- copy deploy/.env.example and read its comments
 ```
+
+It reports one variable at a time — the first it reaches, which is not
+necessarily the first one in the file — so expect to run `up -d` once per
+missing value if you fill them in one at a time.
 
 ## 2. Point at an embedder
 
@@ -237,6 +245,15 @@ server accepts the role:
 
 ```
 {"name":"ada-lovelace","id":"7","role":"author","identifier":"ada-lovelace-7-author","verified":true}
+```
+
+`scripts/init-workspace` writes those three variables into
+`.claude/settings.local.json`, which is read by Claude Code and by nothing else.
+If you are driving the CLI from an ordinary shell, export them yourself:
+
+```sh
+export LOAM_SERVER_URL=http://127.0.0.1:8080
+export LOAM_AGENT_NAME=ada-lovelace LOAM_AGENT_ID=7 LOAM_AGENT_ROLE=author
 ```
 
 ### After `loam clone`, source control is plain git
