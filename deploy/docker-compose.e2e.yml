@@ -25,6 +25,21 @@
 # first owns this file and the other reuses it unchanged (noted on both
 # beads).
 #
+# NOT deploy/docker-compose.yml, which is the single-machine DEPLOYMENT
+# stack (loam-lzxo). Deliberately different, and the differences above are
+# the reasons, not oversights: this file runs NO loam server (the suite
+# runs a host binary, see the third paragraph) and DOES run a seeded
+# Forgejo (a deployment has no business shipping an upstream forge);
+# it publishes Postgres on a fixed host port and uses fixed container
+# names because a host process and `docker exec` need a predictable
+# address, neither of which a deployment needs. Do not merge the two.
+#
+# The one thing they MUST agree on is the Postgres image, since a pgvector
+# skew means this suite is exercising a version nobody deploys. That is
+# enforced by internal/deploycheck/compose_test.go, which parses both
+# files (and helm/loam/values.yaml) and compares what it finds -- so
+# bumping the tag here alone is a red test, not a silent divergence.
+#
 # Bring up by hand for manual poking (task test:e2e does this itself, plus
 # seeding -- see Taskfile.yml):
 #   docker compose -p loam-e2e -f deploy/docker-compose.e2e.yml up -d

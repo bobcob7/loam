@@ -1261,6 +1261,259 @@ tasks:
         echo ""
         echo "=== test:e2e:golden complete: golden path + conflict/catch-up/re-accept variant, against the real compiled binaries and a real Forgejo ==="
 
+  test:compose:
+    desc: >-
+      The anti-rot gate for the single-machine deployment stack
+      (loam-lzxo.6): brings deploy/docker-compose.yml up from a genuinely
+      clean state with a generated throwaway .env, proves the startup
+      ORDERING actually held, proves /healthz and /readyz answer, proves
+      the admin console is reachable AND is the real SPA, then tears
+      everything down including volumes. Needs a Docker (or
+      Docker-API-compatible) daemon and network access to
+      registry.bobcob7.com.
+
+      NIGHTLY-ONLY, not part of `task test`. That is a cost decision with
+      a specific cause: .forgejo/workflows/ci.yaml's runners have capacity
+      1 and same-architecture jobs SERIALISE rather than parallelise
+      (that file's header documents this at length), so a gate that pulls
+      a ~100MB image, boots Postgres and runs migrations delays every
+      other PR behind it for minutes. It sits in the same tier as
+      test:e2e and test:e2e:golden and for the same reason. What DOES run
+      per-PR is internal/deploycheck's ordinary `go test` package, which
+      catches the cheap half of the same rot -- a renamed LOAM_* variable,
+      a Postgres image tag that drifted from the e2e stack's or the Helm
+      chart's, a secret that acquired a working default -- in
+      milliseconds and with no daemon. This target catches what only a
+      real boot can: an image tag that no longer resolves, a migration
+      that fails on a fresh database, a healthcheck path that moved, a
+      required variable the compose file stopped passing through.
+
+      IT PULLS THE PUBLISHED, PINNED IMAGE rather than building the
+      current tree, because that is what the file under test actually
+      says: deploy/docker-compose.yml ships a pinned tag, and the
+      question this gate answers is "does the thing a user runs still
+      work", not "does HEAD compile". Building here would also swap a
+      ~30s pull for a multi-minute Node + cgo + tree-sitter build, on the
+      same capacity-1 runners. To answer the OTHER question -- does the
+      current tree still work in this stack -- build an image and point
+      the same target at it:
+        task docker:build && LOAM_COMPOSE_IMAGE=registry.bobcob7.com/loam/server:dev task test:compose
+
+      ISOLATION. It never reads or writes your deploy/.env, and never
+      touches a stack you have running: it generates its own env file in
+      a temp dir, passes it with --env-file (which suppresses compose's
+      own .env discovery), uses its own compose project name, and
+      publishes on 127.0.0.1:18080 rather than 8080. LOAM_COMPOSE_SUFFIX
+      namespaces an entire run (project name and host port) so two can
+      proceed at once, exactly as LOAM_E2E_SUFFIX does for test:e2e.
+
+      CLEANUP IS EXPLICIT AND UNCONDITIONAL -- `down -v --remove-orphans`
+      on every exit path, plus a pre-flight self-heal for a previous
+      Ctrl-C'd run, because mvdan/sh (go-task's shell) does not fire an
+      EXIT trap on its own SIGINT interception. Nothing here uses
+      testcontainers-go, so TESTCONTAINERS_RYUK_DISABLED is irrelevant to
+      this target; it shells out to compose directly.
+    cmds:
+      - |
+        set -u
+        set -o pipefail
+        compose_file="deploy/docker-compose.yml"
+        compose_project="loam-compose-smoke${LOAM_COMPOSE_SUFFIX:-}"
+        host_port="${LOAM_COMPOSE_PORT:-18080}"
+        base_url="http://127.0.0.1:$host_port"
+        env_file="$(mktemp -t loam-compose-smoke-env.XXXXXX)"
+        # Same LOAM_COMPOSE_CMD escape hatch test:e2e documents: this
+        # environment's `docker` CLI has no `compose` subcommand at all,
+        # only the standalone `docker-compose` binary.
+        compose() {
+          if [ -n "${LOAM_COMPOSE_CMD:-}" ]; then
+            $LOAM_COMPOSE_CMD -p "$compose_project" --env-file "$env_file" -f "$compose_file" "$@"
+          elif docker compose version >/dev/null 2>&1; then
+            docker compose -p "$compose_project" --env-file "$env_file" -f "$compose_file" "$@"
+          else
+            docker-compose -p "$compose_project" --env-file "$env_file" -f "$compose_file" "$@"
+          fi
+        }
+        cleanup() {
+          echo ""
+          echo "=== test:compose cleanup: tearing down the stack INCLUDING volumes ==="
+          compose down -v --remove-orphans >/dev/null 2>&1 || true
+          rm -f "$env_file"
+        }
+        trap cleanup EXIT
+        fail() { echo "test:compose FAILED: $*" >&2; exit 1; }
+        # A generated password and key per run. The key is a real
+        # base64-encoded 32 bytes because internal/config validates the
+        # decoded length; nothing it protects outlives this run.
+        admin_password="compose-smoke-$(date +%s)-Passw0rd"
+        db_password="compose-smoke-db-$(date +%s)"
+        encryption_key="$(openssl rand -base64 32)"
+        {
+          echo "LOAM_ADMIN_PASSWORD=$admin_password"
+          echo "LOAM_DB_PASSWORD=$db_password"
+          echo "LOAM_ENCRYPTION_KEY=$encryption_key"
+          # A URL that resolves to nothing on purpose. This gate proves the
+          # stack BOOTS and serves; ingest needs a real embedder and is
+          # test:e2e's job. Pointing it at a dead address keeps this target
+          # from silently depending on whatever ollama the runner happens
+          # to have -- and note the server does not touch the embedder
+          # during startup or readiness, which is exactly what
+          # docs/deployment-spec.md's "Readiness Caveat" section says.
+          echo "LOAM_EMBEDDER_URL=http://embedder.invalid:11434"
+          echo "LOAM_HTTP_PORT=$host_port"
+          echo "LOAM_HTTP_BIND=127.0.0.1"
+          # `if`, not `[ ... ] && echo`: go-task's shell runs with
+          # errexit, and a false AND-OR list as the LAST command of this
+          # brace group makes the group itself exit non-zero, killing the
+          # task before it starts anything. Same reason for the `|| true`
+          # on the volume probe in step 6.
+          if [ -n "${LOAM_COMPOSE_IMAGE:-}" ]; then echo "LOAM_IMAGE=$LOAM_COMPOSE_IMAGE"; fi
+        } > "$env_file"
+        echo "=== test:compose pre-flight: self-healing any leak from a previous Ctrl-C'd run ==="
+        compose down -v --remove-orphans >/dev/null 2>&1 || true
+        echo ""
+        echo "=== step 1/6: bring the stack up from clean (project $compose_project) ==="
+        compose up -d || fail "compose up -d did not succeed -- a required variable, an unresolvable image tag, or an invalid file"
+        echo ""
+        echo "=== step 2/6: prove the ORDERING held: postgres was healthy before loam started ==="
+        # Asserted IMMEDIATELY after `up -d` returns, before the readiness
+        # poll below, and that ordering of the steps is load-bearing:
+        # a container's health log keeps only the last few entries, so by
+        # the time a slow first boot has finished migrating, the window can
+        # contain nothing but checks that ran AFTER loam started, and the
+        # comparison would fail for a reason that has nothing to do with
+        # the property under test. Right after `up -d`, the first passing
+        # check is still in the window.
+        #
+        # This is worth asserting rather than assuming. `depends_on:
+        # condition: service_healthy` is the only thing between a fresh
+        # database and a server that runs its migrations during boot; if it
+        # silently degraded to service_started, the stack would still come
+        # up most of the time and fail on a slow machine, which is the
+        # worst possible way for it to break.
+        #
+        # ESCAPING, and it is not optional: go-task renders every command
+        # through Go text/template BEFORE the shell sees it, so a bare
+        # docker --format '{{.State.StartedAt}}' is eaten by go-task and
+        # reaches docker as an EMPTY format string -- silently, yielding an
+        # empty result rather than an error, which would turn this
+        # assertion into a no-op that always passes. The quoted-brace form
+        # below is how a literal brace pair is emitted. Step 6 avoids
+        # --format entirely (docker ps -q / docker volume ls -q) rather
+        # than repeat this.
+        #
+        # .End, not .Start: the container became healthy when the first
+        # passing check FINISHED. .UTC.Format normalises it to the same
+        # shape and the same ZONE .State.StartedAt already uses -- the two
+        # fields have different Go types (time.Time and string), render
+        # differently by default, and the health log renders in the
+        # daemon's LOCAL time while StartedAt is UTC. Comparing them raw
+        # compares a date against a timestamp; comparing them without .UTC
+        # compares two different clocks and reports a false failure of an
+        # ordering that actually held (seen while writing this).
+        # -aq, not -q: a container that already crashlooped out of the
+        # running state must still be FINDABLE, or every startup failure
+        # below reports the useless "no loam container found" instead of
+        # the actual reason. Removing a required variable from the compose
+        # file produces exactly that, and it is the single most likely rot
+        # this gate exists to catch.
+        pg_container="$(compose ps -aq postgres)"
+        loam_container="$(compose ps -aq loam)"
+        [ -n "$pg_container" ] || fail "no postgres container exists at all -- compose up -d did not create the service"
+        [ -n "$loam_container" ] || fail "no loam container exists at all -- compose up -d did not create the service"
+        loam_running="$(docker inspect "$loam_container" --format '{{"{{"}}.State.Running{{"}}"}}' 2>/dev/null || echo unknown)"
+        if [ "$loam_running" != "true" ]; then
+          echo "--- loam logs ---" >&2
+          compose logs --tail 40 loam >&2 2>&1 || true
+          fail "the loam container is not running moments after up -d -- most often a required LOAM_* variable the compose file stopped passing through, or a migration that failed on a fresh database (logs above)"
+        fi
+        pg_healthy_at="$(docker inspect "$pg_container" --format '{{"{{"}}range .State.Health.Log{{"}}"}}{{"{{"}}if eq .ExitCode 0{{"}}"}}{{"{{"}}.End.UTC.Format "2006-01-02T15:04:05.000000000Z"{{"}}"}} {{"{{"}}end{{"}}"}}{{"{{"}}end{{"}}"}}' 2>/dev/null | awk '{print $1}')"
+        loam_started_at="$(docker inspect "$loam_container" --format '{{"{{"}}.State.StartedAt{{"}}"}}')"
+        [ -n "$pg_healthy_at" ] || fail "postgres recorded no passing healthcheck -- the pg_isready probe is missing or broken, and depends_on has nothing honest to wait on"
+        [ -n "$loam_started_at" ] || fail "could not read the loam container's start time (an empty --format would do this: see the escaping note above)"
+        echo "postgres first healthy at $pg_healthy_at; loam started at $loam_started_at"
+        # Ordering decided by `sort`, not by `[ a \> b ]`: `>` is not a
+        # POSIX `test` operator, and go-task's shell (mvdan/sh) does not
+        # implement it -- the comparison silently evaluates false and the
+        # assertion fails on a stack that is perfectly correct (seen while
+        # writing this). Both values are RFC3339 UTC from the same daemon
+        # clock and fixed-width through the seconds field, so a plain
+        # lexicographic sort is a chronological sort.
+        earlier="$(printf '%s\n%s\n' "$pg_healthy_at" "$loam_started_at" | sort | head -1)"
+        [ "$pg_healthy_at" != "$loam_started_at" ] || fail "postgres became healthy and loam started at the same instant ($pg_healthy_at) -- that is not an ordering, it is a coincidence, and the check below cannot distinguish it"
+        [ "$earlier" = "$pg_healthy_at" ] || fail "loam started at $loam_started_at, BEFORE postgres was healthy at $pg_healthy_at -- depends_on: condition: service_healthy is not in effect"
+        echo ""
+        echo "=== step 3/6: wait for /readyz, which checks the pool AND the migration state ==="
+        ready_deadline=$(( $(date +%s) + 180 ))
+        while true; do
+          ready_code="$(curl -s -o /dev/null -w '%{http_code}' "$base_url/readyz" 2>/dev/null || echo 000)"
+          [ "$ready_code" = "200" ] && break
+          if [ "$(date +%s)" -ge "$ready_deadline" ]; then
+            echo "--- loam logs ---" >&2
+            compose logs --tail 60 loam >&2 2>&1 || true
+            fail "/readyz never returned 200 within 180s (last: $ready_code)"
+          fi
+          sleep 1
+        done
+        # Body, not just the status code. A 200 from something that is not
+        # loam -- a stray process already on this port, a proxy -- would
+        # pass a code-only check, and this gate exists precisely to notice
+        # when the thing answering is not what we think.
+        ready_body="$(curl -s "$base_url/readyz")"
+        [ "$ready_body" = "ready" ] || fail "/readyz returned 200 but the body was '$ready_body', not 'ready'"
+        live_body="$(curl -s --fail "$base_url/healthz")" || fail "/healthz did not return 2xx"
+        [ "$live_body" = "live" ] || fail "/healthz returned 2xx but the body was '$live_body', not 'live'"
+        echo "/healthz -> live, /readyz -> ready"
+        echo ""
+        echo "=== step 4/6: the container's own healthcheck agrees ==="
+        health_deadline=$(( $(date +%s) + 90 ))
+        while true; do
+          loam_health="$(docker inspect "$loam_container" --format '{{"{{"}}.State.Health.Status{{"}}"}}' 2>/dev/null || echo unknown)"
+          [ "$loam_health" = "healthy" ] && break
+          [ "$(date +%s)" -ge "$health_deadline" ] && fail "the loam container never reported healthy (last: $loam_health) -- its healthcheck command or the endpoints it calls have moved"
+          sleep 2
+        done
+        echo "loam container health: healthy"
+        echo ""
+        echo "=== step 5/6: the ADMIN CONSOLE answers, and it is the real SPA ==="
+        # /readyz proves the process reached the database. It says nothing
+        # about whether the shipped admin SPA is present, and loam-nvb.15
+        # exists because web/dist's committed PLACEHOLDER can be baked into
+        # a binary in place of a real Vite build -- a breakage no readiness
+        # probe can see, which is the entire reason this step exists.
+        anon_code="$(curl -s -o /dev/null -w '%{http_code}' "$base_url/" 2>/dev/null || echo 000)"
+        [ "$anon_code" = "401" ] || fail "the admin console answered $anon_code without credentials, expected 401 -- the console must not be unauthenticated"
+        index_html="$(curl -s --fail -u "admin:$admin_password" "$base_url/")" || fail "the admin console rejected the configured LOAM_ADMIN_USER/LOAM_ADMIN_PASSWORD -- the compose file is not passing them through"
+        case "$index_html" in
+          *loam-placeholder-spa*) fail "the served index.html is web/dist's COMMITTED PLACEHOLDER, not the real admin SPA (loam-nvb.15)" ;;
+        esac
+        case "$index_html" in
+          *"/assets/index-"*) : ;;
+          *) fail "the served index.html references no hashed /assets/index-*.js bundle, so it is not a real Vite build" ;;
+        esac
+        echo "admin console: 401 anonymous, 200 authenticated, real SPA bundle served"
+        repos_code="$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$admin_password" -X POST -H 'Content-Type: application/json' -d '{}' "$base_url/loam.admin.v1.RepoAdminService/ListRepos")"
+        [ "$repos_code" = "200" ] || fail "RepoAdminService/ListRepos answered $repos_code, expected 200 -- the admin RPC surface is not reachable"
+        echo "admin RPC: ListRepos -> 200"
+        echo ""
+        echo "=== step 6/6: tear down, including volumes, and prove nothing survived ==="
+        compose down -v --remove-orphans || fail "compose down did not succeed"
+        leftover_containers="$(docker ps -a -q --filter "label=com.docker.compose.project=$compose_project" 2>/dev/null || true)"
+        [ -z "$leftover_containers" ] || fail "containers survived teardown: $leftover_containers"
+        leftover_volumes="$(docker volume ls -q --filter "label=com.docker.compose.project=$compose_project" 2>/dev/null || true)"
+        # Belt and braces: some compose implementations do not label
+        # volumes, so also look them up by the names compose derives.
+        for suffix in loam-data postgres-data ollama-data; do
+          if docker volume inspect "${compose_project}_${suffix}" >/dev/null 2>&1; then
+            leftover_volumes="$leftover_volumes ${compose_project}_${suffix}"
+          fi
+        done
+        leftover_volumes="$(echo "$leftover_volumes" | tr -s ' ' | sed 's/^ //;s/ $//')"
+        [ -z "$leftover_volumes" ] || fail "volumes survived teardown: $leftover_volumes"
+        echo "no containers and no volumes remain for project $compose_project"
+        echo ""
+        echo "=== test:compose complete: deploy/docker-compose.yml boots clean, orders correctly, serves the real admin console, and cleans up after itself ==="
+
   demo:m1:
     desc: >-
       Demo M1 (loam-ejr): run the store integration suite (loam-li0.6,
