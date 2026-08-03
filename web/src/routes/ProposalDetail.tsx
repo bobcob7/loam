@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "../components/Button";
 import { CopyField } from "../components/CopyField";
 import { Dialog } from "../components/Dialog";
+import { DiffView } from "../components/DiffView";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Field } from "../components/Field";
 import { Form, FormActions } from "../components/Form";
@@ -199,7 +200,7 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
         {diffQuery.isError && (
           <ErrorBanner title="Could not load diff" message={errorMessage(mapConnectError(diffQuery.error))} />
         )}
-        {diffQuery.data !== undefined && <pre className={styles.diff}>{diffQuery.data.diff}</pre>}
+        {diffQuery.data !== undefined && <DiffView diff={diffQuery.data.diff} />}
       </section>
 
       <section className={styles.section}>

@@ -1,0 +1,150 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour
+   or a var() naming a token that does not exist. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.total {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.toolbarActions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+/* Not the shared Button: these are inline text affordances beside a count
+   line, and a pair of --control-height pills there reads as the section's
+   primary actions, which they are not. */
+.toolbarButton {
+  padding: 0;
+  color: var(--color-focus);
+  font-size: var(--text-sm);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.toolbarButton:hover {
+  text-decoration: underline;
+}
+
+.toolbarButton:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The files-changed index: the answer to "what is the shape of this change",
+   readable without expanding anything. */
+.index {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.index li + li .indexEntry {
+  border-block-start: 1px solid var(--color-border);
+}
+
+.indexEntry {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  text-align: start;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.indexEntry:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.indexEntry:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.file {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* The native disclosure triangle is the affordance; it is kept rather than
+   replaced with a custom chevron, which is most of the reason <details> was
+   worth using at all. */
+.fileSummary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.fileSummary:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.fileSummary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.path {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
+.counts {
+  flex: none;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Added/removed TOTALS are coloured; the diff lines themselves are not (see
+   DiffView.tsx on why there is no per-line rendering). The +/- signs carry
+   the meaning on their own, so colour is never the only signal here. */
+.added {
+  color: var(--color-success-fg);
+}
+
+.removed {
+  color: var(--color-danger-fg);
+}
+
+.body {
+  overflow-x: auto;
+  padding: var(--space-3);
+  margin: 0;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  border-block-start: 1px solid var(--color-border);
+}

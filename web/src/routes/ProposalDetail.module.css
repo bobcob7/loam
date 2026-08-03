@@ -31,19 +31,9 @@
   line-height: var(--leading-tight);
 }
 
-/* A unified diff is preformatted, identifier-dense text -- the mono face is
-   functional here (src/styles/tokens.css -> Typography), not decorative. */
-.diff {
-  overflow-x: auto;
-  padding: var(--space-4);
-  color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
+/* The diff's own presentation moved to components/DiffView.module.css when it
+   became per-file and collapsible (loam-ba6a.2); this screen no longer styles
+   a diff of its own. */
 
 .threadList {
   display: flex;

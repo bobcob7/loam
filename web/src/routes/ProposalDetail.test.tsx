@@ -221,10 +221,13 @@ describe("ProposalDetail: loaded screen", () => {
     expect(link?.getAttribute("href")).toBe("");
   });
 
-  it("renders the diff", async () => {
+  it("renders the diff as a per-file index rather than one undifferentiated block", async () => {
     stubFetch(baseRoutes());
     await renderLoaded();
-    expect(await screen.findByText(/-old/)).toBeInTheDocument();
+    const index = await screen.findByRole("navigation", { name: "Files changed" });
+    expect(within(index).getByText("src/index.ts")).toBeInTheDocument();
+    // The patch text is still reachable -- collapsed, not unmounted.
+    expect(screen.getByText(/-old/)).toBeInTheDocument();
   });
 
   it("renders one comment thread with its anchor, author and body", async () => {
