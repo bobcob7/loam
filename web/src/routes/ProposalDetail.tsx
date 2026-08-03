@@ -7,6 +7,7 @@ import { Dialog } from "../components/Dialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Field } from "../components/Field";
 import { Form, FormActions } from "../components/Form";
+import { Markdown } from "../components/Markdown";
 import { Pager } from "../components/Pager";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, type TableColumn } from "../components/Table";
@@ -188,7 +189,9 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
         </span>
         <span className={styles.metaItem}>Author: {wb.author}</span>
       </p>
-      {wb.description !== "" && <p>{wb.description}</p>}
+      {/* Agent-authored and untrusted: it goes through the shared renderer,
+          never into markup of its own (components/Markdown.tsx). */}
+      <Markdown source={wb.description} />
 
       <section className={styles.section}>
         <h2>Diff</h2>

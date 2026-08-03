@@ -1,0 +1,170 @@
+/* Tokens only -- src/styles/tokens.test.ts fails the build on a raw colour
+   or a var() naming a token that does not exist.
+
+   Every rule below is scoped under .root and targets an element rather than a
+   class, because the markup is produced by react-markdown from untrusted
+   prose: there is no place to hang a class name, and the set of elements is
+   closed (react-markdown emits no raw HTML -- see Markdown.tsx). */
+
+.root {
+  color: var(--color-text);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+}
+
+/* The first and last block set no outer margin, so a Markdown block drops
+   into a comment or a page section without the caller compensating for
+   collapsed margins it cannot see. */
+.root > :first-child {
+  margin-block-start: 0;
+}
+
+.root > :last-child {
+  margin-block-end: 0;
+}
+
+.root p,
+.root ul,
+.root ol,
+.root blockquote,
+.root pre,
+.root table {
+  margin-block: var(--space-3);
+}
+
+/* Headings inside agent prose are SUBORDINATE to the page's own headings:
+   the description sits under an <h1> and a comment body sits three levels
+   into the Comments section, so an <h1> written by an agent must not read as
+   a peer of the page title. Sizes step down from --text-lg (the value
+   ProposalDetail.module.css gives its own <h2>) rather than starting there. */
+.root h1,
+.root h2,
+.root h3,
+.root h4,
+.root h5,
+.root h6 {
+  margin-block: var(--space-4) var(--space-2);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.root h1,
+.root h2 {
+  font-size: var(--text-lg);
+}
+
+.root h3,
+.root h4,
+.root h5,
+.root h6 {
+  font-size: var(--text-md);
+}
+
+.root ul,
+.root ol {
+  padding-inline-start: var(--space-5);
+}
+
+.root ul {
+  list-style: disc;
+}
+
+.root ol {
+  list-style: decimal;
+}
+
+.root li {
+  margin-block: var(--space-1);
+}
+
+/* A GFM task list keeps its checkbox but loses the bullet and the indent the
+   bullet was reserving. */
+.root li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-inline-start: calc(var(--space-5) * -1);
+}
+
+.root li > input[type="checkbox"] {
+  margin-inline-end: var(--space-2);
+}
+
+.root a {
+  color: var(--color-focus);
+  text-decoration: underline;
+}
+
+.root a:hover {
+  color: var(--color-text);
+}
+
+.root code {
+  padding: 0 var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background-color: var(--color-surface-raised);
+  border-radius: var(--radius-sm);
+}
+
+/* Unhighlighted by design (loam-ba6a): a fenced block is readable mono text
+   on a raised surface, not a tokenised one. `overflow-x` rather than wrapping,
+   because agent prose fences command lines and diff hunks, where a wrapped
+   line reads as two. */
+.root pre {
+  overflow-x: auto;
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  background-color: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* The <code> inside a <pre> already sits on the block's own surface; the
+   inline treatment would draw a second box inside the first. */
+.root pre code {
+  padding: 0;
+  background-color: transparent;
+  border-radius: 0;
+}
+
+.root blockquote {
+  padding-inline-start: var(--space-3);
+  color: var(--color-text-muted);
+  border-inline-start: 3px solid var(--color-border-strong);
+}
+
+/* GFM tables. Scrollable rather than squeezed: a table an agent wrote may
+   have more columns than a comment column is wide. */
+.root table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.root th,
+.root td {
+  padding: var(--space-1) var(--space-3);
+  text-align: start;
+  border: 1px solid var(--color-border);
+}
+
+.root th {
+  font-weight: var(--weight-semibold);
+  background-color: var(--color-surface-raised);
+}
+
+.root hr {
+  margin-block: var(--space-4);
+  border: 0;
+  border-block-start: 1px solid var(--color-border);
+}
+
+/* A remote image is loaded from a host the comment's author chose. It is
+   allowed (the URL is scheme-checked like any other), but it is capped so it
+   cannot take over the page it was pasted into. */
+.root img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+}

@@ -169,6 +169,58 @@ describe("ProposalDetail: loaded screen", () => {
     expect(screen.getByText("main")).toBeInTheDocument();
   });
 
+  it("renders the description through the shared markdown renderer", async () => {
+    // The claim is that the description reaches Markdown at all -- a heading
+    // and a list item are structures a plain <p> could not produce, so their
+    // presence proves the wiring rather than the component (which
+    // components/Markdown.test.tsx covers on its own).
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          description: "## What changed\n\n- added the index\n- `task web:test` passes\n",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(await screen.findByRole("heading", { name: "What changed" })).toBeInTheDocument();
+    expect(screen.getByText("added the index")).toBeInTheDocument();
+  });
+
+  it("renders no description block at all when the description is empty", async () => {
+    // Preserves the pre-markdown behaviour: an empty description was never a
+    // visible element, and must not become an empty bordered box.
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({ workBranch: workBranchFixture({ description: "" }) }),
+    });
+    await renderLoaded();
+    const title = screen.getByRole("heading", { level: 1 });
+    const diff = screen.getByRole("heading", { name: "Diff" });
+    // Nothing renders between the title's meta line and the Diff section.
+    expect(title.compareDocumentPosition(diff) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelectorAll("h2")).toHaveLength(4);
+  });
+
+  it("renders a hostile description inert", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          description: "<script>window.stolen = 1</script>\n\n[x](javascript:alert(1))",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(document.querySelector("script")).toBeNull();
+    // Queried by element rather than by role: an <a> whose href was stripped
+    // to "" is no longer reliably exposed as a link, which is itself the
+    // point -- there is nothing left to follow.
+    const link = document.querySelector("a");
+    expect(link?.textContent).toBe("x");
+    expect(link?.getAttribute("href")).toBe("");
+  });
+
   it("renders the diff", async () => {
     stubFetch(baseRoutes());
     await renderLoaded();
