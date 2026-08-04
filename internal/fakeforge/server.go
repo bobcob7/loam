@@ -1,13 +1,14 @@
 // Package fakeforge is an in-process test double for an upstream git forge
 // (per docs/testing-spec.md "The Three Test Doubles" and docs/sync-spec.md
 // "Provider Interface"/"Upstream Transport"). A Server is a single
-// net/http.Handler exposing four surfaces: bare repos over token-
+// net/http.Handler exposing five surfaces: bare repos over token-
 // authenticated smart HTTP, a small provider REST API mirroring the real
-// forge's six operations, one Forgejo-REST-shaped route for the single
-// production caller that holds a real *forge.Forgejo rather than a
-// forge.Provider (forgejoapi.go), and a test-only control API for
-// scripting upstream events. Each Server owns its own temp storage;
-// nothing is shared between instances.
+// forge's six operations, one Forgejo-REST-shaped route for production
+// callers holding a real *forge.Forgejo rather than a forge.Provider
+// (forgejoapi.go), one GitHub-REST-shaped route for the same reason on
+// *forge.GitHub's side (githubapi.go, loam-tmds.4), and a test-only
+// control API for scripting upstream events. Each Server owns its own
+// temp storage; nothing is shared between instances.
 package fakeforge
 
 import (
@@ -177,6 +178,15 @@ func (s *Server) newMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls", s.handleForgejoListPulls)
 	mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{index}", s.handleForgejoGetPull)
 	mux.HandleFunc("PATCH /api/v1/repos/{owner}/{repo}/pulls/{index}", s.handleForgejoPatchPull)
+	// The GitHub-REST-shaped surface, consumed by the REAL *forge.GitHub
+	// rather than by *fakeforge.Client — see githubapi.go. No version
+	// prefix, matching GitHub's own paths (unlike Forgejo's /api/v1/...
+	// above), so there is no path collision between the two dialects.
+	mux.HandleFunc("GET /user", s.handleGitHubUser)
+	mux.HandleFunc("POST /repos/{owner}/{repo}/pulls", s.handleGitHubCreatePull)
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls", s.handleGitHubListPulls)
+	mux.HandleFunc("GET /repos/{owner}/{repo}/pulls/{index}", s.handleGitHubGetPull)
+	mux.HandleFunc("PATCH /repos/{owner}/{repo}/pulls/{index}", s.handleGitHubPatchPull)
 	mux.HandleFunc("POST /provider/validate-token", s.handleValidateToken)
 	mux.HandleFunc("POST /provider/create-pr", s.handleCreatePR)
 	mux.HandleFunc("POST /provider/pr-state", s.handleGetPRState)
