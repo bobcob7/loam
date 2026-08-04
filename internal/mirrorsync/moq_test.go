@@ -7,6 +7,7 @@ import (
 	"context"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 	"github.com/google/uuid"
 	"sync"
@@ -453,6 +454,78 @@ func (mock *PRPollerMock) PollPRsCalls() []struct {
 	mock.lockPollPRs.RLock()
 	calls = mock.calls.PollPRs
 	mock.lockPollPRs.RUnlock()
+	return calls
+}
+
+// Ensure, that DriftReconcilerMock does implement DriftReconciler.
+// If this is not the case, regenerate this file with moq.
+var _ DriftReconciler = &DriftReconcilerMock{}
+
+// DriftReconcilerMock is a mock implementation of DriftReconciler.
+//
+//	func TestSomethingThatUsesDriftReconciler(t *testing.T) {
+//
+//		// make and configure a mocked DriftReconciler
+//		mockedDriftReconciler := &DriftReconcilerMock{
+//			ReconcileDriftFunc: func(ctx context.Context, repo RepoID) error {
+//				panic("mock out the ReconcileDrift method")
+//			},
+//		}
+//
+//		// use mockedDriftReconciler in code that requires DriftReconciler
+//		// and then make assertions.
+//
+//	}
+type DriftReconcilerMock struct {
+	// ReconcileDriftFunc mocks the ReconcileDrift method.
+	ReconcileDriftFunc func(ctx context.Context, repo RepoID) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ReconcileDrift holds details about calls to the ReconcileDrift method.
+		ReconcileDrift []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo RepoID
+		}
+	}
+	lockReconcileDrift sync.RWMutex
+}
+
+// ReconcileDrift calls ReconcileDriftFunc.
+func (mock *DriftReconcilerMock) ReconcileDrift(ctx context.Context, repo RepoID) error {
+	if mock.ReconcileDriftFunc == nil {
+		panic("DriftReconcilerMock.ReconcileDriftFunc: method is nil but DriftReconciler.ReconcileDrift was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo RepoID
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+	}
+	mock.lockReconcileDrift.Lock()
+	mock.calls.ReconcileDrift = append(mock.calls.ReconcileDrift, callInfo)
+	mock.lockReconcileDrift.Unlock()
+	return mock.ReconcileDriftFunc(ctx, repo)
+}
+
+// ReconcileDriftCalls gets all the calls that were made to ReconcileDrift.
+// Check the length with:
+//
+//	len(mockedDriftReconciler.ReconcileDriftCalls())
+func (mock *DriftReconcilerMock) ReconcileDriftCalls() []struct {
+	Ctx  context.Context
+	Repo RepoID
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo RepoID
+	}
+	mock.lockReconcileDrift.RLock()
+	calls = mock.calls.ReconcileDrift
+	mock.lockReconcileDrift.RUnlock()
 	return calls
 }
 
@@ -2319,5 +2392,609 @@ func (mock *workBranchTipResolverMock) ResolveWorkBranchRefCalls() []struct {
 	mock.lockResolveWorkBranchRef.RLock()
 	calls = mock.calls.ResolveWorkBranchRef
 	mock.lockResolveWorkBranchRef.RUnlock()
+	return calls
+}
+
+// Ensure, that mirrorTipResolverMock does implement mirrorTipResolver.
+// If this is not the case, regenerate this file with moq.
+var _ mirrorTipResolver = &mirrorTipResolverMock{}
+
+// mirrorTipResolverMock is a mock implementation of mirrorTipResolver.
+//
+//	func TestSomethingThatUsesmirrorTipResolver(t *testing.T) {
+//
+//		// make and configure a mocked mirrorTipResolver
+//		mockedmirrorTipResolver := &mirrorTipResolverMock{
+//			ResolveUpstreamProposalRefFunc: func(ctx context.Context, repo string, name string) (string, error) {
+//				panic("mock out the ResolveUpstreamProposalRef method")
+//			},
+//			ResolveWorkBranchRefFunc: func(ctx context.Context, repo string, name string) (string, error) {
+//				panic("mock out the ResolveWorkBranchRef method")
+//			},
+//		}
+//
+//		// use mockedmirrorTipResolver in code that requires mirrorTipResolver
+//		// and then make assertions.
+//
+//	}
+type mirrorTipResolverMock struct {
+	// ResolveUpstreamProposalRefFunc mocks the ResolveUpstreamProposalRef method.
+	ResolveUpstreamProposalRefFunc func(ctx context.Context, repo string, name string) (string, error)
+
+	// ResolveWorkBranchRefFunc mocks the ResolveWorkBranchRef method.
+	ResolveWorkBranchRefFunc func(ctx context.Context, repo string, name string) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// ResolveUpstreamProposalRef holds details about calls to the ResolveUpstreamProposalRef method.
+		ResolveUpstreamProposalRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// Name is the name argument value.
+			Name string
+		}
+		// ResolveWorkBranchRef holds details about calls to the ResolveWorkBranchRef method.
+		ResolveWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// Name is the name argument value.
+			Name string
+		}
+	}
+	lockResolveUpstreamProposalRef sync.RWMutex
+	lockResolveWorkBranchRef       sync.RWMutex
+}
+
+// ResolveUpstreamProposalRef calls ResolveUpstreamProposalRefFunc.
+func (mock *mirrorTipResolverMock) ResolveUpstreamProposalRef(ctx context.Context, repo string, name string) (string, error) {
+	if mock.ResolveUpstreamProposalRefFunc == nil {
+		panic("mirrorTipResolverMock.ResolveUpstreamProposalRefFunc: method is nil but mirrorTipResolver.ResolveUpstreamProposalRef was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+		Name: name,
+	}
+	mock.lockResolveUpstreamProposalRef.Lock()
+	mock.calls.ResolveUpstreamProposalRef = append(mock.calls.ResolveUpstreamProposalRef, callInfo)
+	mock.lockResolveUpstreamProposalRef.Unlock()
+	return mock.ResolveUpstreamProposalRefFunc(ctx, repo, name)
+}
+
+// ResolveUpstreamProposalRefCalls gets all the calls that were made to ResolveUpstreamProposalRef.
+// Check the length with:
+//
+//	len(mockedmirrorTipResolver.ResolveUpstreamProposalRefCalls())
+func (mock *mirrorTipResolverMock) ResolveUpstreamProposalRefCalls() []struct {
+	Ctx  context.Context
+	Repo string
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}
+	mock.lockResolveUpstreamProposalRef.RLock()
+	calls = mock.calls.ResolveUpstreamProposalRef
+	mock.lockResolveUpstreamProposalRef.RUnlock()
+	return calls
+}
+
+// ResolveWorkBranchRef calls ResolveWorkBranchRefFunc.
+func (mock *mirrorTipResolverMock) ResolveWorkBranchRef(ctx context.Context, repo string, name string) (string, error) {
+	if mock.ResolveWorkBranchRefFunc == nil {
+		panic("mirrorTipResolverMock.ResolveWorkBranchRefFunc: method is nil but mirrorTipResolver.ResolveWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+		Name: name,
+	}
+	mock.lockResolveWorkBranchRef.Lock()
+	mock.calls.ResolveWorkBranchRef = append(mock.calls.ResolveWorkBranchRef, callInfo)
+	mock.lockResolveWorkBranchRef.Unlock()
+	return mock.ResolveWorkBranchRefFunc(ctx, repo, name)
+}
+
+// ResolveWorkBranchRefCalls gets all the calls that were made to ResolveWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedmirrorTipResolver.ResolveWorkBranchRefCalls())
+func (mock *mirrorTipResolverMock) ResolveWorkBranchRefCalls() []struct {
+	Ctx  context.Context
+	Repo string
+	Name string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+	}
+	mock.lockResolveWorkBranchRef.RLock()
+	calls = mock.calls.ResolveWorkBranchRef
+	mock.lockResolveWorkBranchRef.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchRefAdvancerMock does implement workBranchRefAdvancer.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchRefAdvancer = &workBranchRefAdvancerMock{}
+
+// workBranchRefAdvancerMock is a mock implementation of workBranchRefAdvancer.
+//
+//	func TestSomethingThatUsesworkBranchRefAdvancer(t *testing.T) {
+//
+//		// make and configure a mocked workBranchRefAdvancer
+//		mockedworkBranchRefAdvancer := &workBranchRefAdvancerMock{
+//			AdvanceWorkBranchRefFunc: func(ctx context.Context, repo string, name string, from string, to string) error {
+//				panic("mock out the AdvanceWorkBranchRef method")
+//			},
+//		}
+//
+//		// use mockedworkBranchRefAdvancer in code that requires workBranchRefAdvancer
+//		// and then make assertions.
+//
+//	}
+type workBranchRefAdvancerMock struct {
+	// AdvanceWorkBranchRefFunc mocks the AdvanceWorkBranchRef method.
+	AdvanceWorkBranchRefFunc func(ctx context.Context, repo string, name string, from string, to string) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// AdvanceWorkBranchRef holds details about calls to the AdvanceWorkBranchRef method.
+		AdvanceWorkBranchRef []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Repo is the repo argument value.
+			Repo string
+			// Name is the name argument value.
+			Name string
+			// From is the from argument value.
+			From string
+			// To is the to argument value.
+			To string
+		}
+	}
+	lockAdvanceWorkBranchRef sync.RWMutex
+}
+
+// AdvanceWorkBranchRef calls AdvanceWorkBranchRefFunc.
+func (mock *workBranchRefAdvancerMock) AdvanceWorkBranchRef(ctx context.Context, repo string, name string, from string, to string) error {
+	if mock.AdvanceWorkBranchRefFunc == nil {
+		panic("workBranchRefAdvancerMock.AdvanceWorkBranchRefFunc: method is nil but workBranchRefAdvancer.AdvanceWorkBranchRef was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+		From string
+		To   string
+	}{
+		Ctx:  ctx,
+		Repo: repo,
+		Name: name,
+		From: from,
+		To:   to,
+	}
+	mock.lockAdvanceWorkBranchRef.Lock()
+	mock.calls.AdvanceWorkBranchRef = append(mock.calls.AdvanceWorkBranchRef, callInfo)
+	mock.lockAdvanceWorkBranchRef.Unlock()
+	return mock.AdvanceWorkBranchRefFunc(ctx, repo, name, from, to)
+}
+
+// AdvanceWorkBranchRefCalls gets all the calls that were made to AdvanceWorkBranchRef.
+// Check the length with:
+//
+//	len(mockedworkBranchRefAdvancer.AdvanceWorkBranchRefCalls())
+func (mock *workBranchRefAdvancerMock) AdvanceWorkBranchRefCalls() []struct {
+	Ctx  context.Context
+	Repo string
+	Name string
+	From string
+	To   string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Repo string
+		Name string
+		From string
+		To   string
+	}
+	mock.lockAdvanceWorkBranchRef.RLock()
+	calls = mock.calls.AdvanceWorkBranchRef
+	mock.lockAdvanceWorkBranchRef.RUnlock()
+	return calls
+}
+
+// Ensure, that ancestryCheckerMock does implement ancestryChecker.
+// If this is not the case, regenerate this file with moq.
+var _ ancestryChecker = &ancestryCheckerMock{}
+
+// ancestryCheckerMock is a mock implementation of ancestryChecker.
+//
+//	func TestSomethingThatUsesancestryChecker(t *testing.T) {
+//
+//		// make and configure a mocked ancestryChecker
+//		mockedancestryChecker := &ancestryCheckerMock{
+//			ContainsFunc: func(ctx context.Context, mirrorDir string, extraObjectDir string, ancestor string, descendant string) (bool, error) {
+//				panic("mock out the Contains method")
+//			},
+//		}
+//
+//		// use mockedancestryChecker in code that requires ancestryChecker
+//		// and then make assertions.
+//
+//	}
+type ancestryCheckerMock struct {
+	// ContainsFunc mocks the Contains method.
+	ContainsFunc func(ctx context.Context, mirrorDir string, extraObjectDir string, ancestor string, descendant string) (bool, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Contains holds details about calls to the Contains method.
+		Contains []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// MirrorDir is the mirrorDir argument value.
+			MirrorDir string
+			// ExtraObjectDir is the extraObjectDir argument value.
+			ExtraObjectDir string
+			// Ancestor is the ancestor argument value.
+			Ancestor string
+			// Descendant is the descendant argument value.
+			Descendant string
+		}
+	}
+	lockContains sync.RWMutex
+}
+
+// Contains calls ContainsFunc.
+func (mock *ancestryCheckerMock) Contains(ctx context.Context, mirrorDir string, extraObjectDir string, ancestor string, descendant string) (bool, error) {
+	if mock.ContainsFunc == nil {
+		panic("ancestryCheckerMock.ContainsFunc: method is nil but ancestryChecker.Contains was just called")
+	}
+	callInfo := struct {
+		Ctx            context.Context
+		MirrorDir      string
+		ExtraObjectDir string
+		Ancestor       string
+		Descendant     string
+	}{
+		Ctx:            ctx,
+		MirrorDir:      mirrorDir,
+		ExtraObjectDir: extraObjectDir,
+		Ancestor:       ancestor,
+		Descendant:     descendant,
+	}
+	mock.lockContains.Lock()
+	mock.calls.Contains = append(mock.calls.Contains, callInfo)
+	mock.lockContains.Unlock()
+	return mock.ContainsFunc(ctx, mirrorDir, extraObjectDir, ancestor, descendant)
+}
+
+// ContainsCalls gets all the calls that were made to Contains.
+// Check the length with:
+//
+//	len(mockedancestryChecker.ContainsCalls())
+func (mock *ancestryCheckerMock) ContainsCalls() []struct {
+	Ctx            context.Context
+	MirrorDir      string
+	ExtraObjectDir string
+	Ancestor       string
+	Descendant     string
+} {
+	var calls []struct {
+		Ctx            context.Context
+		MirrorDir      string
+		ExtraObjectDir string
+		Ancestor       string
+		Descendant     string
+	}
+	mock.lockContains.RLock()
+	calls = mock.calls.Contains
+	mock.lockContains.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchDriftMarkerMock does implement workBranchDriftMarker.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchDriftMarker = &workBranchDriftMarkerMock{}
+
+// workBranchDriftMarkerMock is a mock implementation of workBranchDriftMarker.
+//
+//	func TestSomethingThatUsesworkBranchDriftMarker(t *testing.T) {
+//
+//		// make and configure a mocked workBranchDriftMarker
+//		mockedworkBranchDriftMarker := &workBranchDriftMarkerMock{
+//			SetUpstreamDriftFunc: func(ctx context.Context, id uuid.UUID, drift workbranchstore.UpstreamDrift) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the SetUpstreamDrift method")
+//			},
+//		}
+//
+//		// use mockedworkBranchDriftMarker in code that requires workBranchDriftMarker
+//		// and then make assertions.
+//
+//	}
+type workBranchDriftMarkerMock struct {
+	// SetUpstreamDriftFunc mocks the SetUpstreamDrift method.
+	SetUpstreamDriftFunc func(ctx context.Context, id uuid.UUID, drift workbranchstore.UpstreamDrift) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// SetUpstreamDrift holds details about calls to the SetUpstreamDrift method.
+		SetUpstreamDrift []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// Drift is the drift argument value.
+			Drift workbranchstore.UpstreamDrift
+		}
+	}
+	lockSetUpstreamDrift sync.RWMutex
+}
+
+// SetUpstreamDrift calls SetUpstreamDriftFunc.
+func (mock *workBranchDriftMarkerMock) SetUpstreamDrift(ctx context.Context, id uuid.UUID, drift workbranchstore.UpstreamDrift) (workbranchstore.WorkBranch, error) {
+	if mock.SetUpstreamDriftFunc == nil {
+		panic("workBranchDriftMarkerMock.SetUpstreamDriftFunc: method is nil but workBranchDriftMarker.SetUpstreamDrift was just called")
+	}
+	callInfo := struct {
+		Ctx   context.Context
+		ID    uuid.UUID
+		Drift workbranchstore.UpstreamDrift
+	}{
+		Ctx:   ctx,
+		ID:    id,
+		Drift: drift,
+	}
+	mock.lockSetUpstreamDrift.Lock()
+	mock.calls.SetUpstreamDrift = append(mock.calls.SetUpstreamDrift, callInfo)
+	mock.lockSetUpstreamDrift.Unlock()
+	return mock.SetUpstreamDriftFunc(ctx, id, drift)
+}
+
+// SetUpstreamDriftCalls gets all the calls that were made to SetUpstreamDrift.
+// Check the length with:
+//
+//	len(mockedworkBranchDriftMarker.SetUpstreamDriftCalls())
+func (mock *workBranchDriftMarkerMock) SetUpstreamDriftCalls() []struct {
+	Ctx   context.Context
+	ID    uuid.UUID
+	Drift workbranchstore.UpstreamDrift
+} {
+	var calls []struct {
+		Ctx   context.Context
+		ID    uuid.UUID
+		Drift workbranchstore.UpstreamDrift
+	}
+	mock.lockSetUpstreamDrift.RLock()
+	calls = mock.calls.SetUpstreamDrift
+	mock.lockSetUpstreamDrift.RUnlock()
+	return calls
+}
+
+// Ensure, that workBranchAdoptionWriterMock does implement workBranchAdoptionWriter.
+// If this is not the case, regenerate this file with moq.
+var _ workBranchAdoptionWriter = &workBranchAdoptionWriterMock{}
+
+// workBranchAdoptionWriterMock is a mock implementation of workBranchAdoptionWriter.
+//
+//	func TestSomethingThatUsesworkBranchAdoptionWriter(t *testing.T) {
+//
+//		// make and configure a mocked workBranchAdoptionWriter
+//		mockedworkBranchAdoptionWriter := &workBranchAdoptionWriterMock{
+//			RecordAcceptedTipFunc: func(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the RecordAcceptedTip method")
+//			},
+//			UpdateStateFunc: func(ctx context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+//				panic("mock out the UpdateState method")
+//			},
+//		}
+//
+//		// use mockedworkBranchAdoptionWriter in code that requires workBranchAdoptionWriter
+//		// and then make assertions.
+//
+//	}
+type workBranchAdoptionWriterMock struct {
+	// RecordAcceptedTipFunc mocks the RecordAcceptedTip method.
+	RecordAcceptedTipFunc func(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error)
+
+	// UpdateStateFunc mocks the UpdateState method.
+	UpdateStateFunc func(ctx context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// RecordAcceptedTip holds details about calls to the RecordAcceptedTip method.
+		RecordAcceptedTip []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// Tip is the tip argument value.
+			Tip string
+		}
+		// UpdateState holds details about calls to the UpdateState method.
+		UpdateState []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// ID is the id argument value.
+			ID uuid.UUID
+			// To is the to argument value.
+			To workbranchstore.State
+		}
+	}
+	lockRecordAcceptedTip sync.RWMutex
+	lockUpdateState       sync.RWMutex
+}
+
+// RecordAcceptedTip calls RecordAcceptedTipFunc.
+func (mock *workBranchAdoptionWriterMock) RecordAcceptedTip(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error) {
+	if mock.RecordAcceptedTipFunc == nil {
+		panic("workBranchAdoptionWriterMock.RecordAcceptedTipFunc: method is nil but workBranchAdoptionWriter.RecordAcceptedTip was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		Tip string
+	}{
+		Ctx: ctx,
+		ID:  id,
+		Tip: tip,
+	}
+	mock.lockRecordAcceptedTip.Lock()
+	mock.calls.RecordAcceptedTip = append(mock.calls.RecordAcceptedTip, callInfo)
+	mock.lockRecordAcceptedTip.Unlock()
+	return mock.RecordAcceptedTipFunc(ctx, id, tip)
+}
+
+// RecordAcceptedTipCalls gets all the calls that were made to RecordAcceptedTip.
+// Check the length with:
+//
+//	len(mockedworkBranchAdoptionWriter.RecordAcceptedTipCalls())
+func (mock *workBranchAdoptionWriterMock) RecordAcceptedTipCalls() []struct {
+	Ctx context.Context
+	ID  uuid.UUID
+	Tip string
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		Tip string
+	}
+	mock.lockRecordAcceptedTip.RLock()
+	calls = mock.calls.RecordAcceptedTip
+	mock.lockRecordAcceptedTip.RUnlock()
+	return calls
+}
+
+// UpdateState calls UpdateStateFunc.
+func (mock *workBranchAdoptionWriterMock) UpdateState(ctx context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error) {
+	if mock.UpdateStateFunc == nil {
+		panic("workBranchAdoptionWriterMock.UpdateStateFunc: method is nil but workBranchAdoptionWriter.UpdateState was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		To  workbranchstore.State
+	}{
+		Ctx: ctx,
+		ID:  id,
+		To:  to,
+	}
+	mock.lockUpdateState.Lock()
+	mock.calls.UpdateState = append(mock.calls.UpdateState, callInfo)
+	mock.lockUpdateState.Unlock()
+	return mock.UpdateStateFunc(ctx, id, to)
+}
+
+// UpdateStateCalls gets all the calls that were made to UpdateState.
+// Check the length with:
+//
+//	len(mockedworkBranchAdoptionWriter.UpdateStateCalls())
+func (mock *workBranchAdoptionWriterMock) UpdateStateCalls() []struct {
+	Ctx context.Context
+	ID  uuid.UUID
+	To  workbranchstore.State
+} {
+	var calls []struct {
+		Ctx context.Context
+		ID  uuid.UUID
+		To  workbranchstore.State
+	}
+	mock.lockUpdateState.RLock()
+	calls = mock.calls.UpdateState
+	mock.lockUpdateState.RUnlock()
+	return calls
+}
+
+// Ensure, that roundOpenerMock does implement roundOpener.
+// If this is not the case, regenerate this file with moq.
+var _ roundOpener = &roundOpenerMock{}
+
+// roundOpenerMock is a mock implementation of roundOpener.
+//
+//	func TestSomethingThatUsesroundOpener(t *testing.T) {
+//
+//		// make and configure a mocked roundOpener
+//		mockedroundOpener := &roundOpenerMock{
+//			OpenRoundFunc: func(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
+//				panic("mock out the OpenRound method")
+//			},
+//		}
+//
+//		// use mockedroundOpener in code that requires roundOpener
+//		// and then make assertions.
+//
+//	}
+type roundOpenerMock struct {
+	// OpenRoundFunc mocks the OpenRound method.
+	OpenRoundFunc func(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// OpenRound holds details about calls to the OpenRound method.
+		OpenRound []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// WorkBranchID is the workBranchID argument value.
+			WorkBranchID uuid.UUID
+			// RequestedBy is the requestedBy argument value.
+			RequestedBy string
+		}
+	}
+	lockOpenRound sync.RWMutex
+}
+
+// OpenRound calls OpenRoundFunc.
+func (mock *roundOpenerMock) OpenRound(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error) {
+	if mock.OpenRoundFunc == nil {
+		panic("roundOpenerMock.OpenRoundFunc: method is nil but roundOpener.OpenRound was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		RequestedBy  string
+	}{
+		Ctx:          ctx,
+		WorkBranchID: workBranchID,
+		RequestedBy:  requestedBy,
+	}
+	mock.lockOpenRound.Lock()
+	mock.calls.OpenRound = append(mock.calls.OpenRound, callInfo)
+	mock.lockOpenRound.Unlock()
+	return mock.OpenRoundFunc(ctx, workBranchID, requestedBy)
+}
+
+// OpenRoundCalls gets all the calls that were made to OpenRound.
+// Check the length with:
+//
+//	len(mockedroundOpener.OpenRoundCalls())
+func (mock *roundOpenerMock) OpenRoundCalls() []struct {
+	Ctx          context.Context
+	WorkBranchID uuid.UUID
+	RequestedBy  string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		WorkBranchID uuid.UUID
+		RequestedBy  string
+	}
+	mock.lockOpenRound.RLock()
+	calls = mock.calls.OpenRound
+	mock.lockOpenRound.RUnlock()
 	return calls
 }

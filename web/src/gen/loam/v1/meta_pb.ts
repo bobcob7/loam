@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file loam/v1/meta.proto.
  */
 export const file_loam_v1_meta: GenFile = /*@__PURE__*/
-  fileDesc("ChJsb2FtL3YxL21ldGEucHJvdG8SB2xvYW0udjEiOgoWR2V0SW5zdHJ1Y3Rpb25zUmVxdWVzdBIUCgdjb21tYW5kGAEgASgJSACIAQFCCgoIX2NvbW1hbmQiawoXR2V0SW5zdHJ1Y3Rpb25zUmVzcG9uc2USDQoFdXNhZ2UYASABKAkSJgoIY29tbWFuZHMYAiADKAsyFC5sb2FtLnYxLkNvbW1hbmRJbmZvEhkKEXJvbGVfaW5zdHJ1Y3Rpb25zGAMgASgJIiwKC0NvbW1hbmRJbmZvEgwKBG5hbWUYASABKAkSDwoHc3VtbWFyeRgCIAEoCTJjCgtNZXRhU2VydmljZRJUCg9HZXRJbnN0cnVjdGlvbnMSHy5sb2FtLnYxLkdldEluc3RydWN0aW9uc1JlcXVlc3QaIC5sb2FtLnYxLkdldEluc3RydWN0aW9uc1Jlc3BvbnNlYgZwcm90bzM");
+  fileDesc("ChJsb2FtL3YxL21ldGEucHJvdG8SB2xvYW0udjEiOgoWR2V0SW5zdHJ1Y3Rpb25zUmVxdWVzdBIUCgdjb21tYW5kGAEgASgJSACIAQFCCgoIX2NvbW1hbmQiawoXR2V0SW5zdHJ1Y3Rpb25zUmVzcG9uc2USDQoFdXNhZ2UYASABKAkSJgoIY29tbWFuZHMYAiADKAsyFC5sb2FtLnYxLkNvbW1hbmRJbmZvEhkKEXJvbGVfaW5zdHJ1Y3Rpb25zGAMgASgJIj4KC0NvbW1hbmRJbmZvEgwKBG5hbWUYASABKAkSDwoHc3VtbWFyeRgCIAEoCRIQCghzeW5vcHNpcxgDIAEoCTJjCgtNZXRhU2VydmljZRJUCg9HZXRJbnN0cnVjdGlvbnMSHy5sb2FtLnYxLkdldEluc3RydWN0aW9uc1JlcXVlc3QaIC5sb2FtLnYxLkdldEluc3RydWN0aW9uc1Jlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message loam.v1.GetInstructionsRequest
@@ -77,6 +77,16 @@ export type CommandInfo = Message<"loam.v1.CommandInfo"> & {
    * @generated from field: string summary = 2;
    */
   summary: string;
+
+  /**
+   * Positional-argument shape (docs/cli-spec.md's <...>/[...] convention),
+   * e.g. "<repo> <from>" for "work start". Empty when the command takes no
+   * positional arguments. Flag usage is not included here -- the CLI's own
+   * --help already renders that from the FlagSet it parses with.
+   *
+   * @generated from field: string synopsis = 3;
+   */
+  synopsis: string;
 };
 
 /**

@@ -68,6 +68,7 @@ type harness struct {
 	merge     *MergeabilityCheckerMock
 	ingest    *IngestEnqueuerMock
 	prs       *PRPollerMock
+	drift     *DriftReconcilerMock
 	state     *SyncStateReporterMock
 	outcomes  chan repoOutcome
 }
@@ -85,6 +86,7 @@ func buildHarness(repoIDs []RepoID) *harness {
 		merge:    &MergeabilityCheckerMock{},
 		ingest:   &IngestEnqueuerMock{},
 		prs:      &PRPollerMock{},
+		drift:    &DriftReconcilerMock{},
 		outcomes: make(chan repoOutcome, 16),
 	}
 	h.repoList.ListReposFunc = func(ctx context.Context) ([]RepoID, error) {
@@ -95,6 +97,7 @@ func buildHarness(repoIDs []RepoID) *harness {
 	h.merge.CheckMergeabilityFunc = func(ctx context.Context, repo RepoID, advanced []Advance) error { return nil }
 	h.ingest.EnqueueIngestFunc = func(ctx context.Context, repo RepoID, advanced []Advance) (bool, error) { return false, nil }
 	h.prs.PollPRsFunc = func(ctx context.Context, repo RepoID) error { return nil }
+	h.drift.ReconcileDriftFunc = func(ctx context.Context, repo RepoID) error { return nil }
 	h.state = &SyncStateReporterMock{
 		ReportSyncingFunc: func(ctx context.Context, repo RepoID) error { return nil },
 		ReportIdleFunc: func(ctx context.Context, repo RepoID, enqueuedIngest bool) error {
@@ -111,7 +114,7 @@ func buildHarness(repoIDs []RepoID) *harness {
 
 func newHarness(repoIDs ...RepoID) *harness {
 	h := buildHarness(repoIDs)
-	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state)
+	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.drift, h.state)
 	return h
 }
 
@@ -120,7 +123,7 @@ func newHarness(repoIDs ...RepoID) *harness {
 // no other harness constructor exposes.
 func newHarnessWithOptions(repoIDs []RepoID, opts ...Option) *harness {
 	h := buildHarness(repoIDs)
-	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state, opts...)
+	h.scheduler = New(testLogger(), h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.drift, h.state, opts...)
 	return h
 }
 
@@ -133,7 +136,7 @@ func recordStep(log *eventLog, step string) func(ctx context.Context, repo RepoI
 	}
 }
 
-func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
+func TestScheduler_RunsSixStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -156,6 +159,7 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 		return true, nil
 	}
 	h.prs.PollPRsFunc = recordStep(&log, "pollprs")
+	h.drift.ReconcileDriftFunc = recordStep(&log, "drift")
 	go h.scheduler.Run(ctx)
 	h.ticks <- time.Now()
 	first := <-h.outcomes
@@ -165,8 +169,8 @@ func TestScheduler_RunsFiveStepsInOrderForEveryEnrolledRepo(t *testing.T) {
 	assert.True(t, first.enqueuedIngest, "the enqueuer reported a genuine enqueue for this advance")
 	assert.True(t, second.enqueuedIngest, "the enqueuer reported a genuine enqueue for this advance")
 	assert.ElementsMatch(t, []RepoID{"repoA", "repoB"}, []RepoID{first.repo, second.repo})
-	assert.Equal(t, []string{"repoA:fetch", "repoA:advances", "repoA:merge", "repoA:ingest", "repoA:pollprs"}, log.forRepo("repoA"))
-	assert.Equal(t, []string{"repoB:fetch", "repoB:advances", "repoB:merge", "repoB:ingest", "repoB:pollprs"}, log.forRepo("repoB"))
+	assert.Equal(t, []string{"repoA:fetch", "repoA:advances", "repoA:merge", "repoA:ingest", "repoA:pollprs", "repoA:drift"}, log.forRepo("repoA"))
+	assert.Equal(t, []string{"repoB:fetch", "repoB:advances", "repoB:merge", "repoB:ingest", "repoB:pollprs", "repoB:drift"}, log.forRepo("repoB"))
 }
 
 func TestScheduler_FailingStepInOneRepoDoesNotBlockAnother(t *testing.T) {
@@ -524,7 +528,7 @@ func TestScheduler_CyclePanicIsLoggedWithRepoValueAndStack(t *testing.T) {
 	defer cancel()
 	handler, logger := newCapturingHandler()
 	h := buildHarness([]RepoID{"repoA"})
-	h.scheduler = New(logger, h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.state)
+	h.scheduler = New(logger, h.ticks, h.repoList, h.fetch, h.advances, h.merge, h.ingest, h.prs, h.drift, h.state)
 	wantPanic := "collaborator exploded"
 	h.fetch.FetchFunc = func(ctx context.Context, repo RepoID) (FetchResult, error) {
 		panic(wantPanic)
@@ -1078,7 +1082,7 @@ func TestScheduler_TickDuringRunDoesNotRaceTheSharedWaitGroup(t *testing.T) {
 func TestScheduler_WithMaxConcurrentCyclesNonPositiveIsANoOp(t *testing.T) {
 	t.Parallel()
 	for _, n := range []int{0, -1} {
-		s := New(testLogger(), nil, nil, nil, nil, nil, nil, nil, nil, WithMaxConcurrentCycles(n))
+		s := New(testLogger(), nil, nil, nil, nil, nil, nil, nil, nil, nil, WithMaxConcurrentCycles(n))
 		assert.Nil(t, s.sem, "WithMaxConcurrentCycles(%d) must leave the scheduler unbounded, not install a zero-capacity gate", n)
 	}
 }

@@ -43,6 +43,7 @@ type Scheduler struct {
 	mergeability MergeabilityChecker
 	ingest       IngestEnqueuer
 	prPoller     PRPoller
+	drift        DriftReconciler
 	state        SyncStateReporter
 	mu           sync.Mutex
 	running      map[RepoID]struct{}
@@ -67,7 +68,7 @@ type Option func(*Scheduler)
 // (acquired first thing, released via a deferred receive), not tick's
 // spawn loop, so tick keeps returning its started list the instant every
 // repo's tryStart guard has been claimed, exactly as before -- only the
-// goroutines' own work (the five Mirror Sync steps and their terminal
+// goroutines' own work (the six Mirror Sync steps and their terminal
 // report) waits for a free slot. docs/testing-spec.md's "Manual
 // scheduler" contract is unaffected by that wait: Scheduler.Tick still
 // blocks, via waitIdle, until every cycle it started -- queued on the
@@ -90,7 +91,7 @@ func WithMaxConcurrentCycles(n int) Option {
 // than a wall-clock timer (docs/testing-spec.md -> Manual scheduler).
 // opts applies after every required argument is set; see Option and
 // WithMaxConcurrentCycles.
-func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher Fetcher, advances AdvanceDetector, mergeability MergeabilityChecker, ingest IngestEnqueuer, prPoller PRPoller, state SyncStateReporter, opts ...Option) *Scheduler {
+func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher Fetcher, advances AdvanceDetector, mergeability MergeabilityChecker, ingest IngestEnqueuer, prPoller PRPoller, drift DriftReconciler, state SyncStateReporter, opts ...Option) *Scheduler {
 	s := &Scheduler{
 		logger:       logger,
 		ticks:        ticks,
@@ -100,6 +101,7 @@ func New(logger *slog.Logger, ticks <-chan time.Time, repos RepoLister, fetcher 
 		mergeability: mergeability,
 		ingest:       ingest,
 		prPoller:     prPoller,
+		drift:        drift,
 		state:        state,
 		running:      make(map[RepoID]struct{}),
 	}
@@ -389,8 +391,10 @@ func (s *Scheduler) recoverCyclePanic(ctx context.Context, repo RepoID) {
 		"repo", string(repo), "panic", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
 }
 
-// runSteps runs the fixed 5-step Mirror Sync order for repo in order
-// (docs/sync-spec.md -> Mirror Sync, steps 1-5), returning whether step 4
+// runSteps runs the fixed 6-step Mirror Sync order for repo in order
+// (docs/sync-spec.md -> Mirror Sync, steps 1-5, plus step 6's upstream
+// drift reconciliation -- docs/sync-spec.md -> Upstream Drift on
+// `loam/<work-branch>`), returning whether step 4
 // actually enqueued an ingest job (IngestEnqueuer.EnqueueIngest's own
 // enqueued return value, never synthesised here — loam-ax1) and the first
 // step's wrapped error, if any. Step 4's enqueued is propagated verbatim
@@ -419,6 +423,9 @@ func (s *Scheduler) runSteps(ctx context.Context, repo RepoID) (enqueuedIngest b
 	}
 	if err := s.prPoller.PollPRs(ctx, repo); err != nil {
 		return enqueued, fmt.Errorf("polling PRs for repo %s: %w", repo, err)
+	}
+	if err := s.drift.ReconcileDrift(ctx, repo); err != nil {
+		return enqueued, fmt.Errorf("reconciling upstream drift for repo %s: %w", repo, err)
 	}
 	return enqueued, nil
 }

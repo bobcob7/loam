@@ -456,7 +456,7 @@ func TestBuildProposalAccepter_RejectsABadEncryptionKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-// syncCollaborators is one stand-in for all seven mirrorsync collaborator
+// syncCollaborators is one stand-in for all eight mirrorsync collaborator
 // seams newSyncRunner takes, driving the scheduler through a real Mirror
 // Sync cycle whose only observable step is the fetch.
 //
@@ -516,6 +516,8 @@ func (c *syncCollaborators) EnqueueIngest(context.Context, mirrorsync.RepoID, []
 
 func (c *syncCollaborators) PollPRs(context.Context, mirrorsync.RepoID) error { return nil }
 
+func (c *syncCollaborators) ReconcileDrift(context.Context, mirrorsync.RepoID) error { return nil }
+
 func (c *syncCollaborators) ReportSyncing(context.Context, mirrorsync.RepoID) error { return nil }
 
 func (c *syncCollaborators) ReportIdle(context.Context, mirrorsync.RepoID, bool) error { return nil }
@@ -559,7 +561,7 @@ func TestNewSyncRunner_BoundsConcurrentCyclesAtTheProductionDefault(t *testing.T
 	const extra = 4
 	collaborators := newSyncCollaborators(defaultMaxConcurrentCycles + extra)
 	ticks := make(chan time.Time)
-	r := newSyncRunner(syncTestLogger(), ticks, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, 5*time.Second)
+	r := newSyncRunner(syncTestLogger(), ticks, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, 5*time.Second)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runDone := runSyncRunner(ctx, r)
@@ -614,7 +616,7 @@ func TestNewSyncRunner_DrainsEveryQueuedCycleWithinTheGracePeriod(t *testing.T) 
 	n := defaultMaxConcurrentCycles + extra
 	collaborators := newSyncCollaborators(n)
 	ticks := make(chan time.Time)
-	r := newSyncRunner(syncTestLogger(), ticks, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, 5*time.Second)
+	r := newSyncRunner(syncTestLogger(), ticks, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, collaborators, 5*time.Second)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runDone := runSyncRunner(ctx, r)

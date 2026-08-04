@@ -10,7 +10,7 @@ import type { Message, UnknownEnum } from "@bufbuild/protobuf";
  * Describes the file loam/v1/common.proto.
  */
 export const file_loam_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChRsb2FtL3YxL2NvbW1vbi5wcm90bxIHbG9hbS52MSIbCgpRdWVyeVNjb3BlEg0KBXJlcG9zGAEgAygJIscBCgpXb3JrQnJhbmNoEgwKBHJlcG8YASABKAkSDAoEbmFtZRgCIAEoCRIOCgZ0YXJnZXQYAyABKAkSDQoFdGl0bGUYBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSJwoFc3RhdGUYBiABKA4yGC5sb2FtLnYxLldvcmtCcmFuY2hTdGF0ZRIOCgZhdXRob3IYByABKAkSHAoPdXBzdHJlYW1fcHJfdXJsGAggASgJSACIAQFCEgoQX3Vwc3RyZWFtX3ByX3VybCI2CgdDb21tZW50Eg4KBmF1dGhvchgBIAEoCRIMCgRib2R5GAIgASgJEg0KBXJvdW5kGAMgASgNIjQKCEZpbGVMaW5lEgwKBGZpbGUYASABKAkSEQoEbGluZRgCIAEoDUgAiAEBQgcKBV9saW5lIowBCgZUaHJlYWQSCgoCaWQYASABKAkSEAoIcmVzb2x2ZWQYAiABKAgSJgoGYW5jaG9yGAMgASgLMhEubG9hbS52MS5GaWxlTGluZUgAiAEBEiIKCGNvbW1lbnRzGAQgAygLMhAubG9hbS52MS5Db21tZW50Eg0KBXJvdW5kGAUgASgNQgkKB19hbmNob3IiagoOVmVyZGljdFN1bW1hcnkSEAoIcmV2aWV3ZXIYASABKAkSKAoHb3V0Y29tZRgCIAEoDjIXLmxvYW0udjEuVmVyZGljdE91dGNvbWUSDQoFc3RhbGUYAyABKAgSDQoFcm91bmQYBCABKA0iJQoEUGFnZRINCgVsaW1pdBgBIAEoDRIOCgZvZmZzZXQYAiABKA0iGQoIUGFnZUluZm8SDQoFdG90YWwYASABKA0iQQoISW5nZXN0ZWQSDAoEcmVwbxgBIAEoCRIOCgZ0YXJnZXQYAiABKAkSCwoDcmVmGAMgASgJEgoKAmF0GAQgASgJKosBCg5WZXJkaWN0T3V0Y29tZRIfChtWRVJESUNUX09VVENPTUVfVU5TUEVDSUZJRUQQABIbChdWRVJESUNUX09VVENPTUVfQVBQUk9WRRABEh4KGlZFUkRJQ1RfT1VUQ09NRV9ESVNBUFBST1ZFEAISGwoXVkVSRElDVF9PVVRDT01FX05FVVRSQUwQAyrRAQoPV29ya0JyYW5jaFN0YXRlEiEKHVdPUktfQlJBTkNIX1NUQVRFX1VOU1BFQ0lGSUVEEAASGwoXV09SS19CUkFOQ0hfU1RBVEVfRFJBRlQQARIgChxXT1JLX0JSQU5DSF9TVEFURV9SRVZJRVdBQkxFEAISHgoaV09SS19CUkFOQ0hfU1RBVEVfUkVWSUVXRUQQAxIeChpXT1JLX0JSQU5DSF9TVEFURV9DT01QTEVURRAEEhwKGFdPUktfQlJBTkNIX1NUQVRFX0NMT1NFRBAFYgZwcm90bzM");
+  fileDesc("ChRsb2FtL3YxL2NvbW1vbi5wcm90bxIHbG9hbS52MSIbCgpRdWVyeVNjb3BlEg0KBXJlcG9zGAEgAygJIqYCCgpXb3JrQnJhbmNoEgwKBHJlcG8YASABKAkSDAoEbmFtZRgCIAEoCRIOCgZ0YXJnZXQYAyABKAkSDQoFdGl0bGUYBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSJwoFc3RhdGUYBiABKA4yGC5sb2FtLnYxLldvcmtCcmFuY2hTdGF0ZRIOCgZhdXRob3IYByABKAkSHAoPdXBzdHJlYW1fcHJfdXJsGAggASgJSACIAQESLQoIY29uZmxpY3QYCSABKA4yGy5sb2FtLnYxLldvcmtCcmFuY2hDb25mbGljdBIuCg51cHN0cmVhbV9kcmlmdBgKIAEoDjIWLmxvYW0udjEuVXBzdHJlYW1EcmlmdEISChBfdXBzdHJlYW1fcHJfdXJsIjYKB0NvbW1lbnQSDgoGYXV0aG9yGAEgASgJEgwKBGJvZHkYAiABKAkSDQoFcm91bmQYAyABKA0iNAoIRmlsZUxpbmUSDAoEZmlsZRgBIAEoCRIRCgRsaW5lGAIgASgNSACIAQFCBwoFX2xpbmUijAEKBlRocmVhZBIKCgJpZBgBIAEoCRIQCghyZXNvbHZlZBgCIAEoCBImCgZhbmNob3IYAyABKAsyES5sb2FtLnYxLkZpbGVMaW5lSACIAQESIgoIY29tbWVudHMYBCADKAsyEC5sb2FtLnYxLkNvbW1lbnQSDQoFcm91bmQYBSABKA1CCQoHX2FuY2hvciJqCg5WZXJkaWN0U3VtbWFyeRIQCghyZXZpZXdlchgBIAEoCRIoCgdvdXRjb21lGAIgASgOMhcubG9hbS52MS5WZXJkaWN0T3V0Y29tZRINCgVzdGFsZRgDIAEoCBINCgVyb3VuZBgEIAEoDSIlCgRQYWdlEg0KBWxpbWl0GAEgASgNEg4KBm9mZnNldBgCIAEoDSIZCghQYWdlSW5mbxINCgV0b3RhbBgBIAEoDSJBCghJbmdlc3RlZBIMCgRyZXBvGAEgASgJEg4KBnRhcmdldBgCIAEoCRILCgNyZWYYAyABKAkSCgoCYXQYBCABKAkqiwEKDlZlcmRpY3RPdXRjb21lEh8KG1ZFUkRJQ1RfT1VUQ09NRV9VTlNQRUNJRklFRBAAEhsKF1ZFUkRJQ1RfT1VUQ09NRV9BUFBST1ZFEAESHgoaVkVSRElDVF9PVVRDT01FX0RJU0FQUFJPVkUQAhIbChdWRVJESUNUX09VVENPTUVfTkVVVFJBTBADKtEBCg9Xb3JrQnJhbmNoU3RhdGUSIQodV09SS19CUkFOQ0hfU1RBVEVfVU5TUEVDSUZJRUQQABIbChdXT1JLX0JSQU5DSF9TVEFURV9EUkFGVBABEiAKHFdPUktfQlJBTkNIX1NUQVRFX1JFVklFV0FCTEUQAhIeChpXT1JLX0JSQU5DSF9TVEFURV9SRVZJRVdFRBADEh4KGldPUktfQlJBTkNIX1NUQVRFX0NPTVBMRVRFEAQSHAoYV09SS19CUkFOQ0hfU1RBVEVfQ0xPU0VEEAUqmwEKEldvcmtCcmFuY2hDb25mbGljdBIkCiBXT1JLX0JSQU5DSF9DT05GTElDVF9VTlNQRUNJRklFRBAAEh0KGVdPUktfQlJBTkNIX0NPTkZMSUNUX05PTkUQARIgChxXT1JLX0JSQU5DSF9DT05GTElDVF9GTEFHR0VEEAISHgoaV09SS19CUkFOQ0hfQ09ORkxJQ1RfUkVTRVQQAyplCg1VcHN0cmVhbURyaWZ0Eh4KGlVQU1RSRUFNX0RSSUZUX1VOU1BFQ0lGSUVEEAASFwoTVVBTVFJFQU1fRFJJRlRfTk9ORRABEhsKF1VQU1RSRUFNX0RSSUZUX0RJVkVSR0VEEAJiBnByb3RvMw");
 
 /**
  * Scope for queries that can target specific repos or every enrolled repo.
@@ -99,6 +99,22 @@ export type WorkBranch = Message<"loam.v1.WorkBranch"> & {
    * @generated from field: optional string upstream_pr_url = 8;
    */
   upstreamPrUrl?: string | undefined;
+
+  /**
+   * Whether the branch still merges into its target. Read-only; the server sets
+   * it on sync and clears it on a catch-up push.
+   *
+   * @generated from field: loam.v1.WorkBranchConflict conflict = 9;
+   */
+  conflict: WorkBranchConflict;
+
+  /**
+   * Whether the upstream branch Loam pushed has moved under it. Read-only; the
+   * server sets and clears it on sync.
+   *
+   * @generated from field: loam.v1.UpstreamDrift upstream_drift = 10;
+   */
+  upstreamDrift: UpstreamDrift;
 };
 
 /**
@@ -456,4 +472,113 @@ export type WorkBranchState = (typeof WorkBranchState)[keyof typeof WorkBranchSt
  */
 export const WorkBranchStateSchema: GenEnum<WorkBranchState> = /*@__PURE__*/
   enumDesc(file_loam_v1_common, 1);
+
+/**
+ * Whether a work branch still merges cleanly into its target branch, and what a
+ * target advance did to it (docs/git-spec.md → Target Advances & Catch-Up).
+ * A branch carrying anything but NONE cannot be accepted; it must be caught up
+ * by a push first.
+ *
+ * @generated from enum loam.v1.WorkBranchConflict
+ */
+export const WorkBranchConflict = {
+  /**
+   * @generated from enum value: WORK_BRANCH_CONFLICT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED: 0,
+
+  /**
+   * Merges cleanly into the current target tip. The ordinary case.
+   *
+   * @generated from enum value: WORK_BRANCH_CONFLICT_NONE = 1;
+   */
+  NONE: 1,
+
+  /**
+   * The target advanced and the branch no longer merges into it. The branch was
+   * already DRAFT, so nothing was demoted — only the flag was raised.
+   *
+   * @generated from enum value: WORK_BRANCH_CONFLICT_FLAGGED = 2;
+   */
+  FLAGGED: 2,
+
+  /**
+   * The same conflict, on a branch that was REVIEWABLE or REVIEWED: it was reset
+   * to DRAFT as well as flagged, and a catch-up push restores it to REVIEWABLE
+   * with a fresh review round.
+   *
+   * @generated from enum value: WORK_BRANCH_CONFLICT_RESET = 3;
+   */
+  RESET: 3,
+} as const;
+
+/**
+ * Whether a work branch still merges cleanly into its target branch, and what a
+ * target advance did to it (docs/git-spec.md → Target Advances & Catch-Up).
+ * A branch carrying anything but NONE cannot be accepted; it must be caught up
+ * by a push first.
+ *
+ * @generated from enum loam.v1.WorkBranchConflict
+ */
+export type WorkBranchConflict = (typeof WorkBranchConflict)[keyof typeof WorkBranchConflict] | UnknownEnum;
+
+/**
+ * Describes the enum loam.v1.WorkBranchConflict.
+ */
+export const WorkBranchConflictSchema: GenEnum<WorkBranchConflict> = /*@__PURE__*/
+  enumDesc(file_loam_v1_common, 2);
+
+/**
+ * Whether the upstream `loam/<name>` branch Loam pushed has been moved by
+ * someone else (docs/sync-spec.md → Upstream Drift on `loam/<work-branch>`).
+ *
+ * This is a DIFFERENT fact from WorkBranchConflict and the two can hold at once:
+ * conflict means *the target moved, catch up*, drift means *someone rewrote the
+ * branch Loam pushed*. They call for different operator actions, so a console
+ * must not collapse them into one badge.
+ *
+ * @generated from enum loam.v1.UpstreamDrift
+ */
+export const UpstreamDrift = {
+  /**
+   * @generated from enum value: UPSTREAM_DRIFT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED: 0,
+
+  /**
+   * Upstream is where Loam left it, or drifted only by a fast-forward Loam has
+   * since adopted (which reopens a review round). The ordinary case.
+   *
+   * @generated from enum value: UPSTREAM_DRIFT_NONE = 1;
+   */
+  NONE: 1,
+
+  /**
+   * The upstream branch moved somewhere the work branch's tip is not an ancestor
+   * of. Loam changes nothing — it cannot know which side is intended — and
+   * refuses to accept the branch until upstream is reconciled by hand.
+   *
+   * @generated from enum value: UPSTREAM_DRIFT_DIVERGED = 2;
+   */
+  DIVERGED: 2,
+} as const;
+
+/**
+ * Whether the upstream `loam/<name>` branch Loam pushed has been moved by
+ * someone else (docs/sync-spec.md → Upstream Drift on `loam/<work-branch>`).
+ *
+ * This is a DIFFERENT fact from WorkBranchConflict and the two can hold at once:
+ * conflict means *the target moved, catch up*, drift means *someone rewrote the
+ * branch Loam pushed*. They call for different operator actions, so a console
+ * must not collapse them into one badge.
+ *
+ * @generated from enum loam.v1.UpstreamDrift
+ */
+export type UpstreamDrift = (typeof UpstreamDrift)[keyof typeof UpstreamDrift] | UnknownEnum;
+
+/**
+ * Describes the enum loam.v1.UpstreamDrift.
+ */
+export const UpstreamDriftSchema: GenEnum<UpstreamDrift> = /*@__PURE__*/
+  enumDesc(file_loam_v1_common, 3);
 
