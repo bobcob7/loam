@@ -246,6 +246,22 @@ func TestResolveWorkBranchRef_MirrorMissing_ReturnsErrMirrorMissing(t *testing.T
 // it, committing, and pushing back -- the only way to move a bare repo's
 // ref to a genuinely new commit without hand-rolling plumbing. Returns the
 // new tip SHA.
+//
+// The commit's blob content and message are keyed on ref itself rather than
+// a fixed string, so two calls that advance two DIFFERENT refs back to back
+// are guaranteed to produce different tree hashes -- and therefore
+// different commit SHAs -- BY CONSTRUCTION. This is load-bearing, not
+// cosmetic (loam-giq.14): with author/committer pinned identically by
+// runGit's fixed environment, an unvarying parent, and (until this fix) a
+// fixed message and content, a commit hash's only remaining input was the
+// timestamp -- and two such commits landing inside the same wall-clock
+// second, which the CI container does every time, produced the IDENTICAL
+// SHA. That silently stopped
+// TestAdvanceWorkBranchRef_RefusesWhenTheRefMovedUnderIt from exercising
+// AdvanceWorkBranchRef's compare-and-swap guard at all. Do not revert this
+// to a fixed string, and do not "fix" a future flake here with a sleep --
+// that trades a fast flake for a slow one instead of removing the
+// coincidence.
 func advanceRef(t *testing.T, mirrorDir, ref string) string {
 	t.Helper()
 	require.True(t, strings.HasPrefix(ref, "refs/heads/"), "advanceRef needs a refs/heads/ ref, got %q", ref)
@@ -253,9 +269,9 @@ func advanceRef(t *testing.T, mirrorDir, ref string) string {
 	clone := filepath.Join(t.TempDir(), "clone")
 	runGit(t, "", "clone", "--quiet", mirrorDir, clone)
 	runGit(t, clone, "checkout", "--quiet", "-B", "local-work", tracking)
-	require.NoError(t, os.WriteFile(filepath.Join(clone, "advance.txt"), []byte("advanced\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "advance.txt"), []byte("advanced: "+ref+"\n"), 0o644))
 	runGit(t, clone, "add", "advance.txt")
-	runGit(t, clone, "commit", "--quiet", "-m", "advance")
+	runGit(t, clone, "commit", "--quiet", "-m", "advance "+ref)
 	runGit(t, clone, "push", "--quiet", "origin", "HEAD:"+ref)
 	return refSHA(t, mirrorDir, ref)
 }
