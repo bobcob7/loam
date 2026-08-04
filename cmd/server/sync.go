@@ -261,13 +261,15 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
 	httpClient := &http.Client{}
-	// One host-agnostic *forge.Forgejo for gitCredentialConverter, exactly
-	// as registerRepoAdminService builds it and for the reason documented
-	// there: GitCredentials' token-as-password convention is the same for
-	// every Forgejo host, so it needs no binding. The forge REST surface
-	// the PR poller reads DOES need binding, which is what forgePRTracker
-	// below exists for.
-	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	// One host-agnostic *forge.Resolver for gitCredentialConverter,
+	// exactly as registerRepoAdminService builds it and for the reason
+	// documented there: GitCredentials' token-as-password convention is
+	// the same for every host this package resolves to a Kind (see
+	// forge.gitCredentialsConvention), so it needs no per-host binding.
+	// The forge REST surface the PR poller reads DOES need binding, and
+	// does need the right Kind for the repo it is bound to, which is
+	// what forgePRTracker below exists for.
+	transport := gittransport.New(credentials, forge.NewResolver(httpClient, cfg.Logger), cfg.Logger)
 	resolver := mirrorsync.NewStoreRepoResolver(repos, workBranches)
 	fetcher := mirrorsync.NewMirrorFetcher(cfg.DataDir, transport, resolver)
 	advances := mirrorsync.NewStoreAdvanceDetector(repos, repos, workBranches)
@@ -321,7 +323,7 @@ func buildProposalAccepter(cfg config.Config, pool *pgxpool.Pool, httpClient *ht
 	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
-	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	transport := gittransport.New(credentials, forge.NewResolver(httpClient, cfg.Logger), cfg.Logger)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
 	// tips resolves the local tip an accept is about to push, recorded as
 	// work_branches.accepted_tip (loam-cgg) -- the same *gitref.Creator type
@@ -356,7 +358,7 @@ func buildUpstreamPRCloser(cfg config.Config, pool *pgxpool.Pool, httpClient *ht
 	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
-	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	transport := gittransport.New(credentials, forge.NewResolver(httpClient, cfg.Logger), cfg.Logger)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
 	return mirrorsync.NewStorePRPoller(cfg.DataDir, cfg.Logger, repos, workBranches, workBranches, tracker, transport), nil
 }
@@ -365,19 +367,22 @@ func buildUpstreamPRCloser(cfg config.Config, pool *pgxpool.Pool, httpClient *ht
 // reads PR state through, and proposal acceptance opens a pull request
 // through: mirrorsync's pullRequestTracker and pullRequestOpener seams,
 // both satisfied by resolving each call's repo to its OWN forge host and
-// token and building a single-use *forge.Forgejo bound to that pair.
+// token and building a single-use forge.Provider bound to that pair --
+// via forge.NewProvider, so the repo's OWN Kind (Forgejo or GitHub) is
+// resolved fresh each time too, not just its host and token.
 //
 // A per-call instance is required, not an optimisation deferred: a
-// *forge.Forgejo is bound to one host and one token at construction
-// (forge.NewForgejo's doc comment), while StorePRPoller is one object
-// polling every enrolled repo, and different repos can be enrolled against
-// different forge hosts with different credentials. A single shared
-// instance would have to be bound to some arbitrary host -- or to the
-// empty host, which makes every request target the literal URL
-// "https:///api/v1/..." -- and would silently send one repo's token to
-// another repo's forge. repoadmin.ForgeChecker already reached this same
-// conclusion for CheckRepo and builds per call for the same reason; this
-// is that pattern applied to the poller's own two calls.
+// forge.Provider returned by NewProvider is bound to one host and one
+// token at construction, while StorePRPoller is one object polling
+// every enrolled repo, and different repos can be enrolled against
+// different forge hosts -- on different Kinds -- with different
+// credentials. A single shared instance would have to be bound to some
+// arbitrary host -- or to the empty host, which makes every request
+// target the literal URL "https:///api/v1/..." -- and would silently
+// send one repo's token to another repo's forge, or one Kind's request
+// shape to the other Kind's API. repoadmin.ForgeChecker already reached
+// this same conclusion for CheckRepo and builds per call for the same
+// reason; this is that pattern applied to the poller's own two calls.
 //
 // It is defined here, at the composition root, rather than in
 // internal/mirrorsync: it is the join of three things this binary owns and
@@ -433,12 +438,15 @@ func (t forgePRTracker) FindOpenPR(ctx context.Context, repo, headBranch, target
 }
 
 // provider resolves repo's enrolled forge host and that host's stored
-// token, and returns a *forge.Forgejo bound to both. Failures are
+// token, and returns a forge.Provider bound to both -- of whichever Kind
+// row.ForgeHost resolves to (loam-tmds.1's selection seam). Failures are
 // returned, never swallowed into an unauthenticated provider: an
 // unauthenticated PR read against a private repo answers 404, which
 // StorePRPoller would report as an unknown state rather than as the
-// credential problem it actually is.
-func (t forgePRTracker) provider(ctx context.Context, repo string) (*forge.Forgejo, error) {
+// credential problem it actually is. A host that resolves to no known
+// Kind (forge.ErrUnsupportedForgeKind) is returned exactly the same way
+// -- named with the repo, never silently defaulted to Forgejo.
+func (t forgePRTracker) provider(ctx context.Context, repo string) (forge.Provider, error) {
 	row, err := t.repos.GetRepoByName(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolving repo %s for forge access: %w", repo, err)
@@ -447,5 +455,9 @@ func (t forgePRTracker) provider(ctx context.Context, repo string) (*forge.Forge
 	if err != nil {
 		return nil, fmt.Errorf("resolving credential for forge host %s: %w", row.ForgeHost, err)
 	}
-	return forge.NewForgejo(row.ForgeHost, credential.Token, t.httpClient, t.logger), nil
+	provider, err := forge.NewProvider(row.ForgeHost, credential.Token, t.httpClient, t.logger)
+	if err != nil {
+		return nil, fmt.Errorf("resolving forge provider for repo %s: %w", repo, err)
+	}
+	return provider, nil
 }

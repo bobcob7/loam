@@ -421,6 +421,35 @@ func TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed(t *test
 	require.ErrorIs(t, err, wantErr)
 }
 
+// TestForgePRTracker_UnsupportedForgeKind_FailsLoudly is loam-tmds.1's
+// AC4 pinned at the composition root: a repo enrolled against a host
+// this tree cannot resolve to a Kind (a GitHub-Enterprise-shaped host,
+// out of scope per internal/forge.KindForHost) must fail the call
+// naming the repo and the host, and must NOT silently fall back to
+// treating it as Forgejo -- which would send its token to a
+// Forgejo-shaped API URL on that host and fail in a way that looks
+// nothing like "this forge kind is unsupported".
+func TestForgePRTracker_UnsupportedForgeKind_FailsLoudly(t *testing.T) {
+	t.Parallel()
+	credentialsCalled := false
+	tracker := forgePRTracker{
+		repos: &repoForgeLookupMock{GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
+			return reposstore.Repo{Name: name, ForgeHost: "github-enterprise.example.com"}, nil
+		}},
+		credentials: &forgeCredentialLookupMock{GetByHostFunc: func(_ context.Context, host string) (credentialstore.Credential, error) {
+			credentialsCalled = true
+			return credentialstore.Credential{Host: host, Token: "tkn"}, nil
+		}},
+		httpClient: &http.Client{},
+		logger:     syncTestLogger(),
+	}
+	_, err := tracker.GetPRState(t.Context(), "acme/widgets", 7)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "acme/widgets", "the error must name the repo whose forge kind could not be resolved")
+	assert.Contains(t, err.Error(), "github-enterprise.example.com", "the error must name the unresolvable host")
+	assert.True(t, credentialsCalled, "the credential lookup still runs -- resolution fails on the Kind, not on finding a token")
+}
+
 // TestBuildProposalAccepter_WiresTheProductionGraph proves the
 // composition-root constructor registerProposalService builds
 // AcceptProposal's engine from actually assembles -- and, by compiling at all,
