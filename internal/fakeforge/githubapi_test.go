@@ -1,9 +1,11 @@
 package fakeforge
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -86,6 +88,49 @@ func TestGitHubCreatePRAgainstFake_DuplicateAndRepoNotFound(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, forge.ErrDuplicatePR)
 	})
+	t.Run("missing base branch", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := client.CreatePR(t.Context(), "acme/widgets", "feature-1", "branch-that-does-not-exist", "t", "d")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, forge.ErrRepoNotFound,
+			"the fake answers 422 with field:\"base\",code:\"invalid\" (the confirmed GitHub shape), which forge.GitHub's githubIsMissingBaseBranch must map to ErrRepoNotFound -- NOT the 404 an earlier revision of this fake incorrectly modeled")
+		assert.NotErrorIs(t, err, forge.ErrDuplicatePR)
+	})
+}
+
+// TestGitHubCreatePRAgainstFake_MissingBaseBranchWireShape pins the exact
+// response body the fake now sends for a nonexistent base branch, since
+// a review found the PREVIOUS revision (a 404) was actively wrong: POST
+// /repos/{owner}/{repo}/pulls documents only 201/403/422, and a
+// nonexistent base branch is the confirmed 422 shape asserted here.
+func TestGitHubCreatePRAgainstFake_MissingBaseBranchWireShape(t *testing.T) {
+	t.Parallel()
+	srv, ts := newTestServer(t)
+	srv.AddToken("full-token")
+	require.NoError(t, srv.SeedRepoFiles(t.Context(), "acme/widgets",
+		map[string][]byte{"README.md": []byte("# widgets\n")}, SeedOptions{DefaultBranch: "main"}))
+	require.NoError(t, srv.CreateBranch(t.Context(), "acme/widgets", "feature-1", "main"))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/repos/acme/widgets/pulls",
+		strings.NewReader(`{"head":"feature-1","base":"branch-that-does-not-exist"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "token full-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode, "the endpoint documents only 201/403/422 -- never 404")
+	var body struct {
+		Errors []struct {
+			Resource string `json:"resource"`
+			Field    string `json:"field"`
+			Code     string `json:"code"`
+		} `json:"errors"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Errors, 1)
+	assert.Equal(t, "PullRequest", body.Errors[0].Resource)
+	assert.Equal(t, "base", body.Errors[0].Field)
+	assert.Equal(t, "invalid", body.Errors[0].Code)
 }
 
 // TestGitHubCreatePRAgainstFake_Unauthenticated proves an anonymous

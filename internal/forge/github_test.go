@@ -174,6 +174,54 @@ func TestGitHub_CreatePR_Other422IsNotDuplicatePR(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrDuplicatePR)
 }
 
+// TestGitHub_CreatePR_MissingBaseBranch_Maps422ToErrRepoNotFound is the
+// case a review caught missing: POST /repos/{owner}/{repo}/pulls
+// documents only 201/403/422 (404 is not among them), and a nonexistent
+// base branch answers 422 with an errors[] entry
+// {"resource":"PullRequest","field":"base","code":"invalid"} — matched
+// structurally by githubIsMissingBaseBranch, not by message text, and
+// mapped to ErrRepoNotFound (the same sentinel Forgejo's own
+// BaseNotExist fold uses). This is the row
+// internal/forgesuite's CreatePR/MissingTargetBranchIsRepoNotFound
+// exercises end to end against the fake; this is the unit-level pin of
+// the same mapping directly against forge.GitHub.
+func TestGitHub_CreatePR_MissingBaseBranch_Maps422ToErrRepoNotFound(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","field":"base","code":"invalid"}]}`))
+	}))
+	defer server.Close()
+	g := NewGitHub(server.URL, "tkn", server.Client(), testLogger())
+	_, _, err := g.CreatePR(t.Context(), "acme/widgets", "loam/wb-1", "branch-that-does-not-exist", "title", "body")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRepoNotFound)
+	assert.NotErrorIs(t, err, ErrDuplicatePR, "a missing-branch validation error must not also read as a duplicate PR")
+}
+
+// TestGitHub_CreatePR_MissingHeadBranch_StaysUnclassified pins the
+// deliberate asymmetry: only the base-branch shape is a CONFIRMED
+// response (see githubIsMissingBaseBranch's doc comment). A head-field
+// invalid error is NOT matched to any sentinel — it falls through to
+// the generic "unexpected status" error — because this package has not
+// confirmed GitHub answers a missing head branch with the same shape,
+// and internal/forgesuite's shared contract table excludes this case
+// entirely (mirroring Forgejo's own excluded leaked-500 case) so
+// nothing requires a specific mapping here.
+func TestGitHub_CreatePR_MissingHeadBranch_StaysUnclassified(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","field":"head","code":"invalid"}]}`))
+	}))
+	defer server.Close()
+	g := NewGitHub(server.URL, "tkn", server.Client(), testLogger())
+	_, _, err := g.CreatePR(t.Context(), "acme/widgets", "branch-that-does-not-exist", "main", "title", "body")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoNotFound, "the head case is unconfirmed and must not silently borrow the base case's mapping")
+	assert.NotErrorIs(t, err, ErrDuplicatePR)
+}
+
 // TestGitHub_CreatePR_ErrorMapping covers ErrInvalidToken/ErrRepoNotFound
 // via the shared status classifier, and the rate-limit non-mapping at
 // this call site too (loam-tmds.2 AC5 is not ValidateToken-only).

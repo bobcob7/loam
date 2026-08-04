@@ -75,19 +75,38 @@ type githubErrorWire struct {
 // githubValidationErrorWire is GitHub's 422 validation-error shape
 // (docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-
 // api): a top-level message plus a structured errors[] array. The
-// duplicate-PR case's message text is what forge.GitHub's
-// githubIsDuplicatePR actually matches on (see that function's doc
-// comment for why: this project could not confirm GitHub's errors[].code
-// for this specific case from available docs), so this fake reproduces
-// that exact, documented text rather than a code this bead never
-// verified.
+// duplicate-PR case is matched on message text (Code=="custom", which
+// GitHub's own docs define as "refer to the message property to
+// diagnose the error" -- see forge.GitHub's githubIsDuplicatePR doc
+// comment); the missing-base-branch case is matched structurally on
+// Field=="base", Code=="invalid" (see githubIsMissingBaseBranch's doc
+// comment) -- both fields are populated here so this fake can produce
+// either shape faithfully.
 type githubValidationErrorWire struct {
 	Message string `json:"message"`
 	Errors  []struct {
 		Resource string `json:"resource"`
+		Field    string `json:"field,omitempty"`
 		Code     string `json:"code"`
-		Message  string `json:"message"`
+		Message  string `json:"message,omitempty"`
 	} `json:"errors,omitempty"`
+}
+
+// writeGitHubValidationError writes a GitHub-shaped 422 response with a
+// single errors[] entry -- the field/code-addressable branch-validation
+// shape (githubIsMissingBaseBranch), distinct from the message-text
+// duplicate-PR shape handleGitHubCreatePull builds directly since that
+// one needs a message, not a field/code pair.
+func writeGitHubValidationError(w http.ResponseWriter, resource, field, code string) {
+	writeJSON(w, http.StatusUnprocessableEntity, githubValidationErrorWire{
+		Message: "Validation Failed",
+		Errors: []struct {
+			Resource string `json:"resource"`
+			Field    string `json:"field,omitempty"`
+			Code     string `json:"code"`
+			Message  string `json:"message,omitempty"`
+		}{{Resource: resource, Field: field, Code: code}},
+	})
 }
 
 // githubPullWire mirrors forge/github.go's own githubPullWire: html_url,
@@ -215,43 +234,60 @@ func (s *Server) handleGitHubCreatePull(w http.ResponseWriter, r *http.Request) 
 		Body  string `json:"body"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	// Both branch checks answer 404, NOT the 422 a real validation
-	// failure might use: this bead could not confirm what status code
-	// real GitHub returns for either a missing head or a missing base
-	// branch (unlike the duplicate-PR 422, whose message text this
-	// project could at least find documented), so rather than invent an
-	// unverified 422 shape, this models the closest VERIFIED-CONTRACT
-	// behaviour instead — the interface's own ErrRepoNotFound sentinel,
-	// which forge.GitHub's doPullRequest already maps any 404 to, and
-	// which internal/forgesuite's shared CreatePR/MissingTargetBranch
-	// case requires uniformly across providers. internal/fakeforge's own
-	// Forgejo surface (forgejoapi.go) sets the precedent for this choice:
-	// its missing-HEAD-branch route also does not mimic real Forgejo's
-	// verified-but-inconvenient 500 leak, opting for a plain 404 instead.
-	// A maintainer running the real-GitHub contract leg (gated, currently
-	// unexecuted — see github_integration_test.go) should confirm this
-	// against live GitHub and correct it here if it differs.
+	// NEITHER branch check answers 404: POST /repos/{owner}/{repo}/pulls
+	// documents ONLY 201/403/422 for this endpoint (docs.github.com/en/
+	// rest/pulls/pulls#create-a-pull-request) -- 404 is not a status this
+	// route can honestly return once the repo itself is known to exist
+	// (s.requireRepo above already handled that case). A prior revision
+	// of this file answered 404 here, reasoned as "the closest verified
+	// sentinel," which a review correctly identified as circular: it
+	// picked the one status GitHub's docs say this endpoint does NOT
+	// return, because that status happened to be the one
+	// forge.GitHub's doPullRequest already mapped to the sentinel the
+	// contract wants -- which would have hidden a genuine gap in
+	// doPullRequest's own classification instead of exercising it.
+	//
+	// The BASE case is now a confirmed response shape: a nonexistent
+	// base branch answers 422 with an errors[] entry
+	// {"resource":"PullRequest","field":"base","code":"invalid"}, which
+	// forge.GitHub's githubIsMissingBaseBranch (github.go) now matches
+	// structurally and maps to ErrRepoNotFound -- see that function's
+	// own doc comment for why field/code, not message text, is the
+	// right match here.
+	//
+	// The HEAD case is inferred by symmetry (the same errors[] shape,
+	// field:"head"), NOT independently confirmed: this bead's excluded
+	// from internal/forgesuite's shared contract table for the identical
+	// reason Forgejo's own leaked-500 head case is (see that package's
+	// doc comment), so nothing exercises this shape end to end.
+	// forge.GitHub's doPullRequest deliberately does NOT match
+	// field=="head" against anything -- it falls through to a generic
+	// "unexpected status" error -- so this fake and the real client
+	// agree on leaving this case unclassified rather than one of them
+	// quietly guessing.
 	if err := s.requireBranch(r.Context(), repoDir, req.Head); err != nil {
-		writeGitHubError(w, http.StatusNotFound, "Not Found")
+		writeGitHubValidationError(w, "PullRequest", "head", "invalid")
 		return
 	}
 	if err := s.requireBranch(r.Context(), repoDir, req.Base); err != nil {
-		writeGitHubError(w, http.StatusNotFound, "Not Found")
+		writeGitHubValidationError(w, "PullRequest", "base", "invalid")
 		return
 	}
 	if existing, ok := s.prs.findOpen(repo, req.Head, req.Base); ok {
 		// The message text here is load-bearing, not illustrative:
 		// forge.GitHub's githubIsDuplicatePR matches "pull request
 		// already exists" case-insensitively against exactly this
-		// field, since this bead could not confirm GitHub's errors[].code
-		// for this case from available docs (see that function's own
-		// doc comment).
+		// field. Code=="custom" is what GitHub's own docs define as
+		// "refer to the message property to diagnose the error" (see
+		// githubErrorEnvelope's doc comment in forge/github.go), so
+		// this is the documented shape, not an approximation of one.
 		writeJSON(w, http.StatusUnprocessableEntity, githubValidationErrorWire{
 			Message: "Validation Failed",
 			Errors: []struct {
 				Resource string `json:"resource"`
+				Field    string `json:"field,omitempty"`
 				Code     string `json:"code"`
-				Message  string `json:"message"`
+				Message  string `json:"message,omitempty"`
 			}{{Resource: "PullRequest", Code: "custom", Message: fmt.Sprintf("A pull request already exists for %s:%s (pr #%d).", strings.SplitN(repo, "/", 2)[0], req.Head, existing.number)}},
 		})
 		return

@@ -266,14 +266,16 @@ type githubPatchPullRequest struct {
 // (docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-
 // api, fetched 2026-08-04): "The response body will include an errors
 // property, which includes a code property to help you diagnose the
-// problem." Message is also read directly: this package's own
-// duplicate-PR detection (githubIsDuplicatePR) matches on message text
-// rather than a specific errors[].code, because the docs fetched for
-// this bead confirm the errors[] shape and its documented codes
-// (missing, missing_field, invalid, already_exists, unprocessable,
-// custom) but do NOT confirm which code GitHub assigns to a duplicate
-// pull request specifically — flagged here rather than guessed; see
-// githubIsDuplicatePR's own doc comment.
+// problem." The documented codes are missing, missing_field, invalid,
+// already_exists, unprocessable, and custom — and per that same page,
+// custom means "refer to the message property to diagnose the error":
+// message-text matching for a custom-coded error (githubIsDuplicatePR,
+// below) is what GitHub's own docs instruct, not a fallback chosen for
+// lack of a better signal. A nonexistent base branch, by contrast, is
+// invalid with Field=="base" — a structured, field-addressable code
+// (githubIsMissingBaseBranch, below) — so that case is matched
+// structurally, not by message text, exactly because code=="invalid"
+// does carry the specific meaning custom does not.
 type githubErrorEnvelope struct {
 	Message string `json:"message"`
 	Errors  []struct {
@@ -287,26 +289,54 @@ type githubErrorEnvelope struct {
 // githubIsDuplicatePR reports whether a 422 response body represents
 // CreatePR's duplicate-PR case, by matching "pull request already
 // exists" (case-insensitive) against the envelope's top-level message
-// or any per-error message. This is a message-text match, not a
-// structured errors[].code match, and that is a deliberate, flagged gap:
-// GitHub's troubleshooting docs (fetched 2026-08-04) document the
-// errors[].code values already_exists, custom, invalid, missing,
-// missing_field, and unprocessable in general, but do not state which
-// one this specific case uses, and this package found no other GitHub
-// REST reference page that pins it definitively. Matching on the
-// documented, human-readable message text is deliberately the more
-// conservative choice — it is exactly the string GitHub Support and
-// GitHub's own CLI tooling are known to key on for this error — and any
-// OTHER 422 (a genuinely invalid branch name, no commits between head
-// and base, etc.) falls through to CreatePR's generic "unexpected
-// status" branch rather than being misreported as a duplicate.
+// or any per-error message whose Resource is "PullRequest" — the
+// pre-filter is cheap hardening against an unrelated custom-coded error
+// on the same response ever containing that phrase by coincidence, not
+// a response to any observed false positive. GitHub's troubleshooting
+// docs define the "custom" errors[].code as "refer to the message
+// property to diagnose the error": for a custom-coded validation
+// failure, message-text matching IS the documented mechanism, not a
+// conservative stand-in for a code this package could not confirm (see
+// githubErrorEnvelope's own doc comment). Any OTHER 422 (an invalid
+// branch name via githubIsMissingBaseBranch below, no commits between
+// head and base, etc.) is handled on its own terms rather than being
+// misreported as a duplicate.
 func githubIsDuplicatePR(envelope githubErrorEnvelope) bool {
 	const marker = "pull request already exists"
 	if strings.Contains(strings.ToLower(envelope.Message), marker) {
 		return true
 	}
 	for _, e := range envelope.Errors {
-		if strings.Contains(strings.ToLower(e.Message), marker) {
+		if e.Resource == "PullRequest" && strings.Contains(strings.ToLower(e.Message), marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// githubIsMissingBaseBranch reports whether a 422 response body
+// represents CreatePR's nonexistent-base-branch case: an errors[] entry
+// with Resource=="PullRequest", Field=="base", and Code=="invalid".
+// This is a real, confirmed response shape (not the earlier,
+// unconfirmed guess this package shipped and a review caught): POST
+// /repos/{owner}/{repo}/pulls documents only 201/403/422 for this
+// endpoint — 404 is not among them — and a nonexistent base is answered
+// with exactly this errors[] entry. CreatePR maps it to ErrRepoNotFound,
+// the same sentinel Forgejo's own BaseNotExist fold uses (forgejo.go),
+// for the identical reason: the target branch not existing reads to a
+// caller as "the thing I asked to create a PR against could not be
+// resolved," which ErrRepoNotFound already covers.
+//
+// This is deliberately narrower than "any invalid-coded error": a
+// nonexistent HEAD branch is excluded from this check (and from
+// internal/forgesuite's shared contract table entirely — see that
+// package's doc comment) because this package has not confirmed
+// GitHub answers that case with the same Field=="base" shape, and
+// folding an unconfirmed case into ErrRepoNotFound risks the same
+// mistake this function was written to fix.
+func githubIsMissingBaseBranch(envelope githubErrorEnvelope) bool {
+	for _, e := range envelope.Errors {
+		if e.Resource == "PullRequest" && e.Field == "base" && e.Code == "invalid" {
 			return true
 		}
 	}
@@ -473,6 +503,9 @@ func (g *GitHub) doPullRequest(ctx context.Context, method, repo string, prNumbe
 		_ = json.Unmarshal(bodyBytes, &envelope)
 		if githubIsDuplicatePR(envelope) {
 			return nil, ErrDuplicatePR
+		}
+		if githubIsMissingBaseBranch(envelope) {
+			return nil, ErrRepoNotFound
 		}
 		return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, strconv.Quote(envelope.Message))
 	}
