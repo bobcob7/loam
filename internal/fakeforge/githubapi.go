@@ -215,12 +215,28 @@ func (s *Server) handleGitHubCreatePull(w http.ResponseWriter, r *http.Request) 
 		Body  string `json:"body"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Both branch checks answer 404, NOT the 422 a real validation
+	// failure might use: this bead could not confirm what status code
+	// real GitHub returns for either a missing head or a missing base
+	// branch (unlike the duplicate-PR 422, whose message text this
+	// project could at least find documented), so rather than invent an
+	// unverified 422 shape, this models the closest VERIFIED-CONTRACT
+	// behaviour instead — the interface's own ErrRepoNotFound sentinel,
+	// which forge.GitHub's doPullRequest already maps any 404 to, and
+	// which internal/forgesuite's shared CreatePR/MissingTargetBranch
+	// case requires uniformly across providers. internal/fakeforge's own
+	// Forgejo surface (forgejoapi.go) sets the precedent for this choice:
+	// its missing-HEAD-branch route also does not mimic real Forgejo's
+	// verified-but-inconvenient 500 leak, opting for a plain 404 instead.
+	// A maintainer running the real-GitHub contract leg (gated, currently
+	// unexecuted — see github_integration_test.go) should confirm this
+	// against live GitHub and correct it here if it differs.
 	if err := s.requireBranch(r.Context(), repoDir, req.Head); err != nil {
-		writeGitHubError(w, http.StatusUnprocessableEntity, "Validation Failed: head branch does not exist")
+		writeGitHubError(w, http.StatusNotFound, "Not Found")
 		return
 	}
 	if err := s.requireBranch(r.Context(), repoDir, req.Base); err != nil {
-		writeGitHubError(w, http.StatusUnprocessableEntity, "Validation Failed: base branch does not exist")
+		writeGitHubError(w, http.StatusNotFound, "Not Found")
 		return
 	}
 	if existing, ok := s.prs.findOpen(repo, req.Head, req.Base); ok {
