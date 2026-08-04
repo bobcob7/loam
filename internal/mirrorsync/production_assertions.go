@@ -1,6 +1,6 @@
 package mirrorsync
 
-// The Scheduler takes all seven of its collaborators as required
+// The Scheduler takes all eight of its collaborators as required
 // parameters, so it is constructible only when every one of them has a
 // production implementation. Tracking which ones did was previously done
 // in a prose inventory inside interfaces.go's RepoLister doc comment, and
@@ -13,7 +13,7 @@ package mirrorsync
 // method its implementation lacks -- this file fails to build, loudly, at
 // the exact commit that broke it. A comment cannot do that.
 //
-// Six of the seven are asserted here. The seventh, SyncStateReporter, is
+// Seven of the eight are asserted here. The eighth, SyncStateReporter, is
 // asserted in internal/mirrorsync/state instead: that package imports this
 // one, so naming *state.Reporter here would be an import cycle. See
 // production_assertions.go there -- and note that SyncStateReporter is
@@ -26,4 +26,5 @@ var (
 	_ MergeabilityChecker = (*StoreMergeabilityChecker)(nil)
 	_ IngestEnqueuer      = (*StoreIngestEnqueuer)(nil)
 	_ PRPoller            = (*StorePRPoller)(nil)
+	_ DriftReconciler     = (*StoreDriftReconciler)(nil)
 )

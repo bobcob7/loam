@@ -132,6 +132,15 @@ The mirror's refs fall into two classes:
   here would silently corrupt the mirror until the next sync clobbered it.
 - **Work-branch refs** — `refs/heads/loam-reserved/<name>` where `<name>` is a registered
   work branch of this repo. Created **server-side by `work start` only**, never by push.
+  They advance by **agent push**, with exactly one exception: the sync cycle moves one
+  when it adopts a fast-forward someone pushed straight to the upstream `loam/<name>`
+  branch (`docs/sync-spec.md` → Upstream Drift). That move is a compare-and-swap against
+  the tip the server read, so it can never overwrite a push that lands mid-cycle, and it
+  is defensible only because the same reconciliation reopens the review round — the
+  adopted commit reached the mirror through the forge, so **none of the enforcement
+  below applied to it**. An agent whose branch was adopted must `git pull` before its
+  next push, exactly as it would after any upstream move; a push from a clone that has
+  not seen the adopted commit is a non-fast-forward and is rejected.
 
 ### The `refs/heads/loam-reserved/` namespace is server-owned
 

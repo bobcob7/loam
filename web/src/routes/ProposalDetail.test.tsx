@@ -185,6 +185,43 @@ describe("ProposalDetail: loaded screen", () => {
     expect(screen.getByText("main")).toBeInTheDocument();
   });
 
+  it("badges neither conflict nor upstream drift on a healthy branch", async () => {
+    // The absence is the assertion: both fields arrive as their 'none' value
+    // on every healthy proposal, so a badge here would be permanent noise.
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          conflict: "WORK_BRANCH_CONFLICT_NONE",
+          upstreamDrift: "UPSTREAM_DRIFT_NONE",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(screen.queryByText("Upstream diverged")).not.toBeInTheDocument();
+    expect(screen.queryByText("Conflicted")).not.toBeInTheDocument();
+  });
+
+  it("badges upstream divergence and a conflict SEPARATELY when both are set", async () => {
+    // The two are independent facts that can hold at once and need different
+    // remedies -- catch the branch up, versus reconcile a branch somebody
+    // rewrote on the forge -- so this screen must show both rather than
+    // collapsing them into one "conflicted" pill (docs/sync-spec.md ->
+    // Upstream Drift).
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          conflict: "WORK_BRANCH_CONFLICT_RESET",
+          upstreamDrift: "UPSTREAM_DRIFT_DIVERGED",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(screen.getByText("Conflict reset")).toBeInTheDocument();
+    expect(screen.getByText("Upstream diverged")).toBeInTheDocument();
+  });
+
   it("renders the description through the shared markdown renderer", async () => {
     // The claim is that the description reaches Markdown at all -- a heading
     // and a list item are structures a plain <p> could not produce, so their

@@ -1,9 +1,18 @@
 import { create } from "@bufbuild/protobuf";
 import { IngestStatus, SyncState } from "../gen/loam/admin/v1/repo_admin_pb";
-import { VerdictOutcome, VerdictSummarySchema, WorkBranchState, type VerdictSummary } from "../gen/loam/v1/common_pb";
 import {
+  UpstreamDrift,
+  VerdictOutcome,
+  VerdictSummarySchema,
+  WorkBranchConflict,
+  WorkBranchState,
+  type VerdictSummary,
+} from "../gen/loam/v1/common_pb";
+import {
+  conflictIntent,
   ingestStatusIntent,
   syncStateIntent,
+  upstreamDriftIntent,
   verdictOutcomeIntent,
   verdictSummaryIntent,
   workBranchStateIntent,
@@ -119,6 +128,74 @@ describe("workBranchStateIntent", () => {
       intent: "warning",
       label: "Unknown",
     });
+  });
+});
+
+describe("conflictIntent", () => {
+  const known: ReadonlyArray<readonly [WorkBranchConflict, StatusBadgeContent]> = [
+    [WorkBranchConflict.FLAGGED, { intent: "warning", label: "Conflicted" }],
+    [WorkBranchConflict.RESET, { intent: "warning", label: "Conflict reset" }],
+  ];
+
+  it("covers every named WorkBranchConflict member besides UNSPECIFIED and NONE", () => {
+    const namedValues = Object.entries(WorkBranchConflict)
+      .filter(([name]) => name !== "UNSPECIFIED" && name !== "NONE")
+      .map(([, value]) => value);
+    expect(known.map(([value]) => value).sort()).toEqual(namedValues.sort());
+  });
+
+  it.each(known)("maps %s to %o", (value, expected) => {
+    expect(conflictIntent(value)).toEqual(expected);
+  });
+
+  it("badges nothing for a branch that merges cleanly, or for a server that never sent the field", () => {
+    expect(conflictIntent(WorkBranchConflict.NONE)).toBeUndefined();
+    expect(conflictIntent(WorkBranchConflict.UNSPECIFIED)).toBeUndefined();
+  });
+
+  it("still badges a value outside the generated union: that is a newer server, not an absence", () => {
+    expect(conflictIntent(999 as unknown as WorkBranchConflict)).toEqual({
+      intent: "warning",
+      label: "Unknown",
+    });
+  });
+});
+
+describe("upstreamDriftIntent", () => {
+  const known: ReadonlyArray<readonly [UpstreamDrift, StatusBadgeContent]> = [
+    [UpstreamDrift.DIVERGED, { intent: "danger", label: "Upstream diverged" }],
+  ];
+
+  it("covers every named UpstreamDrift member besides UNSPECIFIED and NONE", () => {
+    const namedValues = Object.entries(UpstreamDrift)
+      .filter(([name]) => name !== "UNSPECIFIED" && name !== "NONE")
+      .map(([, value]) => value);
+    expect(known.map(([value]) => value).sort()).toEqual(namedValues.sort());
+  });
+
+  it.each(known)("maps %s to %o", (value, expected) => {
+    expect(upstreamDriftIntent(value)).toEqual(expected);
+  });
+
+  it("badges nothing when upstream is where Loam left it", () => {
+    expect(upstreamDriftIntent(UpstreamDrift.NONE)).toBeUndefined();
+    expect(upstreamDriftIntent(UpstreamDrift.UNSPECIFIED)).toBeUndefined();
+  });
+
+  it("still badges a value outside the generated union", () => {
+    expect(upstreamDriftIntent(999 as unknown as UpstreamDrift)).toEqual({
+      intent: "warning",
+      label: "Unknown",
+    });
+  });
+
+  it("is a DIFFERENT pill from the conflict one, so the two never collapse", () => {
+    // The two fields are independent and can both be set: the target moved
+    // AND somebody rewrote the branch Loam pushed. They need different
+    // remedies, so they must not share an intent-and-label.
+    expect(upstreamDriftIntent(UpstreamDrift.DIVERGED)).not.toEqual(
+      conflictIntent(WorkBranchConflict.FLAGGED),
+    );
   });
 });
 

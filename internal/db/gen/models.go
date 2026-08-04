@@ -170,4 +170,5 @@ type WorkBranch struct {
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
 	AcceptedTip      pgtype.Text
+	UpstreamDrift    string
 }

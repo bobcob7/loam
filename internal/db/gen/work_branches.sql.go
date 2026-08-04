@@ -17,7 +17,7 @@ SET conflict = 'none',
     state = CASE WHEN conflict = 'reset' THEN 'reviewable' ELSE state END,
     updated_at = now()
 WHERE id = $1 AND conflict IN ('flagged', 'reset')
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 // A catch-up push brings the branch up to date (docs/git-spec.md "Target
@@ -47,6 +47,7 @@ func (q *Queries) ClearWorkBranchConflict(ctx context.Context, id pgtype.UUID) (
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -55,7 +56,7 @@ const closeWorkBranch = `-- name: CloseWorkBranch :one
 UPDATE work_branches
 SET state = 'closed', close_reason = $2, updated_at = now()
 WHERE id = $1 AND state NOT IN ('complete', 'closed')
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type CloseWorkBranchParams struct {
@@ -85,6 +86,7 @@ func (q *Queries) CloseWorkBranch(ctx context.Context, arg CloseWorkBranchParams
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -93,7 +95,7 @@ const completeWorkBranch = `-- name: CompleteWorkBranch :one
 UPDATE work_branches
 SET state = 'complete', updated_at = now()
 WHERE id = $1 AND state NOT IN ('complete', 'closed')
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 // Set by the server when the upstream PR merges (docs/cli-spec.md: "There
@@ -140,6 +142,7 @@ func (q *Queries) CompleteWorkBranch(ctx context.Context, id pgtype.UUID) (WorkB
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -191,7 +194,7 @@ const createWorkBranch = `-- name: CreateWorkBranch :one
 
 INSERT INTO work_branches (id, repo_id, name, target, author)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type CreateWorkBranchParams struct {
@@ -245,12 +248,13 @@ func (q *Queries) CreateWorkBranch(ctx context.Context, arg CreateWorkBranchPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
 
 const getWorkBranchByID = `-- name: GetWorkBranchByID :one
-SELECT id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip FROM work_branches WHERE id = $1
+SELECT id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift FROM work_branches WHERE id = $1
 `
 
 func (q *Queries) GetWorkBranchByID(ctx context.Context, id pgtype.UUID) (WorkBranch, error) {
@@ -272,12 +276,13 @@ func (q *Queries) GetWorkBranchByID(ctx context.Context, id pgtype.UUID) (WorkBr
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
 
 const getWorkBranchByName = `-- name: GetWorkBranchByName :one
-SELECT id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip FROM work_branches WHERE repo_id = $1 AND name = $2
+SELECT id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift FROM work_branches WHERE repo_id = $1 AND name = $2
 `
 
 type GetWorkBranchByNameParams struct {
@@ -307,12 +312,13 @@ func (q *Queries) GetWorkBranchByName(ctx context.Context, arg GetWorkBranchByNa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
 
 const listWorkBranches = `-- name: ListWorkBranches :many
-SELECT wb.id, wb.repo_id, wb.name, wb.target, wb.title, wb.description, wb.state, wb.author, wb.upstream_pr_url, wb.upstream_pr_number, wb.conflict, wb.close_reason, wb.created_at, wb.updated_at, wb.accepted_tip FROM work_branches wb
+SELECT wb.id, wb.repo_id, wb.name, wb.target, wb.title, wb.description, wb.state, wb.author, wb.upstream_pr_url, wb.upstream_pr_number, wb.conflict, wb.close_reason, wb.created_at, wb.updated_at, wb.accepted_tip, wb.upstream_drift FROM work_branches wb
 WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
   AND ($2::text = '' OR wb.target = $2)
   AND ($3::text = '' OR wb.author = $3)
@@ -391,6 +397,7 @@ func (q *Queries) ListWorkBranches(ctx context.Context, arg ListWorkBranchesPara
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.AcceptedTip,
+			&i.UpstreamDrift,
 		); err != nil {
 			return nil, err
 		}
@@ -403,7 +410,7 @@ func (q *Queries) ListWorkBranches(ctx context.Context, arg ListWorkBranchesPara
 }
 
 const listWorkBranchesByCursor = `-- name: ListWorkBranchesByCursor :many
-SELECT wb.id, wb.repo_id, wb.name, wb.target, wb.title, wb.description, wb.state, wb.author, wb.upstream_pr_url, wb.upstream_pr_number, wb.conflict, wb.close_reason, wb.created_at, wb.updated_at, wb.accepted_tip FROM work_branches wb
+SELECT wb.id, wb.repo_id, wb.name, wb.target, wb.title, wb.description, wb.state, wb.author, wb.upstream_pr_url, wb.upstream_pr_number, wb.conflict, wb.close_reason, wb.created_at, wb.updated_at, wb.accepted_tip, wb.upstream_drift FROM work_branches wb
 WHERE ($1::uuid IS NULL OR wb.repo_id = $1)
   AND ($2::text = '' OR wb.target = $2)
   AND ($3::text = '' OR wb.author = $3)
@@ -533,6 +540,7 @@ func (q *Queries) ListWorkBranchesByCursor(ctx context.Context, arg ListWorkBran
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.AcceptedTip,
+			&i.UpstreamDrift,
 		); err != nil {
 			return nil, err
 		}
@@ -554,7 +562,7 @@ SET conflict = CASE
     state = CASE WHEN state IN ('reviewable', 'reviewed') THEN 'draft' ELSE state END,
     updated_at = now()
 WHERE id = $1 AND state IN ('draft', 'reviewable', 'reviewed')
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 // The server's mergeability check re-evaluates EVERY open (non-terminal)
@@ -601,6 +609,7 @@ func (q *Queries) MarkWorkBranchConflicted(ctx context.Context, id pgtype.UUID) 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -609,7 +618,7 @@ const recordWorkBranchAcceptedTip = `-- name: RecordWorkBranchAcceptedTip :one
 UPDATE work_branches
 SET accepted_tip = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type RecordWorkBranchAcceptedTipParams struct {
@@ -648,6 +657,7 @@ func (q *Queries) RecordWorkBranchAcceptedTip(ctx context.Context, arg RecordWor
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -656,7 +666,7 @@ const recordWorkBranchUpstreamPR = `-- name: RecordWorkBranchUpstreamPR :one
 UPDATE work_branches
 SET upstream_pr_url = $2, upstream_pr_number = $3, accepted_tip = $4, updated_at = now()
 WHERE id = $1 AND upstream_pr_number IS NULL
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type RecordWorkBranchUpstreamPRParams struct {
@@ -720,6 +730,7 @@ func (q *Queries) RecordWorkBranchUpstreamPR(ctx context.Context, arg RecordWork
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -728,7 +739,7 @@ const setWorkBranchTitleDescription = `-- name: SetWorkBranchTitleDescription :o
 UPDATE work_branches
 SET title = $2, description = $3, updated_at = now()
 WHERE id = $1 AND state NOT IN ('complete', 'closed')
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type SetWorkBranchTitleDescriptionParams struct {
@@ -760,6 +771,67 @@ func (q *Queries) SetWorkBranchTitleDescription(ctx context.Context, arg SetWork
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
+	)
+	return i, err
+}
+
+const setWorkBranchUpstreamDrift = `-- name: SetWorkBranchUpstreamDrift :one
+UPDATE work_branches
+SET upstream_drift = $2, updated_at = now()
+WHERE id = $1 AND state NOT IN ('complete', 'closed')
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
+`
+
+type SetWorkBranchUpstreamDriftParams struct {
+	ID            pgtype.UUID
+	UpstreamDrift string
+}
+
+// Records what the sync cycle observed about the upstream loam/<name>
+// branch this work branch was pushed to (loam-giq.11, docs/sync-spec.md
+// "Upstream Drift on `loam/<work-branch>`"): 'diverged' when the branch
+// moved somewhere the work-branch tip is not an ancestor of, 'none' when
+// upstream is where Loam left it or a fast-forward has just been adopted.
+//
+// Unlike every other UPDATE in this file this one is NOT a guarded
+// transition, and that is the point: upstream_drift is a LEVEL-triggered
+// observation of a fact outside Loam, re-derived from the mirror on every
+// sync cycle, not a lifecycle state an actor moves the branch through. It
+// must be able to go back to 'none' when the operator reconciles upstream
+// by hand -- there is no "clear drift" command and no push that clears it,
+// so a guard that made clearing conditional on anything would strand a
+// branch flagged forever. Writing the value already there is a harmless
+// no-op; internal/mirrorsync's reconciler skips that call anyway, from the
+// row it has already read, so the common case costs no statement at all.
+//
+// The terminal states are excluded, matching every other write in this
+// file that a sync cycle can reach: a complete or closed branch is done,
+// its upstream branch is deleted by the PR poller's cleanup, and moving a
+// column on it would only ever be noise. internal/workbranchstore maps the
+// resulting zero rows to ErrIllegalTransition (or ErrNotFound), and the
+// reconciler never calls this for a terminal branch in the first place --
+// its poll set excludes them.
+func (q *Queries) SetWorkBranchUpstreamDrift(ctx context.Context, arg SetWorkBranchUpstreamDriftParams) (WorkBranch, error) {
+	row := q.db.QueryRow(ctx, setWorkBranchUpstreamDrift, arg.ID, arg.UpstreamDrift)
+	var i WorkBranch
+	err := row.Scan(
+		&i.ID,
+		&i.RepoID,
+		&i.Name,
+		&i.Target,
+		&i.Title,
+		&i.Description,
+		&i.State,
+		&i.Author,
+		&i.UpstreamPrUrl,
+		&i.UpstreamPrNumber,
+		&i.Conflict,
+		&i.CloseReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }
@@ -777,7 +849,7 @@ WHERE id = $1
       AND title IS NOT NULL AND title <> ''
       AND description IS NOT NULL AND description <> '')
   )
-RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip
+RETURNING id, repo_id, name, target, title, description, state, author, upstream_pr_url, upstream_pr_number, conflict, close_reason, created_at, updated_at, accepted_tip, upstream_drift
 `
 
 type UpdateWorkBranchStateParams struct {
@@ -829,6 +901,7 @@ func (q *Queries) UpdateWorkBranchState(ctx context.Context, arg UpdateWorkBranc
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.AcceptedTip,
+		&i.UpstreamDrift,
 	)
 	return i, err
 }

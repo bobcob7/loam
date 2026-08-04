@@ -25,11 +25,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"connectrpc.com/connect"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
+	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 	"github.com/bobcob7/loam/internal/mirrorpath"
 	"github.com/bobcob7/loam/internal/mirrorsync"
 	"github.com/bobcob7/loam/internal/refnames"
@@ -66,6 +68,15 @@ func (h *acceptanceHarness) registerSyncSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^no agent identity appears in the body$`, h.stepNoAgentIdentityAppearsInTheBody)
 	sc.Step(`^the server is configured without PR attribution$`, h.stepTheServerIsConfiguredWithoutPRAttribution)
 	sc.Step(`^the PR body is the work branch's description alone$`, h.stepThePRBodyIsTheWorkBranchsDescriptionAlone)
+	sc.Step(`^someone pushes a commit directly to the upstream "([^"]*)" branch$`, h.stepSomeonePushesDirectlyToTheUpstreamBranch)
+	sc.Step(`^the upstream "([^"]*)" branch moves on while the work branch moves on separately$`, h.stepUpstreamAndWorkBranchMoveSeparately)
+	sc.Step(`^the upstream "([^"]*)" branch is rewound behind the work branch$`, h.stepUpstreamBranchIsRewound)
+	sc.Step(`^the work branch advances to that commit$`, h.stepTheWorkBranchAdvancesToThatCommit)
+	sc.Step(`^the work branch still holds the commit its author pushed$`, h.stepTheWorkBranchStillHoldsItsAuthorsCommit)
+	sc.Step(`^a new review round is opened by the server$`, h.stepANewReviewRoundIsOpenedByTheServer)
+	sc.Step(`^the accepted tip records that commit$`, h.stepTheAcceptedTipRecordsThatCommit)
+	sc.Step(`^accepting it is refused until it is approved again$`, h.stepAcceptingIsRefusedUntilApprovedAgain)
+	sc.Step(`^the admin sees the work branch flagged as diverged from upstream$`, h.stepTheAdminSeesTheBranchFlaggedAsDiverged)
 }
 
 // stepIAmSignedInAsAdmin is the Background row every admin-facing feature
@@ -877,4 +888,336 @@ func runIsolatedGit(ctx context.Context, dir string, args ...string) (string, er
 		return string(out), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), runErr, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+// --- Upstream drift on loam/<work-branch> (loam-giq.11) ---
+
+// acceptanceDriftScratchRef is the mirror-local ref the drift fixtures
+// build the "somebody else pushed" commit on before sending it upstream.
+// It is a carrier, not a branch anything reads: the very next mirror fetch
+// prunes it (nothing upstream matches it), while the commit itself stays
+// reachable through refs/heads/loam/<name> once the forge has it.
+const acceptanceDriftScratchRef = "refs/heads/acceptance-upstream-drift"
+
+// stepSomeonePushesDirectlyToTheUpstreamBranch reproduces the reported
+// incident (loam-giq.11) exactly: with the proposal accepted and
+// loam/<name> sitting at the commit Loam pushed, a commit is added ON TOP
+// of it, straight on the forge, without passing through Loam at all.
+//
+// The commit is built in the mirror and pushed over the SAME authenticated
+// transport an admin's own git would use -- there is no back door into the
+// fake forge here -- and the work branch's own ref is deliberately left
+// where it is, which is what makes this a fast-forward rather than a
+// divergence.
+//
+// Three preconditions are checked before the scenario continues, because
+// each of them failing would make the later assertions pass vacuously: the
+// forge really advertises the new commit, it really differs from what the
+// accept recorded, and the work branch itself has NOT moved.
+func (h *acceptanceHarness) stepSomeonePushesDirectlyToTheUpstreamBranch(ctx context.Context, prefix string) error {
+	world := worldFrom(ctx)
+	upstreamRef := "refs/heads/" + prefix + world.workBranch
+	before, err := h.upstreamRefSHA(ctx, world, upstreamRef)
+	if err != nil {
+		return fmt.Errorf("this scenario needs an accepted proposal's upstream branch to push onto: %w", err)
+	}
+	pushed, err := h.pushCommitOntoUpstreamBranch(ctx, world, "UPSTREAM-EDIT.txt", "edited on the forge, behind loam's back\n", "acceptance: a commit pushed straight to loam/")
+	if err != nil {
+		return err
+	}
+	if pushed == before {
+		return fmt.Errorf("upstream %s is still at %s, so nothing drifted", upstreamRef, before)
+	}
+	accepted, err := h.recordedAcceptedTip(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if pushed == accepted {
+		return fmt.Errorf("the commit pushed upstream (%s) is the one loam recorded as accepted, so there is no drift to detect", pushed)
+	}
+	tip, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
+	if err != nil {
+		return err
+	}
+	if tip != accepted {
+		return fmt.Errorf("the work branch is at %s but loam recorded %s as accepted; this fixture means to move ONLY the upstream branch", tip, accepted)
+	}
+	world.driftUpstreamSHA = pushed
+	world.driftWorkTipSHA = tip
+	return h.latchRoundBeforeTheTick(ctx, world)
+}
+
+// stepUpstreamAndWorkBranchMoveSeparately builds the genuinely diverged
+// case: two DIFFERENT children of the commit Loam pushed, one landing on
+// the forge's loam/<name> and one landing on the work branch, so neither
+// tip contains the other and no fast-forward reconciles them.
+//
+// Both commits touch the same file for a reason: it makes the divergence a
+// real one a human would have to resolve, not a pair of edits git could
+// merge without a decision. Loam does not attempt either, but a fixture
+// whose two sides trivially merged would be arguing about a case the spec
+// is not about.
+func (h *acceptanceHarness) stepUpstreamAndWorkBranchMoveSeparately(ctx context.Context, prefix string) error {
+	world := worldFrom(ctx)
+	accepted, err := h.recordedAcceptedTip(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	upstreamSHA, err := h.pushCommitOntoUpstreamBranch(ctx, world, "DIVERGENCE.txt", "the forge's version\n", "acceptance: the forge's side of the divergence")
+	if err != nil {
+		return err
+	}
+	workSHA, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), refnames.WorkBranch(world.workBranch),
+		"DIVERGENCE.txt", "the author's version\n", "acceptance: the author's side of the divergence")
+	if err != nil {
+		return err
+	}
+	if upstreamSHA == workSHA {
+		return fmt.Errorf("both sides landed on %s, so nothing diverged", upstreamSHA)
+	}
+	if upstreamSHA == accepted || workSHA == accepted {
+		return fmt.Errorf("one side is still at the accepted tip %s (upstream %s, work branch %s); a diverged fixture needs both to have moved", accepted, upstreamSHA, workSHA)
+	}
+	world.driftUpstreamSHA = upstreamSHA
+	world.driftWorkTipSHA = workSHA
+	return h.latchRoundBeforeTheTick(ctx, world)
+}
+
+// stepTheWorkBranchAdvancesToThatCommit is the adoption itself, read off
+// the mirror rather than off any value this harness cached: the work
+// branch's ref must now BE the commit that arrived upstream, and it must
+// have moved to get there (the pre-tick tip is asserted separately, so a
+// tick that did nothing cannot pass this step).
+func (h *acceptanceHarness) stepTheWorkBranchAdvancesToThatCommit(ctx context.Context) error {
+	world := worldFrom(ctx)
+	tip, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
+	if err != nil {
+		return err
+	}
+	if tip == world.driftWorkTipSHA {
+		return fmt.Errorf("the work branch is still at %s; the upstream commit %s was not adopted", tip, world.driftUpstreamSHA)
+	}
+	if tip != world.driftUpstreamSHA {
+		return fmt.Errorf("the work branch is at %s, want the adopted upstream commit %s", tip, world.driftUpstreamSHA)
+	}
+	return nil
+}
+
+// stepTheWorkBranchStillHoldsItsAuthorsCommit is the diverged case's
+// no-op proof. Loam changes nothing: it cannot know which side is
+// intended, and the push that would reconcile it is precisely the
+// destructive one Proposal Acceptance refuses to make.
+func (h *acceptanceHarness) stepTheWorkBranchStillHoldsItsAuthorsCommit(ctx context.Context) error {
+	world := worldFrom(ctx)
+	tip, err := mirrorRefSHA(world.mirrorDir, refnames.WorkBranch(world.workBranch))
+	if err != nil {
+		return err
+	}
+	if tip != world.driftWorkTipSHA {
+		return fmt.Errorf("the work branch moved to %s, want the author's own commit %s left exactly where it was", tip, world.driftWorkTipSHA)
+	}
+	return nil
+}
+
+// stepANewReviewRoundIsOpenedByTheServer proves the approvals reset, in
+// the terms this system already expresses staleness in: a new numbered
+// round, attributed to "server" -- the same attribution a catch-up restore
+// uses, and one no agent and no admin can produce.
+func (h *acceptanceHarness) stepANewReviewRoundIsOpenedByTheServer(ctx context.Context) error {
+	world := worldFrom(ctx)
+	number, requestedBy, err := h.latestRound(ctx, world, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if number <= world.driftRoundBefore {
+		return fmt.Errorf("the work branch is still on review round %d; adopting an unreviewed commit must open a new one", number)
+	}
+	if requestedBy != "server" {
+		return fmt.Errorf("review round %d was requested by %q, want %q -- nobody asked for this round, the server opened it", number, requestedBy, "server")
+	}
+	return nil
+}
+
+// stepTheAcceptedTipRecordsThatCommit pins the settled answer to "what
+// should accepted_tip become after an adoption": the adopted commit, so
+// the column keeps meaning "the upstream tip Loam last pushed OR adopted"
+// and ListProposals stays exact -- nothing remains to push.
+func (h *acceptanceHarness) stepTheAcceptedTipRecordsThatCommit(ctx context.Context) error {
+	world := worldFrom(ctx)
+	accepted, err := h.recordedAcceptedTip(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	if accepted != world.driftUpstreamSHA {
+		return fmt.Errorf("work_branches.accepted_tip holds %s, want the adopted commit %s", accepted, world.driftUpstreamSHA)
+	}
+	return nil
+}
+
+// stepAcceptingIsRefusedUntilApprovedAgain is the whole point of the
+// reset, asserted as a difference rather than as a state: the SAME accept,
+// by the same admin, on the same branch, is refused before a fresh
+// approval and succeeds after one.
+//
+// Without both halves this proves much less than it appears to. The refusal
+// alone would also pass if adoption had simply broken the branch, and the
+// success alone would also pass if nothing had been reset.
+func (h *acceptanceHarness) stepAcceptingIsRefusedUntilApprovedAgain(ctx context.Context) error {
+	world := worldFrom(ctx)
+	client := h.newProposalServiceClient()
+	_, err := acceptProposal(ctx, client, world.repo(), world.workBranch)
+	if rejectErr := requireRPCRejected(err, "accepting a branch whose approvals were just reset", connect.CodeFailedPrecondition); rejectErr != nil {
+		return rejectErr
+	}
+	if _, err := h.submitVerdict(world, world.reviewer, world.workBranch, "approve"); err != nil {
+		return fmt.Errorf("re-approving the adopted commit: %w", err)
+	}
+	if _, err := acceptProposal(ctx, client, world.repo(), world.workBranch); err != nil {
+		return fmt.Errorf("accepting after a fresh approval must succeed, or the reset is a dead end: %w", err)
+	}
+	return nil
+}
+
+// stepTheAdminSeesTheBranchFlaggedAsDiverged reads the flag back the way
+// the admin console does -- one GetWorkBranch over loam.v1 as a superuser,
+// the same call the proposal detail page makes -- not out of the database.
+// Surfacing this state through the protos IS half of loam-giq.11; a
+// scenario that asserted the column would pass just as happily with the
+// field left off the wire.
+//
+// The conflict field is asserted too, and asserted to be NONE: the two are
+// separate fields precisely because they mean different things and call for
+// different remedies, so a console must be able to see drift on a branch
+// that merges into its target perfectly well.
+func (h *acceptanceHarness) stepTheAdminSeesTheBranchFlaggedAsDiverged(ctx context.Context) error {
+	world := worldFrom(ctx)
+	resp, err := h.newWorkBranchServiceClient().GetWorkBranch(ctx, connect.NewRequest(&loamv1.GetWorkBranchRequest{
+		Repo:       world.repo(),
+		WorkBranch: world.workBranch,
+	}))
+	if err != nil {
+		return fmt.Errorf("reading work branch %s as the admin: %w", world.workBranch, err)
+	}
+	wb := resp.Msg.GetWorkBranch()
+	if wb.GetUpstreamDrift() != loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED {
+		return fmt.Errorf("the admin sees upstream_drift %s on %s, want UPSTREAM_DRIFT_DIVERGED", wb.GetUpstreamDrift(), world.workBranch)
+	}
+	if wb.GetConflict() != loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE {
+		return fmt.Errorf("the admin sees conflict %s on %s, want WORK_BRANCH_CONFLICT_NONE -- this branch merges into its target fine; what moved is the branch loam pushed", wb.GetConflict(), world.workBranch)
+	}
+	return nil
+}
+
+// pushCommitOntoUpstreamBranch builds one commit on top of the work
+// branch's CURRENT upstream branch content and pushes it to the forge's
+// refs/heads/loam/<name>, over the harness's authenticated transport.
+//
+// The commit is forked from the mirror's own work-branch ref rather than
+// from the mirrored loam/<name>: at this point in a scenario the mirror has
+// not fetched since the accept, so it holds no loam/<name> ref at all --
+// the accept pushed that branch UP, it does not come back down until the
+// next sync. The two are the same commit at that moment, which is what
+// makes forking from the reachable one correct rather than merely
+// convenient.
+func (h *acceptanceHarness) pushCommitOntoUpstreamBranch(ctx context.Context, world *acceptanceWorld, filename, content, message string) (string, error) {
+	sha, err := commitIntoMirror(ctx, world.mirrorDir, acceptanceDriftScratchRef, refnames.WorkBranch(world.workBranch), filename, content, message)
+	if err != nil {
+		return "", err
+	}
+	refspec := acceptanceDriftScratchRef + ":" + refnames.UpstreamProposalBranch(world.workBranch)
+	if _, err := h.transport.Push(ctx, h.forgeHost, world.mirrorDir, world.upstreamURL, refspec); err != nil {
+		return "", fmt.Errorf("pushing %s to the forge: %w", refspec, err)
+	}
+	upstreamSHA, err := h.upstreamRefSHA(ctx, world, refnames.UpstreamProposalBranch(world.workBranch))
+	if err != nil {
+		return "", err
+	}
+	if upstreamSHA != sha {
+		return "", fmt.Errorf("the forge advertises %s for %s after the push, want the pushed commit %s", upstreamSHA, refnames.UpstreamProposalBranch(world.workBranch), sha)
+	}
+	return sha, nil
+}
+
+// latchRoundBeforeTheTick records the branch's current review round so the
+// Then that asserts a NEW one has something earlier to compare against --
+// the same discipline stepMirrorHasDiverged applies to SHAs (loam-8vg).
+func (h *acceptanceHarness) latchRoundBeforeTheTick(ctx context.Context, world *acceptanceWorld) error {
+	number, _, err := h.latestRound(ctx, world, world.workBranch)
+	if err != nil {
+		return err
+	}
+	world.driftRoundBefore = number
+	return nil
+}
+
+// recordedAcceptedTip reads work_branches.accepted_tip back off the row --
+// what proposal acceptance pushed, or what the drift reconciler adopted.
+// A SQL NULL is an error rather than an empty string: every caller here is
+// asserting about a branch that has definitely been accepted, so a NULL
+// means the fixture never got that far.
+func (h *acceptanceHarness) recordedAcceptedTip(ctx context.Context, repoID uuid.UUID, name string) (string, error) {
+	var tip *string
+	if err := h.server.pool.QueryRow(ctx,
+		`SELECT accepted_tip FROM work_branches WHERE repo_id = $1 AND name = $2`, repoID, name).Scan(&tip); err != nil {
+		return "", fmt.Errorf("reading accepted_tip for work branch %s: %w", name, err)
+	}
+	if tip == nil {
+		return "", fmt.Errorf("work branch %s has no recorded accepted_tip", name)
+	}
+	return *tip, nil
+}
+
+// stepUpstreamBranchIsRewound builds the third ancestry case against a real
+// forge: the work branch gains a commit, and loam/<name> is then FORCE-PUSHED
+// backwards, off the commit the accept put there, onto the target branch's
+// tip. The upstream tip is now a strict ancestor of the work-branch tip --
+// neither a fast-forward nor a two-sided divergence.
+//
+// It is the one case the unit suite cannot reach honestly on its own: with a
+// mocked ancestry checker a rewind and a divergence are the same input
+// unless the fixture models the relation, so this scenario is what proves
+// the classification against git's own answer rather than against a fixture
+// that agrees with the implementation by construction.
+//
+// The force refspec is what makes it a rewind and not a no-op: a plain push
+// of an ancestor is rejected as a non-fast-forward, which would leave
+// upstream where it was and quietly turn this scenario into "nothing
+// happened". The push is verified to have actually moved the ref before the
+// scenario continues.
+func (h *acceptanceHarness) stepUpstreamBranchIsRewound(ctx context.Context, prefix string) error {
+	world := worldFrom(ctx)
+	upstreamRef := "refs/heads/" + prefix + world.workBranch
+	accepted, err := h.recordedAcceptedTip(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	rewoundTo, err := mirrorRefSHA(world.mirrorDir, refnames.TargetBranch(world.targetBranch))
+	if err != nil {
+		return err
+	}
+	if rewoundTo == accepted {
+		return fmt.Errorf("the target tip and the accepted tip are both %s, so rewinding to it would move nothing", accepted)
+	}
+	workSHA, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), refnames.WorkBranch(world.workBranch),
+		"REWIND.txt", "written after the accept\n", "acceptance: a commit the rewind would discard")
+	if err != nil {
+		return err
+	}
+	refspec := "+" + refnames.TargetBranch(world.targetBranch) + ":" + refnames.UpstreamProposalBranch(world.workBranch)
+	if _, err := h.transport.Push(ctx, h.forgeHost, world.mirrorDir, world.upstreamURL, refspec); err != nil {
+		return fmt.Errorf("force-pushing %s to rewind the upstream branch: %w", refspec, err)
+	}
+	upstreamSHA, err := h.upstreamRefSHA(ctx, world, upstreamRef)
+	if err != nil {
+		return err
+	}
+	if upstreamSHA != rewoundTo {
+		return fmt.Errorf("upstream %s is at %s after the force push, want the rewound %s", upstreamRef, upstreamSHA, rewoundTo)
+	}
+	if upstreamSHA == accepted || upstreamSHA == workSHA {
+		return fmt.Errorf("upstream %s did not move off the accepted tip %s (work branch %s), so nothing was rewound", upstreamRef, accepted, workSHA)
+	}
+	world.driftUpstreamSHA = upstreamSHA
+	world.driftWorkTipSHA = workSHA
+	return h.latchRoundBeforeTheTick(ctx, world)
 }

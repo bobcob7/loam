@@ -14,6 +14,7 @@ import (
 	"github.com/bobcob7/loam/internal/crypto"
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/fakeforge"
+	"github.com/bobcob7/loam/internal/gitancestry"
 	"github.com/bobcob7/loam/internal/gitmergetree"
 	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
@@ -21,6 +22,7 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorsync"
 	"github.com/bobcob7/loam/internal/mirrorsync/state"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/testsched"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
@@ -163,7 +165,7 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // pointed at the shared fakeforge instance -- and immediately wraps it in
 // a *testsched.SyncHarness, which is ALL this function returns.
 //
-// Every one of the scheduler's seven collaborators is now the production
+// Every one of the scheduler's eight collaborators is now the production
 // type, constructed exactly as cmd/server/main.go's run() would construct
 // it (loam-a16): StoreRepoLister (loam-13z), MirrorFetcher (giq.2),
 // StoreAdvanceDetector (giq.4), StoreMergeabilityChecker (giq.5) over a
@@ -172,7 +174,7 @@ const acceptanceForgeToken = "loam-acceptance-static-token"
 // fakeforge's provider surface and this suite's one authenticated
 // gittransport.Transport, and internal/mirrorsync/state's Reporter (giq.9)
 // over the live pool. There are no harness-local stand-ins left in this
-// graph at all, so "the next sync runs" drives a genuine five-step Mirror
+// graph at all, so "the next sync runs" drives a genuine six-step Mirror
 // Sync cycle end to end rather than erroring out at step 2.
 //
 // It also applies production's own cross-repo concurrency bound
@@ -226,8 +228,10 @@ func newSyncHarness(srv acceptanceServer, transport *gittransport.Transport, for
 	mergeability := mirrorsync.NewStoreMergeabilityChecker(srv.dataDir, repoStore, workBranchStore, gitmergetree.New(logger), workBranchStore)
 	ingestEnqueuer := mirrorsync.NewStoreIngestEnqueuer(repoStore, repoStore, srv.ingestPool)
 	prPoller := mirrorsync.NewStorePRPoller(srv.dataDir, logger, repoStore, workBranchStore, workBranchStore, forgeClient, transport)
+	refs := gitref.New(srv.dataDir)
+	drift := mirrorsync.NewStoreDriftReconciler(srv.dataDir, logger, repoStore, workBranchStore, refs, refs, gitancestry.New(logger), workBranchStore, workBranchStore, reviewstore.NewRoundStore(srv.pool, logger))
 	reporter := state.New(srv.pool)
-	scheduler := mirrorsync.New(logger, nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, advances, mergeability, ingestEnqueuer, prPoller, reporter, mirrorsync.WithMaxConcurrentCycles(defaultMaxConcurrentCycles))
+	scheduler := mirrorsync.New(logger, nil, mirrorsync.NewStoreRepoLister(repoStore), fetcher, advances, mergeability, ingestEnqueuer, prPoller, drift, reporter, mirrorsync.WithMaxConcurrentCycles(defaultMaxConcurrentCycles))
 	return testsched.NewSyncHarness(scheduler)
 }
 

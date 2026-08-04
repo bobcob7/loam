@@ -24,7 +24,7 @@ func testLogger() *slog.Logger {
 var errBoom = errors.New("boom")
 
 func validGenRow(id uuid.UUID) gen.WorkBranch {
-	return gen.WorkBranch{ID: pgUUID(id), RepoID: pgUUID(uuid.Must(uuid.NewV7())), Name: "wb-test", Target: "main", State: "draft", Author: "grace-hopper-3-author", Conflict: "none"}
+	return gen.WorkBranch{ID: pgUUID(id), RepoID: pgUUID(uuid.Must(uuid.NewV7())), Name: "wb-test", Target: "main", State: "draft", Author: "grace-hopper-3-author", Conflict: "none", UpstreamDrift: "none"}
 }
 
 // TestCreate_UniqueViolation_ReturnsErrDuplicateName proves Create maps a
@@ -248,6 +248,9 @@ var transitionCases = []transitionCase{
 	{name: "ClearConflict", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
 		return s.ClearConflict(ctx, testID)
 	}},
+	{name: "SetUpstreamDrift", call: func(ctx context.Context, s *Store) (WorkBranch, error) {
+		return s.SetUpstreamDrift(ctx, testID, DriftDiverged)
+	}},
 }
 
 // TestTransitionMethods_NotFound_ReturnErrNotFound proves every transition
@@ -368,6 +371,9 @@ func allTransitionsError(err error) *querierMock {
 			return gen.WorkBranch{}, err
 		},
 		ClearWorkBranchConflictFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
+			return gen.WorkBranch{}, err
+		},
+		SetWorkBranchUpstreamDriftFunc: func(_ context.Context, _ gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error) {
 			return gen.WorkBranch{}, err
 		},
 		GetWorkBranchByIDFunc: func(_ context.Context, _ pgtype.UUID) (gen.WorkBranch, error) {
@@ -608,4 +614,70 @@ func TestFromGenWorkBranch_AcceptedTipNullReadsAsNilPointer(t *testing.T) {
 	wb, err := New(mock, testLogger()).Get(t.Context(), id)
 	require.NoError(t, err)
 	assert.Nil(t, wb.AcceptedTip, "a NULL accepted_tip column must read back as a nil pointer")
+}
+
+// TestSetUpstreamDrift_WritesTheObservedValue proves the value the caller
+// observed is the value that reaches the statement -- both of them, since
+// the whole point of this column is that it goes back to 'none' when the
+// operator reconciles upstream by hand and no other write path can do that.
+func TestSetUpstreamDrift_WritesTheObservedValue(t *testing.T) {
+	t.Parallel()
+	for _, want := range []UpstreamDrift{DriftDiverged, DriftNone} {
+		t.Run(string(want), func(t *testing.T) {
+			t.Parallel()
+			id := uuid.Must(uuid.NewV7())
+			var got gen.SetWorkBranchUpstreamDriftParams
+			mock := &querierMock{
+				SetWorkBranchUpstreamDriftFunc: func(_ context.Context, arg gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error) {
+					got = arg
+					row := validGenRow(id)
+					row.UpstreamDrift = arg.UpstreamDrift
+					return row, nil
+				},
+			}
+			wb, err := New(mock, testLogger()).SetUpstreamDrift(t.Context(), id, want)
+			require.NoError(t, err)
+			assert.Equal(t, string(want), got.UpstreamDrift)
+			assert.Equal(t, pgUUID(id), got.ID)
+			assert.Equal(t, want, wb.UpstreamDrift, "the returned row must carry the value the statement wrote back")
+		})
+	}
+}
+
+// TestSetUpstreamDrift_RejectsAValueOutsideTheCheckConstraint proves a
+// third value never reaches Postgres to fail as SQLSTATE 23514: the guard
+// is in Go, ahead of the statement, so the sync cycle's log names the bad
+// value rather than quoting a constraint.
+func TestSetUpstreamDrift_RejectsAValueOutsideTheCheckConstraint(t *testing.T) {
+	t.Parallel()
+	called := false
+	mock := &querierMock{
+		SetWorkBranchUpstreamDriftFunc: func(_ context.Context, _ gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error) {
+			called = true
+			return gen.WorkBranch{}, nil
+		},
+	}
+	_, err := New(mock, testLogger()).SetUpstreamDrift(t.Context(), uuid.Must(uuid.NewV7()), UpstreamDrift("fast_forward"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errInvalidUpstreamDrift)
+	assert.False(t, called, "an illegal value must not reach the database at all")
+}
+
+// TestFromGenWorkBranch_UpstreamDriftIsCarriedThrough proves the column is
+// actually read back onto the struct. Without it every consumer -- the
+// accept preconditions, the proposal queue's exclusion, the proto surface
+// -- would silently see the Go zero value on every row.
+func TestFromGenWorkBranch_UpstreamDriftIsCarriedThrough(t *testing.T) {
+	t.Parallel()
+	id := uuid.Must(uuid.NewV7())
+	mock := &querierMock{
+		GetWorkBranchByIDFunc: func(context.Context, pgtype.UUID) (gen.WorkBranch, error) {
+			row := validGenRow(id)
+			row.UpstreamDrift = string(DriftDiverged)
+			return row, nil
+		},
+	}
+	wb, err := New(mock, testLogger()).Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, DriftDiverged, wb.UpstreamDrift)
 }

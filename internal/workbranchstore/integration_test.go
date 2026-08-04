@@ -9,6 +9,7 @@ package workbranchstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -851,4 +852,92 @@ func TestRecordUpstreamPR_UnknownIDIsNotFound(t *testing.T) {
 	_, err := store.RecordUpstreamPR(t.Context(), uuid.Must(uuid.NewV7()), "https://example.com/g/r/pulls/7", 7, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 	require.ErrorIs(t, err, ErrNotFound)
 	assert.NotErrorIs(t, err, ErrPRAlreadyRecorded)
+}
+
+// TestUpstreamDrift_DefaultsToNoneAndRoundTripsBothWays proves the three
+// halves of loam-giq.11's column that only a real database can show: the
+// 0007 migration's NOT NULL DEFAULT 'none' (so no row anywhere carries a
+// NULL or the Go zero value), and that the value survives a write and a
+// re-read in BOTH directions.
+//
+// The clear direction is the one worth having a live test for. There is no
+// "clear drift" command and no push that clears it -- the operator fixes
+// the branch on the forge, which Loam never sees -- so if the column could
+// only ever be set, a flagged branch would be unacceptable forever.
+func TestUpstreamDrift_DefaultsToNoneAndRoundTripsBothWays(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-drift-roundtrip", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	require.Equal(t, DriftNone, wb.UpstreamDrift, "the column's DEFAULT must make every new row 'none', not NULL or empty")
+
+	flagged, err := store.SetUpstreamDrift(ctx, wb.ID, DriftDiverged)
+	require.NoError(t, err)
+	assert.Equal(t, DriftDiverged, flagged.UpstreamDrift)
+	reread, err := store.Get(ctx, wb.ID)
+	require.NoError(t, err)
+	assert.Equal(t, DriftDiverged, reread.UpstreamDrift, "the flag must survive a round trip through the database")
+	assert.Equal(t, ConflictNone, reread.Conflict, "drift must not touch the conflict column -- they are independent facts")
+
+	cleared, err := store.SetUpstreamDrift(ctx, wb.ID, DriftNone)
+	require.NoError(t, err)
+	assert.Equal(t, DriftNone, cleared.UpstreamDrift, "an operator who reconciled the branch upstream must be able to get back to 'none'")
+}
+
+// TestUpstreamDrift_CoexistsWithAConflict is the whole reason this is its
+// own column rather than a fourth `conflict` value: a target can advance
+// into a merge conflict while the loam/ branch is separately rewritten.
+// With one column, whichever happened second would erase the first and the
+// operator would fix one problem while never learning about the other.
+func TestUpstreamDrift_CoexistsWithAConflict(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-drift-and-conflict", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	wb, err = store.SetTitleDescription(ctx, wb.ID, "Add login", "Adds a login form")
+	require.NoError(t, err)
+	wb, err = store.UpdateState(ctx, wb.ID, StateReviewable)
+	require.NoError(t, err)
+	wb, err = store.MarkConflicted(ctx, wb.ID)
+	require.NoError(t, err)
+	require.Equal(t, ConflictReset, wb.Conflict)
+
+	drifted, err := store.SetUpstreamDrift(ctx, wb.ID, DriftDiverged)
+	require.NoError(t, err)
+	assert.Equal(t, DriftDiverged, drifted.UpstreamDrift)
+	assert.Equal(t, ConflictReset, drifted.Conflict, "recording drift must not clear the conflict the target advance recorded")
+	assert.Equal(t, StateDraft, drifted.State, "nor undo the demotion that came with it")
+
+	restored, err := store.ClearConflict(ctx, wb.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ConflictNone, restored.Conflict)
+	assert.Equal(t, DriftDiverged, restored.UpstreamDrift, "a catch-up push answers the target advance; it says nothing about the branch somebody rewrote upstream")
+}
+
+// TestSetUpstreamDrift_IllegalValueNeverReachesTheCheckConstraint proves
+// the Go guard and the CHECK constraint agree, by asserting the Go guard
+// fires FIRST: a third value comes back as this package's own sentinel,
+// not as SQLSTATE 23514. The constraint is still the durable backstop --
+// the second half of this test writes past the store, straight to
+// Postgres, and shows the database refusing the same value.
+func TestSetUpstreamDrift_IllegalValueNeverReachesTheCheckConstraint(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-drift-illegal", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+
+	_, err = store.SetUpstreamDrift(ctx, wb.ID, UpstreamDrift("fast_forward"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errInvalidUpstreamDrift)
+	var pgErr *pgconn.PgError
+	assert.False(t, errors.As(err, &pgErr), "the value must be rejected in Go, before the statement, not as a constraint violation")
+
+	_, err = sharedPool.Exec(ctx, `UPDATE work_branches SET upstream_drift = 'fast_forward' WHERE id = $1`, wb.ID)
+	require.Error(t, err, "the CHECK constraint is the durable backstop under that guard")
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "23514", pgErr.Code)
+	assert.Equal(t, "work_branches_upstream_drift_check", pgErr.ConstraintName)
 }

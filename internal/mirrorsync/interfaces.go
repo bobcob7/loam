@@ -15,10 +15,11 @@ import (
 
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
-//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter upstreamRefPusher workBranchByNameLookup workBranchPRRecorder pullRequestOpener workBranchTipResolver
+//go:generate go tool moq -out moq_test.go . RepoLister Fetcher AdvanceDetector MergeabilityChecker IngestEnqueuer PRPoller DriftReconciler SyncStateReporter repoNameLister upstreamRefFetcher repoResolver repoByNameLookup workBranchNameLister targetBranchLister ingestedRefLookup ingestJobEnqueuer mergeTreeRunner workBranchConflictMarker workBranchTerminator pullRequestTracker upstreamRefDeleter upstreamRefPusher workBranchByNameLookup workBranchPRRecorder pullRequestOpener workBranchTipResolver mirrorTipResolver workBranchRefAdvancer ancestryChecker workBranchDriftMarker workBranchAdoptionWriter roundOpener
 
 // RepoID identifies an enrolled repo the scheduler cycles on each tick. It
 // is repos.name (an "<group>/<repo_name>" string), not repos.id -- the
@@ -181,6 +182,24 @@ type IngestEnqueuer interface {
 // State Tracking; owned by bead giq.8).
 type PRPoller interface {
 	PollPRs(ctx context.Context, repo RepoID) error
+}
+
+// DriftReconciler performs Mirror Sync step 6: compares the mirrored
+// upstream loam/<name> branch of every accepted work branch against what
+// Loam last pushed or adopted, adopting a fast-forward and recording
+// anything else as upstream drift (docs/sync-spec.md -> Upstream Drift on
+// `loam/<work-branch>`; owned by bead loam-giq.11).
+//
+// It runs AFTER the PR poller, not before, and the order is load-bearing in
+// one direction only: a PR that merged this tick flips its branch to
+// complete in step 5, which takes it out of this step's set entirely, so a
+// branch whose upstream ref the poller has just deleted is never
+// classified. The reverse order would reach that branch in the window
+// between the delete and the state change and would have to special-case
+// it. Nothing else in the cycle depends on this step, and nothing this step
+// writes is read by an earlier one.
+type DriftReconciler interface {
+	ReconcileDrift(ctx context.Context, repo RepoID) error
 }
 
 // SyncStateReporter surfaces the outcome of a repo's cycle so it can be
@@ -465,6 +484,120 @@ type workBranchPRRecorder interface {
 // this package's own per-consumer convention).
 type workBranchTipResolver interface {
 	ResolveWorkBranchRef(ctx context.Context, repo, name string) (string, error)
+}
+
+// mirrorTipResolver is the pair of mirror reads StoreDriftReconciler needs,
+// defined here at the consumer. *gitref.Creator satisfies it structurally.
+//
+// It is a separate interface from workBranchTipResolver above rather than
+// two extra methods on it: that one is the ACCEPT path's seam, it needs
+// exactly one method, and widening it would hand the accept engine a read
+// of the upstream branch it has no use for. Both methods here are reads of
+// the same bare mirror, so keeping them together escalates nothing -- the
+// capability this package deliberately keeps out of every read seam is the
+// WRITE, which lives alone on workBranchRefAdvancer below.
+//
+// ResolveUpstreamProposalRef must report a mirror that holds no
+// refs/heads/loam/<name> as gitref.ErrRefMissing rather than as an empty
+// SHA: the reconciler skips that branch entirely, and an empty string
+// reaching its comparison would read as "upstream differs from
+// accepted_tip" and flag every unaccepted branch as diverged.
+type mirrorTipResolver interface {
+	ResolveWorkBranchRef(ctx context.Context, repo, name string) (string, error)
+	ResolveUpstreamProposalRef(ctx context.Context, repo, name string) (string, error)
+}
+
+// workBranchRefAdvancer is the one seam in this package that MOVES a
+// work-branch ref in the mirror, defined here at the consumer.
+// *gitref.Creator satisfies it structurally.
+//
+// It is deliberately alone on its own interface, for the same reason
+// upstreamRefDeleter is not folded into upstreamRefFetcher: work-branch refs
+// advance by agent push and by nothing else (docs/git-spec.md -> Ref
+// Policy), and the single documented exception -- adopting an upstream
+// fast-forward, which is only defensible because it resets the approvals --
+// should not become reachable from any other collaborator merely because it
+// shares a git package with this one.
+//
+// The from parameter is the expected current value, not a hint: the
+// implementation must refuse the update when the ref has moved
+// (gitref.ErrRefMoved), which is what stops an agent push landing mid-cycle
+// from being silently overwritten.
+type workBranchRefAdvancer interface {
+	AdvanceWorkBranchRef(ctx context.Context, repo, name, from, to string) error
+}
+
+// ancestryChecker answers StoreDriftReconciler's one git question -- is the
+// work branch's tip contained in the upstream branch's history, i.e. is
+// this a fast-forward? -- defined here at the consumer.
+// *gitancestry.Checker satisfies it structurally.
+//
+// extraObjectDir is receive-pack's quarantine directory, which exists only
+// on the pre-receive hook path (internal/catchup's identically shaped seam).
+// This caller passes "": both commits are already in the mirror's own object
+// store by the time it runs -- the upstream one arrived on the fetch two
+// steps earlier, the work-branch one has been there since the agent pushed it.
+//
+// A failed check must come back as a non-nil error, never as contained=false.
+// The two have opposite consequences here, exactly as they do for
+// mergeTreeRunner: false means "diverged", which flags the branch and blocks
+// acceptance, so a corrupt mirror or a canceled context must not be able to
+// produce it.
+type ancestryChecker interface {
+	Contains(ctx context.Context, mirrorDir, extraObjectDir, ancestor, descendant string) (bool, error)
+}
+
+// workBranchDriftMarker is the workbranchstore.Store surface
+// StoreDriftReconciler records its observation of the upstream branch
+// through, defined here at the consumer. *workbranchstore.Store satisfies it
+// structurally.
+//
+// One method that takes the value, rather than the mark/clear pair
+// workBranchConflictMarker deliberately does NOT have a clearing half of.
+// The asymmetry is the point: a conflict is cleared by a push, which the
+// server sees, so clearing belongs to the pusher's path (internal/catchup);
+// upstream drift is fixed on the FORGE, which the server never sees, so the
+// only way back to 'none' is this step re-deriving it from the mirror. A
+// marker with no clearing seam would flag a branch permanently.
+type workBranchDriftMarker interface {
+	SetUpstreamDrift(ctx context.Context, id uuid.UUID, drift workbranchstore.UpstreamDrift) (workbranchstore.WorkBranch, error)
+}
+
+// workBranchAdoptionWriter is the two work_branches writes an adopted
+// fast-forward makes, defined here at the consumer.
+// *workbranchstore.Store satisfies it structurally.
+//
+// They share one interface because they are two halves of one operation and
+// are never called apart: RecordAcceptedTip is what absorbs the adopted
+// commit ("the upstream tip Loam last pushed OR adopted"), and UpdateState
+// is the reviewed -> reviewable half of resetting the approvals, which the
+// review round alone cannot express -- a branch left in 'reviewed' would
+// never reappear in a reviewer's queue, since the awaiting-verdict filter
+// matches 'reviewable' only.
+//
+// RecordAcceptedTip is the SAME store method proposal acceptance's
+// re-accept leg calls (workBranchPRRecorder above). That is deliberate and
+// is the whole of loam-giq.11's settled answer to "what should accepted_tip
+// become after an adoption": it becomes the adopted commit, with no second
+// column beside it, so ListProposals stays exact (nothing remains to push,
+// so the branch is not re-listed) and the reopened round is what forces
+// re-review.
+type workBranchAdoptionWriter interface {
+	UpdateState(ctx context.Context, id uuid.UUID, to workbranchstore.State) (workbranchstore.WorkBranch, error)
+	RecordAcceptedTip(ctx context.Context, id uuid.UUID, tip string) (workbranchstore.WorkBranch, error)
+}
+
+// roundOpener is the review_rounds write seam an adopted fast-forward
+// resets the approvals through, defined here at the consumer.
+// *reviewstore.RoundStore satisfies it structurally.
+//
+// Opening a numbered round IS the reset: verdicts carry no stale column,
+// staleness is derived from the round number, and only current-round
+// approves count toward the accept bar. That is why this package needs no
+// verdict-writing seam at all -- and must not grow one, since a second
+// notion of staleness is precisely what loam-giq.11 was told not to invent.
+type roundOpener interface {
+	OpenRound(ctx context.Context, workBranchID uuid.UUID, requestedBy string) (reviewstore.Round, error)
 }
 
 // pullRequestOpener is the forge.Provider surface StoreProposalAccepter

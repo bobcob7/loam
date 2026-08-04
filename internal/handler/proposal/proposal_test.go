@@ -78,6 +78,13 @@ func reviewedBranch() workbranchstore.WorkBranch {
 		// the bare name here would hide the shape that bug is about.
 		Author:   "scout-7f3a-reviewer",
 		Conflict: workbranchstore.ConflictNone,
+		// Both enum-like columns are NOT NULL with a 'none' default, so a
+		// row read from Postgres never carries the Go zero value for either.
+		// Spelling them out is what keeps this fixture a faithful stand-in
+		// for one: the accept gate and the queue predicate both reject
+		// anything that is not exactly 'none', so a fixture leaving one
+		// empty would be testing a row the database cannot produce.
+		UpstreamDrift: workbranchstore.DriftNone,
 	}
 }
 
@@ -868,4 +875,85 @@ func TestCloseWorkBranch_UnknownWorkBranch_NotFound(t *testing.T) {
 		Repo: "acme/widgets", WorkBranch: "wb-ghost", Body: "gone",
 	}))
 	requireConnectCode(t, err, connect.CodeNotFound)
+}
+
+// TestAcceptProposal_UpstreamDrift_FailedPrecondition is the second half of
+// docs/sync-spec.md's "AcceptProposal must refuse on either field": a
+// branch that is perfectly mergeable against its target, and carries a live
+// approval, is still refused when the loam/ branch it would push to has
+// been moved somewhere it cannot fast-forward into. Accepting past it would
+// attempt exactly the non-forced push that cannot succeed, and the operator
+// would meet a git rejection several layers from its cause.
+//
+// The fixture is deliberately UNconflicted, so this cannot pass on the
+// conflict check that sits immediately above it in the handler.
+func TestAcceptProposal_UpstreamDrift_FailedPrecondition(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	d.workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, name string) (workbranchstore.WorkBranch, error) {
+		wb := reviewedBranch()
+		wb.Name, wb.UpstreamDrift = name, workbranchstore.DriftDiverged
+		require.Equal(t, workbranchstore.ConflictNone, wb.Conflict, "this fixture must be refused for its DRIFT, not for a conflict")
+		return wb, nil
+	}
+	_, err := d.handler().AcceptProposal(adminCtx(t), connect.NewRequest(&adminv1.AcceptProposalRequest{Repo: "acme/widgets", WorkBranch: "wb-9c2f1a"}))
+	requireConnectCode(t, err, connect.CodeFailedPrecondition)
+	assert.Contains(t, err.Error(), "upstream drift", "the drift refusal must not read like the catch-up one -- they call for different operator actions")
+	assert.Empty(t, d.accepter.AcceptProposalCalls())
+}
+
+// TestListProposals_DriftedBranchIsNotAProposal proves the drift clause of
+// the predicate (docs/web-spec.md -> "Upstream drift is surfaced, not
+// listed"): a reviewed, approved, unconflicted branch whose upstream branch
+// was rewritten is not awaiting an admin decision, because AcceptProposal
+// refuses it -- listing it would offer a button that cannot work.
+func TestListProposals_DriftedBranchIsNotAProposal(t *testing.T) {
+	t.Parallel()
+	drifted := branchNamed("wb-drifted", func(wb *workbranchstore.WorkBranch) {
+		wb.UpstreamDrift = workbranchstore.DriftDiverged
+	})
+	require.Equal(t, workbranchstore.ConflictNone, drifted.Conflict, "the excluded branch must be excluded for its drift alone")
+	d := listDeps(branchNamed("wb-clean", nil), drifted)
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetProposals(), 1)
+	assert.Equal(t, "wb-clean", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
+}
+
+// TestProposalWorkBranchCarriesConflictAndDrift is the surfacing half of
+// loam-giq.11: both columns were server-internal before it, so a branch the
+// server had flagged looked, to every client, exactly like one it had not.
+// A diverged branch never appears in ListProposals, which is why this
+// asserts on CloseWorkBranch's returned WorkBranch -- the admin surface
+// that returns a row regardless of the queue predicate.
+func TestProposalWorkBranchCarriesConflictAndDrift(t *testing.T) {
+	t.Parallel()
+	d := newTestDeps()
+	d.workBranches.CloseFunc = func(_ context.Context, _ uuid.UUID, reason string) (workbranchstore.WorkBranch, error) {
+		wb := reviewedBranch()
+		wb.State = workbranchstore.StateClosed
+		wb.CloseReason = &reason
+		wb.Conflict = workbranchstore.ConflictReset
+		wb.UpstreamDrift = workbranchstore.DriftDiverged
+		return wb, nil
+	}
+	resp, err := d.handler().CloseWorkBranch(adminCtx(t), connect.NewRequest(&adminv1.CloseWorkBranchRequest{Repo: "acme/widgets", WorkBranch: "wb-9c2f1a", Body: "superseded"}))
+	require.NoError(t, err)
+	assert.Equal(t, loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET, resp.Msg.GetWorkBranch().GetConflict())
+	assert.Equal(t, loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED, resp.Msg.GetWorkBranch().GetUpstreamDrift(),
+		"the two are separate fields precisely because they can both be set at once, and the console must show both")
+}
+
+// TestConflictAndDriftToProto_UnknownValueIsUnspecifiedNotNone pins the one
+// direction these mappings must never round the wrong way. NONE is a
+// positive claim -- "this branch merges cleanly", "upstream is where we
+// left it" -- and a value neither function recognizes is not evidence of
+// either. Defaulting to NONE would let a bad row read as healthy on the one
+// screen an operator uses to decide whether to accept.
+func TestConflictAndDriftToProto_UnknownValueIsUnspecifiedNotNone(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED, conflictToProto(workbranchstore.Conflict("")))
+	assert.Equal(t, loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED, conflictToProto(workbranchstore.Conflict("wat")))
+	assert.Equal(t, loamv1.UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED, driftToProto(workbranchstore.UpstreamDrift("")))
+	assert.Equal(t, loamv1.UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED, driftToProto(workbranchstore.UpstreamDrift("fast_forward")))
 }

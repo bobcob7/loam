@@ -47,6 +47,41 @@ enum WorkBranchState {
   WORK_BRANCH_STATE_CLOSED = 5;
 }
 
+// Whether a work branch still merges cleanly into its target branch, and what a
+// target advance did to it (docs/git-spec.md → Target Advances & Catch-Up).
+// A branch carrying anything but NONE cannot be accepted; it must be caught up
+// by a push first.
+enum WorkBranchConflict {
+  WORK_BRANCH_CONFLICT_UNSPECIFIED = 0;
+  // Merges cleanly into the current target tip. The ordinary case.
+  WORK_BRANCH_CONFLICT_NONE = 1;
+  // The target advanced and the branch no longer merges into it. The branch was
+  // already DRAFT, so nothing was demoted — only the flag was raised.
+  WORK_BRANCH_CONFLICT_FLAGGED = 2;
+  // The same conflict, on a branch that was REVIEWABLE or REVIEWED: it was reset
+  // to DRAFT as well as flagged, and a catch-up push restores it to REVIEWABLE
+  // with a fresh review round.
+  WORK_BRANCH_CONFLICT_RESET = 3;
+}
+
+// Whether the upstream `loam/<name>` branch Loam pushed has been moved by
+// someone else (docs/sync-spec.md → Upstream Drift on `loam/<work-branch>`).
+//
+// This is a DIFFERENT fact from WorkBranchConflict and the two can hold at once:
+// conflict means *the target moved, catch up*, drift means *someone rewrote the
+// branch Loam pushed*. They call for different operator actions, so a console
+// must not collapse them into one badge.
+enum UpstreamDrift {
+  UPSTREAM_DRIFT_UNSPECIFIED = 0;
+  // Upstream is where Loam left it, or drifted only by a fast-forward Loam has
+  // since adopted (which reopens a review round). The ordinary case.
+  UPSTREAM_DRIFT_NONE = 1;
+  // The upstream branch moved somewhere the work branch's tip is not an ancestor
+  // of. Loam changes nothing — it cannot know which side is intended — and
+  // refuses to accept the branch until upstream is reconciled by hand.
+  UPSTREAM_DRIFT_DIVERGED = 2;
+}
+
 // A work branch — the first-party unit of work. Identity is (repo, name); the
 // name is randomly generated and otherwise carries no meaning, so the title and
 // description are its human-facing identity. "Review" is the REVIEWABLE state
@@ -66,6 +101,12 @@ message WorkBranch {
   string author = 7;
   // Upstream PR URL, once the admin has created it. Unset until then.
   optional string upstream_pr_url = 8;
+  // Whether the branch still merges into its target. Read-only; the server sets
+  // it on sync and clears it on a catch-up push.
+  WorkBranchConflict conflict = 9;
+  // Whether the upstream branch Loam pushed has moved under it. Read-only; the
+  // server sets and clears it on sync.
+  UpstreamDrift upstream_drift = 10;
 }
 
 // A single comment within a thread.

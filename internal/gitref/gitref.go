@@ -83,6 +83,32 @@ var ErrRefMissing = errors.New("gitref: work-branch ref not found in mirror")
 // and "unlikely" is not a safety property.
 var ErrRefExists = errors.New("gitref: work-branch ref already exists")
 
+// ErrRefMoved indicates a guarded ref update was refused because the ref no
+// longer held the value the caller expected -- AdvanceWorkBranchRef's
+// compare-and-swap losing to a concurrent writer (in practice: an agent's
+// own push landing between the caller reading the tip and this call trying
+// to move it). It is not a failure to act on: the caller's whole view of
+// the branch is stale, so the correct response is to abandon this pass and
+// re-derive it, never to retry the same swap with the same values.
+var ErrRefMoved = errors.New("gitref: ref moved since the value the update expected")
+
+// errBlankSHA is AdvanceWorkBranchRef's refusal of an empty old or new
+// value, and it is load-bearing rather than defensive: an empty field in
+// git-update-ref(1)'s --stdin `update` line means the ZERO oid, not
+// "unset", and the two positions read very differently. Both measured
+// against real git 2.50.1, on a ref that existed at <A>:
+//
+//   - "update <ref> <A> " (empty OLD) is "the ref must not exist first" and
+//     is refused with "cannot lock ref '<ref>': reference already exists" --
+//     it does not mean "any value", but a caller who assumed it did would
+//     have written a swap that can never succeed.
+//   - "update <ref>  <A>" (empty NEW) DELETES the ref, and exits 0 while
+//     doing it. A zero-valued `to` reaching git would silently destroy the
+//     work branch, which has no reflog in a bare mirror to recover from.
+//
+// So neither is passed through to git.
+var errBlankSHA = errors.New("gitref: ref update needs both an old and a new commit")
+
 // Creator creates work-branch refs in bare mirrors under dataDir
 // (LOAM_DATA_DIR). It holds no per-repo state: the repo name is a
 // parameter, so one Creator serves every enrolled repo.
@@ -182,6 +208,72 @@ func (c *Creator) ResolveWorkBranchRef(ctx context.Context, repoName, name strin
 	return sha, nil
 }
 
+// ResolveUpstreamProposalRef returns the commit SHA the MIRRORED copy of
+// repoName's upstream loam/<name> branch currently points at
+// (refnames.UpstreamProposalBranch), or ErrRefMissing if the mirror holds no
+// such ref -- which is the ordinary state for a work branch that has never
+// been accepted, and for one whose PR has ended and whose upstream branch
+// the PR poller has since deleted.
+//
+// This reads the ref the mirror FETCH writes, not one Loam owns: it is the
+// upstream branch as of the last sync, mirrored back by the ordinary
+// +refs/heads/*:refs/heads/* refspec. Comparing it against
+// ResolveWorkBranchRef (Loam's own reserved-namespace copy) and against
+// work_branches.accepted_tip is how upstream drift is detected
+// (docs/sync-spec.md -> Upstream Drift on `loam/<work-branch>`). Like every
+// other SHA in this codebase it is read live, never cached.
+func (c *Creator) ResolveUpstreamProposalRef(ctx context.Context, repoName, name string) (string, error) {
+	mirrorDir := mirrorpath.Dir(c.dataDir, repoName)
+	sha, err := c.resolve(ctx, mirrorDir, refnames.UpstreamProposalBranch(name))
+	if err != nil {
+		if errors.Is(err, ErrTargetMissing) {
+			return "", fmt.Errorf("resolving upstream branch for work branch %s in %s: %w", name, repoName, ErrRefMissing)
+		}
+		return "", fmt.Errorf("resolving upstream branch for work branch %s in %s: %w", name, repoName, err)
+	}
+	return sha, nil
+}
+
+// AdvanceWorkBranchRef moves refnames.WorkBranch(name) from `from` to `to`
+// in repoName's bare mirror, and is the ONE exception to "work-branch refs
+// advance only by agent pushes" (docs/git-spec.md -> Ref Policy). Its only
+// caller is the sync cycle's upstream-drift reconciler adopting a
+// fast-forward someone pushed straight to loam/<name> on the forge
+// (docs/sync-spec.md -> Upstream Drift on `loam/<work-branch>`), which is
+// defensible ONLY because the same reconciliation reopens the review round:
+// the adopted commit never passed the pre-receive hook, so no push policy
+// applied to it, and the reset approvals are what stop it reaching a
+// further upstream push unreviewed.
+//
+// The update is a COMPARE-AND-SWAP, not an unconditional write: `from` is
+// passed to git-update-ref(1) as the expected old value, so an agent push
+// that landed between the caller resolving the tip and this call is not
+// silently overwritten -- git refuses the update and this returns
+// ErrRefMoved (verified against real git 2.50.1: `fatal: cannot lock ref
+// '<ref>': is at <actual> but expected <old>`, exit 128). That refusal is
+// the whole safety argument for a second writer existing at all, so `from`
+// has no "any value" spelling and cannot be omitted.
+//
+// This never creates a ref: an absent ref fails the swap (git: `unable to
+// resolve reference`, also measured) and comes back as ErrRefMissing.
+// Adopting a commit into a work branch that has no ref would be creating a
+// branch out of an upstream push, which no caller should be able to express.
+func (c *Creator) AdvanceWorkBranchRef(ctx context.Context, repoName, name, from, to string) error {
+	if from == "" || to == "" {
+		return fmt.Errorf("advancing %s in %s from %q to %q: %w", refnames.WorkBranch(name), repoName, from, to, errBlankSHA)
+	}
+	mirrorDir := mirrorpath.Dir(c.dataDir, repoName)
+	ref := refnames.WorkBranch(name)
+	out, err := c.run(ctx, mirrorDir, strings.NewReader("update "+ref+" "+to+" "+from+"\n"), "update-ref", "--stdin")
+	if err != nil {
+		return fmt.Errorf("advancing %s in %s: %w", ref, repoName, err)
+	}
+	if out.exitCode != 0 {
+		return fmt.Errorf("advancing %s in %s from %s to %s: %w", ref, repoName, from, to, classifyUpdateRefStderr(out.stderr))
+	}
+	return nil
+}
+
 // resolve returns ref's current commit SHA, classifying `git rev-parse
 // --verify --quiet`'s three distinguishable outcomes exactly as
 // internal/gitdiff's verifyRef does: exit 0 (resolved), exit 1 with no
@@ -205,15 +297,30 @@ func (c *Creator) resolve(ctx context.Context, mirrorDir, ref string) (string, e
 	}
 }
 
-// classifyUpdateRefStderr maps a failed `update-ref --stdin create` to this
-// package's sentinels. git's own wording for a refused create is "fatal:
-// cannot lock ref '<ref>': reference already exists" (measured against real
-// git 2.50.1), and a bad --git-dir is the same "not a git repository"
-// complaint rev-parse makes.
+// classifyUpdateRefStderr maps a failed `update-ref --stdin` to this
+// package's sentinels, for both the guarded `create` and the guarded
+// `update`. Every string matched here is git's own wording, measured
+// against real git 2.50.1 rather than assumed:
+//
+//   - refused create: "fatal: cannot lock ref '<ref>': reference already
+//     exists"
+//   - refused compare-and-swap: "fatal: cannot lock ref '<ref>': is at
+//     <actual> but expected <old>"
+//   - swap against a ref that does not exist: "fatal: cannot lock ref
+//     '<ref>': unable to resolve reference '<ref>'"
+//   - bad --git-dir: the same "not a git repository" complaint rev-parse
+//     makes
+//
+// All four share the "cannot lock ref" prefix, which is why the
+// distinguishing substring is the clause after it and not that prefix.
 func classifyUpdateRefStderr(stderr string) error {
 	switch {
 	case strings.Contains(stderr, "already exists"):
 		return ErrRefExists
+	case strings.Contains(stderr, "but expected"):
+		return ErrRefMoved
+	case strings.Contains(stderr, "unable to resolve reference"):
+		return ErrRefMissing
 	case isMirrorMissingStderr(stderr):
 		return ErrMirrorMissing
 	default:

@@ -42,6 +42,25 @@ const (
 	ConflictReset   Conflict = "reset"
 )
 
+// UpstreamDrift is a work_branches.upstream_drift value, matching the
+// column's CHECK constraint (docs/persistence-spec.md "work_branches";
+// docs/sync-spec.md "Upstream Drift on `loam/<work-branch>`").
+//
+// It is a SEPARATE column from Conflict, not a fourth Conflict value,
+// because the two are independent facts that can hold at once: a target can
+// advance into a merge conflict while the loam/ branch is separately
+// rewritten. See the 0007 migration's own comment for the full argument.
+type UpstreamDrift string
+
+// The two upstream_drift values the column's CHECK constraint allows. There
+// is no value for a fast-forward: the sync cycle ADOPTS one (advancing the
+// work branch, opening a fresh review round, absorbing the commit into
+// accepted_tip) rather than recording it, so it is never read back.
+const (
+	DriftNone     UpstreamDrift = "none"
+	DriftDiverged UpstreamDrift = "diverged"
+)
+
 // WorkBranch is one work_branches row. The diff itself is never here --
 // it is computed from git (target...name); this struct only carries the
 // pointer at the ref (docs/persistence-spec.md "work_branches").
@@ -58,6 +77,7 @@ type WorkBranch struct {
 	UpstreamPRNumber *int32
 	AcceptedTip      *string
 	Conflict         Conflict
+	UpstreamDrift    UpstreamDrift
 	CloseReason      *string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
@@ -485,6 +505,40 @@ func (s *Store) ClearConflict(ctx context.Context, id uuid.UUID) (WorkBranch, er
 	return fromGenWorkBranch(row), nil
 }
 
+// SetUpstreamDrift records what the sync cycle observed about the upstream
+// loam/<name> branch this work branch was pushed to (loam-giq.11,
+// docs/sync-spec.md "Upstream Drift on `loam/<work-branch>`").
+//
+// It is deliberately NOT shaped like MarkConflicted/ClearConflict, the pair
+// it otherwise resembles. Those two are edge-triggered halves of a
+// lifecycle -- flagged by a target advance, cleared only by a catch-up push
+// -- and each is guarded so that calling the wrong one is an error. Drift
+// has no push that clears it and no command that clears it: it is a
+// level-triggered observation of a fact outside Loam, re-derived from the
+// mirror on every sync cycle, so ONE setter that takes the observed value
+// (and can always write 'none' again) is the only shape that lets a branch
+// recover when the operator reconciles upstream by hand.
+//
+// drift must be one of the two values the column's CHECK constraint allows;
+// anything else is rejected here (errInvalidUpstreamDrift) rather than sent
+// to Postgres to fail as a constraint violation, since a caller passing a
+// third value is a code bug, not a data race. Terminal branches reject
+// (ErrIllegalTransition), matching the guard in the query itself.
+func (s *Store) SetUpstreamDrift(ctx context.Context, id uuid.UUID, drift UpstreamDrift) (WorkBranch, error) {
+	if drift != DriftNone && drift != DriftDiverged {
+		return WorkBranch{}, fmt.Errorf("setting upstream drift %q on work branch %s: %w", drift, id, errInvalidUpstreamDrift)
+	}
+	row, err := s.q.SetWorkBranchUpstreamDrift(ctx, gen.SetWorkBranchUpstreamDriftParams{
+		ID:            pgUUID(id),
+		UpstreamDrift: string(drift),
+	})
+	if err != nil {
+		return WorkBranch{}, s.transitionErr(ctx, id, err, fmt.Sprintf("setting upstream drift %s on", drift))
+	}
+	s.logger.InfoContext(ctx, "set work branch upstream drift", "work_branch_id", id, "upstream_drift", drift)
+	return fromGenWorkBranch(row), nil
+}
+
 // transitionErr maps a transition query's error to a distinguishable
 // sentinel: ErrNotFound if id names no row at all, ErrIllegalTransition if
 // the row exists but its current state/conflict disqualified the guarded
@@ -542,6 +596,7 @@ func fromGenWorkBranch(row gen.WorkBranch) WorkBranch {
 		UpstreamPRNumber: int4FromPg(row.UpstreamPrNumber),
 		AcceptedTip:      textFromPg(row.AcceptedTip),
 		Conflict:         Conflict(row.Conflict),
+		UpstreamDrift:    UpstreamDrift(row.UpstreamDrift),
 		CloseReason:      textFromPg(row.CloseReason),
 		CreatedAt:        row.CreatedAt.Time,
 		UpdatedAt:        row.UpdatedAt.Time,

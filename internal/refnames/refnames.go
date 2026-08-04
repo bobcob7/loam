@@ -157,6 +157,32 @@ func TargetBranch(name string) string {
 	return headsPrefix + name
 }
 
+// UpstreamProposalBranch returns the ref path a proposal acceptance pushes
+// a work branch to on the FORGE -- refs/heads/loam/<name>, the namespace
+// docs/sync-spec.md -> Proposal Acceptance reserves ("Push the work-branch
+// tip to the upstream branch loam/<work-branch-name>").
+//
+// The same path is also where that branch lands in the bare MIRROR once it
+// is fetched back, which is what makes upstream drift observable without a
+// network call: the mirror fetch's refspec is +refs/heads/*:refs/heads/*
+// and only ReservedNamespace is excluded from it, so loam/<name> is
+// mirrored like any other upstream branch (docs/sync-spec.md -> Upstream
+// Drift on `loam/<work-branch>`). This is NOT WorkBranch(name): that is
+// Loam's own, server-owned copy under the reserved namespace, which the
+// fetch never touches. The two refs holding different SHAs is precisely
+// the drift this constant exists to let a caller detect.
+func UpstreamProposalBranch(name string) string {
+	return headsPrefix + upstreamProposalPrefix + name
+}
+
+// upstreamProposalPrefix is the single path segment upstream proposal
+// branches live under, below refs/heads/. It is not exported: callers want
+// either the full ref path (UpstreamProposalBranch) or the branch name a
+// forge API takes ("loam/<name>", which is that path with refs/heads/
+// stripped), and both are built here rather than by string concatenation at
+// each call site.
+const upstreamProposalPrefix = "loam/"
+
 // WorkBranchName inverts WorkBranch: it recovers the bare work-branch name
 // from a mirror ref path, reporting ok=false for any ref outside
 // ReservedNamespace and for the namespace prefix with nothing after it.

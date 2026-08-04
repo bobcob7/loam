@@ -141,6 +141,129 @@ func (WorkBranchState) EnumDescriptor() ([]byte, []int) {
 	return file_loam_v1_common_proto_rawDescGZIP(), []int{1}
 }
 
+// Whether a work branch still merges cleanly into its target branch, and what a
+// target advance did to it (docs/git-spec.md → Target Advances & Catch-Up).
+// A branch carrying anything but NONE cannot be accepted; it must be caught up
+// by a push first.
+type WorkBranchConflict int32
+
+const (
+	WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED WorkBranchConflict = 0
+	// Merges cleanly into the current target tip. The ordinary case.
+	WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE WorkBranchConflict = 1
+	// The target advanced and the branch no longer merges into it. The branch was
+	// already DRAFT, so nothing was demoted — only the flag was raised.
+	WorkBranchConflict_WORK_BRANCH_CONFLICT_FLAGGED WorkBranchConflict = 2
+	// The same conflict, on a branch that was REVIEWABLE or REVIEWED: it was reset
+	// to DRAFT as well as flagged, and a catch-up push restores it to REVIEWABLE
+	// with a fresh review round.
+	WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET WorkBranchConflict = 3
+)
+
+// Enum value maps for WorkBranchConflict.
+var (
+	WorkBranchConflict_name = map[int32]string{
+		0: "WORK_BRANCH_CONFLICT_UNSPECIFIED",
+		1: "WORK_BRANCH_CONFLICT_NONE",
+		2: "WORK_BRANCH_CONFLICT_FLAGGED",
+		3: "WORK_BRANCH_CONFLICT_RESET",
+	}
+	WorkBranchConflict_value = map[string]int32{
+		"WORK_BRANCH_CONFLICT_UNSPECIFIED": 0,
+		"WORK_BRANCH_CONFLICT_NONE":        1,
+		"WORK_BRANCH_CONFLICT_FLAGGED":     2,
+		"WORK_BRANCH_CONFLICT_RESET":       3,
+	}
+)
+
+func (x WorkBranchConflict) Enum() *WorkBranchConflict {
+	p := new(WorkBranchConflict)
+	*p = x
+	return p
+}
+
+func (x WorkBranchConflict) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WorkBranchConflict) Descriptor() protoreflect.EnumDescriptor {
+	return file_loam_v1_common_proto_enumTypes[2].Descriptor()
+}
+
+func (WorkBranchConflict) Type() protoreflect.EnumType {
+	return &file_loam_v1_common_proto_enumTypes[2]
+}
+
+func (x WorkBranchConflict) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WorkBranchConflict.Descriptor instead.
+func (WorkBranchConflict) EnumDescriptor() ([]byte, []int) {
+	return file_loam_v1_common_proto_rawDescGZIP(), []int{2}
+}
+
+// Whether the upstream `loam/<name>` branch Loam pushed has been moved by
+// someone else (docs/sync-spec.md → Upstream Drift on `loam/<work-branch>`).
+//
+// This is a DIFFERENT fact from WorkBranchConflict and the two can hold at once:
+// conflict means *the target moved, catch up*, drift means *someone rewrote the
+// branch Loam pushed*. They call for different operator actions, so a console
+// must not collapse them into one badge.
+type UpstreamDrift int32
+
+const (
+	UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED UpstreamDrift = 0
+	// Upstream is where Loam left it, or drifted only by a fast-forward Loam has
+	// since adopted (which reopens a review round). The ordinary case.
+	UpstreamDrift_UPSTREAM_DRIFT_NONE UpstreamDrift = 1
+	// The upstream branch moved somewhere the work branch's tip is not an ancestor
+	// of. Loam changes nothing — it cannot know which side is intended — and
+	// refuses to accept the branch until upstream is reconciled by hand.
+	UpstreamDrift_UPSTREAM_DRIFT_DIVERGED UpstreamDrift = 2
+)
+
+// Enum value maps for UpstreamDrift.
+var (
+	UpstreamDrift_name = map[int32]string{
+		0: "UPSTREAM_DRIFT_UNSPECIFIED",
+		1: "UPSTREAM_DRIFT_NONE",
+		2: "UPSTREAM_DRIFT_DIVERGED",
+	}
+	UpstreamDrift_value = map[string]int32{
+		"UPSTREAM_DRIFT_UNSPECIFIED": 0,
+		"UPSTREAM_DRIFT_NONE":        1,
+		"UPSTREAM_DRIFT_DIVERGED":    2,
+	}
+)
+
+func (x UpstreamDrift) Enum() *UpstreamDrift {
+	p := new(UpstreamDrift)
+	*p = x
+	return p
+}
+
+func (x UpstreamDrift) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (UpstreamDrift) Descriptor() protoreflect.EnumDescriptor {
+	return file_loam_v1_common_proto_enumTypes[3].Descriptor()
+}
+
+func (UpstreamDrift) Type() protoreflect.EnumType {
+	return &file_loam_v1_common_proto_enumTypes[3]
+}
+
+func (x UpstreamDrift) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use UpstreamDrift.Descriptor instead.
+func (UpstreamDrift) EnumDescriptor() ([]byte, []int) {
+	return file_loam_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
 // Scope for queries that can target specific repos or every enrolled repo.
 //
 // The CLI resolves directory inference locally and populates `repos` with the
@@ -213,6 +336,12 @@ type WorkBranch struct {
 	Author string `protobuf:"bytes,7,opt,name=author,proto3" json:"author,omitempty"`
 	// Upstream PR URL, once the admin has created it. Unset until then.
 	UpstreamPrUrl *string `protobuf:"bytes,8,opt,name=upstream_pr_url,json=upstreamPrUrl,proto3,oneof" json:"upstream_pr_url,omitempty"`
+	// Whether the branch still merges into its target. Read-only; the server sets
+	// it on sync and clears it on a catch-up push.
+	Conflict WorkBranchConflict `protobuf:"varint,9,opt,name=conflict,proto3,enum=loam.v1.WorkBranchConflict" json:"conflict,omitempty"`
+	// Whether the upstream branch Loam pushed has moved under it. Read-only; the
+	// server sets and clears it on sync.
+	UpstreamDrift UpstreamDrift `protobuf:"varint,10,opt,name=upstream_drift,json=upstreamDrift,proto3,enum=loam.v1.UpstreamDrift" json:"upstream_drift,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -301,6 +430,20 @@ func (x *WorkBranch) GetUpstreamPrUrl() string {
 		return *x.UpstreamPrUrl
 	}
 	return ""
+}
+
+func (x *WorkBranch) GetConflict() WorkBranchConflict {
+	if x != nil {
+		return x.Conflict
+	}
+	return WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED
+}
+
+func (x *WorkBranch) GetUpstreamDrift() UpstreamDrift {
+	if x != nil {
+		return x.UpstreamDrift
+	}
+	return UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED
 }
 
 // A single comment within a thread.
@@ -764,7 +907,7 @@ const file_loam_v1_common_proto_rawDesc = "" +
 	"\x14loam/v1/common.proto\x12\aloam.v1\"\"\n" +
 	"\n" +
 	"QueryScope\x12\x14\n" +
-	"\x05repos\x18\x01 \x03(\tR\x05repos\"\x8d\x02\n" +
+	"\x05repos\x18\x01 \x03(\tR\x05repos\"\x85\x03\n" +
 	"\n" +
 	"WorkBranch\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x12\n" +
@@ -774,7 +917,10 @@ const file_loam_v1_common_proto_rawDesc = "" +
 	"\vdescription\x18\x05 \x01(\tR\vdescription\x12.\n" +
 	"\x05state\x18\x06 \x01(\x0e2\x18.loam.v1.WorkBranchStateR\x05state\x12\x16\n" +
 	"\x06author\x18\a \x01(\tR\x06author\x12+\n" +
-	"\x0fupstream_pr_url\x18\b \x01(\tH\x00R\rupstreamPrUrl\x88\x01\x01B\x12\n" +
+	"\x0fupstream_pr_url\x18\b \x01(\tH\x00R\rupstreamPrUrl\x88\x01\x01\x127\n" +
+	"\bconflict\x18\t \x01(\x0e2\x1b.loam.v1.WorkBranchConflictR\bconflict\x12=\n" +
+	"\x0eupstream_drift\x18\n" +
+	" \x01(\x0e2\x16.loam.v1.UpstreamDriftR\rupstreamDriftB\x12\n" +
 	"\x10_upstream_pr_url\"K\n" +
 	"\aComment\x12\x16\n" +
 	"\x06author\x18\x01 \x01(\tR\x06author\x12\x12\n" +
@@ -817,7 +963,16 @@ const file_loam_v1_common_proto_rawDesc = "" +
 	"\x1cWORK_BRANCH_STATE_REVIEWABLE\x10\x02\x12\x1e\n" +
 	"\x1aWORK_BRANCH_STATE_REVIEWED\x10\x03\x12\x1e\n" +
 	"\x1aWORK_BRANCH_STATE_COMPLETE\x10\x04\x12\x1c\n" +
-	"\x18WORK_BRANCH_STATE_CLOSED\x10\x05B\x8c\x01\n" +
+	"\x18WORK_BRANCH_STATE_CLOSED\x10\x05*\x9b\x01\n" +
+	"\x12WorkBranchConflict\x12$\n" +
+	" WORK_BRANCH_CONFLICT_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19WORK_BRANCH_CONFLICT_NONE\x10\x01\x12 \n" +
+	"\x1cWORK_BRANCH_CONFLICT_FLAGGED\x10\x02\x12\x1e\n" +
+	"\x1aWORK_BRANCH_CONFLICT_RESET\x10\x03*e\n" +
+	"\rUpstreamDrift\x12\x1e\n" +
+	"\x1aUPSTREAM_DRIFT_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13UPSTREAM_DRIFT_NONE\x10\x01\x12\x1b\n" +
+	"\x17UPSTREAM_DRIFT_DIVERGED\x10\x02B\x8c\x01\n" +
 	"\vcom.loam.v1B\vCommonProtoP\x01Z3github.com/bobcob7/loam/internal/gen/loam/v1;loamv1\xa2\x02\x03LXX\xaa\x02\aLoam.V1\xca\x02\aLoam\\V1\xe2\x02\x13Loam\\V1\\GPBMetadata\xea\x02\bLoam::V1b\x06proto3"
 
 var (
@@ -832,31 +987,35 @@ func file_loam_v1_common_proto_rawDescGZIP() []byte {
 	return file_loam_v1_common_proto_rawDescData
 }
 
-var file_loam_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_loam_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_loam_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_loam_v1_common_proto_goTypes = []any{
-	(VerdictOutcome)(0),    // 0: loam.v1.VerdictOutcome
-	(WorkBranchState)(0),   // 1: loam.v1.WorkBranchState
-	(*QueryScope)(nil),     // 2: loam.v1.QueryScope
-	(*WorkBranch)(nil),     // 3: loam.v1.WorkBranch
-	(*Comment)(nil),        // 4: loam.v1.Comment
-	(*FileLine)(nil),       // 5: loam.v1.FileLine
-	(*Thread)(nil),         // 6: loam.v1.Thread
-	(*VerdictSummary)(nil), // 7: loam.v1.VerdictSummary
-	(*Page)(nil),           // 8: loam.v1.Page
-	(*PageInfo)(nil),       // 9: loam.v1.PageInfo
-	(*Ingested)(nil),       // 10: loam.v1.Ingested
+	(VerdictOutcome)(0),     // 0: loam.v1.VerdictOutcome
+	(WorkBranchState)(0),    // 1: loam.v1.WorkBranchState
+	(WorkBranchConflict)(0), // 2: loam.v1.WorkBranchConflict
+	(UpstreamDrift)(0),      // 3: loam.v1.UpstreamDrift
+	(*QueryScope)(nil),      // 4: loam.v1.QueryScope
+	(*WorkBranch)(nil),      // 5: loam.v1.WorkBranch
+	(*Comment)(nil),         // 6: loam.v1.Comment
+	(*FileLine)(nil),        // 7: loam.v1.FileLine
+	(*Thread)(nil),          // 8: loam.v1.Thread
+	(*VerdictSummary)(nil),  // 9: loam.v1.VerdictSummary
+	(*Page)(nil),            // 10: loam.v1.Page
+	(*PageInfo)(nil),        // 11: loam.v1.PageInfo
+	(*Ingested)(nil),        // 12: loam.v1.Ingested
 }
 var file_loam_v1_common_proto_depIdxs = []int32{
 	1, // 0: loam.v1.WorkBranch.state:type_name -> loam.v1.WorkBranchState
-	5, // 1: loam.v1.Thread.anchor:type_name -> loam.v1.FileLine
-	4, // 2: loam.v1.Thread.comments:type_name -> loam.v1.Comment
-	0, // 3: loam.v1.VerdictSummary.outcome:type_name -> loam.v1.VerdictOutcome
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	2, // 1: loam.v1.WorkBranch.conflict:type_name -> loam.v1.WorkBranchConflict
+	3, // 2: loam.v1.WorkBranch.upstream_drift:type_name -> loam.v1.UpstreamDrift
+	7, // 3: loam.v1.Thread.anchor:type_name -> loam.v1.FileLine
+	6, // 4: loam.v1.Thread.comments:type_name -> loam.v1.Comment
+	0, // 5: loam.v1.VerdictSummary.outcome:type_name -> loam.v1.VerdictOutcome
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_loam_v1_common_proto_init() }
@@ -872,7 +1031,7 @@ func file_loam_v1_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_loam_v1_common_proto_rawDesc), len(file_loam_v1_common_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      4,
 			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,

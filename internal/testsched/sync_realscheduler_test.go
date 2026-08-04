@@ -64,6 +64,10 @@ type noopPRPoller struct{}
 
 func (noopPRPoller) PollPRs(context.Context, mirrorsync.RepoID) error { return nil }
 
+type noopDriftReconciler struct{}
+
+func (noopDriftReconciler) ReconcileDrift(context.Context, mirrorsync.RepoID) error { return nil }
+
 // blockingFetcher blocks Fetch on release for every repo, first signaling
 // entered exactly once, so a test can prove Tick has not returned while
 // the collaborator is still running.
@@ -103,7 +107,7 @@ func TestSyncHarness_TickWithRealScheduler_BlocksUntilCycleActuallyFinishes(t *t
 	}
 	fetcher := &blockingFetcher{entered: make(chan struct{}), release: make(chan struct{})}
 	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, fetcher,
-		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, noopDriftReconciler{}, state)
 	h := NewSyncHarness(scheduler)
 	type tickResult struct {
 		repos []mirrorsync.RepoID

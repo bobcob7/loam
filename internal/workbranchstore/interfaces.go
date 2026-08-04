@@ -9,6 +9,13 @@
 // affected work branch, and a catch-up push clears the flag (restoring a
 // demoted branch directly to reviewable, no request-review needed).
 //
+// One column is deliberately NOT a transition: upstream_drift
+// (SetUpstreamDrift, docs/sync-spec.md "Upstream Drift on
+// `loam/<work-branch>`") records an observation about a branch on the
+// FORGE, re-derived by every sync cycle, so it is a plain level-triggered
+// setter with no legal-from-value guard. See its own doc comment for why
+// giving it the conflict pair's shape would strand a flagged branch.
+//
 // Every transition method maps to exactly one guarded
 // UPDATE ... WHERE ... RETURNING * in internal/db/queries/work_branches.sql:
 // the legal-from-state check and the write commit as a single atomic
@@ -48,4 +55,5 @@ type querier interface {
 	RecordWorkBranchUpstreamPR(ctx context.Context, arg gen.RecordWorkBranchUpstreamPRParams) (gen.WorkBranch, error)
 	RecordWorkBranchAcceptedTip(ctx context.Context, arg gen.RecordWorkBranchAcceptedTipParams) (gen.WorkBranch, error)
 	ClearWorkBranchConflict(ctx context.Context, id pgtype.UUID) (gen.WorkBranch, error)
+	SetWorkBranchUpstreamDrift(ctx context.Context, arg gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error)
 }

@@ -55,6 +55,16 @@ var ErrPRAlreadyRecorded = errors.New("work branch already has a recorded upstre
 // row's over-inclusion into a false "up to date".
 var errInvalidUpstreamPR = errors.New("upstream pull request identity is not usable")
 
+// errInvalidUpstreamDrift is returned by SetUpstreamDrift for a value
+// outside the two the work_branches_upstream_drift_check CHECK constraint
+// allows. It is rejected in Go, ahead of the statement, rather than left to
+// surface as a constraint violation: the CHECK is the durable backstop, but
+// a caller reaching it has a code bug (there are exactly two legal values
+// and both are named constants in this package), and a wrapped SQLSTATE
+// 23514 from pgconn is a materially worse thing to read in a sync cycle's
+// error log than a sentence naming the value that was passed.
+var errInvalidUpstreamDrift = errors.New("upstream drift value is not one of none/diverged")
+
 // errDuplicateName is returned when Create hits
 // work_branches_repo_id_name_key (UNIQUE(repo_id, name),
 // docs/persistence-spec.md "work_branches") -- identity is (repo, name),

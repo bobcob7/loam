@@ -44,6 +44,20 @@ var errProposalNotReviewed = errors.New("mirrorsync: work branch is not in the r
 // front of the upstream reviewers.
 var errProposalConflicted = errors.New("mirrorsync: work branch is flagged conflicted")
 
+// errProposalDrifted is the refusal for a work branch whose upstream
+// loam/<name> branch has been moved somewhere the branch cannot
+// fast-forward into (docs/sync-spec.md -> Upstream Drift on
+// `loam/<work-branch>`: "AcceptProposal must refuse on either field").
+//
+// It is a SEPARATE sentinel from errProposalConflicted, not a widening of
+// it, for the same reason upstream_drift is a separate column: the two say
+// different things to the operator and call for different remedies -- catch
+// the branch up against its target, versus go and reconcile a branch
+// somebody rewrote on the forge. Accepting past this one would attempt
+// exactly the non-forced push that cannot succeed, several layers from its
+// cause, which is the failure loam-giq.11 was reported for.
+var errProposalDrifted = errors.New("mirrorsync: work branch has drifted from its upstream branch")
+
 // errUnusablePRIdentity is the refusal to record something the forge
 // returned that cannot identify a pull request -- a non-positive number,
 // an empty URL -- even though the call itself reported success.
@@ -216,8 +230,9 @@ func NewStoreProposalAccepter(dataDir string, logger *slog.Logger, attribution b
 // request. See the type doc comment for the idempotency, no-force, and
 // forge-error rules this method implements.
 //
-// The preconditions checked here are the two this package can see on the
-// row itself: state reviewed and no conflict flag. The third precondition
+// The preconditions checked here are the three this package can see on the
+// row itself: state reviewed, no conflict flag, and no upstream drift. The
+// fourth precondition
 // docs/sync-spec.md lists -- at least one non-stale approve verdict -- is
 // NOT checked here and is deliberately left to the AcceptProposal RPC
 // handler (loam-ofg.14): it is a question about the review aggregate
@@ -237,6 +252,9 @@ func (a *StoreProposalAccepter) AcceptProposal(ctx context.Context, repo RepoID,
 	}
 	if wb.Conflict != workbranchstore.ConflictNone {
 		return AcceptResult{}, fmt.Errorf("accepting work branch %s in repo %s (conflict %s): %w", wb.Name, repo, wb.Conflict, errProposalConflicted)
+	}
+	if wb.UpstreamDrift != workbranchstore.DriftNone {
+		return AcceptResult{}, fmt.Errorf("accepting work branch %s in repo %s (upstream drift %s): %w", wb.Name, repo, wb.UpstreamDrift, errProposalDrifted)
 	}
 	refspec, upstreamBranch, err := upstreamProposalRefspec(wb.Name)
 	if err != nil {

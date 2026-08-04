@@ -139,8 +139,18 @@ type acceptanceWorld struct {
 	// itself.
 	lastAcceptPRURL          string
 	lastAcceptUpstreamBranch string
-	upstreamPRURL            string
-	firstUpstreamBranchSHA   string
+	// The upstream-drift scenario state (loam-giq.11, features/sync.feature).
+	// driftUpstreamSHA is the commit pushed straight to the forge's
+	// loam/<name> branch behind Loam's back; driftWorkTipSHA and
+	// driftRoundBefore are the work branch's own tip and its review round
+	// as they stood BEFORE the sync tick, so a Then can prove the tick
+	// moved (or did not move) them rather than assert an equality that
+	// already held.
+	driftUpstreamSHA       string
+	driftWorkTipSHA        string
+	driftRoundBefore       int
+	upstreamPRURL          string
+	firstUpstreamBranchSHA string
 	// roundBefore is the branch's review-round number as it stood before
 	// the re-review, for "a new review round is opened" to compare
 	// against; closeReason is the body the close RPC sent, for "the reason

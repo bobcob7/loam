@@ -15,6 +15,7 @@ import (
 	"github.com/bobcob7/loam/internal/crypto"
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/forge"
+	"github.com/bobcob7/loam/internal/gitancestry"
 	"github.com/bobcob7/loam/internal/gitmergetree"
 	"github.com/bobcob7/loam/internal/gitref"
 	"github.com/bobcob7/loam/internal/gittransport"
@@ -22,6 +23,7 @@ import (
 	"github.com/bobcob7/loam/internal/mirrorsync"
 	"github.com/bobcob7/loam/internal/mirrorsync/state"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 )
 
@@ -174,7 +176,7 @@ func (s syncRunner) Run(ctx context.Context) {
 // exec.CommandContext (internal/gittransport, internal/gitmergetree), the
 // forge client builds every request with http.NewRequestWithContext
 // (internal/forge), and pgx fails a canceled query immediately -- so a
-// queued cycle unwinds through its five steps in microseconds, not
+// queued cycle unwinds through its six steps in microseconds, not
 // seconds. What defaultShutdownGrace has to cover is therefore about one
 // in-flight wave, near enough independent of this value.
 //
@@ -195,7 +197,7 @@ const defaultMaxConcurrentCycles = 32
 //
 // It exists as its own function so the bound is testable as WIRING rather
 // than as an option value: buildSyncScheduler below needs a live
-// *pgxpool.Pool to construct its seven collaborators, so no unit test can
+// *pgxpool.Pool to construct its eight collaborators, so no unit test can
 // reach the Scheduler it builds, and a test that merely re-applied
 // WithMaxConcurrentCycles itself would pass just as happily if this
 // binary passed nothing at all. Everything between here and serve's
@@ -205,7 +207,7 @@ const defaultMaxConcurrentCycles = 32
 // The Scheduler value stays a local here and only its method values
 // escape, which is where syncRunner's doc comment's loam-f75 claim is
 // actually enforced.
-func newSyncRunner(logger *slog.Logger, ticks <-chan time.Time, repos mirrorsync.RepoLister, fetcher mirrorsync.Fetcher, advances mirrorsync.AdvanceDetector, mergeability mirrorsync.MergeabilityChecker, enqueuer mirrorsync.IngestEnqueuer, prPoller mirrorsync.PRPoller, reporter mirrorsync.SyncStateReporter, grace time.Duration) runner {
+func newSyncRunner(logger *slog.Logger, ticks <-chan time.Time, repos mirrorsync.RepoLister, fetcher mirrorsync.Fetcher, advances mirrorsync.AdvanceDetector, mergeability mirrorsync.MergeabilityChecker, enqueuer mirrorsync.IngestEnqueuer, prPoller mirrorsync.PRPoller, drift mirrorsync.DriftReconciler, reporter mirrorsync.SyncStateReporter, grace time.Duration) runner {
 	scheduler := mirrorsync.New(
 		logger,
 		ticks,
@@ -215,6 +217,7 @@ func newSyncRunner(logger *slog.Logger, ticks <-chan time.Time, repos mirrorsync
 		mergeability,
 		enqueuer,
 		prPoller,
+		drift,
 		reporter,
 		mirrorsync.WithMaxConcurrentCycles(defaultMaxConcurrentCycles),
 	)
@@ -222,7 +225,7 @@ func newSyncRunner(logger *slog.Logger, ticks <-chan time.Time, repos mirrorsync
 }
 
 // buildSyncScheduler constructs the production mirrorsync.Scheduler and
-// every one of its seven collaborators over pool and ingestPool -- the
+// every one of its eight collaborators over pool and ingestPool -- the
 // same live Postgres connection and ingest worker pool run() already
 // built, never a second, divergent instance -- and returns it as a plain
 // runner for serve's background tier.
@@ -275,6 +278,14 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 	enqueuer := mirrorsync.NewStoreIngestEnqueuer(repos, repos, ingestPool)
 	tracker := forgePRTracker{repos: repos, credentials: credentials, httpClient: httpClient, logger: cfg.Logger}
 	prPoller := mirrorsync.NewStorePRPoller(cfg.DataDir, cfg.Logger, repos, workBranches, workBranches, tracker, transport)
+	// Step 6's two git seams are one *gitref.Creator (the mirror reads) and
+	// one *gitancestry.Checker (the fast-forward question), the same
+	// concrete types buildProposalAccepter and internal/catchup already
+	// wire for their own halves of this flow -- see
+	// mirrorsync.StoreDriftReconciler for why the ref ADVANCE is a separate
+	// interface from the reads even though one type backs both.
+	refs := gitref.New(cfg.DataDir)
+	drift := mirrorsync.NewStoreDriftReconciler(cfg.DataDir, cfg.Logger, repos, workBranches, refs, refs, gitancestry.New(cfg.Logger), workBranches, workBranches, reviewstore.NewRoundStore(pool, cfg.Logger))
 	return newSyncRunner(
 		cfg.Logger,
 		ticks,
@@ -284,6 +295,7 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 		mergeability,
 		enqueuer,
 		prPoller,
+		drift,
 		state.New(pool),
 		grace,
 	), nil

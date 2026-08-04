@@ -39,7 +39,7 @@ func newStateMock() *syncStateReporterMock {
 func newTestScheduler(lister mirrorsync.RepoLister, state mirrorsync.SyncStateReporter) *mirrorsync.Scheduler {
 	unusedTicks := make(chan time.Time)
 	return mirrorsync.New(testLogger(), unusedTicks, lister, noopFetcher{},
-		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+		noopAdvanceDetector{}, noopMergeabilityChecker{}, noopIngestEnqueuer{}, noopPRPoller{}, noopDriftReconciler{}, state)
 }
 
 func TestSyncHarness_TickReturnsNoReposWhenNoneEnrolled(t *testing.T) {
@@ -81,7 +81,7 @@ func TestSyncHarness_TickUnblocksEvenWhenACycleErrors(t *testing.T) {
 	state := newStateMock()
 	wantErr := errors.New("merge-tree exploded")
 	scheduler := mirrorsync.New(testLogger(), make(chan time.Time), lister, noopFetcher{},
-		noopAdvanceDetector{}, failingMergeabilityChecker{err: wantErr}, noopIngestEnqueuer{}, noopPRPoller{}, state)
+		noopAdvanceDetector{}, failingMergeabilityChecker{err: wantErr}, noopIngestEnqueuer{}, noopPRPoller{}, noopDriftReconciler{}, state)
 	h := NewSyncHarness(scheduler)
 	repos := h.TickT(t.Context(), t)
 	assert.Equal(t, []mirrorsync.RepoID{"repoA"}, repos)

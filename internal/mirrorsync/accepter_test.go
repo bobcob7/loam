@@ -101,18 +101,23 @@ type acceptHarnessOpts struct {
 }
 
 // acceptBranchFixture is the default work branch every accept test starts
-// from: reviewed, unconflicted, titled and described, with no PR recorded.
+// from: reviewed, unconflicted, undrifted, titled and described, with no PR
+// recorded. Both enum-like columns are spelled out because both are NOT
+// NULL with a 'none' default in Postgres -- a row read from the database
+// never carries the Go zero value for either, and both accept preconditions
+// reject anything that is not exactly 'none'.
 func acceptBranchFixture(id uuid.UUID) workbranchstore.WorkBranch {
 	title, description := acceptTitle, acceptDescription
 	return workbranchstore.WorkBranch{
-		ID:          id,
-		Name:        acceptBranchName,
-		Target:      "main",
-		Title:       &title,
-		Description: &description,
-		State:       workbranchstore.StateReviewed,
-		Conflict:    workbranchstore.ConflictNone,
-		Author:      "agent-alpha",
+		ID:            id,
+		Name:          acceptBranchName,
+		Target:        "main",
+		Title:         &title,
+		Description:   &description,
+		State:         workbranchstore.StateReviewed,
+		Conflict:      workbranchstore.ConflictNone,
+		UpstreamDrift: workbranchstore.DriftNone,
+		Author:        "agent-alpha",
 	}
 }
 
