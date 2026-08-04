@@ -414,7 +414,8 @@ func TestReconcileDrift_ReopensReviewPerState(t *testing.T) {
 			// reviewable again means passing through request-review, which
 			// opens its own round. Opening one here would invent a review
 			// round for a branch nobody asked anyone to review
-			// (internal/catchup reached the identical conclusion).
+			// (internal/catchup states the same principle, for its own
+			// different decision).
 			state: workbranchstore.StateDraft,
 			want:  []string{"advance", "tip"},
 		},
