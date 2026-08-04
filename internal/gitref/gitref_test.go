@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/loam/internal/mirrorpath"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // Every test here runs a real git subprocess against a real bare mirror --
@@ -257,4 +258,131 @@ func advanceRef(t *testing.T, mirrorDir, ref string) string {
 	runGit(t, clone, "commit", "--quiet", "-m", "advance")
 	runGit(t, clone, "push", "--quiet", "origin", "HEAD:"+ref)
 	return refSHA(t, mirrorDir, ref)
+}
+
+// TestResolveUpstreamProposalRef_ReadsTheMirroredUpstreamBranch pins the
+// ref path this method reads: refs/heads/loam/<name>, the branch proposal
+// acceptance pushes upstream and the mirror fetch brings back -- NOT the
+// reserved refs/heads/loam-reserved/<name> copy Loam owns. The two are
+// seeded at DIFFERENT commits here on purpose: a method that read the
+// reserved ref would return a real SHA and pass a weaker assertion, so the
+// only thing that distinguishes them is that they disagree.
+func TestResolveUpstreamProposalRef_ReadsTheMirroredUpstreamBranch(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+	runGit(t, "", "--git-dir="+mirrorDir, "update-ref", refnames.UpstreamProposalBranch("wb-9c2f1a"), mainSHA)
+	upstreamSHA := advanceRef(t, mirrorDir, refnames.UpstreamProposalBranch("wb-9c2f1a"))
+	require.NotEqual(t, mainSHA, upstreamSHA, "the two refs must disagree, or this test cannot tell them apart")
+
+	sha, err := c.ResolveUpstreamProposalRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+
+	require.NoError(t, err)
+	assert.Equal(t, upstreamSHA, sha)
+	workBranchSHA, err := c.ResolveWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+	require.NoError(t, err)
+	assert.Equal(t, mainSHA, workBranchSHA, "the reserved work-branch ref must be untouched by an upstream read")
+}
+
+// TestResolveUpstreamProposalRef_RefMissing_ReturnsErrRefMissing covers the
+// ordinary state of a work branch that was never accepted, and of one whose
+// PR ended and whose upstream branch the poller deleted. The drift
+// reconciler skips exactly this error, so it must not be reported as an
+// empty SHA (which would read as "upstream differs from accepted_tip").
+func TestResolveUpstreamProposalRef_RefMissing_ReturnsErrRefMissing(t *testing.T) {
+	t.Parallel()
+	dataDir, _, _ := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+
+	sha, err := c.ResolveUpstreamProposalRef(t.Context(), "acme/widgets", "wb-9c2f1a")
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRefMissing)
+	assert.Empty(t, sha)
+}
+
+// TestAdvanceWorkBranchRef_MovesTheReservedRefToTheUpstreamCommit is the
+// adoption's git half: the work branch ends up at the commit that arrived
+// upstream, and the upstream ref itself is not touched (this method only
+// ever writes the reserved namespace).
+func TestAdvanceWorkBranchRef_MovesTheReservedRefToTheUpstreamCommit(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+	runGit(t, "", "--git-dir="+mirrorDir, "update-ref", refnames.UpstreamProposalBranch("wb-9c2f1a"), mainSHA)
+	upstreamSHA := advanceRef(t, mirrorDir, refnames.UpstreamProposalBranch("wb-9c2f1a"))
+
+	require.NoError(t, c.AdvanceWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", mainSHA, upstreamSHA))
+
+	assert.Equal(t, upstreamSHA, refSHA(t, mirrorDir, refnames.WorkBranch("wb-9c2f1a")))
+	assert.Equal(t, upstreamSHA, refSHA(t, mirrorDir, refnames.UpstreamProposalBranch("wb-9c2f1a")))
+}
+
+// TestAdvanceWorkBranchRef_RefusesWhenTheRefMovedUnderIt is the whole
+// safety argument for a second writer of work-branch refs: the swap is
+// compared against the value the caller last read, so an agent push that
+// landed in between is never overwritten.
+//
+// The ref is moved to a THIRD commit here, unrelated to the one being
+// adopted, so a failure to compare would be visible as a lost commit rather
+// than as a harmless no-op.
+func TestAdvanceWorkBranchRef_RefusesWhenTheRefMovedUnderIt(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+	adopting := advanceRef(t, mirrorDir, "refs/heads/main")
+	agentPushed := advanceRef(t, mirrorDir, refnames.WorkBranch("wb-9c2f1a"))
+	require.NotEqual(t, agentPushed, adopting)
+
+	err := c.AdvanceWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", mainSHA, adopting)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRefMoved)
+	assert.Equal(t, agentPushed, refSHA(t, mirrorDir, refnames.WorkBranch("wb-9c2f1a")), "a refused swap must leave the agent's push exactly where it is")
+}
+
+// TestAdvanceWorkBranchRef_MissingRef_ReturnsErrRefMissing proves this
+// method never CREATES a work-branch ref: adopting a commit into a branch
+// that has no ref would be conjuring a work branch out of an upstream push.
+func TestAdvanceWorkBranchRef_MissingRef_ReturnsErrRefMissing(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+
+	err := New(dataDir).AdvanceWorkBranchRef(t.Context(), "acme/widgets", "wb-never-created", mainSHA, mainSHA)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRefMissing)
+	assert.Empty(t, refSHA(t, mirrorDir, refnames.WorkBranch("wb-never-created")))
+}
+
+// TestAdvanceWorkBranchRef_BlankSHAsAreRejectedBeforeGitSeesThem pins the
+// two measured git behaviours errBlankSHA exists to keep out of reach: an
+// empty NEW value deletes the ref (exit 0, no complaint), and an empty OLD
+// value means "must not exist" rather than "any value". Both are asserted
+// through the ref still holding its original commit afterwards, not merely
+// through the error.
+func TestAdvanceWorkBranchRef_BlankSHAsAreRejectedBeforeGitSeesThem(t *testing.T) {
+	t.Parallel()
+	dataDir, mirrorDir, mainSHA := seedMirror(t)
+	c := New(dataDir)
+	require.NoError(t, c.CreateWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", "main"))
+	for _, tc := range []struct {
+		name     string
+		from, to string
+	}{
+		{name: "empty new value would delete the ref", from: mainSHA, to: ""},
+		{name: "empty old value would not compare anything", from: "", to: mainSHA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := c.AdvanceWorkBranchRef(t.Context(), "acme/widgets", "wb-9c2f1a", tc.from, tc.to)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errBlankSHA)
+			assert.Equal(t, mainSHA, refSHA(t, mirrorDir, refnames.WorkBranch("wb-9c2f1a")))
+		})
+	}
 }
