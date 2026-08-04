@@ -116,6 +116,23 @@ func insertSymbol(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID 
 	return id
 }
 
+// insertSymbolAtLine mirrors insertSymbol but lets the caller pick the line,
+// so tests can seed several rows sharing one file with lines out of order
+// -- insertSymbol's hardcoded line 1 can never distinguish the s.line
+// component of `ORDER BY s.file, s.line NULLS LAST, s.id`
+// (internal/db/gen/code_graph.sql.go:504) from the s.file or s.id
+// components (loam-c94.17).
+func insertSymbolAtLine(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID, file, name string, line int32) uuid.UUID {
+	t.Helper()
+	id := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx,
+		`INSERT INTO symbols (id, repo_id, target_branch, file, line, name, kind) VALUES ($1, $2, 'main', $3, $4, $5, 'function')`,
+		id, repoID, file, line, name,
+	)
+	require.NoError(t, err)
+	return id
+}
+
 // insertEdge seeds one graph_edges row directly: from depends on to.
 func insertEdge(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID, from, to uuid.UUID) {
 	t.Helper()
@@ -1001,37 +1018,41 @@ func TestLookupReferencesByName_IncludesMultipleInScopeRepos(t *testing.T) {
 // limit/truncated contract against a real database: docs/cli-spec.md:535-537
 // requires truncated: true on a capped `graph` response for every
 // subquery, refs included -- this seeds 4 use sites of the same name and
-// asks for at most 2. It also pins WHICH 2 of the 4 survive (f0.go, f1.go,
-// the ORDER BY sr.file, sr.line, sr.id head), not merely that 2 survive:
-// the review round for this bead found that swapping the query's
+// asks for at most 2. It also pins WHICH 2 of the 4 survive, in WHICH
+// order (the ORDER BY sr.file, sr.line, sr.id head), not merely that 2
+// survive: the review round for this bead found that swapping the query's
 // `ORDER BY sr.file, sr.line, sr.id` for `ORDER BY sr.id DESC` still passed
 // the whole suite when only Len==2 was asserted here -- LIMIT's contract
 // depends entirely on which order it caps, exactly the failure mode
 // TestDependents_NearestDepthFirst_NotUUIDOrder (FIX 2, above) already
 // guards for Dependents.
+//
+// loam-c94.17: every row above used to sit in a DISTINCT file, so the
+// sr.line component of that ORDER BY was never load-bearing -- a mutant
+// dropping it (`ORDER BY sr.file, sr.id`) passed too, since sr.file alone
+// already picked the winning 2. Two of the four rows below now share
+// f0.go with lines 9 then 2, inserted in that order so id(line 9) <
+// id(line 2): the correct answer keeps line 2 before line 9, so a mutant
+// deciding the tie by id instead of line produces the same 2 rows in the
+// WRONG order, which the line-value assertion below (not just File)
+// catches. f2.go/f1.go/f0.go are still seeded file-descending so id order
+// and file order disagree too, per loam-ht4r. Do not "tidy" this back to
+// distinct files or ascending order.
 func TestLookupReferencesByName_TruncatesAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	store, pool, repoID := newTestStore(t)
 	ctx := t.Context()
-	// Seeded in REVERSE on purpose. insertReference mints monotonic UUIDv7s,
-	// so seeding f0..f3 ascending makes insertion order, alphabetical
-	// file order and id order all coincide -- and truncating in plain
-	// UUID order then becomes indistinguishable from truncating in file
-	// order. That is precisely the failure mode this test's own doc
-	// comment above claims parity with
-	// (TestDependents_NearestDepthFirst_NotUUIDOrder, whose whole design
-	// point is that UUID order and the intended order actively
-	// disagree). Reversing makes them disagree here too. Do not "tidy"
-	// this back to `range 4`.
-	for i := 3; i >= 0; i-- {
-		insertReference(ctx, t, pool, repoID, fmt.Sprintf("f%d.go", i), "Login", int32(i+1))
-	}
+	insertReference(ctx, t, pool, repoID, "f2.go", "Login", 1)
+	insertReference(ctx, t, pool, repoID, "f1.go", "Login", 1)
+	insertReference(ctx, t, pool, repoID, "f0.go", "Login", 9)
+	insertReference(ctx, t, pool, repoID, "f0.go", "Login", 2)
 
 	refs, truncated, err := store.LookupReferencesByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
 	require.Len(t, refs, 2)
-	assert.Equal(t, []string{"f0.go", "f1.go"}, []string{refs[0].File, refs[1].File}, "a capped result must keep the ORDER BY-first rows (f0.go, f1.go), not an arbitrary 2 of the 4 matches")
+	assert.Equal(t, []string{"f0.go", "f0.go"}, []string{refs[0].File, refs[1].File}, "a capped result must keep the ORDER BY-first rows, both in f0.go")
+	assert.Equal(t, []int32{2, 9}, []int32{refs[0].Line, refs[1].Line}, "within the shared file, line order must decide the order (2 before 9), not id/insertion order (line 9 was inserted first)")
 }
 
 // TestLookupReferencesByName_ExactlyLimitMatches_NotTruncated is the
@@ -1237,38 +1258,44 @@ func TestLookupSymbolsByName_IncludesMultipleInScopeRepos(t *testing.T) {
 // docs/cli-spec.md:535-537 requires truncated: true on a capped `graph`
 // response for every subquery, not only the blast-radius ones -- this
 // seeds 4 same-named symbols and asks for at most 2. It also pins WHICH 2
-// of the 4 survive (f0.go, f1.go, the ORDER BY s.file, s.line NULLS LAST,
-// s.id head), not merely that 2 survive, mirroring
+// of the 4 survive, in WHICH order (the ORDER BY s.file, s.line NULLS
+// LAST, s.id head), not merely that 2 survive, mirroring
 // TestLookupReferencesByName_TruncatesAndReportsTruncated above: asserting
 // only Len==2 leaves two mutants undetected -- trimSymbols returning the
 // tail (symbols[len-effectiveLimit:]) instead of the head, and the query's
 // ORDER BY being swapped for an arbitrary one such as `id DESC` -- exactly
 // the failure mode TestDependents_NearestDepthFirst_NotUUIDOrder (FIX 2,
 // above) already guards for Dependents.
+//
+// loam-c94.17: every row above used to sit in a DISTINCT file, so the
+// s.line component of that ORDER BY was never load-bearing -- a mutant
+// dropping it (`ORDER BY s.file, s.id`) passed too, since s.file alone
+// already picked the winning 2. Two of the four rows below now share
+// f0.go with lines 9 then 2, inserted in that order via
+// insertSymbolAtLine so id(line 9) < id(line 2): the correct answer keeps
+// line 2 before line 9, so a mutant deciding the tie by id instead of
+// line produces the same 2 rows in the WRONG order, which the line-value
+// assertion below (not just File) catches. f2.go/f1.go/f0.go are still
+// seeded file-descending so id order and file order disagree too, per
+// loam-ht4r/loam-865. Do not "tidy" this back to distinct files, plain
+// insertSymbol, or ascending order.
 func TestLookupSymbolsByName_TruncatesAndReportsTruncated(t *testing.T) {
 	t.Parallel()
 	store, pool, repoID := newTestStore(t)
 	ctx := t.Context()
-	// Seeded in REVERSE on purpose. insertSymbol mints monotonic UUIDv7s,
-	// so seeding f0..f3 ascending makes insertion order, alphabetical
-	// file order and id order all coincide -- and truncating in plain
-	// UUID order then becomes indistinguishable from truncating in file
-	// order. Review proved that: with ascending seeding this test
-	// survived an `ORDER BY s.id` mutant, which is precisely the
-	// failure mode the doc comment above claims parity with
-	// (TestDependents_NearestDepthFirst_NotUUIDOrder, whose whole design
-	// point is that UUID order and the intended order actively
-	// disagree). Reversing makes them disagree here too. Do not "tidy"
-	// this back to `range 4`.
-	for i := 3; i >= 0; i-- {
-		insertSymbol(ctx, t, pool, repoID, fmt.Sprintf("f%d.go", i), "Login")
-	}
+	insertSymbol(ctx, t, pool, repoID, "f2.go", "Login")
+	insertSymbol(ctx, t, pool, repoID, "f1.go", "Login")
+	insertSymbolAtLine(ctx, t, pool, repoID, "f0.go", "Login", 9)
+	insertSymbolAtLine(ctx, t, pool, repoID, "f0.go", "Login", 2)
 
 	symbols, truncated, err := store.LookupSymbolsByName(ctx, []uuid.UUID{repoID}, "main", "Login", "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated, "4 matches exist for a limit of 2, so truncated must be true")
 	require.Len(t, symbols, 2)
-	assert.Equal(t, []string{"f0.go", "f1.go"}, []string{symbols[0].File, symbols[1].File}, "a capped result must keep the ORDER BY-first rows (f0.go, f1.go), not an arbitrary 2 of the 4 matches")
+	assert.Equal(t, []string{"f0.go", "f0.go"}, []string{symbols[0].File, symbols[1].File}, "a capped result must keep the ORDER BY-first rows, both in f0.go")
+	require.NotNil(t, symbols[0].Line)
+	require.NotNil(t, symbols[1].Line)
+	assert.Equal(t, []int32{2, 9}, []int32{*symbols[0].Line, *symbols[1].Line}, "within the shared file, line order must decide the order (2 before 9), not id/insertion order (line 9 was inserted first)")
 }
 
 // TestLookupSymbolsByName_ExactlyLimitMatches_NotTruncated is the negative
