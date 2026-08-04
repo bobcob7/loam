@@ -13,7 +13,12 @@ import { Pager } from "../components/Pager";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, type TableColumn } from "../components/Table";
 import { ThreadList } from "../components/ThreadList";
-import { verdictSummaryIntent, workBranchStateIntent } from "../components/statusIntent";
+import {
+  conflictIntent,
+  upstreamDriftIntent,
+  verdictSummaryIntent,
+  workBranchStateIntent,
+} from "../components/statusIntent";
 import { useMutationInvalidating } from "../data/invalidation";
 import { mapConnectError, type ErrorOutcome } from "../data/mapConnectError";
 import { toPagerState, useOffsetPagination } from "../data/pagination";
@@ -166,6 +171,11 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
   }
 
   const stateBadge = workBranchStateIntent(wb.state);
+  // Both render only when there is something to report, and never merge into
+  // one pill: see statusIntent.ts for why an admin must be able to tell "catch
+  // this branch up" apart from "somebody rewrote the branch Loam pushed".
+  const conflictBadge = conflictIntent(wb.conflict);
+  const driftBadge = upstreamDriftIntent(wb.upstreamDrift);
   const verdicts = verdictsQuery.data?.verdicts ?? [];
   const threads = commentsQuery.data?.threads ?? [];
   const alreadyAccepted = wb.upstreamPrUrl !== undefined || acceptMutation.isSuccess;
@@ -175,6 +185,12 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
       <h1>{wb.title}</h1>
       <p className={styles.meta}>
         <StatusBadge intent={stateBadge.intent}>{stateBadge.label}</StatusBadge>
+        {conflictBadge !== undefined && (
+          <StatusBadge intent={conflictBadge.intent}>{conflictBadge.label}</StatusBadge>
+        )}
+        {driftBadge !== undefined && (
+          <StatusBadge intent={driftBadge.intent}>{driftBadge.label}</StatusBadge>
+        )}
         <span className={styles.metaItem}>
           {repo} / <span className={styles.mono}>{workBranch}</span>
         </span>

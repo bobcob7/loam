@@ -1,5 +1,11 @@
 import { IngestStatus, SyncState } from "../gen/loam/admin/v1/repo_admin_pb";
-import { VerdictOutcome, WorkBranchState, type VerdictSummary } from "../gen/loam/v1/common_pb";
+import {
+  UpstreamDrift,
+  VerdictOutcome,
+  WorkBranchConflict,
+  WorkBranchState,
+  type VerdictSummary,
+} from "../gen/loam/v1/common_pb";
 import type { StatusIntent } from "./StatusBadge";
 
 /**
@@ -85,6 +91,57 @@ export function workBranchStateIntent(state: WorkBranchState): StatusBadgeConten
       return { intent: "success", label: "Complete" };
     case WorkBranchState.CLOSED:
       return { intent: "neutral", label: "Closed" };
+    default:
+      return UNKNOWN_STATUS;
+  }
+}
+
+/**
+ * Maps `loam.v1.WorkBranchConflict` to a status pill, or `undefined` when
+ * there is nothing to say.
+ *
+ * `undefined` covers NONE and UNSPECIFIED together, and that pairing is
+ * deliberate rather than a shortcut. NONE means the branch merges cleanly, so
+ * a badge would be noise on every healthy proposal. UNSPECIFIED means the
+ * field never arrived -- which is what a server older than this field looks
+ * like -- and badging every proposal "Unspecified" against such a server would
+ * be worse than silence about a state it cannot report. An UNKNOWN value still
+ * badges: that is a server NEWER than this client, which is a real
+ * needs-attention signal rather than an absence.
+ */
+export function conflictIntent(conflict: WorkBranchConflict): StatusBadgeContent | undefined {
+  switch (conflict) {
+    case WorkBranchConflict.UNSPECIFIED:
+    case WorkBranchConflict.NONE:
+      return undefined;
+    case WorkBranchConflict.FLAGGED:
+      return { intent: "warning", label: "Conflicted" };
+    case WorkBranchConflict.RESET:
+      return { intent: "warning", label: "Conflict reset" };
+    default:
+      return UNKNOWN_STATUS;
+  }
+}
+
+/**
+ * Maps `loam.v1.UpstreamDrift` to a status pill, or `undefined` when there is
+ * nothing to say -- the same absence rule as {@link conflictIntent}.
+ *
+ * DIVERGED is `danger`, not `warning`, and it is a separate badge from the
+ * conflict one on purpose. The two describe independent facts that can hold at
+ * once, and they call for different operator actions: a conflict is fixed by
+ * catching the branch up, while divergence means somebody rewrote the branch
+ * Loam pushed and only reconciling it on the forge will clear it
+ * (`docs/sync-spec.md` -> Upstream Drift). Collapsing them into one
+ * "conflicted" pill would send the admin to fix the wrong thing.
+ */
+export function upstreamDriftIntent(drift: UpstreamDrift): StatusBadgeContent | undefined {
+  switch (drift) {
+    case UpstreamDrift.UNSPECIFIED:
+    case UpstreamDrift.NONE:
+      return undefined;
+    case UpstreamDrift.DIVERGED:
+      return { intent: "danger", label: "Upstream diverged" };
     default:
       return UNKNOWN_STATUS;
   }
