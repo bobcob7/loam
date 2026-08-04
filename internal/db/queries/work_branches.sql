@@ -369,3 +369,33 @@ UPDATE work_branches
 SET accepted_tip = $2, updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: SetWorkBranchUpstreamDrift :one
+-- Records what the sync cycle observed about the upstream loam/<name>
+-- branch this work branch was pushed to (loam-giq.11, docs/sync-spec.md
+-- "Upstream Drift on `loam/<work-branch>`"): 'diverged' when the branch
+-- moved somewhere the work-branch tip is not an ancestor of, 'none' when
+-- upstream is where Loam left it or a fast-forward has just been adopted.
+--
+-- Unlike every other UPDATE in this file this one is NOT a guarded
+-- transition, and that is the point: upstream_drift is a LEVEL-triggered
+-- observation of a fact outside Loam, re-derived from the mirror on every
+-- sync cycle, not a lifecycle state an actor moves the branch through. It
+-- must be able to go back to 'none' when the operator reconciles upstream
+-- by hand -- there is no "clear drift" command and no push that clears it,
+-- so a guard that made clearing conditional on anything would strand a
+-- branch flagged forever. Writing the value already there is a harmless
+-- no-op; internal/mirrorsync's reconciler skips that call anyway, from the
+-- row it has already read, so the common case costs no statement at all.
+--
+-- The terminal states are excluded, matching every other write in this
+-- file that a sync cycle can reach: a complete or closed branch is done,
+-- its upstream branch is deleted by the PR poller's cleanup, and moving a
+-- column on it would only ever be noise. internal/workbranchstore maps the
+-- resulting zero rows to ErrIllegalTransition (or ErrNotFound), and the
+-- reconciler never calls this for a terminal branch in the first place --
+-- its poll set excludes them.
+UPDATE work_branches
+SET upstream_drift = $2, updated_at = now()
+WHERE id = $1 AND state NOT IN ('complete', 'closed')
+RETURNING *;

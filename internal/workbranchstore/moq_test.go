@@ -59,6 +59,9 @@ var _ querier = &querierMock{}
 //			SetWorkBranchTitleDescriptionFunc: func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error) {
 //				panic("mock out the SetWorkBranchTitleDescription method")
 //			},
+//			SetWorkBranchUpstreamDriftFunc: func(ctx context.Context, arg gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error) {
+//				panic("mock out the SetWorkBranchUpstreamDrift method")
+//			},
 //			UpdateWorkBranchStateFunc: func(ctx context.Context, arg gen.UpdateWorkBranchStateParams) (gen.WorkBranch, error) {
 //				panic("mock out the UpdateWorkBranchState method")
 //			},
@@ -107,6 +110,9 @@ type querierMock struct {
 
 	// SetWorkBranchTitleDescriptionFunc mocks the SetWorkBranchTitleDescription method.
 	SetWorkBranchTitleDescriptionFunc func(ctx context.Context, arg gen.SetWorkBranchTitleDescriptionParams) (gen.WorkBranch, error)
+
+	// SetWorkBranchUpstreamDriftFunc mocks the SetWorkBranchUpstreamDrift method.
+	SetWorkBranchUpstreamDriftFunc func(ctx context.Context, arg gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error)
 
 	// UpdateWorkBranchStateFunc mocks the UpdateWorkBranchState method.
 	UpdateWorkBranchStateFunc func(ctx context.Context, arg gen.UpdateWorkBranchStateParams) (gen.WorkBranch, error)
@@ -204,6 +210,13 @@ type querierMock struct {
 			// Arg is the arg argument value.
 			Arg gen.SetWorkBranchTitleDescriptionParams
 		}
+		// SetWorkBranchUpstreamDrift holds details about calls to the SetWorkBranchUpstreamDrift method.
+		SetWorkBranchUpstreamDrift []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.SetWorkBranchUpstreamDriftParams
+		}
 		// UpdateWorkBranchState holds details about calls to the UpdateWorkBranchState method.
 		UpdateWorkBranchState []struct {
 			// Ctx is the ctx argument value.
@@ -225,6 +238,7 @@ type querierMock struct {
 	lockRecordWorkBranchAcceptedTip   sync.RWMutex
 	lockRecordWorkBranchUpstreamPR    sync.RWMutex
 	lockSetWorkBranchTitleDescription sync.RWMutex
+	lockSetWorkBranchUpstreamDrift    sync.RWMutex
 	lockUpdateWorkBranchState         sync.RWMutex
 }
 
@@ -693,6 +707,42 @@ func (mock *querierMock) SetWorkBranchTitleDescriptionCalls() []struct {
 	mock.lockSetWorkBranchTitleDescription.RLock()
 	calls = mock.calls.SetWorkBranchTitleDescription
 	mock.lockSetWorkBranchTitleDescription.RUnlock()
+	return calls
+}
+
+// SetWorkBranchUpstreamDrift calls SetWorkBranchUpstreamDriftFunc.
+func (mock *querierMock) SetWorkBranchUpstreamDrift(ctx context.Context, arg gen.SetWorkBranchUpstreamDriftParams) (gen.WorkBranch, error) {
+	if mock.SetWorkBranchUpstreamDriftFunc == nil {
+		panic("querierMock.SetWorkBranchUpstreamDriftFunc: method is nil but querier.SetWorkBranchUpstreamDrift was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.SetWorkBranchUpstreamDriftParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockSetWorkBranchUpstreamDrift.Lock()
+	mock.calls.SetWorkBranchUpstreamDrift = append(mock.calls.SetWorkBranchUpstreamDrift, callInfo)
+	mock.lockSetWorkBranchUpstreamDrift.Unlock()
+	return mock.SetWorkBranchUpstreamDriftFunc(ctx, arg)
+}
+
+// SetWorkBranchUpstreamDriftCalls gets all the calls that were made to SetWorkBranchUpstreamDrift.
+// Check the length with:
+//
+//	len(mockedquerier.SetWorkBranchUpstreamDriftCalls())
+func (mock *querierMock) SetWorkBranchUpstreamDriftCalls() []struct {
+	Ctx context.Context
+	Arg gen.SetWorkBranchUpstreamDriftParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.SetWorkBranchUpstreamDriftParams
+	}
+	mock.lockSetWorkBranchUpstreamDrift.RLock()
+	calls = mock.calls.SetWorkBranchUpstreamDrift
+	mock.lockSetWorkBranchUpstreamDrift.RUnlock()
 	return calls
 }
 
