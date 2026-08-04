@@ -187,18 +187,26 @@ sentence to the operator and a different remedy, so the console must not collaps
 into one "conflicted" badge. They are separate fields precisely because they can both be
 set at once, and the console must be able to show both.
 
-Note that **neither field reaches the admin today**: `conflict` is server-internal, read
-only by `ListProposals`' exclusion and `AcceptProposal`'s precondition. Exposing
-`conflict` and `upstream_drift` on the work-branch/proposal protos is part of this
-feature.
+Both fields **reach the admin on `WorkBranch` itself** (`conflict`,
+`upstream_drift` — `loam/v1/common.proto`), so every surface that returns a work
+branch carries them: the proposal queue, `GetWorkBranch` behind the proposal detail
+page, and `ListWorkBranches`. They are read-only — no request message sets either, the
+sync cycle is the only writer — and `UNSPECIFIED` never means "fine": `NONE` is a
+positive claim, so an unrecognized stored value surfaces as `UNSPECIFIED` rather than
+being rounded down to it. Before this feature `conflict` was server-internal, read only
+by `ListProposals`' exclusion and `AcceptProposal`'s precondition, so a branch Loam had
+demoted looked to every client exactly like one it had not.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
   title/description, and records `pr_url` on the work branch. On a re-accept after a
   conflict catch-up, the existing PR's branch is fast-forwarded instead — the PR updates
   in place and no new PR is created. The work branch **stays REVIEWED**; it flips to COMPLETE only when the server's sync sees the upstream PR merge (or
-  to CLOSED if the upstream PR is closed). Requires ≥1 non-stale approve verdict and no
+  to CLOSED if the upstream PR is closed). Requires ≥1 non-stale approve verdict, no
   outstanding conflict flag — a branch behind a conflicting target must be caught up and
-  re-reviewed first (`docs/sync-spec.md` → Mergeability Check).
+  re-reviewed first (`docs/sync-spec.md` → Mergeability Check) — and no
+  `upstream_drift`, with its own message: a branch whose `loam/` branch was rewritten
+  needs the *forge* reconciled, not a catch-up push, and the accept it would otherwise
+  attempt is exactly the non-forced push that cannot succeed.
 - `CloseWorkBranch(repo, work_branch, string body) → { WorkBranch }` — closes a work branch
   (→ CLOSED), recording `body` as the close reason. If the branch has an open upstream PR,
   Loam closes that too, best-effort — Loam opened it, Loam closes it. Admin-only; the

@@ -78,8 +78,8 @@ and `reviewer` are seeded by migration and cannot be deleted.
 (null until set), `description` (null), `state`
 (`draft`/`reviewable`/`reviewed`/`complete`/`closed`), `author` (agent identifier),
 `upstream_pr_url` (null), `upstream_pr_number` (null), `accepted_tip` (null), `conflict`
-(`none`/`flagged`/`reset`), `close_reason` (null — set by the admin's `CloseWorkBranch`),
-timestamps.
+(`none`/`flagged`/`reset`), `upstream_drift` (`none`/`diverged`), `close_reason` (null —
+set by the admin's `CloseWorkBranch`), timestamps.
 - `UNIQUE (repo_id, name)` — identity is `(repo, name)`.
 - `conflict` tracks the mergeability check (`docs/git-spec.md` → Target Advances &
   Catch-Up): `flagged` when a target advance no longer merges cleanly into the branch,
@@ -92,8 +92,11 @@ timestamps.
   when the upstream tip and the work-branch tip have no ancestor relationship and no
   fast-forward reconciles them. A clean fast-forward is *adopted* rather than recorded —
   the work branch advances, `accepted_tip` follows, and a new review round opens — so it
-  leaves no drift state behind. `diverged` is never cleared automatically; only a human
-  resolving the upstream branch clears it.
+  leaves no drift state behind. Nothing an agent or an admin can do inside Loam clears
+  `diverged`: it is re-derived from the mirror on every sync cycle, so it clears itself
+  once — and only once — a human has actually reconciled the branch on the forge. There
+  is no "clear drift" command, because a flag that could be dismissed without the
+  upstream branch changing would be a flag that lies.
   It is deliberately NOT a fourth `conflict` value: `conflict` describes the target
   advancing, `upstream_drift` describes Loam's own branch being rewritten, and both can
   be true simultaneously. One column would let whichever happened second overwrite the

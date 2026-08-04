@@ -85,6 +85,10 @@ ingest jobs — and one sync cycle runs, in order:
 3. **Mergeability check** (below) for every advanced target.
 4. **Enqueue ingest** for advanced indexed branches (`docs/ingestion-spec.md`).
 5. **Poll PR states** for work branches with an open recorded PR (below).
+6. **Reconcile upstream drift** on `loam/<work-branch>` (below) for every work
+   branch with a recorded PR and a recorded `accepted_tip`. It runs *after*
+   step 5 so a PR that merged this tick has already taken its branch terminal,
+   and out of this step's set, before its upstream branch is reaped.
 
 `repos.sync_state` reflects the cycle: `syncing` while running, `idle` on
 success (with `last_synced_at`), `error` with the message on failure. A failed
@@ -129,7 +133,8 @@ stays until a push catches up to the newer tip.
 
 `AcceptProposal(repo, work_branch)` — preconditions: state `reviewed`, ≥1
 non-stale approve verdict, **not `conflicted`** (web-spec ripple: the
-precondition list gains the conflict check). Then:
+precondition list gains the conflict check), and **no `upstream_drift`**
+(below). Then:
 
 1. **Push** the work-branch tip to the upstream branch `loam/<work-branch-name>`
    (e.g. `loam/wb-9c2f1a`) over the upstream transport. The prefix namespaces
@@ -181,16 +186,64 @@ own tip:
   is `server`, the same attribution a catch-up round uses. `accepted_tip`
   becomes the adopted commit.
 
+  A `reviewed` branch also returns to `reviewable`, because the round alone
+  would leave it invisible: a reviewer's queue is "reviewable branches with no
+  live verdict from me", so a branch left in `reviewed` would carry a state
+  meaning *decided* while awaiting a decision nobody could see was needed. A
+  `reviewable` branch needs only the round. A `draft` branch gets neither — it
+  has no live review to invalidate and cannot be accepted from `draft` anyway,
+  and `request-review` opens its own round when it is ready (the same rule
+  catch-up detection applies, `docs/git-spec.md` → Target Advances & Catch-Up).
+
+  The work-branch ref is moved as a **compare-and-swap** against the tip Loam
+  read: an agent push landing mid-cycle is never overwritten, it simply
+  refuses the swap and the next cycle re-derives everything.
+
   Adopting is not blessing. The commit arrived without review, and resetting
   the approvals is what keeps the gate honest: it is now in the work branch,
   and it cannot reach a *further* upstream push until someone approves it.
 
-- **Diverged** — neither tip is an ancestor of the other. Loam changes
-  nothing, and records `upstream_drift = diverged` for the admin console
-  (`docs/web-spec.md` → ProposalService). Loam does not merge, rebase, or
-  force: it cannot know which side is intended, and the push that would
-  reconcile it is precisely the destructive one Proposal Acceptance refuses to
-  make.
+- **Diverged** — the work-branch tip is **not** an ancestor of the upstream
+  tip. Loam changes nothing, and records `upstream_drift = diverged` for the
+  admin console (`docs/web-spec.md` → ProposalService). Loam does not merge,
+  rebase, or force: it cannot know which side is intended, and the push that
+  would reconcile it is precisely the destructive one Proposal Acceptance
+  refuses to make.
+
+  That covers two shapes, not one. The obvious shape is genuine divergence —
+  neither tip contains the other, because the branch and its upstream copy each
+  gained different commits. The other is a **rewind**: someone force-pushed
+  `loam/<name>` *back*, so the upstream tip is a strict ancestor of the work
+  branch. That is not a fast-forward (adopting it would move the work branch
+  backwards, discarding reviewed commits) and it is not nothing (`accepted_tip`
+  would permanently misdescribe upstream, and `ListProposals` compares
+  `accepted_tip` against the *work branch*, never against upstream, so nothing
+  would ever re-list the branch and put the dropped commits back). Both are
+  "someone rewrote the branch Loam pushed", which is what `diverged` means.
+
+An upstream branch that is **absent** from the mirror is none of the three: it
+is skipped, changing neither `accepted_tip` nor `upstream_drift`. A forge
+configured to delete a merged PR's head branch removes it seconds before the
+poller flips the branch to `complete`, so absence is routine and carries no
+third SHA to classify against.
+
+**Clearing is level-triggered, unlike `conflict`.** A conflict is cleared by a
+push, which Loam sees; upstream drift is fixed on the *forge* — force-push
+`loam/<name>` back, or merge the work branch's commits into it — which Loam
+never sees. So each cycle re-derives the value and writes whichever it
+observes, `none` included: a diverged branch recovers on the next tick with no
+command to run, and a divergence the operator resolves by merging the work
+branch in is adopted (which clears the flag) rather than merely unflagged.
+There is deliberately no "clear drift" RPC.
+
+**None of it is transactional across git and Postgres**, so an adoption writes
+in the order ref → review round → `accepted_tip`, and the last of those is what
+commits the reconciliation. A crash before it leaves the upstream tip still
+different from `accepted_tip`, the work-branch tip equal to it, and therefore
+the *same* fast-forward classification on the next cycle — which finishes the
+job. The opposite order would leave a branch that had silently adopted an
+unreviewed commit with its old approvals intact and nothing left to notice. A
+duplicated round is the cheap error; a skipped one is not.
 
 `upstream_drift` is its **own column**, deliberately not a fourth `conflict`
 value. The two describe independent facts that can hold simultaneously — a
@@ -207,12 +260,15 @@ rejects a non-`none` `conflict`; it gains an equivalent check on
 cannot be accepted, because the push that acceptance performs is exactly the
 non-forced push that would fail.
 
-**Prerequisite, and it is not free.** Neither field is on the wire today:
-`conflict` is a server-internal value (`workbranchstore.Conflict`, backed by
+**Both fields are on the wire.** They were not before this feature:
+`conflict` was a server-internal value (`workbranchstore.Conflict`, backed by
 the column's CHECK constraint) consumed only by `ListProposals`' exclusion and
-`AcceptProposal`'s precondition. Surfacing drift to the admin console
-therefore requires exposing this state through the proposal/work-branch protos
-first. That work is part of this feature, not an assumed given.
+`AcceptProposal`'s precondition, so a branch Loam had demoted looked, to every
+client, exactly like one it had not. `WorkBranch.conflict` and
+`WorkBranch.upstream_drift` (`loam/v1/common.proto`) now travel with every work
+branch any surface returns, read-only — nothing in any request message sets
+either. Surfacing drift to the console required that, so it was part of this
+feature rather than an assumed given.
 
 **Why adoption is safe to automate and divergence is not.** A fast-forward
 loses nothing — the work branch gains commits and history is preserved. A
