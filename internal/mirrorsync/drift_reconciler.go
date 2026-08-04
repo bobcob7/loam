@@ -104,21 +104,43 @@ const driftRoundRequestedBy = "server"
 // why workbranchstore.SetUpstreamDrift is a plain setter rather than the
 // guarded pair MarkConflicted/ClearConflict form.
 //
-// # Every step is safe to repeat
+// # Every step is safe to repeat, and the round goes FIRST
 //
-// Nothing here is transactional across git and Postgres, so the order of
-// the three writes an adoption makes is chosen so that a crash between any
-// two of them leaves the NEXT tick able to finish the job: the ref advance
-// first, then the review round, and accepted_tip LAST, as the commit of the
-// whole reconciliation. Until accepted_tip is written, U != A still holds,
-// W == U makes the ancestry check still say "fast-forward" (a commit is its
-// own ancestor), and the pass runs again. The failure that costs something
-// is the opposite order -- accepted_tip written before the round -- which
-// would leave a branch that had adopted an unreviewed commit with its old
-// approvals intact and nothing left to notice. A duplicated round is the
-// cheap error; a skipped one is not.
+// Nothing here is transactional across git and Postgres, so the order of an
+// adoption's three writes is chosen for what a crash between any two of
+// them leaves behind. It is: review round, then the ref advance, then
+// accepted_tip LAST as the commit of the whole reconciliation.
 //
-// The ref advance itself is a compare-and-swap against W
+// The round is first because it is the only one of the three whose absence
+// is unrecoverable. Consider the ref moving first and a crash before the
+// round: the branch now holds the adopted, unreviewed commit, the
+// pre-adoption approvals are still live, and upstream_drift is still none
+// -- so an AcceptProposal arriving before the next tick PASSES, pushes, and
+// writes accepted_tip = U itself. The next tick then sees U == A and never
+// opens the round at all. The unreviewed commit is not merely un-reset for
+// one tick; it is permanently blessed, and the review gate this whole
+// mechanism exists to keep honest has been silently bypassed. Writing the
+// round first makes that window harmless: the approvals are already stale,
+// so the accept is refused, and everything after the round is retried by
+// the next tick (until accepted_tip is written, U != A still holds, and
+// W == U keeps the ancestry check answering "fast-forward", since a commit
+// is its own ancestor -- verified against real git 2.50.1).
+//
+// What round-first costs, stated plainly rather than buried: the reset can
+// fire for an adoption that then does not happen. If the compare-and-swap
+// below loses to an agent push landing in the same window, or the ref
+// advance simply fails, the branch has been sent back for re-review for
+// nothing -- an ordinary agent push does NOT reset approvals, so this is a
+// reset the branch would not otherwise have had. A repeatedly failing
+// adoption also opens one round per tick; every one after the first is
+// semantically a no-op (the verdicts it would stale are already stale) and
+// the repo sits in sync_state = error throughout, which is the visible
+// signal. Both costs are re-review. The cost they replace is an unreviewed
+// commit reaching upstream with approvals that were never re-earned, and
+// those are not comparable: a duplicated round is the cheap error, a
+// skipped one is not.
+//
+// The ref advance is a compare-and-swap against W
 // (gitref.AdvanceWorkBranchRef), so an agent push that lands between this
 // step's read and its write is never overwritten: the swap is refused, this
 // branch is left alone, and the next tick re-derives everything from the
@@ -238,20 +260,25 @@ func (d *StoreDriftReconciler) reconcileOne(ctx context.Context, repo RepoID, wb
 // back, in the one shape that loses nothing: the work branch gains history
 // it did not have and every prior verdict goes stale.
 //
-// The three writes are ordered ref, round, accepted_tip -- see the type doc
-// comment's "Every step is safe to repeat" for why that order and not
-// another. The ref advance is skipped when the work branch is already AT
-// the upstream commit, which is not a rare case: it is exactly what the
-// previous tick left behind if it crashed between the advance and the two
-// writes after it (and git-merge-base --is-ancestor answers yes for a
-// commit against itself, so such a branch is still classified as a
+// The three writes are ordered round, ref, accepted_tip -- see the type doc
+// comment's "Every step is safe to repeat, and the round goes FIRST" for why
+// that order and not another, and for what it costs. The ref advance is
+// skipped when the work branch is already AT the upstream commit, which is
+// not a rare case: it is exactly what a previous tick left behind if it
+// crashed after the advance (and git-merge-base --is-ancestor answers yes
+// for a commit against itself, so such a branch is still classified as a
 // fast-forward and lands here again).
 //
 // A compare-and-swap that loses to a concurrent agent push
 // (gitref.ErrRefMoved) is not an error for this branch: this pass's whole
 // view of it -- the tip it read, the ancestry it computed -- is stale, so
-// it stops, writes nothing, and lets the next tick re-derive all of it.
+// it stops, writes nothing further, and lets the next tick re-derive all of
+// it. The round opened moments earlier stands; that is the cost named
+// above, paid so the crash window cannot bless an unreviewed commit.
 func (d *StoreDriftReconciler) adopt(ctx context.Context, repo RepoID, wb workbranchstore.WorkBranch, tip, upstream string) error {
+	if err := d.reopenReview(ctx, repo, wb); err != nil {
+		return err
+	}
 	if tip != upstream {
 		if err := d.refs.AdvanceWorkBranchRef(ctx, string(repo), wb.Name, tip, upstream); err != nil {
 			if errors.Is(err, gitref.ErrRefMoved) {
@@ -261,9 +288,6 @@ func (d *StoreDriftReconciler) adopt(ctx context.Context, repo RepoID, wb workbr
 			return fmt.Errorf("adopting upstream commit %s into work branch %s in repo %s: %w", upstream, wb.Name, repo, err)
 		}
 		d.logger.InfoContext(ctx, "adopted an upstream fast-forward into a work branch", "repo", string(repo), "work_branch", wb.Name, "from", tip, "to", upstream)
-	}
-	if err := d.reopenReview(ctx, repo, wb); err != nil {
-		return err
 	}
 	if _, err := d.adoption.RecordAcceptedTip(ctx, wb.ID, upstream); err != nil {
 		return fmt.Errorf("recording adopted tip %s for work branch %s in repo %s: %w", upstream, wb.Name, repo, err)
@@ -277,12 +301,15 @@ func (d *StoreDriftReconciler) adopt(ctx context.Context, repo RepoID, wb workbr
 // stale column -- docs/web-spec.md: "`stale` is derived"), and only
 // non-stale approves count toward the accept bar.
 //
-// Which branches get one follows internal/catchup's rule
-// (roundBelongsToThisRestore) for the same reason it gives:
+// Which branches get one follows the PRINCIPLE internal/catchup states --
+// a round belongs to a branch that is actually in, or being returned to,
+// review -- not its roundBelongsToThisRestore predicate, which decides a
+// different question (whether a conflict CLEAR was a transition into
+// reviewable) off a value this path does not have:
 //
 //   - reviewed: the branch is sitting in the admin's queue with live
-//     approvals. It goes back to REVIEWABLE -- the ordinary re-review
-//     transition an author or an admin send-back uses -- and opens a round.
+//     approvals. It opens a round and goes back to REVIEWABLE -- the
+//     ordinary re-review transition an author or an admin send-back uses.
 //     Without the state move the branch would keep a state that says
 //     "decided" while carrying no live verdict, and reviewers would never
 //     see it again: the awaiting-verdict filter every reviewer's queue is
@@ -297,26 +324,42 @@ func (d *StoreDriftReconciler) adopt(ctx context.Context, repo RepoID, wb workbr
 //     would be, in catchup's words, "a review round for a branch nobody has
 //     asked anyone to review".
 //
-// The two writes are not atomic with each other. The state move is first so
-// that a failure between them leaves the branch REVIEWABLE with its old
-// round, which is the safe half: the old round's approvals still count
-// until the round opens, but accepted_tip has not been written yet either,
-// so the next tick re-runs this whole path and opens the round then.
+// The round is opened BEFORE the state move, and the state move's failure
+// is logged rather than returned. That asymmetry is the whole point: the
+// ROUND is the reset (CurrentRoundApproveCount, which both the accept gate
+// and the proposal queue read, counts only current-round verdicts), while
+// the state move is REVIEWER VISIBILITY. Doing them the other way round
+// makes a failing state move suppress the reset entirely, and
+// UpdateWorkBranchState's reviewed -> reviewable arm can genuinely fail: it
+// requires a non-empty title AND description, so a reviewed branch carrying
+// a blank description would fail that move on every tick, never reach
+// OpenRound, and never write accepted_tip -- an adopted, unreviewed commit
+// with live approvals, forever. No shipped client can produce that row
+// today (the CLI rejects empty values and the console has no
+// UpdateWorkBranch caller), which makes it latent rather than live, and
+// exactly the kind of thing to close while the ordering is being fixed
+// anyway.
+//
+// Returning the error instead would also make the failure repeat unbounded:
+// accepted_tip stays unwritten, so every tick re-enters this path and opens
+// another round. Logging it leaves the branch reset, gated, and reconciled,
+// with one loud line naming the row an operator has to fix by hand.
 func (d *StoreDriftReconciler) reopenReview(ctx context.Context, repo RepoID, wb workbranchstore.WorkBranch) error {
 	if wb.State == workbranchstore.StateDraft {
 		d.logger.InfoContext(ctx, "adopted commit landed on a draft work branch; no review round to reset", "repo", string(repo), "work_branch", wb.Name)
 		return nil
-	}
-	if wb.State == workbranchstore.StateReviewed {
-		if _, err := d.adoption.UpdateState(ctx, wb.ID, workbranchstore.StateReviewable); err != nil {
-			return fmt.Errorf("returning work branch %s in repo %s to review after adopting an upstream commit: %w", wb.Name, repo, err)
-		}
 	}
 	round, err := d.rounds.OpenRound(ctx, wb.ID, driftRoundRequestedBy)
 	if err != nil {
 		return fmt.Errorf("opening a review round for work branch %s in repo %s after adopting an upstream commit: %w", wb.Name, repo, err)
 	}
 	d.logger.InfoContext(ctx, "reset approvals after adopting an upstream commit", "repo", string(repo), "work_branch", wb.Name, "round", round.Number, "requested_by", driftRoundRequestedBy)
+	if wb.State != workbranchstore.StateReviewed {
+		return nil
+	}
+	if _, err := d.adoption.UpdateState(ctx, wb.ID, workbranchstore.StateReviewable); err != nil {
+		d.logger.ErrorContext(ctx, "approvals were reset but the work branch could not be returned to reviewable; it is gated but invisible to reviewers until an admin moves it", "repo", string(repo), "work_branch", wb.Name, "error", err)
+	}
 	return nil
 }
 

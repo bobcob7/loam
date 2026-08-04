@@ -78,12 +78,44 @@ type driftHarness struct {
 }
 
 // driftUpstream is the mirror state a test seeds: what each work branch's
-// refs/heads/loam/<name> and refs/heads/loam-reserved/<name> resolve to. A
-// name absent from upstream resolves as gitref.ErrRefMissing, which is the
-// mirror's honest answer for a branch that was never accepted.
+// refs/heads/loam/<name> and refs/heads/loam-reserved/<name> resolve to, and
+// -- crucially -- the ANCESTRY between the commits involved. A name absent
+// from upstream resolves as gitref.ErrRefMissing, which is the mirror's
+// honest answer for a branch that was never accepted.
+//
+// contains is a set of ordered (ancestor, descendant) pairs, and modelling
+// it as a relation rather than as one boolean the mock hands back is the
+// difference between a suite that catches a wrong classification and one
+// that cannot. A flat bool makes a REWIND (the upstream tip is a strict
+// ancestor of the work-branch tip, because somebody force-pushed
+// loam/<name> backwards) and a GENUINE DIVERGENCE (neither contains the
+// other) the same input, so an implementation that asked the ancestry
+// question backwards -- and therefore adopted a rewind, moving the work
+// branch back over reviewed commits -- would satisfy every test written
+// against the bool. With the relation, the two fixtures answer differently
+// in the direction a wrong implementation would have to ask, so it fails.
+// A pair absent from the map is false, which is what git reports for two
+// unrelated commits.
 type driftUpstream struct {
 	upstream map[string]string
 	workTip  map[string]string
+	contains map[[2]string]bool
+}
+
+// fastForwardHistory is the ancestry of the ordinary adoption fixture: the
+// work-branch tip is contained in the upstream tip's history, and nothing
+// else is contained in anything.
+func fastForwardHistory() map[[2]string]bool {
+	return map[[2]string]bool{
+		{driftWorkTipSHA, driftUpstreamSHA}: true,
+		// A commit is its own ancestor (git-merge-base --is-ancestor X X
+		// exits 0, verified against real git 2.50.1), which is what makes a
+		// half-finished adoption -- ref already advanced, accepted_tip not
+		// yet written -- classify as a fast-forward again on the next tick
+		// instead of falling through to "diverged".
+		{driftUpstreamSHA, driftUpstreamSHA}: true,
+		{driftWorkTipSHA, driftWorkTipSHA}:   true,
+	}
 }
 
 func newDriftHarness(t *testing.T, repoID uuid.UUID, refs driftUpstream, branches ...workbranchstore.WorkBranch) *driftHarness {
@@ -118,11 +150,11 @@ func newDriftHarness(t *testing.T, repoID uuid.UUID, refs driftUpstream, branche
 	}
 	h.ancestry = &ancestryCheckerMock{
 		ContainsFunc: func(_ context.Context, _, _, ancestor, descendant string) (bool, error) {
-			// The real check: is the work-branch tip contained in the
-			// upstream history? The fixture SHAs are opaque, so the default
-			// answer here is the one a genuine fast-forward gives, and the
-			// diverged tests override it.
-			return true, nil
+			// Answered from the seeded relation, in the direction asked --
+			// never a fixed boolean. See driftUpstream.contains for why that
+			// distinction is what makes a rewind a different input from a
+			// divergence.
+			return refs.contains[[2]string{ancestor, descendant}], nil
 		},
 	}
 	h.drift = &workBranchDriftMarkerMock{
@@ -174,6 +206,30 @@ func nameOf(branches []workbranchstore.WorkBranch, id uuid.UUID) string {
 	return "unknown-" + id.String()
 }
 
+// divergedHistory is the genuine divergence: two commits that each gained
+// history the other does not have, so NEITHER contains the other in either
+// direction. Only the self-pairs hold, exactly as git reports them.
+func divergedHistory() map[[2]string]bool {
+	return map[[2]string]bool{
+		{driftUpstreamSHA, driftUpstreamSHA}: true,
+		{driftWorkTipSHA, driftWorkTipSHA}:   true,
+	}
+}
+
+// rewindHistory is the case the fast-forward/diverged pair does not cover on
+// its own: somebody force-pushed loam/<name> BACKWARDS, so the upstream tip
+// is a STRICT ANCESTOR of the work-branch tip. It is the mirror image of
+// fastForwardHistory -- the one interesting pair points the other way --
+// which is what makes an implementation that asks the ancestry question
+// backwards produce a visibly different outcome here than a correct one.
+func rewindHistory() map[[2]string]bool {
+	return map[[2]string]bool{
+		{driftUpstreamSHA, driftWorkTipSHA}:  true,
+		{driftUpstreamSHA, driftUpstreamSHA}: true,
+		{driftWorkTipSHA, driftWorkTipSHA}:   true,
+	}
+}
+
 // TestReconcileDrift_UpstreamMatchesTheAcceptedTip is the common case, and
 // it is built to fail against the wrong comparison rather than merely to
 // pass against the right one.
@@ -192,6 +248,7 @@ func TestReconcileDrift_UpstreamMatchesTheAcceptedTip(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftAcceptedSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
@@ -204,11 +261,13 @@ func TestReconcileDrift_UpstreamMatchesTheAcceptedTip(t *testing.T) {
 // (loam-giq.11): the admin pushed one commit straight onto loam/<name>, and
 // the work-branch tip is an ancestor of it.
 //
-// Every write is asserted for its VALUE, not merely its occurrence: the
-// swap must be from the tip that was read to the commit that arrived (a
-// swap built from the wrong pair would still be "one advance call"), the
-// round must be attributed to the server, and accepted_tip must absorb the
-// upstream commit rather than the work-branch tip it replaced.
+// Every write is asserted for its VALUE and its POSITION, not merely its
+// occurrence: the review round comes first (see the ordering test below for
+// why that is a correctness property and not a preference), the swap must be
+// from the tip that was read to the commit that arrived (a swap built from
+// the wrong pair would still be "one advance call"), the round must be
+// attributed to the server, and accepted_tip must absorb the upstream commit
+// rather than the work-branch tip it replaced.
 func TestReconcileDrift_FastForwardIsAdopted(t *testing.T) {
 	t.Parallel()
 	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -216,14 +275,15 @@ func TestReconcileDrift_FastForwardIsAdopted(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
 	assert.Equal(t, []string{
-		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
-		"state:wb-9c2f1a:reviewable",
 		"round:wb-9c2f1a:server",
+		"state:wb-9c2f1a:reviewable",
+		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
 		"tip:wb-9c2f1a:" + driftUpstreamSHA,
 	}, h.events())
 	require.Len(t, h.ancestry.ContainsCalls(), 1)
@@ -235,24 +295,30 @@ func TestReconcileDrift_FastForwardIsAdopted(t *testing.T) {
 	assert.Empty(t, h.drift.SetUpstreamDriftCalls(), "an adopted branch was already 'none' and must not be rewritten")
 }
 
-// TestReconcileDrift_AdoptionOrdersTheRoundBeforeTheAcceptedTip pins the
-// crash-safety property the write order exists for. Nothing here is
-// transactional across git and Postgres: if accepted_tip were written
-// first, a crash before the round left a branch that had silently adopted
-// an unreviewed commit with its old approvals intact and nothing left to
-// notice it, because the next tick would see upstream == accepted_tip and
-// do nothing. The reverse order at worst opens one extra round.
+// TestReconcileDrift_AdoptionOpensTheRoundBeforeItTouchesAnythingElse pins
+// the ordering property the whole adoption path is built around, by failing
+// the round and proving nothing else ran.
 //
-// This asserts the ORDER specifically, with the round's write failing, so a
-// future edit that reorders the two lines fails here rather than in a
-// scenario nobody runs.
-func TestReconcileDrift_AdoptionOrdersTheRoundBeforeTheAcceptedTip(t *testing.T) {
+// The order is not a preference. Move the ref first and crash before the
+// round, and the branch holds the adopted, unreviewed commit while its
+// pre-adoption approvals are still live and upstream_drift is still none --
+// so an AcceptProposal arriving in that window PASSES, pushes, and writes
+// accepted_tip = U itself, after which the next tick sees U == A and never
+// opens the round at all. The commit is permanently blessed and the review
+// gate has been bypassed silently. Round-first makes the same window
+// harmless: approvals are already stale, the accept is refused, and every
+// write after the round is retried by the next tick.
+//
+// A future edit that "tidies" these three writes back into ref-first
+// therefore has to delete this test to do it.
+func TestReconcileDrift_AdoptionOpensTheRoundBeforeItTouchesAnythingElse(t *testing.T) {
 	t.Parallel()
 	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	wb := driftBranchFixture("wb-9c2f1a", id, workbranchstore.StateReviewable, driftAcceptedSHA)
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 	wantErr := errors.New("review_rounds insert failed")
 	h.rounds.OpenRoundFunc = func(context.Context, uuid.UUID, string) (reviewstore.Round, error) {
@@ -263,15 +329,45 @@ func TestReconcileDrift_AdoptionOrdersTheRoundBeforeTheAcceptedTip(t *testing.T)
 	err := h.reconciler.ReconcileDrift(t.Context(), driftRepoName)
 
 	require.ErrorIs(t, err, wantErr)
-	assert.Equal(t, []string{
-		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
-		"round:attempted",
-	}, h.events(), "a failed round must leave accepted_tip unwritten, so the next tick re-runs the adoption")
+	assert.Equal(t, []string{"round:attempted"}, h.events(), "a failed reset must stop the adoption dead: no ref move, no accepted_tip, nothing for an accept to act on")
+	assert.Empty(t, h.refs.AdvanceWorkBranchRefCalls())
 	assert.Empty(t, h.adoption.RecordAcceptedTipCalls())
 }
 
+// TestReconcileDrift_AResetSurvivesAFailedRefAdvance is the same ordering
+// seen from the other side, and it is what the reset costs. When the ref
+// advance fails after the round has opened, the branch has been sent back
+// for re-review for an adoption that did not happen -- a real cost, since an
+// ordinary agent push does NOT reset approvals -- and accepted_tip is left
+// unwritten so the next tick retries the whole thing.
+//
+// That trade is deliberate: the alternative order buys back this spurious
+// re-review at the price of a window in which an unreviewed commit can be
+// blessed permanently, and those are not comparable.
+func TestReconcileDrift_AResetSurvivesAFailedRefAdvance(t *testing.T) {
+	t.Parallel()
+	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	wb := driftBranchFixture("wb-9c2f1a", id, workbranchstore.StateReviewable, driftAcceptedSHA)
+	h := newDriftHarness(t, repoID, driftUpstream{
+		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
+		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
+	}, wb)
+	wantErr := errors.New("update-ref exploded")
+	h.refs.AdvanceWorkBranchRefFunc = func(context.Context, string, string, string, string) error {
+		h.record("advance:failed")
+		return wantErr
+	}
+
+	err := h.reconciler.ReconcileDrift(t.Context(), driftRepoName)
+
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, []string{"round:wb-9c2f1a:server", "advance:failed"}, h.events())
+	assert.Empty(t, h.adoption.RecordAcceptedTipCalls(), "accepted_tip is the commit of the whole reconciliation and nothing before it succeeded")
+}
+
 // TestReconcileDrift_AdoptionRetryAfterACrashSkipsTheRefAdvance covers the
-// state the previous test's failure leaves behind: the ref is already at
+// state a crash after the ref advance leaves behind: the ref is already at
 // the upstream commit, accepted_tip still is not. The pass must finish the
 // job -- open the round, write the tip -- without attempting a swap whose
 // "from" and "to" are the same commit.
@@ -282,6 +378,7 @@ func TestReconcileDrift_AdoptionRetryAfterACrashSkipsTheRefAdvance(t *testing.T)
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftUpstreamSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
@@ -306,11 +403,11 @@ func TestReconcileDrift_ReopensReviewPerState(t *testing.T) {
 	}{
 		{
 			state: workbranchstore.StateReviewed,
-			want:  []string{"advance", "state:wb-9c2f1a:reviewable", "round:wb-9c2f1a:server", "tip"},
+			want:  []string{"round:wb-9c2f1a:server", "state:wb-9c2f1a:reviewable", "advance", "tip"},
 		},
 		{
 			state: workbranchstore.StateReviewable,
-			want:  []string{"advance", "round:wb-9c2f1a:server", "tip"},
+			want:  []string{"round:wb-9c2f1a:server", "advance", "tip"},
 		},
 		{
 			// A draft branch cannot be accepted at all, and reaching
@@ -329,6 +426,7 @@ func TestReconcileDrift_ReopensReviewPerState(t *testing.T) {
 			h := newDriftHarness(t, repoID, driftUpstream{
 				upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 				workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+				contains: fastForwardHistory(),
 			}, wb)
 
 			require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
@@ -367,14 +465,23 @@ func TestReconcileDrift_DivergedIsRecordedAndNothingElseHappens(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: divergedHistory(),
 	}, wb)
-	h.ancestry.ContainsFunc = func(context.Context, string, string, string, string) (bool, error) {
-		return false, nil
-	}
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
 	assert.Equal(t, []string{"drift:wb-9c2f1a:diverged"}, h.events())
+	// EXACTLY one ancestry question, and this one: "is the work-branch tip
+	// contained upstream?". An implementation that asked the reverse -- and
+	// so adopted a REWIND, moving the branch back over reviewed commits --
+	// would need either a second call or a swapped pair, and both fail here.
+	// The fast-forward test pins the same call for its own case; without the
+	// pair on BOTH sides a swapped question stays invisible, which is exactly
+	// how that mutation survived the first round of this suite.
+	require.Len(t, h.ancestry.ContainsCalls(), 1)
+	call := h.ancestry.ContainsCalls()[0]
+	assert.Equal(t, driftWorkTipSHA, call.Ancestor)
+	assert.Equal(t, driftUpstreamSHA, call.Descendant)
 }
 
 // TestReconcileDrift_DivergedIsClearedOnceUpstreamIsReconciled is the
@@ -391,6 +498,7 @@ func TestReconcileDrift_DivergedIsClearedOnceUpstreamIsReconciled(t *testing.T) 
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftAcceptedSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
@@ -410,10 +518,8 @@ func TestReconcileDrift_AlreadyDivergedIsNotRewritten(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: divergedHistory(),
 	}, wb)
-	h.ancestry.ContainsFunc = func(context.Context, string, string, string, string) (bool, error) {
-		return false, nil
-	}
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
@@ -433,13 +539,14 @@ func TestReconcileDrift_AdoptionClearsAnEarlierDivergence(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
 	assert.Equal(t, []string{
-		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
 		"round:wb-9c2f1a:server",
+		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
 		"tip:wb-9c2f1a:" + driftUpstreamSHA,
 		"drift:wb-9c2f1a:none",
 	}, h.events())
@@ -448,10 +555,15 @@ func TestReconcileDrift_AdoptionClearsAnEarlierDivergence(t *testing.T) {
 // TestReconcileDrift_ARefusedSwapLeavesEverythingAlone covers an agent push
 // landing between this step's read of the tip and its attempt to move it.
 // The compare-and-swap is refused, and the correct response is to abandon
-// the whole pass for this branch: the tip, the ancestry answer, and the
-// adoption decision were all derived from a state that no longer exists.
-// Writing accepted_tip or opening a round anyway would record a decision
-// about a commit that is no longer the branch's tip.
+// the rest of the pass for this branch: the tip, the ancestry answer, and
+// the adoption decision were all derived from a state that no longer
+// exists, so writing accepted_tip would record a decision about a commit
+// that is no longer the branch's tip.
+//
+// The round opened moments earlier STANDS, and that is the documented cost
+// of opening it first: this branch has been sent back for a re-review that
+// its own push did not otherwise call for. It is not a cycle error either
+// way -- losing a race to an agent is not a failure.
 func TestReconcileDrift_ARefusedSwapLeavesEverythingAlone(t *testing.T) {
 	t.Parallel()
 	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
@@ -459,6 +571,7 @@ func TestReconcileDrift_ARefusedSwapLeavesEverythingAlone(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 	h.refs.AdvanceWorkBranchRefFunc = func(context.Context, string, string, string, string) error {
 		h.record("advance:refused")
@@ -467,7 +580,8 @@ func TestReconcileDrift_ARefusedSwapLeavesEverythingAlone(t *testing.T) {
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName), "losing a race to an agent push is not a cycle failure")
 
-	assert.Equal(t, []string{"advance:refused"}, h.events())
+	assert.Equal(t, []string{"round:wb-9c2f1a:server", "state:wb-9c2f1a:reviewable", "advance:refused"}, h.events())
+	assert.Empty(t, h.adoption.RecordAcceptedTipCalls(), "nothing was adopted, so nothing is recorded as adopted")
 }
 
 // TestReconcileDrift_AnAbsentUpstreamBranchIsSkipped covers a state that is
@@ -486,6 +600,7 @@ func TestReconcileDrift_AnAbsentUpstreamBranchIsSkipped(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
@@ -507,8 +622,12 @@ func TestReconcileDrift_AFailedAncestryCheckChangesNothing(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 	wantErr := errors.New("mirror is corrupt")
+	// The one ContainsFunc override left in this file: a check that could
+	// not RUN is not a relation any fixture can express, and it is exactly
+	// the case that must never be read as its negative answer.
 	h.ancestry.ContainsFunc = func(context.Context, string, string, string, string) (bool, error) {
 		return false, wantErr
 	}
@@ -541,7 +660,7 @@ func TestReconcileDrift_ComparesOnlyBranchesItCanCompare(t *testing.T) {
 		upstream[name] = driftUpstreamSHA
 		workTip[name] = driftWorkTipSHA
 	}
-	h := newDriftHarness(t, repoID, driftUpstream{upstream: upstream, workTip: workTip}, eligible, noPR, noTip, complete, closed)
+	h := newDriftHarness(t, repoID, driftUpstream{upstream: upstream, workTip: workTip, contains: fastForwardHistory()}, eligible, noPR, noTip, complete, closed)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
@@ -562,6 +681,7 @@ func TestReconcileDrift_OneBranchsFailureDoesNotStarveTheRest(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-broken": driftUpstreamSHA, "wb-healthy": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-healthy": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, broken, healthy)
 
 	err := h.reconciler.ReconcileDrift(t.Context(), driftRepoName)
@@ -569,8 +689,8 @@ func TestReconcileDrift_OneBranchsFailureDoesNotStarveTheRest(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, gitref.ErrRefMissing)
 	assert.Equal(t, []string{
-		"advance:wb-healthy:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
 		"round:wb-healthy:server",
+		"advance:wb-healthy:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
 		"tip:wb-healthy:" + driftUpstreamSHA,
 	}, h.events(), "the healthy branch is still reconciled")
 }
@@ -584,7 +704,7 @@ func TestReconcileDrift_ARepoWithNothingAcceptedIsFree(t *testing.T) {
 	draft := driftBranchFixture("wb-draft", uuid.Must(uuid.NewV7()), workbranchstore.StateDraft, driftAcceptedSHA)
 	draft.UpstreamPRNumber = nil
 	draft.AcceptedTip = nil
-	h := newDriftHarness(t, repoID, driftUpstream{upstream: map[string]string{}, workTip: map[string]string{}}, draft)
+	h := newDriftHarness(t, repoID, driftUpstream{upstream: map[string]string{}, workTip: map[string]string{}, contains: fastForwardHistory()}, draft)
 
 	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
 
@@ -603,6 +723,7 @@ func TestReconcileDrift_UnresolvableRepoAbortsTheStep(t *testing.T) {
 	h := newDriftHarness(t, repoID, driftUpstream{
 		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
 		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
 	}, wb)
 	wantErr := errors.New("repo lookup failed")
 	h.repos.GetRepoByNameFunc = func(context.Context, string) (reposstore.Repo, error) { return reposstore.Repo{}, wantErr }
@@ -611,4 +732,89 @@ func TestReconcileDrift_UnresolvableRepoAbortsTheStep(t *testing.T) {
 
 	require.ErrorIs(t, err, wantErr)
 	assert.Empty(t, h.branches.ListByCursorCalls())
+}
+
+// TestReconcileDrift_AnUpstreamRewindIsDivergedNotAdopted is the third
+// ancestry case, and the one a mutation survived in the first round of this
+// suite: somebody force-pushed loam/<name> BACKWARDS, so the upstream tip is
+// a strict ancestor of the work-branch tip.
+//
+// It is `diverged`, deliberately, and both alternatives are worse. Adopting
+// it -- which is what an implementation that asked the ancestry question in
+// the wrong direction would do -- moves the work branch back over commits
+// that were reviewed, discarding them with no reflog in a bare mirror to
+// recover from. Treating it as "no drift" leaves accepted_tip permanently
+// misdescribing upstream, and since ListProposals compares accepted_tip
+// against the WORK BRANCH and never against upstream, nothing would ever
+// re-list the branch to put the dropped commits back.
+//
+// The fixture is what makes this test able to fail: rewindHistory answers
+// the reverse ancestry question TRUE, where the diverged fixture answers it
+// false. Against a single boolean the two cases are one input, and an
+// implementation that adopted rewinds passed every test in this file.
+func TestReconcileDrift_AnUpstreamRewindIsDivergedNotAdopted(t *testing.T) {
+	t.Parallel()
+	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	wb := driftBranchFixture("wb-9c2f1a", id, workbranchstore.StateReviewed, driftAcceptedSHA)
+	h := newDriftHarness(t, repoID, driftUpstream{
+		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
+		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: rewindHistory(),
+	}, wb)
+	require.True(t, rewindHistory()[[2]string{driftUpstreamSHA, driftWorkTipSHA}],
+		"precondition: this fixture must really be a rewind -- upstream contained in the work branch, which is what tells it apart from a plain divergence")
+
+	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName))
+
+	assert.Equal(t, []string{"drift:wb-9c2f1a:diverged"}, h.events())
+	assert.Empty(t, h.refs.AdvanceWorkBranchRefCalls(), "adopting a rewind would move the work branch BACKWARDS over reviewed commits")
+	assert.Empty(t, h.adoption.RecordAcceptedTipCalls())
+	require.Len(t, h.ancestry.ContainsCalls(), 1)
+	call := h.ancestry.ContainsCalls()[0]
+	assert.Equal(t, driftWorkTipSHA, call.Ancestor)
+	assert.Equal(t, driftUpstreamSHA, call.Descendant)
+}
+
+// TestReconcileDrift_AFailedStateMoveStillResetsTheApprovals covers the
+// latent row UpdateWorkBranchState's guard can refuse: its reviewed ->
+// reviewable arm requires a non-empty title AND description, so a reviewed
+// branch carrying a blank description fails that move on every tick.
+//
+// No shipped client can produce such a row today (the CLI rejects empty
+// values, and the console has no UpdateWorkBranch caller), which is exactly
+// why the ordering matters: if the state move came first and its failure
+// were returned, the reset would never happen, accepted_tip would never be
+// written, and the branch would sit forever holding an adopted, unreviewed
+// commit with live approvals -- a permanent gate bypass reachable only from
+// a row nobody can currently create, which is the kind of thing that is
+// discovered years later.
+//
+// The round IS the reset (only current-round verdicts count toward the
+// accept bar); the state move is reviewer visibility. So the round is
+// opened first and the state failure is logged, not returned: the branch
+// ends up gated and fully reconciled, merely invisible to reviewers until
+// an admin fixes the row.
+func TestReconcileDrift_AFailedStateMoveStillResetsTheApprovals(t *testing.T) {
+	t.Parallel()
+	repoID, id := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	wb := driftBranchFixture("wb-9c2f1a", id, workbranchstore.StateReviewed, driftAcceptedSHA)
+	h := newDriftHarness(t, repoID, driftUpstream{
+		upstream: map[string]string{"wb-9c2f1a": driftUpstreamSHA},
+		workTip:  map[string]string{"wb-9c2f1a": driftWorkTipSHA},
+		contains: fastForwardHistory(),
+	}, wb)
+	h.adoption.UpdateStateFunc = func(context.Context, uuid.UUID, workbranchstore.State) (workbranchstore.WorkBranch, error) {
+		h.record("state:refused")
+		return workbranchstore.WorkBranch{}, workbranchstore.ErrIllegalTransition
+	}
+
+	require.NoError(t, h.reconciler.ReconcileDrift(t.Context(), driftRepoName),
+		"a branch that cannot be made visible to reviewers is still reset and still reconciled; failing here would repeat the reset every tick forever")
+
+	assert.Equal(t, []string{
+		"round:wb-9c2f1a:server",
+		"state:refused",
+		"advance:wb-9c2f1a:" + driftWorkTipSHA + "->" + driftUpstreamSHA,
+		"tip:wb-9c2f1a:" + driftUpstreamSHA,
+	}, h.events())
 }

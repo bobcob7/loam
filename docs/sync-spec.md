@@ -238,13 +238,39 @@ branch in is adopted (which clears the flag) rather than merely unflagged.
 There is deliberately no "clear drift" RPC.
 
 **None of it is transactional across git and Postgres**, so an adoption writes
-in the order ref → review round → `accepted_tip`, and the last of those is what
-commits the reconciliation. A crash before it leaves the upstream tip still
-different from `accepted_tip`, the work-branch tip equal to it, and therefore
-the *same* fast-forward classification on the next cycle — which finishes the
-job. The opposite order would leave a branch that had silently adopted an
-unreviewed commit with its old approvals intact and nothing left to notice. A
-duplicated round is the cheap error; a skipped one is not.
+in the order **review round → ref → `accepted_tip`**, the last of which commits
+the reconciliation.
+
+The round is first because it is the only one whose absence is unrecoverable.
+Move the ref first and crash before the round, and the branch holds the adopted,
+unreviewed commit while its pre-adoption approvals are still live and
+`upstream_drift` is still `none` — so an `AcceptProposal` arriving in that window
+passes, pushes, and writes `accepted_tip` itself, after which the next cycle sees
+upstream equal to `accepted_tip` and never opens the round at all. The commit is
+not un-reset for one cycle; it is permanently blessed, and the gate this whole
+mechanism exists to keep honest has been bypassed silently. Round-first makes the
+window harmless: approvals are already stale, the accept is refused, and
+everything after the round is retried next cycle (the work-branch tip now equals
+the upstream tip, and a commit is its own ancestor, so the classification is
+still *fast-forward*).
+
+The cost, stated rather than buried: the reset can fire for an adoption that then
+does not happen — a compare-and-swap lost to an agent push, or a failed ref
+advance, sends a branch back for a re-review it would not otherwise have had,
+since an ordinary agent push does not reset approvals. A repeatedly failing
+adoption likewise opens a round per cycle, each after the first semantically a
+no-op against already-stale verdicts, with the repo in `sync_state = error`
+throughout. Both costs are re-review; the cost they replace is an unreviewed
+commit reaching upstream with approvals that were never re-earned. A duplicated
+round is the cheap error; a skipped one is not.
+
+Within the round step the same rule applies again: the **round is opened before**
+the `reviewed → reviewable` move, and a failure of that move is logged rather
+than propagated. The round *is* the reset (only current-round verdicts count
+toward the accept bar); the state move is reviewer visibility. `UpdateState`'s
+`reviewed → reviewable` arm requires a non-empty title and description, so
+ordering it first would let a branch that cannot satisfy that guard suppress its
+own reset indefinitely.
 
 `upstream_drift` is its **own column**, deliberately not a fourth `conflict`
 value. The two describe independent facts that can hold simultaneously — a

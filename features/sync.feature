@@ -80,3 +80,13 @@ Feature: Upstream sync
     And the admin sees the work branch flagged as diverged from upstream
     When I try to accept it
     Then the attempt is rejected as a failed precondition
+
+  Scenario: An upstream branch rewound behind the work branch is flagged, not re-adopted
+    Given a proposal in state "reviewed" with one "approve" verdict
+    And I accept it
+    And the upstream "loam/" branch is rewound behind the work branch
+    When the next sync runs
+    Then the work branch still holds the commit its author pushed
+    And the admin sees the work branch flagged as diverged from upstream
+    When I try to accept it
+    Then the attempt is rejected as a failed precondition

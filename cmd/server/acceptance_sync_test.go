@@ -70,6 +70,7 @@ func (h *acceptanceHarness) registerSyncSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the PR body is the work branch's description alone$`, h.stepThePRBodyIsTheWorkBranchsDescriptionAlone)
 	sc.Step(`^someone pushes a commit directly to the upstream "([^"]*)" branch$`, h.stepSomeonePushesDirectlyToTheUpstreamBranch)
 	sc.Step(`^the upstream "([^"]*)" branch moves on while the work branch moves on separately$`, h.stepUpstreamAndWorkBranchMoveSeparately)
+	sc.Step(`^the upstream "([^"]*)" branch is rewound behind the work branch$`, h.stepUpstreamBranchIsRewound)
 	sc.Step(`^the work branch advances to that commit$`, h.stepTheWorkBranchAdvancesToThatCommit)
 	sc.Step(`^the work branch still holds the commit its author pushed$`, h.stepTheWorkBranchStillHoldsItsAuthorsCommit)
 	sc.Step(`^a new review round is opened by the server$`, h.stepANewReviewRoundIsOpenedByTheServer)
@@ -1164,4 +1165,59 @@ func (h *acceptanceHarness) recordedAcceptedTip(ctx context.Context, repoID uuid
 		return "", fmt.Errorf("work branch %s has no recorded accepted_tip", name)
 	}
 	return *tip, nil
+}
+
+// stepUpstreamBranchIsRewound builds the third ancestry case against a real
+// forge: the work branch gains a commit, and loam/<name> is then FORCE-PUSHED
+// backwards, off the commit the accept put there, onto the target branch's
+// tip. The upstream tip is now a strict ancestor of the work-branch tip --
+// neither a fast-forward nor a two-sided divergence.
+//
+// It is the one case the unit suite cannot reach honestly on its own: with a
+// mocked ancestry checker a rewind and a divergence are the same input
+// unless the fixture models the relation, so this scenario is what proves
+// the classification against git's own answer rather than against a fixture
+// that agrees with the implementation by construction.
+//
+// The force refspec is what makes it a rewind and not a no-op: a plain push
+// of an ancestor is rejected as a non-fast-forward, which would leave
+// upstream where it was and quietly turn this scenario into "nothing
+// happened". The push is verified to have actually moved the ref before the
+// scenario continues.
+func (h *acceptanceHarness) stepUpstreamBranchIsRewound(ctx context.Context, prefix string) error {
+	world := worldFrom(ctx)
+	upstreamRef := "refs/heads/" + prefix + world.workBranch
+	accepted, err := h.recordedAcceptedTip(ctx, world.repoID, world.workBranch)
+	if err != nil {
+		return err
+	}
+	rewoundTo, err := mirrorRefSHA(world.mirrorDir, refnames.TargetBranch(world.targetBranch))
+	if err != nil {
+		return err
+	}
+	if rewoundTo == accepted {
+		return fmt.Errorf("the target tip and the accepted tip are both %s, so rewinding to it would move nothing", accepted)
+	}
+	workSHA, err := commitIntoMirror(ctx, world.mirrorDir, refnames.WorkBranch(world.workBranch), refnames.WorkBranch(world.workBranch),
+		"REWIND.txt", "written after the accept\n", "acceptance: a commit the rewind would discard")
+	if err != nil {
+		return err
+	}
+	refspec := "+" + refnames.TargetBranch(world.targetBranch) + ":" + refnames.UpstreamProposalBranch(world.workBranch)
+	if _, err := h.transport.Push(ctx, h.forgeHost, world.mirrorDir, world.upstreamURL, refspec); err != nil {
+		return fmt.Errorf("force-pushing %s to rewind the upstream branch: %w", refspec, err)
+	}
+	upstreamSHA, err := h.upstreamRefSHA(ctx, world, upstreamRef)
+	if err != nil {
+		return err
+	}
+	if upstreamSHA != rewoundTo {
+		return fmt.Errorf("upstream %s is at %s after the force push, want the rewound %s", upstreamRef, upstreamSHA, rewoundTo)
+	}
+	if upstreamSHA == accepted || upstreamSHA == workSHA {
+		return fmt.Errorf("upstream %s did not move off the accepted tip %s (work branch %s), so nothing was rewound", upstreamRef, accepted, workSHA)
+	}
+	world.driftUpstreamSHA = upstreamSHA
+	world.driftWorkTipSHA = workSHA
+	return h.latchRoundBeforeTheTick(ctx, world)
 }
