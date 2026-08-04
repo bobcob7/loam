@@ -9,10 +9,17 @@ package forge
 import "context"
 
 // Provider is the forge-specific surface consumed by the credential,
-// proposal, and repo-admin services. Forgejo is the only MVP
-// implementation (GitHub is Future Work). Secrets are fetched from the
-// credential store by callers and passed in; the provider never reaches
-// into the credential store itself.
+// proposal, and repo-admin services. Two implementations exist: Forgejo
+// (forgejo.go) and GitHub (github.go, classic personal-access tokens
+// only — see that file's own doc comment for the token-kind and
+// Enterprise Server scope decisions). NewProvider (resolve.go) resolves
+// a host to the right one; no caller outside this package should ever
+// need to know which implementation it is holding. See
+// docs/sync-spec.md → Provider Interface for what a third
+// implementation would have to supply, and for the concrete differences
+// between these two that cost real time to discover. Secrets are
+// fetched from the credential store by callers and passed in; the
+// provider never reaches into the credential store itself.
 type Provider interface {
 	// ValidateToken confirms token authenticates against host and has
 	// the REST scopes needed to open PRs. Returns an error wrapping
@@ -42,18 +49,25 @@ type Provider interface {
 	// failure to retry; see that sentinel's godoc.
 	ClosePR(ctx context.Context, repo string, prNumber int) error
 	// GitCredentials returns the forge's username/password convention
-	// for authenticating git-over-HTTPS with token (e.g. Forgejo takes
-	// the token as the password with any username).
+	// for authenticating git-over-HTTPS with token. Forgejo takes the
+	// token as the password with any username; GitHub's classic
+	// personal-access tokens (the only kind this package supports —
+	// github.go) share that exact convention, verified against GitHub's
+	// own docs: "the username is not used to authenticate you." A
+	// GitHub App installation token would instead need
+	// "x-access-token" as the username, but that token kind is out of
+	// scope here.
 	GitCredentials(ctx context.Context, token string) (username, password string, err error)
 	// FindOpenPR looks up the open pull request (if any) from headBranch
 	// into targetBranch on repo, by listing and filtering — never by
-	// parsing CreatePR's ErrDuplicatePR message, whose embedded "id" is
-	// the PR's internal id, not the per-repo number this method returns.
+	// parsing CreatePR's ErrDuplicatePR message. Forgejo's message
+	// embeds an internal id, not the per-repo number this method
+	// returns; GitHub's equivalent rejection carries no number at all.
 	// found is false, with prURL/prNumber zero and err nil, when no such
 	// PR is open; err is non-nil only when the lookup itself failed
 	// (wrapping ErrRepoNotFound or ErrInvalidToken on the same terms as
 	// CreatePR/GetPRState/ClosePR). Callers use this to adopt the PR a
-	// 409 from CreatePR reported as already existing.
+	// duplicate-PR rejection from CreatePR reported as already existing.
 	FindOpenPR(ctx context.Context, repo, headBranch, targetBranch string) (prURL string, prNumber int, found bool, err error)
 }
 

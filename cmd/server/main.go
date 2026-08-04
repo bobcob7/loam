@@ -570,15 +570,16 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	}
 	credentials := credentialstore.New(pool, enc, cfg.Logger)
 	httpClient := &http.Client{}
-	// A single, host-agnostic *forge.Forgejo (host/token both empty) is
-	// deliberately reused for gitCredentialConverter here, mirroring
-	// internal/mirrorsync's own tests and internal/gittransport's doc
-	// comment on GitCredentials: that method's Forgejo-token-as-password
-	// convention is the same for every Forgejo host, so it needs neither
-	// binding nor per-call reconstruction the way ForgeChecker's CheckRepo
-	// below does (CheckRepo enforces the instance's OWN bound host matches
-	// the upstream URL, so it must be rebuilt per host+token).
-	transport := gittransport.New(credentials, forge.NewForgejo("", "", httpClient, cfg.Logger), cfg.Logger)
+	// A single, host-agnostic *forge.Resolver is deliberately reused for
+	// gitCredentialConverter here, mirroring internal/mirrorsync's own
+	// tests and internal/gittransport's doc comment on GitCredentials:
+	// that method's token-as-password convention is the same for every
+	// Kind this package resolves to (forge.gitCredentialsConvention), so
+	// it needs neither binding nor per-call reconstruction the way
+	// ForgeChecker's CheckRepo below does (CheckRepo enforces the
+	// instance's OWN bound host matches the upstream URL, so it must be
+	// rebuilt per host+token, AND resolve the right Kind for that host).
+	transport := gittransport.New(credentials, forge.NewResolver(httpClient, cfg.Logger), cfg.Logger)
 	checker := repoadmin.ForgeChecker{HTTPClient: httpClient, Logger: cfg.Logger}
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
@@ -605,12 +606,13 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 // mirrorsync have all been READING that table since they landed.
 //
 // The forge provider passed as the token validator is a single,
-// host-agnostic *forge.Forgejo (host and token both empty), the same shape
-// registerRepoAdminService reuses for gittransport's credential converter
-// and for the same reason: Provider.ValidateToken takes its host and token
-// explicitly, so no per-host binding is needed or wanted here. That is the
-// opposite of repoadmin.ForgeChecker, which must rebuild per call because
-// CheckRepo compares against the instance's own bound host.
+// host-agnostic *forge.Resolver, the same shape registerRepoAdminService
+// reuses for gittransport's credential converter and for the same
+// reason: Provider.ValidateToken takes its host and token explicitly,
+// and Resolver resolves the right Kind for whatever host each call
+// names, so no per-host binding is needed or wanted here. That is the
+// opposite of repoadmin.ForgeChecker, which must rebuild per call
+// because CheckRepo compares against the instance's own bound host.
 //
 // pool == nil is the only unconditional guard, for the same reason and
 // exercised the same way as registerMetadataServices' own guard.
@@ -624,7 +626,7 @@ func registerCredentialService(router *server.Router, cfg config.Config, pool *p
 		return
 	}
 	credentials := credentialstore.New(pool, enc, cfg.Logger)
-	validator := forge.NewForgejo("", "", &http.Client{}, cfg.Logger)
+	validator := forge.NewResolver(&http.Client{}, cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewCredentialServiceHandler(
 		credential.New(credentials, validator, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 	))

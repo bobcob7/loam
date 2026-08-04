@@ -267,6 +267,35 @@ tasks:
       # cannot tell a replayed "ok" apart from a genuine rerun.
       - LOAM_TEST_FORGEJO=1 go test -tags=integration -count=1 ./internal/forgesuite/... -v
 
+  test:contract:github:
+    desc: >-
+      Run the real-GitHub half of the Provider contract suite
+      (loam-tmds.3), the GitHub counterpart of test:contract:forgejo
+      above. UNEXECUTED as of loam-tmds: written and gated, never run --
+      see TestProviderContract_RealGitHub's own doc comment
+      (internal/forgesuite/github_integration_test.go) for the full
+      reasoning. Running it creates, mutates, and deletes real
+      repositories under whatever account LOAM_TEST_GITHUB_TOKEN belongs
+      to, which is why it needs a maintainer's explicit decision, not an
+      agent's.
+
+      Needs no Docker/container (real GitHub is remote, not a local
+      testcontainers instance), but DOES need:
+
+        - LOAM_TEST_GITHUB=1, the opt-in gate.
+        - LOAM_TEST_GITHUB_TOKEN, a classic PAT with "repo" AND
+          "delete_repo" scope, for a DEDICATED, THROWAWAY GitHub account
+          -- never a maintainer's own. This leg creates and deletes real
+          repositories every run.
+        - LOAM_TEST_GITHUB_READONLY_TOKEN, a second classic PAT for the
+          SAME account, created with NO scopes granted at all -- see the
+          test's own doc comment for why classic PATs have no scope
+          equivalent to Forgejo's read:repository, and why SeedRepo
+          therefore creates PUBLIC repos for this leg specifically
+          (unlike test:contract:forgejo's private ones).
+    cmds:
+      - LOAM_TEST_GITHUB=1 go test -tags=integration -count=1 ./internal/forgesuite/... -run TestProviderContract_RealGitHub -v
+
   test:goldens:update:
     desc: >-
       Re-baseline the ingest goldens (loam-li0.8, docs/testing-spec.md

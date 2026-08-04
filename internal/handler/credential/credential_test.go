@@ -211,7 +211,7 @@ func TestSetUpstreamToken_ForgeSentinelsMapToDistinctCodes(t *testing.T) {
 			name:         "token authenticates but is underscoped",
 			forgeErr:     fmt.Errorf("validating token: %w", forge.ErrInsufficientScope),
 			wantCode:     connect.CodeFailedPrecondition,
-			wantMentions: "write:repository",
+			wantMentions: "lacks the scope needed to open pull requests",
 		},
 	}
 	for _, tt := range tests {

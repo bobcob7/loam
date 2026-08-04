@@ -74,16 +74,19 @@ type credentialStore interface {
 
 // tokenValidator confirms a candidate token authenticates against a forge
 // host and carries the scope needed to open pull requests, defined here at
-// the consumer. *forge.Forgejo satisfies it structurally.
+// the consumer. *forge.Resolver satisfies it structurally (any concrete
+// forge.Provider would too, but production wires a Resolver -- see New's
+// doc comment).
 //
 // Note the shape: host and token are arguments, not instance state. That
 // is why -- unlike internal/handler/repoadmin's upstreamChecker, which
-// needs a per-call *forge.Forgejo bound to host+token because CheckRepo
+// needs a per-call forge.Provider bound to host+token because CheckRepo
 // compares upstreamURL against the instance's OWN bound host -- a single,
-// host-agnostic provider built once at the composition root serves every
+// host-agnostic value built once at the composition root serves every
 // host here (forge.Provider's ValidateToken doc: "take their host/token
 // explicitly so callers can validate ... a candidate token before it is
-// bound to (or replaces) an instance's own credential").
+// bound to (or replaces) an instance's own credential"), resolving each
+// call's own Kind fresh (forge.Resolver, loam-tmds.1).
 //
 // The error it returns is the ONLY channel through which this handler can
 // tell an admin WHY a token was refused: CredentialStatus has no reason

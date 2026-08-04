@@ -16,10 +16,13 @@ footer is configurable. `docs/persistence-spec.md`, `docs/web-spec.md`, and the
 ## Provider Interface
 
 The forge-specific surface is deliberately small. Git transport to the upstream
-is forge-agnostic; only the REST calls differ per forge. **Forgejo is the MVP
-implementation; GitHub is the close-behind second.**
+is forge-agnostic; only the REST calls differ per forge. **Two providers exist:
+Forgejo and GitHub** (`internal/forge/forgejo.go`, `internal/forge/github.go`).
+A repo's forge is resolved from its host, never configured or guessed
+per-request — see "Selecting a provider" below.
 
-Operations (Go interface, one implementation per forge):
+Operations (Go interface, one implementation per forge —
+`internal/forge.Provider`):
 
 - `ValidateToken(host, token) → error` — backs `CredentialService.SetUpstreamToken`;
   confirms the token works and has the scopes needed to open PRs.
@@ -32,12 +35,166 @@ Operations (Go interface, one implementation per forge):
 - `ClosePR(repo, pr_number) → error` — backs the admin's `CloseWorkBranch` on a
   branch with an open PR (best-effort; Loam opened the PR, Loam closes it).
 - `GitCredentials(token) → { username, password }` — the forge's convention for
-  token-authenticated HTTPS git (e.g. GitHub uses `x-access-token` as the
-  username; Forgejo takes the token as the password with any username).
+  token-authenticated HTTPS git.
+- `FindOpenPR(repo, head_branch, target_branch) → { pr_url, pr_number, found }` —
+  looks up (by listing and filtering, never by parsing a rejection message) the
+  PR a duplicate-PR rejection from `CreatePR` reported as already existing.
 
 Everything else — URL parsing to `<group>/<repo_name>` (a path split, uniform
 across forges), git fetch/push to the upstream, branch naming — lives in the
 core, outside the interface.
+
+### Selecting a provider
+
+`internal/forge.KindForHost(host)` maps a host to a `Kind` (`KindForgejo` or
+`KindGitHub`), and `NewProvider(host, token, ...)` builds the matching
+implementation. The rule: an **exact** match on `github.com` or its REST-API
+alias `api.github.com` is GitHub; everything else is Forgejo — self-hosted
+forges live at arbitrary domains, so there is no positive signal to require
+before trusting one, and requiring one would break every already-enrolled
+repo. A host **containing the substring "github"** but not one of the two
+exact aliases is rejected outright, naming the host, rather than silently
+treated as Forgejo — this is a narrow heuristic aimed at vendor-named GitHub
+Enterprise Server hosts, not general GHE detection; see "Limits" below for
+exactly what it does and does not catch.
+
+Two call shapes reach this seam:
+
+- **Repo-bound** (a `repos` row exists): the repo's `forge_host` resolves the
+  Kind, e.g. the PR poller and proposal acceptance
+  (`cmd/server/sync.go`'s `forgePRTracker`).
+- **Pre-repo** (no `repos` row yet): `CredentialService.SetUpstreamToken`
+  (validating a candidate token before it is stored) and
+  `RepoAdminService.EnrollRepo`'s upstream check both take a host explicitly
+  and resolve through the same function — there is no separate code path for
+  "before enrollment."
+
+`internal/forgehost.Canonicalize` folds `api.github.com` to `github.com`
+*before* either call shape sees the host, so a credential entered under
+either spelling is the same `credentials.host` row a repo enrolled against
+either spelling would look up.
+
+### What a third provider would have to supply
+
+Everything `internal/forge.Provider` lists above, plus:
+
+- A `Kind` constant and a case in `KindForHost`/`NewProvider` (`resolve.go`) —
+  by exact host match, the same discipline GitHub's alias handling follows,
+  not a substring guess that could silently steal a Forgejo host.
+- Its own base-URL derivation (see below — this is the first thing that
+  differs, and the property that decides how a test double for it gets
+  addressed).
+- Sentinel mapping for every failure `internal/forge/errors.go` names:
+  `ErrInvalidToken`, `ErrInsufficientScope`, `ErrRepoNotFound`,
+  `ErrNoWriteAccess`, `ErrDuplicatePR`, `ErrPRAlreadyMerged`. The wire shape
+  each maps from is provider-specific (see below); the sentinels themselves
+  are not negotiable.
+- A test double bounded to exactly what `Provider`'s seven methods call
+  (`internal/fakeforge`'s existing two dialects, `forgejoapi.go` and
+  `githubapi.go`, are the pattern: reuse the shared state — repos on disk, the
+  PR registry, the token registry — and add only the new wire encoding), and
+  an `internal/forgesuite.Harness` implementation so the *same* contract
+  assertions run against it unchanged.
+- A decision on rate limiting (see below) and on which token kind(s) it
+  supports, recorded the way GitHub's provider records classic-PAT-only.
+
+### Differences between Forgejo and GitHub that cost real time to discover
+
+These are exactly the traps `loam-tmds`'s own planning notes warned about
+before either provider existed; recorded here because each would otherwise be
+rediscovered per provider, once.
+
+- **Base URL derivation.** Forgejo's REST API lives at `<host>/api/v1` — the
+  same host the repo's git URL uses, just with a path suffix, so a Forgejo
+  `Provider` is bound to whatever host `repos.forge_host` says. GitHub's REST
+  API is the fixed `https://api.github.com`, independent of the fact that
+  every GitHub repo's git/web host is `github.com` — a *different* host
+  entirely, not a path suffix on the same one. GitHub Enterprise Server adds a
+  third shape, `https://<host>/api/v3`, which this implementation does not
+  derive at all (see "Limits" below).
+- **Duplicate-PR status code.** A second `CreatePR` for a head/target pair
+  that already has an open PR: Forgejo answers `409 Conflict` with a message
+  embedding the existing PR's *internal* id (not the per-repo number
+  `FindOpenPR` returns — never parse it). GitHub answers `422 Unprocessable
+  Entity` with a structured `errors[]` array; this implementation matches on
+  the message text "pull request already exists" rather than a specific
+  `errors[].code`, because GitHub's own troubleshooting docs document the
+  `errors[].code` vocabulary in general but not which value this specific
+  case uses — flagged in `github.go`, not guessed.
+- **"Merged" is a Loam-level state; both wire formats only carry a boolean.**
+  `GetPRState` reports Loam's own three-value `open`/`merged`/`closed`, but
+  *neither* forge's actual pull-request object has a three-valued state field
+  — both Forgejo's and GitHub's carry a `state` that is only `open`/`closed`,
+  plus a separate `merged` boolean. Both providers therefore do the identical
+  fold on read (`state=="closed" && merged` → `"merged"`), and getting that
+  fold wrong — reporting a merged PR as merely closed — is the single most
+  damaging thing either implementation of this method could get wrong, since
+  it would make Loam treat a merged proposal as abandoned. This is not a
+  place the two providers actually diverge; it is listed here because a
+  third provider's author, seeing "open/merged/closed" in the interface doc,
+  could otherwise assume their forge exposes that three-way split natively
+  and skip writing the fold.
+- **Rate limiting is real for one, not the other.** GitHub enforces primary
+  rate limits (`403`/`429` with `x-ratelimit-remaining: 0`, honoring
+  `Retry-After`/`x-ratelimit-reset`) and secondary rate limits (`403`/`429`
+  with no guaranteed header, only a message). `github.go`'s
+  `githubRateLimitError` classifies both *before* the generic 401/403 fold,
+  specifically so a throttled request can never present as an invalid
+  credential. Self-hosted Forgejo does not meaningfully rate-limit, and its
+  provider does nothing analogous — a polling cadence harmless against
+  Forgejo can get a GitHub-backed account throttled.
+- **Token kinds and git-over-HTTPS conventions.** Forgejo issues one token
+  kind. GitHub has three usable for git operations — classic PATs,
+  fine-grained PATs, and GitHub App installation tokens — with different scope
+  models and different git-over-HTTPS username conventions. This
+  implementation supports **classic PATs only** (see "Limits" below); its
+  git-over-HTTPS convention happens to coincide with Forgejo's (any username,
+  token as password — verified against GitHub's own docs), which is why
+  `internal/gittransport`'s shared, host-agnostic credential converter needs
+  no per-Kind branch today. That would stop being true for an App
+  installation token, which conventionally uses `x-access-token` as the
+  username.
+
+### Limits (operator-facing)
+
+An operator should learn these from this document, not from a failure:
+
+- **GitHub Enterprise Server is not supported, and detection of it is a
+  heuristic, not a guarantee.** A host containing the substring "github" but
+  not matching `github.com`/`api.github.com` exactly is refused at
+  credential/enrollment time with an explicit error naming the host, rather
+  than silently treated as Forgejo. **This only catches GHE installs an
+  operator happened to name after the vendor** (`github.example.com`,
+  `github-internal.acme.com`). GitHub Enterprise Server installs at whatever
+  hostname the customer chooses, and most don't mention GitHub at all —
+  `git.acme.com`, `source.corp.io`, `scm.example.net` are all ordinary GHE
+  hostnames, and every one of them resolves silently to Forgejo, unmitigated
+  (`internal/forge.TestKindForHost_NonGitHubNamedEnterpriseHostsResolveToForgejoUnmitigated`
+  demonstrates this directly). If you run GitHub Enterprise Server, do not
+  rely on this check to catch a misconfiguration — Loam has no way to tell
+  your GHE host apart from a self-hosted Forgejo at the same shape of
+  hostname, and will send your token to a Forgejo-shaped API URL that fails
+  in a way that looks like a bad credential, not "unsupported forge."
+  **This is also a narrow, deliberate behaviour change**: a self-hosted
+  Forgejo whose own hostname happens to contain "github" (e.g.
+  `github-mirror.internal.corp`) previously resolved fine and now fails to
+  resolve at all, refused by the same heuristic — see `KindForHost`'s own
+  doc comment (`internal/forge/resolve.go`) for why that tradeoff was
+  accepted rather than avoided.
+- **Only classic personal-access tokens are supported for GitHub.**
+  Fine-grained PATs and GitHub App installation tokens are not — see
+  `github.go`'s own doc comment for the reasoning (no generic scope-listing
+  header for fine-grained PATs; a different lifecycle and git convention for
+  App tokens).
+- **`ValidateToken` requires GitHub's `repo` scope unconditionally.** A token
+  scoped only to `public_repo` authenticates but is rejected, because
+  `ValidateToken` has no way to know in advance whether the repos it will be
+  used against are private.
+- **GitHub rate limits are honored defensively, not adaptively.** This
+  provider classifies and reports rate-limit rejections distinctly (see
+  above) but does not itself back off or retry; a caller polling on a fixed
+  interval against a GitHub-backed repo should budget for GitHub's documented
+  limits.
 
 ## Upstream Transport
 

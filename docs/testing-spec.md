@@ -120,7 +120,13 @@ standards.
   validation (valid, invalid, missing scopes), `CheckRepo` read/write probes, PR
   create/state/close, `GitCredentials` actually authenticating a clone and push. This
   suite is what licenses the acceptance layer to trust the fake. Runs per-PR against
-  the fake; nightly against real Forgejo.
+  the fake; nightly against real Forgejo. **GitHub (loam-tmds.3) runs the identical
+  suite**, unchanged, against a GitHub-shaped fake per-PR
+  (`TestProviderContract_GitHubOverFake`); its real-GitHub leg
+  (`TestProviderContract_RealGitHub`, `task test:contract:github`) is written and
+  gated the same way the Forgejo one is, but as of loam-tmds has never been run —
+  it creates and deletes real repositories, which needs a maintainer-supplied
+  dedicated GitHub account, not an agent's.
 
 ## Layer 3 — End-to-End (nightly / pre-release)
 
@@ -147,7 +153,7 @@ E2E exists to prove the shipped artifacts compose; behavioral coverage lives in 
 | Stage | Suites | Budget |
 | --- | --- | --- |
 | Per-PR gate | lint, unit (existing standards), integration, acceptance (fake forge) | minutes |
-| Nightly | provider contract vs. real Forgejo, e2e smoke, Playwright, compose deployment smoke | tens of minutes |
+| Nightly | provider contract vs. real Forgejo, provider contract vs. real GitHub (unexecuted as of loam-tmds — see Layer 2), e2e smoke, Playwright, compose deployment smoke | tens of minutes |
 | Pre-release | full nightly set, green required | — |
 
 Taskfile targets mirror the stages: `task test:integration`, `task test:acceptance`,

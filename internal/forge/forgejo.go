@@ -242,6 +242,27 @@ func (f *Forgejo) ClosePR(ctx context.Context, repo string, prNumber int) error 
 // GitCredentials returns Forgejo's git-over-HTTPS convention: the token
 // as the password, with any username.
 func (f *Forgejo) GitCredentials(ctx context.Context, token string) (string, string, error) {
+	return gitCredentialsConvention(token)
+}
+
+// gitCredentialsConvention is the git-over-HTTPS username/password
+// convention both Forgejo and GitHub (classic PAT, loam-tmds.2's chosen
+// token kind) share: any non-empty username, with token as the
+// password. Factored out so Resolver -- which must answer this without
+// knowing or caring which Kind actually owns the request -- and both
+// concrete providers read it from one place.
+//
+// GitHub's classic-PAT convention genuinely coincides with Forgejo's
+// here, not by assumption: "Although you are required to enter your
+// username along with your personal access token, the username is not
+// used to authenticate you. Instead, the personal access token is used
+// to authenticate you." (docs.github.com/en/authentication/keeping-
+// your-account-and-data-secure/managing-your-personal-access-tokens,
+// fetched 2026-08-04). App installation tokens use a different
+// convention (x-access-token as username) and fine-grained PATs are a
+// different token kind entirely -- neither is in scope, see github.go's
+// token-kind decision.
+func gitCredentialsConvention(token string) (string, string, error) {
 	if token == "" {
 		return "", "", fmt.Errorf("git credentials: %w", ErrInvalidToken)
 	}
