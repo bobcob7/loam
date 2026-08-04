@@ -19,16 +19,34 @@
 // drop-then-insert for REPARSED files only. The deleted/renamed-file drops
 // (diffplan.Plan.DropFiles) belong to the orchestrator, as does the commit.
 //
-// Failure is all-or-nothing here, unlike chunker.ChunkFiles's per-file
-// resilience: an embed failure or a store failure returns immediately
-// rather than skipping the file and continuing. That is not a stylistic
-// difference, it is docs/ingestion-spec.md "Consistency & Failure" --
-// "stale-but-consistent is the rule: on any failure, including an
-// unreachable embedder, nothing commits" -- so there is nothing to gain
-// from pressing on into a transaction that is going to roll back. The
-// per-file tolerance that does exist lives one step earlier, in
-// ChunkFiles, which drops binary and unparseable files from the batch
-// before this package ever sees them.
+// Embedding (Prepare) is still all-or-nothing: an embed failure, or a
+// vector count/width that disagrees with the Embedder's own Dimension(),
+// returns immediately rather than skipping the file, because Prepare has
+// no partial result to skip past -- a file with no vector has nothing
+// Persist could write for it anyway.
+//
+// Persist's per-file WRITES are not (loam-c94.21): a file the store
+// rejects -- a malformed row, a constraint, a size limit -- is counted in
+// Stats.FilesRejected, logged, and skipped, exactly the "skipped and
+// counted, never silently" treatment chunker.ChunkFiles already gives a
+// binary or unparseable file one step earlier. A cancelled context or an
+// infrastructure-class failure (a dead pool, a closed transaction) is not
+// survivable and still aborts the whole batch immediately -- see Persist's
+// own doc comment for the exact line this bead draws and why.
+//
+// That per-file tolerance is necessary but NOT sufficient to keep one bad
+// file from costing a whole repo when st is bound to a shared transaction
+// (chunkstore.NewInTx, which is how the swap orchestrator, loam-c94.12,
+// actually constructs it): Postgres aborts the ENTIRE transaction, not
+// just the offending statement, the moment any statement in it errors --
+// confirmed against a real server in this package's own integration
+// tests -- so a rejection anywhere in the batch dooms that transaction's
+// COMMIT regardless of how many files Persist still manages to attempt
+// afterward, INCLUDING the ones that landed before the rejection. Making
+// "one bad file costs one file, not a repo" true end to end needs a
+// per-file SAVEPOINT (or equivalent isolation) at the point
+// chunkstore.ReplaceFileChunks runs, which is out of this package's reach
+// -- see Persist's doc comment and TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit.
 package vectors
 
 import (

@@ -19,6 +19,49 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
+// capturingHandler is a minimal slog.Handler that keeps every record it
+// receives, so a test can assert not just that a rejection returned the
+// right stats but that it was ALSO logged, and logged naming the right
+// file -- Persist's contract is "counted AND logged," and a test that only
+// checks Stats cannot tell those apart from a bug that drops the log line.
+type capturingHandler struct {
+	records *[]slog.Record
+}
+
+func (h capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r)
+	return nil
+}
+
+func (h capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h capturingHandler) WithGroup(string) slog.Handler { return h }
+
+// newCapturingLogger returns a logger backed by capturingHandler and a
+// pointer to its recorded slog.Records, for tests that need to assert on
+// log content rather than just Stats/error return values.
+func newCapturingLogger() (*slog.Logger, *[]slog.Record) {
+	records := &[]slog.Record{}
+	return slog.New(capturingHandler{records: records}), records
+}
+
+// recordAttr returns the string value of key on r, or "" if r carries no
+// such attribute -- a small helper so log-content assertions read as plain
+// equality checks.
+func recordAttr(r slog.Record, key string) string {
+	var out string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			out = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return out
+}
+
 // testDimension is the narrow vector width the unit tests in this package
 // run against. It is deliberately NOT 768: these tests exercise this
 // package's own batching, offset arithmetic, and width checking, none of

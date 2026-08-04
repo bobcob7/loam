@@ -136,6 +136,17 @@ func storedChunks(t *testing.T, repoID uuid.UUID, files ...string) []storedChunk
 // orchestrator (loam-c94.12) will use, via chunkstore.NewInTx. commit=false
 // rolls back instead, so a test can prove nothing was auto-committed
 // underneath.
+//
+// A Commit failure is returned to the caller rather than asserted away
+// here (require.NoError used to sit on this line): since loam-c94.21,
+// IngestFileChunks can return a nil error for a batch that still contained
+// a rejected file (see Persist's doc comment for why), and the shared
+// transaction that rejection poisoned can still fail to commit even
+// though IngestFileChunks itself reported no error -- exactly the gap
+// TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit
+// exists to document. A caller of this helper must be able to see that
+// failure, not have it turn into a test process abort three frames away
+// from the assertion that actually cares.
 func ingestInTx(t *testing.T, e embedder, repoID uuid.UUID, files []chunker.FileChunks, commit bool) (Stats, error) {
 	t.Helper()
 	ctx := t.Context()
@@ -151,7 +162,9 @@ func ingestInTx(t *testing.T, e embedder, repoID uuid.UUID, files []chunker.File
 	if ingestErr != nil || !commit {
 		return stats, ingestErr
 	}
-	require.NoError(t, tx.Commit(ctx))
+	if commitErr := tx.Commit(ctx); commitErr != nil {
+		return stats, commitErr
+	}
 	committed = true
 	return stats, nil
 }
@@ -358,6 +371,19 @@ func TestIngestFileChunks_ReplacingOneFile_LeavesOtherFilesRowsUntouched(t *test
 // width disagrees with the column must fail loudly at INSERT and leave
 // nothing behind -- never a truncated or padded vector that inserts
 // cleanly and misranks forever.
+// An 8-wide vector against a vector(768) column is, from this package's own
+// dimension check's point of view, no different from any other embedder --
+// Embed and Dimension() agree with each other, so errDimensionMismatch
+// never fires; only Postgres itself, at INSERT, can catch it. That makes it
+// a genuine per-file STORE rejection under loam-c94.21's policy (a "type
+// error," in the bead's own words, same bucket as a constraint or a size
+// limit) rather than a Prepare-time abort, so IngestFileChunks now reports
+// it as Stats.FilesRejected and returns no error of its own -- Postgres's
+// dimension complaint survives in the ERROR log instead of the return
+// value. The shared transaction is still poisoned by the rejection, so the
+// caller's own commit fails regardless (see
+// TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit
+// for that in isolation); either way, nothing ends up in the table.
 func TestIngestFileChunks_EmbedderWidthDisagreesWithColumn_FailsLoudlyAndWritesNothing(t *testing.T) {
 	t.Parallel()
 	repoID := newIntegrationRepo(t)
@@ -371,11 +397,28 @@ func TestIngestFileChunks_EmbedderWidthDisagreesWithColumn_FailsLoudlyAndWritesN
 			return out, nil
 		},
 	}
+	logger, records := newCapturingLogger()
+	ctx := t.Context()
+	tx, err := sharedPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	_, err := ingestInTx(t, narrow, repoID, []chunker.FileChunks{unitsFor("pkg/narrow/narrow.go", "func Alpha() {}")}, true)
+	stats, ingestErr := New(narrow, logger).IngestFileChunks(ctx, chunkstore.NewInTx(tx, testLogger()), repoID, testBranch,
+		[]chunker.FileChunks{unitsFor("pkg/narrow/narrow.go", "func Alpha() {}")})
+	require.NoError(t, ingestErr, "a per-file store rejection must not abort IngestFileChunks on its own")
+	assert.Equal(t, 1, stats.FilesRejected, "an 8-wide vector against a 768-wide column must never reach the table silently -- it must be counted as rejected")
 
-	require.Error(t, err, "an 8-wide vector must never reach a vector(768) column silently")
-	assert.Contains(t, err.Error(), "768", "Postgres's own dimension complaint must survive to the caller")
+	var rejectionLog *slog.Record
+	for i, r := range *records {
+		if r.Level == slog.LevelError {
+			rejectionLog = &(*records)[i]
+		}
+	}
+	require.NotNil(t, rejectionLog, "the rejection must be logged, not only counted")
+	assert.Contains(t, recordAttr(*rejectionLog, "error"), "768", "Postgres's own dimension complaint must survive to the log")
+
+	commitErr := tx.Commit(ctx)
+	require.Error(t, commitErr, "the rejection still poisoned the shared transaction")
 	assert.Empty(t, storedChunks(t, repoID), "a failed dimension check must leave the table exactly as it was")
 }
 
@@ -433,6 +476,74 @@ func TestIngestFileChunks_BatchLargerThanMaxEmbedBatch_PersistsEveryChunkWithIts
 		require.NoError(t, err)
 		assert.Equal(t, want[0], row.embedding, "chunk %d, which crossed a request boundary at %d, must keep its own vector", i, maxEmbedBatch)
 	}
+}
+
+// loam-c94.21's central finding, proved against a REAL server rather than
+// assumed from documentation: Persist's own per-file skip-and-continue
+// (Stats.FilesRejected, no error returned for a survivable rejection) is
+// necessary but not sufficient to save a batch when st is bound to the
+// swap orchestrator's shared transaction, exactly how production wires it
+// (internal/ingest/orchestrator/production.go's vectorAdapter.Persist).
+// Postgres aborts the ENTIRE transaction -- not merely the offending
+// statement -- the instant one statement in it errors, with no way back
+// short of a SAVEPOINT neither this package nor
+// chunkstore.ReplaceFileChunks currently takes. The rejected file here is
+// deliberately the LAST one Persist touches, so there is no cascade of
+// SUBSEQUENT calls to blame: the commit fails purely because of the one
+// rejection, proving the gap is inherent to the shared transaction, not to
+// how many files came after it.
+func TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit(t *testing.T) {
+	t.Parallel()
+	repoID := newIntegrationRepo(t)
+	ctx := t.Context()
+	tx, err := sharedPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	badContent := string([]byte{0x66, 0x6f, 0x6f, 0xff, 0x62, 0x61, 0x72}) // "foo\xffbar": 0xff alone is not valid UTF-8
+	files := []chunker.FileChunks{
+		unitsFor("pkg/good/good.go", "func Good() {}"),
+		unitsFor("pkg/bad/bad.go", badContent),
+	}
+
+	stats, ingestErr := New(testembed.New(), testLogger()).IngestFileChunks(ctx, chunkstore.NewInTx(tx, testLogger()), repoID, testBranch, files)
+	require.NoError(t, ingestErr, "Persist's own per-file policy must treat one bad-byte rejection as survivable and return no error on its own, even though the rejected file is last in the batch")
+	assert.Equal(t, 1, stats.FilesReplaced, "the good file's own ReplaceFileChunks call must have gone through")
+	assert.Equal(t, 1, stats.FilesRejected, "the bad-byte file must be counted as rejected, not silently dropped")
+
+	commitErr := tx.Commit(ctx)
+	require.Error(t, commitErr, "the shared transaction is unconditionally poisoned once ANY statement inside it errors -- Persist skipping past the rejection cannot undo that, only a SAVEPOINT around each ReplaceFileChunks call (in chunkstore, outside this package) can")
+	assert.Contains(t, commitErr.Error(), "rollback")
+	assert.Empty(t, storedChunks(t, repoID), "nothing committed, not even the good file Stats reported as replaced, because the whole shared transaction rolled back")
+}
+
+// Decision #3 from loam-c94.21's bead (confirmed from ReplaceFileChunks's
+// own doc comment -- "a failure partway through leaves the file's prior
+// chunks intact rather than half-replaced" -- and here from a real
+// rollback, not merely read): a reparse the store rejects must leave the
+// file's PRIOR chunks exactly as they were. Stale-but-present, matching
+// docs/ingestion-spec.md's stale-but-consistent rule, never emptied and
+// never half-replaced.
+func TestIngestFileChunks_RejectedReparse_LeavesTheFilesPriorChunksIntact(t *testing.T) {
+	t.Parallel()
+	repoID := newIntegrationRepo(t)
+	e := testembed.New()
+	const path = "pkg/stale/stale.go"
+
+	_, err := ingestInTx(t, e, repoID, []chunker.FileChunks{unitsFor(path, "func Old() {}")}, true)
+	require.NoError(t, err)
+	before := storedChunks(t, repoID, path)
+	require.Len(t, before, 1)
+
+	ctx := t.Context()
+	tx, err := sharedPool.Begin(ctx)
+	require.NoError(t, err)
+	badContent := string([]byte{0x62, 0x61, 0x64, 0xff}) // "bad\xff"
+	_, ingestErr := New(e, testLogger()).IngestFileChunks(ctx, chunkstore.NewInTx(tx, testLogger()), repoID, testBranch, []chunker.FileChunks{unitsFor(path, badContent)})
+	_ = ingestErr
+	require.NoError(t, tx.Rollback(ctx), "the caller (the swap orchestrator, loam-c94.12, in production) rolls back on any writeSwap failure -- this test rolls back the same way rather than relying on Commit to fail on its own")
+
+	assert.Equal(t, before, storedChunks(t, repoID, path), "a rejected reparse must leave the file's PRIOR chunks byte-for-byte as they were, never emptied and never left half-replaced")
 }
 
 // Guard the seam itself: *chunkstore.Store built over a real transaction
