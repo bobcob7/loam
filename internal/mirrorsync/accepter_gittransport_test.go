@@ -175,13 +175,14 @@ func newRealAccepter(t *testing.T, f acceptFixture, wb workbranchstore.WorkBranc
 func acceptWorkBranch(name string) workbranchstore.WorkBranch {
 	title, description := "Real push", "A real push over the real transport."
 	return workbranchstore.WorkBranch{
-		ID:          uuid.New(),
-		Name:        name,
-		Target:      "main",
-		Title:       &title,
-		Description: &description,
-		State:       workbranchstore.StateReviewed,
-		Conflict:    workbranchstore.ConflictNone,
+		ID:            uuid.New(),
+		Name:          name,
+		Target:        "main",
+		Title:         &title,
+		Description:   &description,
+		State:         workbranchstore.StateReviewed,
+		Conflict:      workbranchstore.ConflictNone,
+		UpstreamDrift: workbranchstore.DriftNone,
 	}
 }
 

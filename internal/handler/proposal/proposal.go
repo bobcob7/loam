@@ -102,7 +102,16 @@ func New(
 // non-stale approve "awaiting an admin decision -- either it has no
 // upstream PR yet, or its existing PR's branch is behind the work branch (a
 // conflict catch-up that has been re-reviewed)". The first three conditions
-// are evaluated here exactly, as before. The final disjunction now is too:
+// are evaluated here exactly, as before.
+//
+// A branch carrying upstream drift is excluded alongside a conflicted one
+// (loam-giq.11, docs/web-spec.md -> "Upstream drift is surfaced, not
+// listed"). It is not awaiting an accept decision: AcceptProposal refuses
+// it, so listing it would offer the admin a button that cannot work. What
+// the admin needs about it -- that it is diverged, and how that differs
+// from a conflict -- travels on the WorkBranch message itself now
+// (workBranchToProto), which is the surface every other view of a branch
+// already reads. The final disjunction now is too:
 // mirrorsync.StoreProposalAccepter records the tip it pushes as
 // work_branches.accepted_tip on every accept (both a first accept and a
 // re-accept fast-forward), so "the PR's branch is behind" reduces to a live
@@ -134,7 +143,7 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 	repoNames := make(map[uuid.UUID]string, len(candidates))
 	proposals := make([]*adminv1.Proposal, 0, len(candidates))
 	for _, wb := range candidates {
-		if wb.Conflict != workbranchstore.ConflictNone {
+		if wb.Conflict != workbranchstore.ConflictNone || wb.UpstreamDrift != workbranchstore.DriftNone {
 			continue
 		}
 		approvals, err := h.verdicts.CurrentRoundApproveCount(ctx, wb.ID)
@@ -222,8 +231,8 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 //
 // # Preconditions checked here versus in the accepter
 //
-// State and conflict are re-checked here, ahead of the delegation, even
-// though the accepter checks them too. That is not redundancy for its own
+// State, conflict, and upstream drift are re-checked here, ahead of the
+// delegation, even though the accepter checks all three too. That is not redundancy for its own
 // sake: the accepter's sentinels are unexported, so an error surfacing from
 // there cannot be classified at this boundary and would collapse to
 // CodeInternal, whereas "this branch is not reviewed" and "this branch is
@@ -244,6 +253,9 @@ func (h *Handler) AcceptProposal(ctx context.Context, req *connect.Request[admin
 	}
 	if wb.Conflict != workbranchstore.ConflictNone {
 		return nil, h.errors.ToConnectErr(fmt.Errorf("work branch %s/%s is flagged %s against its target -- it must be caught up and re-reviewed before it can be accepted: %w", repo, name, wb.Conflict, handler.ErrFailedPrecondition))
+	}
+	if wb.UpstreamDrift != workbranchstore.DriftNone {
+		return nil, h.errors.ToConnectErr(fmt.Errorf("work branch %s/%s has upstream drift %s -- its loam/%s branch on the forge was moved somewhere this branch cannot fast-forward into, and no push Loam is willing to make reconciles it; reconcile the upstream branch by hand first: %w", repo, name, wb.UpstreamDrift, name, handler.ErrFailedPrecondition))
 	}
 	approvals, err := h.verdicts.CurrentRoundApproveCount(ctx, wb.ID)
 	if err != nil {
@@ -600,9 +612,48 @@ func stateToProto(s workbranchstore.State) loamv1.WorkBranchState {
 	}
 }
 
+// conflictToProto maps a workbranchstore.Conflict to its proto enum value,
+// a second copy for the same reason as outcomeToProto. An unrecognized
+// value becomes UNSPECIFIED, never NONE: NONE is a positive claim that the
+// branch merges cleanly into its target, and this admin surface is exactly
+// where such a claim must not be invented.
+func conflictToProto(c workbranchstore.Conflict) loamv1.WorkBranchConflict {
+	switch c {
+	case workbranchstore.ConflictNone:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE
+	case workbranchstore.ConflictFlagged:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_FLAGGED
+	case workbranchstore.ConflictReset:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET
+	default:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED
+	}
+}
+
+// driftToProto maps a workbranchstore.UpstreamDrift to its proto enum
+// value, with the same treatment of an unrecognized value as
+// conflictToProto and for the same reason.
+func driftToProto(d workbranchstore.UpstreamDrift) loamv1.UpstreamDrift {
+	switch d {
+	case workbranchstore.DriftNone:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_NONE
+	case workbranchstore.DriftDiverged:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED
+	default:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED
+	}
+}
+
 // workBranchToProto renders a work_branches row as the shared loam.v1
 // WorkBranch the admin protos reuse (docs/web-spec.md: "Admin protos reuse
 // WorkBranch, Page, and PageInfo from loam.v1").
+//
+// conflict and upstream_drift ride along (loam-giq.11). This is the surface
+// the second one exists for: a diverged branch is deliberately NOT listed
+// as a proposal (see ListProposals), so the console learns about it from
+// the work branch itself, and it must be able to tell "the target moved,
+// catch up" apart from "someone rewrote the branch Loam pushed" -- two
+// different remedies -- rather than collapsing them into one badge.
 func workBranchToProto(repoName string, wb workbranchstore.WorkBranch) *loamv1.WorkBranch {
 	return &loamv1.WorkBranch{
 		Repo:          repoName,
@@ -613,6 +664,8 @@ func workBranchToProto(repoName string, wb workbranchstore.WorkBranch) *loamv1.W
 		State:         stateToProto(wb.State),
 		Author:        wb.Author,
 		UpstreamPrUrl: wb.UpstreamPRURL,
+		Conflict:      conflictToProto(wb.Conflict),
+		UpstreamDrift: driftToProto(wb.UpstreamDrift),
 	}
 }
 

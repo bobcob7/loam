@@ -78,6 +78,13 @@ func reviewedBranch() workbranchstore.WorkBranch {
 		// the bare name here would hide the shape that bug is about.
 		Author:   "scout-7f3a-reviewer",
 		Conflict: workbranchstore.ConflictNone,
+		// Both enum-like columns are NOT NULL with a 'none' default, so a
+		// row read from Postgres never carries the Go zero value for either.
+		// Spelling them out is what keeps this fixture a faithful stand-in
+		// for one: the accept gate and the queue predicate both reject
+		// anything that is not exactly 'none', so a fixture leaving one
+		// empty would be testing a row the database cannot produce.
+		UpstreamDrift: workbranchstore.DriftNone,
 	}
 }
 

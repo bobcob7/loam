@@ -677,9 +677,49 @@ func protoToState(s loamv1.WorkBranchState) workbranchstore.State {
 	}
 }
 
+// conflictToProto maps a workbranchstore.Conflict to its proto enum value.
+// An unrecognized value (including the zero value a WorkBranch that was
+// never read from the database carries) becomes UNSPECIFIED rather than
+// NONE, deliberately: NONE is a positive claim that the branch merges
+// cleanly, and a value this function does not recognize is not evidence of
+// that.
+func conflictToProto(c workbranchstore.Conflict) loamv1.WorkBranchConflict {
+	switch c {
+	case workbranchstore.ConflictNone:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE
+	case workbranchstore.ConflictFlagged:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_FLAGGED
+	case workbranchstore.ConflictReset:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET
+	default:
+		return loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_UNSPECIFIED
+	}
+}
+
+// driftToProto maps a workbranchstore.UpstreamDrift to its proto enum
+// value, with the same treatment of an unrecognized value as
+// conflictToProto and for the same reason.
+func driftToProto(d workbranchstore.UpstreamDrift) loamv1.UpstreamDrift {
+	switch d {
+	case workbranchstore.DriftNone:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_NONE
+	case workbranchstore.DriftDiverged:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED
+	default:
+		return loamv1.UpstreamDrift_UPSTREAM_DRIFT_UNSPECIFIED
+	}
+}
+
 // workBranchToProto converts a workbranchstore.WorkBranch to its proto
 // representation, given the enrolled repo name the store's WorkBranch
 // itself does not carry (it only holds RepoID).
+//
+// conflict and upstream_drift are on the wire here (loam-giq.11) because
+// they were server-internal before it: conflict was read only by
+// ListProposals' exclusion and AcceptProposal's precondition, so a branch
+// the server had demoted or flagged looked, to every client, exactly like
+// one it had not. Both are read-only to clients -- nothing in any request
+// message sets either -- and both are set and cleared by the sync cycle.
 func workBranchToProto(repoName string, wb workbranchstore.WorkBranch) *loamv1.WorkBranch {
 	return &loamv1.WorkBranch{
 		Repo:          repoName,
@@ -690,5 +730,7 @@ func workBranchToProto(repoName string, wb workbranchstore.WorkBranch) *loamv1.W
 		State:         stateToProto(wb.State),
 		Author:        wb.Author,
 		UpstreamPrUrl: wb.UpstreamPRURL,
+		Conflict:      conflictToProto(wb.Conflict),
+		UpstreamDrift: driftToProto(wb.UpstreamDrift),
 	}
 }
