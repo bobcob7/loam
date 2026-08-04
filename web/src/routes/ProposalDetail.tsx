@@ -4,12 +4,15 @@ import { useState } from "react";
 import { Button } from "../components/Button";
 import { CopyField } from "../components/CopyField";
 import { Dialog } from "../components/Dialog";
+import { DiffView } from "../components/DiffView";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Field } from "../components/Field";
 import { Form, FormActions } from "../components/Form";
+import { Markdown } from "../components/Markdown";
 import { Pager } from "../components/Pager";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, type TableColumn } from "../components/Table";
+import { ThreadList } from "../components/ThreadList";
 import { verdictSummaryIntent, workBranchStateIntent } from "../components/statusIntent";
 import { useMutationInvalidating } from "../data/invalidation";
 import { mapConnectError, type ErrorOutcome } from "../data/mapConnectError";
@@ -19,7 +22,7 @@ import {
   closeWorkBranch,
   listProposals,
 } from "../gen/loam/admin/v1/proposal-ProposalService_connectquery";
-import type { Thread, VerdictSummary } from "../gen/loam/v1/common_pb";
+import type { VerdictSummary } from "../gen/loam/v1/common_pb";
 import {
   getWorkBranch,
   getWorkBranchDiff,
@@ -47,14 +50,6 @@ function errorMessage(outcome: ErrorOutcome): string {
     return "Authentication required. Refresh the page to sign in again.";
   }
   return outcome.message;
-}
-
-/** A thread's anchor rendered as a location, or "General comment" when unanchored. */
-function anchorLabel(thread: Thread): string {
-  if (thread.anchor === undefined) return "General comment";
-  return thread.anchor.line === undefined
-    ? thread.anchor.file
-    : `${thread.anchor.file}:${thread.anchor.line}`;
 }
 
 const verdictRowKey = (verdict: VerdictSummary): string => `${verdict.reviewer}-${verdict.round}`;
@@ -188,7 +183,9 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
         </span>
         <span className={styles.metaItem}>Author: {wb.author}</span>
       </p>
-      {wb.description !== "" && <p>{wb.description}</p>}
+      {/* Agent-authored and untrusted: it goes through the shared renderer,
+          never into markup of its own (components/Markdown.tsx). */}
+      <Markdown source={wb.description} />
 
       <section className={styles.section}>
         <h2>Diff</h2>
@@ -196,7 +193,7 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
         {diffQuery.isError && (
           <ErrorBanner title="Could not load diff" message={errorMessage(mapConnectError(diffQuery.error))} />
         )}
-        {diffQuery.data !== undefined && <pre className={styles.diff}>{diffQuery.data.diff}</pre>}
+        {diffQuery.data !== undefined && <DiffView diff={diffQuery.data.diff} />}
       </section>
 
       <section className={styles.section}>
@@ -230,25 +227,7 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
             {threads.length === 0 ? (
               <p>No comment threads yet.</p>
             ) : (
-              <ul className={styles.threadList}>
-                {threads.map((thread) => (
-                  <li key={thread.id} className={styles.thread}>
-                    <p className={styles.threadHeading}>
-                      <span className={styles.mono}>{anchorLabel(thread)}</span>
-                      {thread.resolved && <StatusBadge intent="success">Resolved</StatusBadge>}
-                    </p>
-                    <ul className={styles.commentList}>
-                      {thread.comments.map((comment, index) => (
-                        <li key={`${thread.id}-${index}`}>
-                          <span className={styles.commentAuthor}>{comment.author}</span>
-                          {` (round ${comment.round}): `}
-                          {comment.body}
-                        </li>
-                      ))}
-                    </ul>
-                  </li>
-                ))}
-              </ul>
+              <ThreadList threads={threads} />
             )}
             {commentsQuery.data.pageInfo !== undefined && (
               <Pager

@@ -225,11 +225,81 @@ codegen, routing, build/embed) is designed in [`docs/web-frontend-spec.md`](web-
 - **Credentials** — set and validate the upstream token per forge host.
 - **Roles** — edit agent roles: granted operations, instructions, defaults.
 - **Proposals** — the queue of reviewed work branches: view one (title/description/diff/
-  verdicts), then accept (create the upstream PR), request a re-review, or close.
+  verdicts), then accept (create the upstream PR), request a re-review, or close. The detail
+  screen's reading surface is specified below.
 - **Jobs** — ingest job activity across repos (queued/running/succeeded/failed, timings,
   errors), and a per-repo reindex action.
 
 TODO — per-screen detail, navigation, and states.
+
+### Proposal detail: reading a proposal
+
+The screen an admin uses to decide whether to accept code. It is READ-ONLY as far as the
+conversation goes: there is no commenting, replying or resolving from the UI, deliberately
+(`loam-ba6a`). The three terminal actions — accept, request another review round, close —
+are the only writes.
+
+**Agent-authored prose is rendered as markdown, and treated as untrusted.** The work
+branch description and every comment body are written by agents, and a comment body in
+particular is written by a *different* agent to the branch's author — a reviewer, under a
+separate identity, whose role is to be adversarial about the change. Both go through one
+shared renderer (`web/src/components/Markdown.tsx`, react-markdown + remark-gfm) with:
+
+- **raw HTML passthrough off** — `rehype-raw` is not installed and must not be added; a
+  `<script>` or an `onerror` attribute in a body renders as inert text, not as markup;
+- **link and image URLs restricted to `http:`, `https:`, `mailto:` and relative** by an
+  explicit `urlTransform`. A denied URL becomes `""`. The check is on the parsed scheme,
+  case-insensitively, so `JaVaScRiPt:` and the character-reference form
+  `&#106;avascript&#x3A;` are denied too;
+- **`rel="noreferrer noopener"`** on every link, so an untrusted destination cannot reach
+  `window.opener` or learn the proposal URL from the referrer;
+- **images are not auto-loaded.** `![](https://evil.example/beacon.png)` in a comment body
+  is a read receipt: it fires on page open with no interaction and hands the reader's IP,
+  user-agent and a timestamp to whoever wrote the comment. A `referrerPolicy` does not fix
+  that — it removes the proposal URL from the request, but the request itself is the leak.
+  An image therefore renders as a link the reader can choose to open; one whose source
+  failed the scheme check renders as inert text with no destination at all.
+
+These are asserted against the rendered DOM, both on the component and at the comment-body
+call site, never against the configuration. There is **no syntax highlighting**: a fenced
+block renders as a styled, unhighlighted `<pre><code>`.
+
+**The diff is per-file and collapsible** (`web/src/components/DiffView.tsx`). A
+files-changed index — path, added and removed counts, and a whole-change total — is readable
+without expanding anything, followed by one native `<details>` section per file plus
+Expand all / Collapse all. Every file starts **collapsed**, with no size threshold and no
+exception for a single-file diff, so the page's height is a function of the file count
+alone and the sections below the diff stay reachable. Diff bodies are one `<pre>` per file
+with no per-line elements — which is what keeps collapsed sections cheap enough to leave
+mounted, so find-in-page still reaches them. The unified diff is split by tracking each
+`@@` hunk's declared line counts rather than by splitting on `diff --git`, for two reasons
+a split cannot serve: a diff may carry **no `diff --git` lines at all** (a bare
+`--- `/`+++ ` pair, as POSIX `diff -u` and this screen's own test fixture produce — note
+that `GetWorkBranchDiff` itself always emits `diff --git`, since the server shells out to
+`git diff --no-ext-diff`, so this defends fixtures and hand-written patches rather than the
+live path), and the `---`/`+++` header lines start with `-` and `+`, so per-file
+added/removed counts are only correct if the parser knows where each hunk's body begins. A
+header-shaped line in a file's *content* arrives prefixed (`+diff --git …`) and is
+respected as content, which is asserted.
+
+**Threads are arranged from what the data model actually carries.** `Thread` has no
+parent, reply-to or continuation field (`proto/loam/v1/common.proto`), so no cross-thread
+relationship is drawn — nothing nests one thread inside another or numbers them as a
+sequence, because a wrong guess about which threads are related is worse than a flat list.
+Three derivations are made (`web/src/components/ThreadList.tsx`):
+
+- **Round transitions within a thread.** `Comment.round` is the comment's own round and can
+  be later than `Thread.round`. Comments are grouped into consecutive same-round runs under
+  a round label, and a run later than the round the thread was raised in is marked in words
+  as well as colour. This is the only view that shows a conversation developing over time.
+- **Grouping by anchor file**, threads ordered by anchor line within a file (whole-file
+  anchors first, ties left in server order), files in the order the server sent them.
+  `ListComments` is paginated, so a group is the threads on that file *within the current
+  page*; the heading is the file path and claims nothing more. An anchor records the line as
+  it was when the thread was raised and cannot be re-anchored (`loam-hi5o.24`), so each
+  thread also shows the round it was raised in.
+- **Resolved threads collapse by default**, unresolved ones do not. An explicit toggle wins
+  over the default, including across the screen's polling refetches.
 
 ## Open Questions
 

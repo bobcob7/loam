@@ -76,6 +76,22 @@ const commentsFixture: RouteBody = {
   pageInfo: { total: 1 },
 };
 
+/** A `ListComments` body carrying exactly the threads a test cares about. */
+const threadsFixture = (threads: readonly RouteBody[]): RouteBody => ({
+  threads,
+  pageInfo: { total: threads.length },
+});
+
+/**
+ * The Comments section as an element to scope queries to. Reviewer names
+ * appear in the Verdicts table too, so an unscoped query is ambiguous.
+ */
+const commentsSection = (): HTMLElement => {
+  const section = screen.getByRole("heading", { name: "Comments" }).closest("section");
+  if (section === null) throw new Error("Comments section is not inside a <section>");
+  return section;
+};
+
 /** The full set of GET queries this screen fires, with sane defaults. */
 const baseRoutes = (): Record<string, Route> => ({
   [workBranchPath]: ok({ workBranch: workBranchFixture() }),
@@ -169,10 +185,65 @@ describe("ProposalDetail: loaded screen", () => {
     expect(screen.getByText("main")).toBeInTheDocument();
   });
 
-  it("renders the diff", async () => {
+  it("renders the description through the shared markdown renderer", async () => {
+    // The claim is that the description reaches Markdown at all -- a heading
+    // and a list item are structures a plain <p> could not produce, so their
+    // presence proves the wiring rather than the component (which
+    // components/Markdown.test.tsx covers on its own).
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          description: "## What changed\n\n- added the index\n- `task web:test` passes\n",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(await screen.findByRole("heading", { name: "What changed" })).toBeInTheDocument();
+    expect(screen.getByText("added the index")).toBeInTheDocument();
+  });
+
+  it("renders no description block at all when the description is empty", async () => {
+    // Preserves the pre-markdown behaviour: an empty description was never a
+    // visible element, and must not become an empty bordered box.
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({ workBranch: workBranchFixture({ description: "" }) }),
+    });
+    await renderLoaded();
+    const title = screen.getByRole("heading", { level: 1 });
+    const diff = screen.getByRole("heading", { name: "Diff" });
+    // Nothing renders between the title's meta line and the Diff section.
+    expect(title.compareDocumentPosition(diff) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelectorAll("h2")).toHaveLength(4);
+  });
+
+  it("renders a hostile description inert", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [workBranchPath]: ok({
+        workBranch: workBranchFixture({
+          description: "<script>window.stolen = 1</script>\n\n[x](javascript:alert(1))",
+        }),
+      }),
+    });
+    await renderLoaded();
+    expect(document.querySelector("script")).toBeNull();
+    // Queried by element rather than by role: an <a> whose href was stripped
+    // to "" is no longer reliably exposed as a link, which is itself the
+    // point -- there is nothing left to follow.
+    const link = document.querySelector("a");
+    expect(link?.textContent).toBe("x");
+    expect(link?.getAttribute("href")).toBe("");
+  });
+
+  it("renders the diff as a per-file index rather than one undifferentiated block", async () => {
     stubFetch(baseRoutes());
     await renderLoaded();
-    expect(await screen.findByText(/-old/)).toBeInTheDocument();
+    const index = await screen.findByRole("navigation", { name: "Files changed" });
+    expect(within(index).getByText("src/index.ts")).toBeInTheDocument();
+    // The patch text is still reachable -- collapsed, not unmounted.
+    expect(screen.getByText(/-old/)).toBeInTheDocument();
   });
 
   it("renders one comment thread with its anchor, author and body", async () => {
@@ -186,6 +257,233 @@ describe("ProposalDetail: loaded screen", () => {
     if (comments === null) throw new Error("unreachable: asserted above");
     expect(within(comments).getByText("reviewer-a-agent")).toBeInTheDocument();
     expect(within(comments).getByText(/Consider renaming this\./)).toBeInTheDocument();
+  });
+
+  it("renders a comment body through the shared markdown renderer", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "### Rename this\n\n- `parseDiff` is ambiguous\n- prefer `parseUnifiedDiff`",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    expect(
+      await within(comments).findByRole("heading", { name: "Rename this" }),
+    ).toBeInTheDocument();
+    expect(within(comments).getAllByRole("listitem").length).toBeGreaterThan(1);
+  });
+
+  it("keeps the author and round out of the body, so a heading does not run on", async () => {
+    // The pre-markdown rendering was `{author} (round N): {body}` on one line;
+    // a body opening with a heading continued the metadata sentence. The
+    // assertion is that the heading's text is exactly the heading's -- if the
+    // metadata were still inline it would be part of the same text node's
+    // ancestor chain, and the heading element itself would not exist at all.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 2,
+            comments: [{ author: "reviewer-a-agent", round: 2, body: "# Blocking" }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    expect(await within(comments).findByRole("heading", { name: "Blocking" })).toBeInTheDocument();
+    expect(within(comments).getByText("reviewer-a-agent")).toBeInTheDocument();
+    expect(within(comments).getByText("Round 2")).toBeInTheDocument();
+  });
+
+  it("renders a fenced block nested inside a comment inside a thread list", async () => {
+    // Three levels of nesting -- <ul> thread > <li> comment > markdown block.
+    // The check is that the block-level content survives as a real pre > code
+    // rather than being collapsed into the list item's inline flow.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "This fails:\n\n```\nTypeError: x is not a function\n```\n",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText(/This fails/);
+    const block = comments.querySelector("li pre > code");
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toBe("TypeError: x is not a function\n");
+  });
+
+  it("renders no body block for a comment with an empty body", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [{ author: "reviewer-a-agent", round: 1, body: "" }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    const author = await within(comments).findByText("reviewer-a-agent");
+    const item = author.closest("li");
+    // Metadata only: the Markdown renderer emits nothing at all rather than
+    // an empty block that would read as a body that failed to load.
+    expect(item?.children).toHaveLength(1);
+    expect(item?.firstElementChild?.tagName).toBe("P");
+  });
+
+  it("renders a hostile COMMENT BODY inert at this call site, not only in the component", async () => {
+    // A comment body is written by a different agent to the branch's author --
+    // a reviewer, under a separate identity, whose role is adversarial. This
+    // asserts the wiring here, because a correct Markdown component reached
+    // through a second, inline renderer would leave Markdown.test.tsx green.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body:
+                  "<script>window.stolen = 1</script>\n\n" +
+                  '<img src="x" onerror="window.stolen = 2">\n\n' +
+                  "[approve it](javascript:document.querySelector('button').click())\n\n" +
+                  "[or this](&#106;avascript&#x3A;alert&#40;1&#41;)",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText("reviewer-a-agent");
+    expect(comments.querySelector("script")).toBeNull();
+    expect(comments.querySelector("img")).toBeNull();
+    expect(comments.querySelectorAll("[onerror]")).toHaveLength(0);
+    const links = [...comments.querySelectorAll("a")];
+    expect(links).toHaveLength(2);
+    for (const link of links) expect(link.getAttribute("href")).toBe("");
+    expect(comments.innerHTML).not.toContain("javascript");
+  });
+
+  it("loads no remote image from a comment body, which would be a read receipt", async () => {
+    // The trust boundary this matters at: a REVIEWER's comment body, rendered
+    // in the author's console on page open. An <img> here needs no click to
+    // hand the reader's IP, user-agent and a timestamp to whoever wrote it.
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            comments: [
+              {
+                author: "reviewer-a-agent",
+                round: 1,
+                body: "![](https://evil.example/beacon.png)\n\n![shot](https://evil.example/2.png)",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    await within(comments).findByText("reviewer-a-agent");
+    expect(comments.querySelectorAll("img")).toHaveLength(0);
+    // Offered as links instead -- nothing is fetched until the admin chooses.
+    const beacon = within(comments).getByRole("link", { name: /^image/ });
+    expect(beacon).toHaveAttribute("href", "https://evil.example/beacon.png");
+    expect(beacon).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
+  it("groups threads by anchor file and marks a reply from a later round", async () => {
+    stubFetch({
+      ...baseRoutes(),
+      [commentsPath]: ok(
+        threadsFixture([
+          {
+            id: "thread-1",
+            resolved: false,
+            round: 1,
+            anchor: { file: "src/index.ts", line: 42 },
+            comments: [
+              { author: "reviewer-a-agent", round: 1, body: "Consider renaming this." },
+              { author: "widget-writer-1-worker", round: 3, body: "Renamed." },
+            ],
+          },
+          {
+            id: "thread-2",
+            resolved: true,
+            round: 1,
+            anchor: { file: "src/index.ts", line: 7 },
+            comments: [{ author: "reviewer-b-agent", round: 1, body: "Fine." }],
+          },
+        ]),
+      ),
+    });
+    await renderLoaded();
+    const comments = commentsSection();
+    // One group heading for the file both threads are anchored to.
+    expect(
+      await within(comments).findByRole("heading", { name: "src/index.ts" }),
+    ).toBeInTheDocument();
+    // Ordered by anchor line: 7 before 42.
+    const anchors = within(comments)
+      .getAllByText(/^src\/index\.ts:\d+$/)
+      .map((node) => node.textContent);
+    expect(anchors).toEqual(["src/index.ts:7", "src/index.ts:42"]);
+    // The round-3 reply on a round-1 thread is called out.
+    expect(
+      within(comments).getByText("after the round this thread was raised in"),
+    ).toBeInTheDocument();
+    // The resolved thread starts collapsed, the unresolved one open.
+    const sections = [...comments.querySelectorAll("details")];
+    expect(sections.map((section) => section.open)).toEqual([false, true]);
   });
 
   it("renders both reviewers as distinct verdict rows, not collapsed to one", async () => {
