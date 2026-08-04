@@ -1,0 +1,457 @@
+# Nightly suites on Forgejo Actions (loam-ytt2.10), replacing the GitHub
+# workflow this repo carried before the move to git.bobcob7.com
+# (.github/workflows/nightly.yml, deleted in 01e7408 alongside the per-PR
+# gate's own port -- ci.yaml's header tells that story).
+#
+# docs/testing-spec.md "CI Stages", Nightly row: provider contract vs. a
+# REAL Forgejo, e2e smoke, Playwright, and compose deployment smoke,
+# budgeted "tens of minutes" against the per-PR gate's "minutes". Provider
+# contract vs. real GitHub is UNEXECUTED as of loam-tmds (see
+# Taskfile.yml's test:contract:github desc for why -- it needs a
+# maintainer-owned throwaway account, not an agent's) and is deliberately
+# not a job here.
+#
+# THE BLOCKER THIS WORKFLOW ANSWERS: whether testcontainers-go and `docker
+# compose` both work against this instance's dind sidecar from inside a
+# job, rather than only for `docker build` (proven by build.yaml). Proven
+# 2026-08-04 by a two-job throwaway spike run out-of-band on the upstream
+# forge (loam-ytt2.10 bead notes, run #43): a testcontainers-go leg with NO
+# skip guard passed on amd64 in golang:1.26.5, and a `docker compose` leg
+# passed on arm64 in docker:27. Not a false green -- checked, not assumed;
+# see the bead notes for how. That spike could not be run as part of an
+# author agent's own CI (loam work branches are not mirrored upstream until
+# an admin accepts the proposal, so nothing here fires on this branch) and
+# was instead pushed to a throwaway branch/PR by hand and deleted
+# afterward. This workflow is the real port; it has not itself been
+# through a CI run for the same structural reason -- see this bead's
+# report for exactly what is verified versus written-but-unrun.
+#
+# WHY ALL FOUR JOBS ARE PINNED TO amd64, DELIBERATELY, UNLIKE build.yaml's
+# matrix: ci.yaml's per-PR gate lives entirely on arm64, so amd64 carries
+# only build.yaml's tag-triggered image builds and is otherwise idle. The
+# spike measured this live: its amd64 leg settled in about a minute while
+# its arm64 leg sat pending for about six, queued behind the gate on that
+# runner (same runner, capacity 1, per ci.yaml's header). Every job below
+# runs for tens of minutes; queuing all four behind the per-PR gate on
+# arm64 would cost real latency on every ordinary push for no reason -- the
+# nightly schedule has no such deadline (see the cron comment below), and
+# a tag push should not have to wait behind whatever gate run happens to be
+# mid-flight.
+#
+# WHY container: golang:1.26.5 ON EVERY JOB, not docker:27 for the
+# compose-heavy ones: every job below either builds this module (CGO_ENABLED
+# =1, tree-sitter's C sources, per CLAUDE.md and ci.yaml's own header) or
+# runs `go test` against build-tagged files that import packages requiring
+# it, and ci.yaml's header already establishes that CGO here needs a glibc
+# image -- docker:27 is Alpine/musl and would fail the same way build.yaml
+# warns against using it for anything other than `docker build`/`push`
+# itself. That means, unlike build.yaml, this workflow cannot reach for an
+# image that already ships Docker -- it must install a Docker CLI (and,
+# where compose is needed, a compose binary) into golang:1.26.5 by hand.
+# Static binaries, pinned by version below, rather than `apt-get install
+# docker.io`: Debian's bundled docker.io package does not carry the
+# `compose` plugin at all (the exact gap Taskfile.yml's own LOAM_COMPOSE_CMD
+# escape hatch exists for), and a static binary is one fewer moving part
+# than standing up apt's Docker repo + gpg key inside a job.
+#
+# WHY EXPLICIT `needs:` RATHER THAN LEANING ON CAPACITY-1 SERIALIZATION:
+# amd64's capacity of 1 already means these four jobs cannot literally
+# overlap in time -- but capacity is a runner *setting*, not a property of
+# this workflow, and e2e / e2e-golden sharing
+# deploy/docker-compose.e2e.yml (fixed container names, fixed ports) is a
+# correctness requirement that must hold regardless of what the runner
+# fleet looks like later. `needs:` makes the ordering an explicit fact of
+# this file instead of an accident of today's runner count, exactly
+# following demo:m7's own reasoning in Taskfile.yml for running its two
+# e2e legs back to back rather than in parallel.
+#
+# WHY `if: always()` ON EVERY DOWNSTREAM JOB, WHICH IS A DEVIATION FROM
+# THE PLAIN CHAINED-`needs:` DESIGN THIS BEAD'S NOTES SKETCH: a bare
+# `needs:` chain has GitHub/Forgejo Actions' default semantics -- a failed
+# job skips everything that needs it, cascading one failure into three
+# skips. That is the right trade for ci.yaml's per-PR gate (fail fast, save
+# a contributor's time) and for demo:m7's sequential `cmds:` (same
+# reasoning, spelled out in that target's own desc). It is the WRONG trade
+# here: the deleted GitHub workflow ran its three suites as independent
+# jobs on independent runners specifically so a failure in one never hid
+# the others' results, and docs/testing-spec.md's Pre-release stage reads
+# "full nightly set, green required" -- which means knowing the status of
+# the FULL set, not stopping at the first red job. `needs:` still fixes the
+# ORDER (so e2e and e2e-golden never overlap), but `if: always()` keeps
+# each job running regardless of what came before, so a bad night reports
+# all four verdicts instead of one real one and three "skipped"s that read
+# like green until someone opens the run.
+#
+# ORDER: contract-forgejo, then e2e-golden, then e2e, then compose --
+# cheapest and most container-light first (a single Forgejo testcontainer,
+# no compose stack, no Node), then the two jobs that share
+# deploy/docker-compose.e2e.yml back to back in the same order demo:m7
+# already uses (golden path before the Playwright smoke), then the
+# deployment-image smoke last, since it is the only leg that depends on a
+# published image existing in the registry rather than on this checkout's
+# own source.
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC daily (loam-ytt2.10 bead notes), not the deleted GitHub
+    # workflow's 07:00 -- chosen new for this instance, not carried over,
+    # since "daily, off-hours" is the only actual requirement and there is
+    # no longer a GitHub Actions scheduler's own best-effort drift to hedge
+    # against. Forgejo's scheduler has the same best-effort caveat the
+    # deleted workflow's comment gave for GitHub's, and the same slop is
+    # acceptable here for the same reason: nothing downstream has a per-PR
+    # latency requirement on this trigger.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  # Scoped by ref, not just workflow name, so a schedule run on main and a
+  # tag-push run on a release tag never contend for the same group; NOT
+  # cancel-in-progress, matching the deleted workflow's own reasoning: a
+  # nightly or pre-release run already tens of minutes in should finish and
+  # report, not be cancelled by a second trigger landing mid-run.
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CGO_ENABLED: "1"
+  # Pinned go-task version, carried over unchanged from the deleted
+  # GitHub workflow's own pin -- bump deliberately, not as a side effect of
+  # this port.
+  GO_TASK_VERSION: "v3.52.0"
+  # Static binary versions for the Docker CLI + standalone compose this
+  # workflow installs into golang:1.26.5 (see the header above for why
+  # that image, unlike docker:27, has neither). Pinned rather than
+  # "latest" for the same reason GO_TASK_VERSION is: reproducible jobs,
+  # deliberate bumps.
+  DOCKER_CLI_VERSION: "27.3.1"
+  DOCKER_COMPOSE_VERSION: "2.29.7"
+  # Every job below talks to the dind sidecar. build.yaml's docker:27 jobs
+  # never set this by hand and still reach it, which means the runner
+  # itself exports DOCKER_HOST into job containers -- but this workflow
+  # sets it explicitly anyway (only when unset, so a runner-provided value
+  # always wins) rather than assuming that holds for golang:1.26.5 too.
+  # This mirrors exactly what the resolving spike did (bead notes: "sets
+  # DOCKER_HOST ... by hand when it is unset, so whether the runner
+  # exports it or not, the sidecar is reachable").
+  DOCKER_HOST_FALLBACK: "unix:///shared/docker.sock"
+
+jobs:
+  contract-forgejo:
+    name: provider contract vs real Forgejo (nightly)
+    # loam-li0.9 / internal/forgesuite, Taskfile.yml's test:contract:forgejo:
+    # the same assertions the per-PR gate already runs against
+    # internal/fakeforge, re-run against a REAL Forgejo 9.0.3 container.
+    # This is the cheapest, most container-light of the four legs -- one
+    # testcontainers-go container, no compose stack, no Node -- so it runs
+    # first and the other three still run regardless of its result (see
+    # the header's `if: always()` note).
+    runs-on: amd64
+    container:
+      image: golang:1.26.5
+    timeout-minutes: 20
+    env:
+      # Required on this dind-sidecar setup, per this bead's own hard
+      # constraint and unlike the deleted GitHub workflow's equivalent job
+      # (which ran on a real, GitHub-managed Docker daemon and explicitly
+      # did NOT set this). Nothing then reaps a container that survives a
+      # dying job, which is exactly what the sweep step below is a
+      # backstop for.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      # Hand-cloned, not actions/checkout: that is a JavaScript action and
+      # this job's container (golang:1.26.5, chosen for CGO -- see the
+      # workflow header) has no node, exactly as ci.yaml's own checkout
+      # step documents.
+      - name: checkout
+        run: |
+          set -eu
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
+          git log --oneline -1
+
+      - name: Install C toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential
+
+      - name: Install Docker CLI (static binary, for the sweep step only)
+        run: |
+          set -eu
+          curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz
+          tar -xzf /tmp/docker.tgz -C /tmp
+          install -m 0755 /tmp/docker/docker /usr/local/bin/docker
+          rm -rf /tmp/docker /tmp/docker.tgz
+          docker --version
+
+      - name: Point DOCKER_HOST at the dind sidecar (only if unset)
+        run: echo "DOCKER_HOST=${DOCKER_HOST:-$DOCKER_HOST_FALLBACK}" >> "$GITHUB_ENV"
+
+      - name: Install go-task
+        # Taskfile.yml's own target, not the bare go test line the deleted
+        # workflow inlined: go-task is what the rest of this workflow needs
+        # anyway (compose orchestration below is ~150 lines of scripted
+        # bash that only lives in Taskfile.yml, per that file's own header
+        # on why go-task is a real, separately-installed prerequisite), so
+        # installing it once here keeps every job in this file consistent
+        # rather than having this one job alone inline the command. A
+        # separate step, matching the other three jobs, rather than
+        # inlined into the test step below -- one install pattern for the
+        # whole file.
+        run: |
+          set -eu
+          go install "github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: LOAM_TEST_FORGEJO=1 task test:contract:forgejo
+        run: LOAM_TEST_FORGEJO=1 task test:contract:forgejo
+
+      - name: Sweep leaked testcontainers (ryuk failure backstop)
+        # `org.testcontainers=true`, not `org.testcontainers.reap=true`.
+        # The reap label is attached only when ryuk itself is enabled
+        # (testcontainers-go v0.43.0, internal/core/labels.go: the reap
+        # label is conditional on `!config.Read().RyukDisabled`), and this
+        # job sets TESTCONTAINERS_RYUK_DISABLED=true above -- so filtering
+        # on the reap label here would find nothing on every run,
+        # including the runs where something genuinely leaked. The plain
+        # `org.testcontainers=true` label is attached unconditionally to
+        # every container this suite starts, ryuk on or off, which is what
+        # a backstop that fires specifically BECAUSE ryuk is disabled
+        # actually needs to filter on (loam-ytt2.10 review).
+        if: always()
+        run: |
+          leaked="$(docker ps -aq --filter "label=org.testcontainers=true")"
+          if [ -n "$leaked" ]; then
+            echo "::warning::Removing containers left behind by this job: $leaked"
+            docker rm -f $leaked
+          else
+            echo "No leaked testcontainers containers found."
+          fi
+          docker ps -a
+
+  e2e-golden:
+    name: e2e golden path + conflict/catch-up/re-accept (nightly)
+    needs: contract-forgejo
+    if: always()
+    # Taskfile.yml's test:e2e:golden: the golden path plus the
+    # conflict/catch-up/re-accept variant, scripted over the real compiled
+    # CLI + admin API against deploy/docker-compose.e2e.yml -- no Node, no
+    # Playwright (see that target's own desc: "there is no Playwright
+    # here"). Shares the compose file with the `e2e` job below, so the two
+    # must never run concurrently -- enforced here by `needs:`, not by
+    # capacity-1 alone (see the workflow header).
+    #
+    # LOAM_E2E_SUFFIX/PG_PORT/FORGEJO_PORT are set to values distinct from
+    # `e2e`'s own defaults (loam-ytt2.10 review): `needs:` plus `if:
+    # always()` guarantees ORDER, not that this job's own EXIT trap always
+    # fires -- a job that hits its own timeout-minutes is SIGKILLed, which
+    # skips test:e2e:golden's `trap cleanup EXIT` the same way go-task's
+    # shell already fails to run one on SIGINT (Taskfile.yml's own note on
+    # this target). Both targets default to the SAME fixed container names
+    # and host ports (deploy/docker-compose.e2e.yml's container_name and
+    # ports both key off LOAM_E2E_SUFFIX/LOAM_E2E_PG_PORT/
+    # LOAM_E2E_FORGEJO_PORT with no suffix by default), and `e2e`'s own
+    # pre-flight self-heal is scoped to ITS project name, not this one's --
+    # so a container this job leaves behind after a hard kill would
+    # collide with `e2e`'s `compose up` on both name and host port, not
+    # just project. Giving this job its own suffix and ports means a leak
+    # here can never block `e2e`'s boot, in either direction.
+    runs-on: amd64
+    container:
+      image: golang:1.26.5
+    timeout-minutes: 30
+    env:
+      LOAM_E2E_SUFFIX: "-golden"
+      LOAM_E2E_PG_PORT: "25432"
+      LOAM_E2E_FORGEJO_PORT: "23000"
+    steps:
+      - name: checkout
+        run: |
+          set -eu
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
+          git log --oneline -1
+
+      - name: Install C toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential
+
+      - name: Install Docker CLI + compose (static binaries)
+        # Debian's bundled docker.io lacks the compose plugin (Taskfile.
+        # yml's own LOAM_COMPOSE_CMD escape hatch exists for exactly this
+        # gap), so both are installed as pinned, standalone binaries
+        # instead. LOAM_COMPOSE_CMD is set explicitly below rather than
+        # relying on Taskfile.yml's own `docker compose version` probe to
+        # fall through to `docker-compose` -- deterministic beats implicit
+        # here, since the probe's failure mode (a `docker compose`
+        # subcommand that half-works) is harder to diagnose from a nightly
+        # log than a compose command that was never ambiguous.
+        run: |
+          set -eu
+          curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz
+          tar -xzf /tmp/docker.tgz -C /tmp
+          install -m 0755 /tmp/docker/docker /usr/local/bin/docker
+          rm -rf /tmp/docker /tmp/docker.tgz
+          curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          docker --version
+          docker-compose --version
+          echo "LOAM_COMPOSE_CMD=docker-compose" >> "$GITHUB_ENV"
+
+      - name: Point DOCKER_HOST at the dind sidecar (only if unset)
+        run: echo "DOCKER_HOST=${DOCKER_HOST:-$DOCKER_HOST_FALLBACK}" >> "$GITHUB_ENV"
+
+      - name: Install go-task
+        run: |
+          set -eu
+          go install "github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: task test:e2e:golden
+        run: task test:e2e:golden
+
+  e2e:
+    name: e2e smoke + Playwright admin journeys (nightly)
+    needs: e2e-golden
+    if: always()
+    # Taskfile.yml's test:e2e: the same compose stack as e2e-golden above,
+    # plus the real server/loam/loamhook binaries with the REAL embedded
+    # admin SPA, plus the Playwright admin-journey suite -- the only place
+    # any of that runs in CI. Needs Node in addition to everything e2e-
+    # golden needs, which is why this job (not e2e-golden) carries the
+    # Node install.
+    runs-on: amd64
+    container:
+      image: golang:1.26.5
+    timeout-minutes: 35
+    steps:
+      - name: checkout
+        run: |
+          set -eu
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
+          git log --oneline -1
+
+      - name: Install C toolchain
+        run: |
+          apt-get update
+          apt-get install -y build-essential ca-certificates curl gnupg
+
+      - name: Install Node (web/package.json requires >=22.12.0)
+        # golang:1.26.5 has no Node at all, and this repo's own Playwright
+        # pin (web/package.json's @playwright/test) needs a real Node, not
+        # merely "some Node" -- the NodeSource setup script picks the
+        # right package for whatever Debian release this image tag happens
+        # to be built on, which is safer than guessing a codename-specific
+        # apt package name by hand.
+        run: |
+          set -eu
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+          node --version
+          npm --version
+
+      - name: Install Docker CLI + compose (static binaries)
+        run: |
+          set -eu
+          curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz
+          tar -xzf /tmp/docker.tgz -C /tmp
+          install -m 0755 /tmp/docker/docker /usr/local/bin/docker
+          rm -rf /tmp/docker /tmp/docker.tgz
+          curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          docker --version
+          docker-compose --version
+          echo "LOAM_COMPOSE_CMD=docker-compose" >> "$GITHUB_ENV"
+
+      - name: Point DOCKER_HOST at the dind sidecar (only if unset)
+        run: echo "DOCKER_HOST=${DOCKER_HOST:-$DOCKER_HOST_FALLBACK}" >> "$GITHUB_ENV"
+
+      - name: Install go-task
+        run: |
+          set -eu
+          go install "github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: task web:e2e:install
+        # Separate step, matching Taskfile.yml's own note on this task:
+        # installs the pinned Playwright Chromium build (+ OS deps via
+        # --with-deps) that test:e2e below requires but deliberately does
+        # not trigger itself.
+        run: task web:e2e:install
+
+      - name: task test:e2e
+        run: task test:e2e
+
+  compose:
+    name: deployment stack smoke (nightly)
+    needs: e2e
+    if: always()
+    # Taskfile.yml's test:compose (docs/testing-spec.md CI Stages'
+    # "compose deployment smoke"): brings deploy/docker-compose.yml up
+    # from clean using the PUBLISHED, PINNED image (not a build of this
+    # checkout -- see that target's own desc for why), proves ordering,
+    # health, and the real SPA, then tears down including volumes. The
+    # only leg of the four that depends on build.yaml having already
+    # pushed an image to registry.bobcob7.com rather than on this
+    # checkout's own source, which is why it runs last.
+    runs-on: amd64
+    container:
+      image: golang:1.26.5
+    timeout-minutes: 15
+    steps:
+      - name: checkout
+        run: |
+          set -eu
+          git clone --no-single-branch \
+            "http://x-access-token:${{ secrets.GITHUB_TOKEN }}@forgejo-http.forgejo.svc.cluster.local:3000/${{ github.repository }}.git" .
+          git checkout --detach "${{ github.sha }}"
+          git log --oneline -1
+
+      - name: Install Docker CLI + compose (static binaries)
+        # No C toolchain step here, unlike the other three jobs: test:compose
+        # never builds this module (it pulls the pinned image), so CGO/
+        # tree-sitter never enters the picture.
+        run: |
+          set -eu
+          curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz
+          tar -xzf /tmp/docker.tgz -C /tmp
+          install -m 0755 /tmp/docker/docker /usr/local/bin/docker
+          rm -rf /tmp/docker /tmp/docker.tgz
+          curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          docker --version
+          docker-compose --version
+          echo "LOAM_COMPOSE_CMD=docker-compose" >> "$GITHUB_ENV"
+
+      - name: Point DOCKER_HOST at the dind sidecar (only if unset)
+        run: echo "DOCKER_HOST=${DOCKER_HOST:-$DOCKER_HOST_FALLBACK}" >> "$GITHUB_ENV"
+
+      - name: Install go-task
+        run: |
+          set -eu
+          go install "github.com/go-task/task/v3/cmd/task@${GO_TASK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: task --version
+        run: task --version
+
+      - name: task test:compose
+        run: task test:compose
