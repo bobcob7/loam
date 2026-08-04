@@ -37,6 +37,38 @@ func TestCanonicalize_AcceptedForms(t *testing.T) {
 	}
 }
 
+// TestCanonicalize_GitHubAPIHostAliasesToWebHost is loam-tmds.5's AC1:
+// an admin who mistakenly enters GitHub's REST-API host into the
+// Credentials screen's Host field must still get the SAME
+// credentials.host row a repo enrolled against github.com would look
+// up -- getting this wrong produces "credential not found" for a
+// credential that is plainly there.
+func TestCanonicalize_GitHubAPIHostAliasesToWebHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "bare api.github.com", raw: "api.github.com"},
+		{name: "https-qualified api.github.com", raw: "https://api.github.com"},
+		{name: "uppercase is tolerated", raw: "API.GITHUB.COM"},
+		{name: "trailing slash is tolerated", raw: "https://api.github.com/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Canonicalize(tt.raw)
+			require.NoError(t, err)
+			assert.Equal(t, "github.com", got, "api.github.com must canonicalize to the SAME host github.com itself canonicalizes to")
+		})
+	}
+	direct, err := Canonicalize("github.com")
+	require.NoError(t, err)
+	aliased, err := Canonicalize("api.github.com")
+	require.NoError(t, err)
+	assert.Equal(t, direct, aliased, "the two spellings must resolve to byte-identical credentials.host rows")
+}
+
 // TestCanonicalize_AgreesWithFromURL proves the two exported functions
 // this package exists to reconcile actually produce the same string for
 // the same forge -- the property loam-0hjq's fix depends on, not just each

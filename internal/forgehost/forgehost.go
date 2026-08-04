@@ -28,6 +28,10 @@
 // internal/handler/repoadmin/handler.go, which this package's rule exists
 // to keep matching byte for byte -- forgeHostOf delegates to FromURL
 // rather than duplicating the decision.
+//
+// loam-tmds.5 adds one more fold on top of that rule: GitHub's REST-API
+// host, api.github.com, canonicalizes to its web/git host, github.com --
+// see githubAPIHost's doc comment on canonical, below, for why.
 package forgehost
 
 import (
@@ -61,10 +65,35 @@ func FromURL(u *url.URL) string {
 	return canonical(u.Scheme, u.Host)
 }
 
+// githubAPIHost and githubWebHost are GitHub's two host spellings this
+// package aliases together (loam-tmds.5): the git/web host every repo's
+// upstream URL actually names, and its REST-API host, in case an admin
+// enters that one into the Credentials screen's Host field instead --
+// an easy mistake, since "api.github.com" is the host GitHub's own API
+// docs put front and center. They are the same account and the same
+// token (github.com does not even serve git-over-HTTPS at a distinct
+// api.* path the way it serves REST there), so a credential entered
+// under either spelling must resolve for a repo enrolled under the
+// other -- getting this wrong produces "credential not found" for a
+// credential that is plainly there, exactly the failure mode this
+// package exists to prevent for the analogous scheme-qualification
+// case (see the package doc). internal/forge.KindForHost applies the
+// identical alias when deciding whether a host is GitHub at all; this
+// is that same fact, applied here so the two hosts also share one
+// credentials.host ROW, not just one resolved Kind.
+const (
+	githubAPIHost = "api.github.com"
+	githubWebHost = "github.com"
+)
+
 // canonical is the one rule both FromURL and Canonicalize apply: bare host
 // for everything except plain http, which keeps its scheme prefix (see the
-// package doc for why).
+// package doc for why) -- and, on top of that, GitHub's REST-API host
+// folded to its web/git host (see githubAPIHost's doc comment).
 func canonical(scheme, host string) string {
+	if strings.EqualFold(host, githubAPIHost) {
+		host = githubWebHost
+	}
 	if scheme == "http" {
 		return "http://" + host
 	}

@@ -69,9 +69,11 @@ type credentialResolver interface {
 // (potentially expensive) initial clone (docs/web-spec.md ->
 // RepoAdminService: "EnrollRepo's CheckRepo (read + write probes) remains
 // the authoritative gate"). Defined here at the consumer so this package
-// never constructs a *forge.Forgejo itself or imports net/http; the
-// production adapter, ForgeChecker (checker.go, this package), builds a
-// fresh, single-use *forge.Forgejo bound to host+token per call.
+// never constructs a concrete forge.Provider itself or imports net/http;
+// the production adapter, ForgeChecker (checker.go, this package), builds
+// a fresh, single-use forge.Provider bound to host+token per call, of
+// whichever Kind host resolves to (forge.NewProvider, loam-tmds.1's
+// selection seam) -- Forgejo or GitHub, never hardcoded to one.
 type upstreamChecker interface {
 	CheckRepo(ctx context.Context, host, token, upstreamURL string) error
 }

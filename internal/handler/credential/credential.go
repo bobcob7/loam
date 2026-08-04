@@ -37,8 +37,10 @@ var _ adminv1connect.CredentialServiceHandler = (*Handler)(nil)
 
 // New builds a Handler over the given seams. validator is the forge
 // provider SetUpstreamToken checks a candidate token against; in
-// production a single host-agnostic *forge.Forgejo, since ValidateToken
-// takes its host and token explicitly (see tokenValidator).
+// production a single host-agnostic *forge.Resolver (internal/forge,
+// loam-tmds.1's selection seam), which resolves each call's host to the
+// right Kind -- Forgejo or GitHub -- fresh every time, since
+// ValidateToken takes its host and token explicitly (see tokenValidator).
 func New(credentials credentialStore, validator tokenValidator, errors *handler.ErrorMapper, logger *slog.Logger) *Handler {
 	return &Handler{credentials: credentials, validator: validator, errors: errors, logger: logger}
 }
@@ -200,13 +202,23 @@ func (h *Handler) ListCredentials(ctx context.Context, _ *connect.Request[adminv
 // The two forge sentinels stay distinct all the way to the wire, as
 // forge/errors.go requires of this package by name: a token that does not
 // authenticate is CodeInvalidArgument (the argument supplied is wrong), a
-// token that authenticates but lacks write:repository is
+// token that authenticates but lacks the scope needed to open PRs is
 // CodeFailedPrecondition (the argument is a real token; the state of the
 // thing it names does not permit the operation). Neither is mapped to
 // CodePermissionDenied, which is reserved here for requireAdmin -- folding
 // the underscoped case in there would make "the CALLER is not an admin"
 // and "the TOKEN is underscoped" indistinguishable on the wire, and one of
 // those is the gate this package's own tests assert.
+//
+// The ErrInsufficientScope message deliberately names no specific scope
+// string (it used to say "the write:repository scope", Forgejo's own
+// name for it): this handler holds only the narrow tokenValidator seam,
+// never a concrete forge.Provider, so it has no way to know whether host
+// resolved to Forgejo (write:repository) or GitHub (repo) -- see
+// internal/forge's KindForHost (loam-tmds.1/.5). Naming Forgejo's scope
+// unconditionally was a genuine single-forge assumption this bead
+// (loam-tmds.5) found and removed: it would have told a GitHub operator
+// their token lacked a scope GitHub has never heard of.
 //
 // Both sentinel branches DISCARD the underlying error rather than wrapping
 // it. That is not laziness: the classification is the entire useful
@@ -224,7 +236,7 @@ func (h *Handler) validateToken(ctx context.Context, host, token string) error {
 	case errors.Is(err, forge.ErrInvalidToken):
 		return fmt.Errorf("the forge at %s rejected the token: it does not authenticate (missing, malformed, expired, or revoked): %w", host, handler.ErrInvalidArgument)
 	case errors.Is(err, forge.ErrInsufficientScope):
-		return fmt.Errorf("the token authenticates against %s but lacks the write:repository scope needed to open pull requests: %w", host, handler.ErrFailedPrecondition)
+		return fmt.Errorf("the token authenticates against %s but lacks the scope needed to open pull requests: %w", host, handler.ErrFailedPrecondition)
 	default:
 		return fmt.Errorf("validating the token against %s: %w", host, redactErr(err, token))
 	}

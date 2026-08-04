@@ -292,9 +292,12 @@ func TestServer_SetUpstreamToken_RejectedTokenIsReportedAndNeverStored(t *testin
 
 // TestServer_SetUpstreamToken_UnderscopedTokenIsReportedDistinctly is the
 // other forge sentinel, end to end: forge/errors.go requires this package
-// to tell "does not authenticate" apart from "authenticates but lacks
-// write:repository", and CredentialStatus has no field that could carry
-// the difference, so the Connect code is where it has to show up.
+// to tell "does not authenticate" apart from "authenticates but lacks the
+// scope needed to open pull requests" (Forgejo's own name for that scope
+// is write:repository, but the handler's message is deliberately
+// forge-neutral -- see credential.go's validateToken doc comment,
+// loam-tmds.5), and CredentialStatus has no field that could carry the
+// difference, so the Connect code is where it has to show up.
 func TestServer_SetUpstreamToken_UnderscopedTokenIsReportedDistinctly(t *testing.T) {
 	rs := startServer(t, newPostgres(t))
 	forgeStub := stubForgejoAPI(t)
@@ -308,7 +311,7 @@ func TestServer_SetUpstreamToken_UnderscopedTokenIsReportedDistinctly(t *testing
 	require.ErrorAs(t, err, &connectErr)
 	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code(),
 		"an underscoped token is not the same answer as an unauthenticated one (CodeInvalidArgument) or an unauthorized caller (CodePermissionDenied)")
-	assert.Contains(t, connectErr.Message(), "write:repository")
+	assert.Contains(t, connectErr.Message(), "lacks the scope needed to open pull requests")
 	assert.NotContains(t, connectErr.Message(), credUnderscopedToken)
 	assert.NotContains(t, rs.serverLog(), credUnderscopedToken)
 }
