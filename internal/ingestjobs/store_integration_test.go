@@ -243,6 +243,43 @@ func TestClaim_ClaimsOldestQueuedJobFirst(t *testing.T) {
 	assert.Zero(t, claimed.Attempts, "Claim must not touch attempts -- only Fail increments it")
 }
 
+// TestClaim_QueuedAtTie_BreaksOnID pins ClaimIngestJob's ORDER BY
+// j.queued_at, j.id tiebreak against a FORCED tie, not an incidental one:
+// two back-to-back Store.Enqueue calls do not actually produce one in
+// practice (queued_at's stored precision is microseconds, and a real
+// round trip to Postgres is far longer than that), so a fixture relying
+// on natural timing cannot exercise this branch at all -- and previously
+// didn't, despite this file's own comment once claiming otherwise. This
+// test instead inserts two rows directly with an IDENTICAL explicit
+// queued_at, deliberately inserting the LEXICALLY HIGHER uuid FIRST, so a
+// query that (incorrectly) fell back to physical/insertion order would
+// pick the wrong one and this assertion would catch it.
+func TestClaim_QueuedAtTie_BreaksOnID(t *testing.T) {
+	ctx := t.Context()
+	store := newTestStore(t)
+	repoID := seedRepo(t, ctx)
+	tie := time.Now().UTC()
+	higherID := uuid.Must(uuid.NewV7())
+	lowerID := uuid.Must(uuid.NewV7())
+	if higherID.String() < lowerID.String() {
+		higherID, lowerID = lowerID, higherID
+	}
+	_, err := sharedPool.Exec(ctx,
+		`INSERT INTO ingest_jobs (id, repo_id, target_branch, kind, status, attempts, queued_at) VALUES ($1, $2, 'main', 'full', 'queued', 0, $3)`,
+		higherID, repoID, tie,
+	)
+	require.NoError(t, err, "the lexically higher id is inserted FIRST, so a query that fell back to insertion/physical order would wrongly prefer it")
+	_, err = sharedPool.Exec(ctx,
+		`INSERT INTO ingest_jobs (id, repo_id, target_branch, kind, status, attempts, queued_at) VALUES ($1, $2, 'staging', 'incremental', 'queued', 0, $3)`,
+		lowerID, repoID, tie,
+	)
+	require.NoError(t, err)
+
+	claimed, err := store.Claim(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, lowerID, claimed.ID, "on a queued_at tie, the LOWER id must win, per ORDER BY queued_at, id -- never insertion order")
+}
+
 // TestClaim_EnforcesAtMostOneRunningJobPerRepo is this bead's central
 // DESIGN requirement, proved single-threaded first (the concurrent proofs
 // below cover the race): a repo with a running job and a SECOND queued job
@@ -313,6 +350,22 @@ func TestClaim_ConcurrentClaims_SameRepo_OnlyOneWins(t *testing.T) {
 	start.Done()
 	wg.Wait()
 
+	// The database-state assertion runs FIRST and with assert (never
+	// FailNow), deliberately ahead of the successes/failures check below:
+	// if this test ever regresses, "two DIFFERENT jobs of the same repo
+	// simultaneously running" (read straight out of Postgres) is the
+	// actually diagnostic fact, and a require.Equal(successes) that bails
+	// out first would make it unreachable exactly when it matters most.
+	rows, err := sharedPool.Query(ctx, `SELECT count(*) FROM ingest_jobs WHERE repo_id = $1 AND status = 'running'`, repoID)
+	require.NoError(t, err)
+	var runningCount int
+	for rows.Next() {
+		require.NoError(t, rows.Scan(&runningCount))
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, 1, runningCount, "the database itself must show exactly one running job for this repo, not this test's own bookkeeping")
+
 	successes, failures := 0, 0
 	var winner Job
 	for i := range 2 {
@@ -323,20 +376,14 @@ func TestClaim_ConcurrentClaims_SameRepo_OnlyOneWins(t *testing.T) {
 		case errors.Is(errs[i], errNoJobAvailable):
 			failures++
 		default:
-			t.Fatalf("unexpected Claim error: %v", errs[i])
+			t.Errorf("unexpected Claim error: %v", errs[i])
 		}
 	}
-	require.Equal(t, 1, successes, "exactly one concurrent claim against the same repo must win")
-	require.Equal(t, 1, failures, "the other must see errNoJobAvailable, not a second running job for the same repo")
-	assert.Contains(t, []uuid.UUID{job1.ID, job2.ID}, winner.ID)
-
-	rows, err := sharedPool.Query(ctx, `SELECT count(*) FROM ingest_jobs WHERE repo_id = $1 AND status = 'running'`, repoID)
-	require.NoError(t, err)
-	defer rows.Close()
-	require.True(t, rows.Next())
-	var runningCount int
-	require.NoError(t, rows.Scan(&runningCount))
-	assert.Equal(t, 1, runningCount, "the database itself must show exactly one running job for this repo, not this test's own bookkeeping")
+	assert.Equal(t, 1, successes, "exactly one concurrent claim against the same repo must win")
+	assert.Equal(t, 1, failures, "the other must see errNoJobAvailable, not a second running job for the same repo")
+	if successes == 1 {
+		assert.Contains(t, []uuid.UUID{job1.ID, job2.ID}, winner.ID)
+	}
 }
 
 // TestClaim_ConcurrentClaims_DifferentRepos_BothWin proves the guard is
@@ -447,7 +494,9 @@ func TestClaim_RunningJobWithADeadWorker_BlocksItsOwnRepoOnly(t *testing.T) {
 	stillRunning, err := store.Get(ctx, stuck.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, stillRunning.Status, "nothing in this store ever times out a running job on its own")
-	_ = followUp
+	stillQueued, err := store.Get(ctx, followUp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusQueued, stillQueued.Status, "the stuck repo's own follow-up job is left exactly where it was, not silently dropped or altered")
 }
 
 // TestComplete_SetsSucceededStatsAndFinishedAt proves the success path

@@ -70,25 +70,55 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (Job, error) {
 	return fromGenIngestJob(row), nil
 }
 
+// maxClaimAttempts bounds how many times Claim retries ClaimIngestJob
+// after losing a race against ingest_jobs_one_running_per_repo (the
+// partial unique index that is the actual source of the
+// single-running-per-repo guarantee -- see ClaimIngestJob's doc comment,
+// internal/db/queries/ingest_jobs.sql, for why the statement itself
+// cannot establish that guarantee alone). Each retry is a fresh,
+// independent statement against Postgres with negligible cost, and the
+// condition it retries on is self-resolving (a fresh attempt's snapshot
+// sees whatever committed claim it previously missed and picks a
+// different candidate), so this bound exists only to keep a pathological
+// burst of contention from looping forever, not because a well-behaved
+// caller is expected to need more than one or two attempts in practice.
+const maxClaimAttempts = 25
+
 // Claim atomically picks the oldest queued job belonging to a repo with no
 // currently running job, and flips it to running with started_at set --
-// the single-running-per-repo guard the bead's DESIGN calls for, enforced
-// by ClaimIngestJob's own row locking (internal/db/queries/ingest_jobs.sql;
-// see its doc comment for the concurrency argument in full). Returns a
-// wrapped errNoJobAvailable when nothing is claimable right now, which is
-// Claim's ordinary "nothing to do" outcome, not a failure a caller should
-// log as one.
+// the single-running-per-repo guard the bead's DESIGN calls for. The
+// guarantee itself comes from ingest_jobs_one_running_per_repo (migration
+// 0008_ingest_jobs_running_guard), a database constraint, not from
+// ClaimIngestJob's own locking (internal/db/queries/ingest_jobs.sql; see
+// its doc comment for why one SQL statement under READ COMMITTED cannot
+// establish this alone, proven by this package's own concurrency
+// integration tests under repetition). Claim retries, up to
+// maxClaimAttempts times, whenever an attempt loses a race against that
+// constraint -- an ordinary "someone beat me to it" outcome, not a
+// failure -- so a caller sees this internal contention only as slightly
+// higher latency, never as a spurious error.
+//
+// Returns a wrapped errNoJobAvailable when nothing is claimable right
+// now, which is Claim's ordinary "nothing to do" outcome, not a failure a
+// caller should log as one.
 func (s *Store) Claim(ctx context.Context) (Job, error) {
-	row, err := s.q.ClaimIngestJob(ctx)
-	if err != nil {
+	for attempt := 0; attempt < maxClaimAttempts; attempt++ {
+		row, err := s.q.ClaimIngestJob(ctx)
+		if err == nil {
+			job := fromGenIngestJob(row)
+			s.logger.InfoContext(ctx, "claimed ingest job", "job_id", job.ID, "repo_id", job.RepoID, "target_branch", job.TargetBranch, "kind", job.Kind, "attempts", job.Attempts, "claim_attempt", attempt+1)
+			return job, nil
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Job{}, fmt.Errorf("claiming an ingest job: %w", errNoJobAvailable)
 		}
+		if isRunningPerRepoViolation(err) {
+			s.logger.DebugContext(ctx, "claim lost a race against the single-running-per-repo constraint, retrying", "claim_attempt", attempt+1)
+			continue
+		}
 		return Job{}, fmt.Errorf("claiming an ingest job: %w", err)
 	}
-	job := fromGenIngestJob(row)
-	s.logger.InfoContext(ctx, "claimed ingest job", "job_id", job.ID, "repo_id", job.RepoID, "target_branch", job.TargetBranch, "kind", job.Kind, "attempts", job.Attempts)
-	return job, nil
+	return Job{}, fmt.Errorf("claiming an ingest job: exhausted %d attempts against %s: %w", maxClaimAttempts, runningPerRepoConstraint, errNoJobAvailable)
 }
 
 // Complete records a successful ingest for id: status succeeded, stats

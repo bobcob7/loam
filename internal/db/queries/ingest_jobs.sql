@@ -32,20 +32,54 @@ SELECT * FROM ingest_jobs WHERE id = $1;
 -- running job -- the "at most one running job per repo" guard the design
 -- calls for -- and, in the SAME statement, flips it to running.
 --
--- The guard cannot be enforced by locking the candidate ingest_jobs row
--- alone (FOR UPDATE OF j): two DIFFERENT queued rows for the SAME repo are
--- two different rows, so locking one does not block a concurrent claim
--- from locking the other. What must be serialized is "is there already a
--- running job for THIS repo", a fact that, for a repo with no running job
--- yet, has no row of its own to lock. This statement instead locks the
--- CANDIDATE'S repos ROW (FOR UPDATE OF rp SKIP LOCKED) -- every queued job
--- for the same repo shares that one row, so a second concurrent claim
--- attempting a job for the same repo contends for the identical lock and,
--- under SKIP LOCKED, is excluded from the candidate set for THIS attempt
--- rather than blocking, and falls through to a different repo's job (or to
--- no candidate at all) instead of double-claiming. Locking is scoped to
--- this one statement (no explicit BEGIN here), so ordinary reads and
--- writes against repos elsewhere are never blocked by it.
+-- CORRECTNESS OF THAT GUARD DOES NOT COME FROM THIS STATEMENT. It comes
+-- from ingest_jobs_one_running_per_repo (migration
+-- 0008_ingest_jobs_running_guard), a partial UNIQUE INDEX on (repo_id)
+-- WHERE status = 'running'. A prior version of this query tried to
+-- establish the guard entirely within one statement, by locking the
+-- candidate's repos row (FOR UPDATE OF rp SKIP LOCKED) so a second
+-- concurrent claim against the same repo would contend for that lock --
+-- and this bead's own concurrency integration tests, run at -count=200+,
+-- proved that construction wrong: two concurrent claims against the SAME
+-- repo's two DIFFERENT queued jobs can each compute their candidate from
+-- a read-committed statement snapshot that has not yet observed the
+-- other's not-yet-committed claim. Once each has picked a DIFFERENT row,
+-- no recheck on the row actually being written (the AND status =
+-- 'queued' below) can catch it -- that recheck only defends a collision
+-- on the SAME row, and this failure mode is across two different rows of
+-- the same repo. No single SQL statement running under READ COMMITTED
+-- isolation can close that window by itself; only a constraint Postgres
+-- enforces against the committed table state, independent of any
+-- transaction's snapshot, can. See the migration's own comment for the
+-- full argument, and bd remember guard-design-ask-dont-model-2026-08 for
+-- why a guard that EXECUTES a rule (a constraint) cannot drift the way
+-- one that RESTATES it (an application-level check) can.
+--
+-- Given that, what THIS statement does is reduce how often two claims
+-- collide and have to retry, not guarantee they never do:
+--   - NOT EXISTS(... running ...) skips repos this transaction's own
+--     snapshot already believes are busy -- a best-effort filter, since
+--     that snapshot can be stale, not the source of correctness.
+--   - FOR UPDATE OF j SKIP LOCKED locks the candidate JOB row itself
+--     (not a repos row -- there is no cross-row entity left to lock once
+--     the constraint carries the invariant), so two claims racing for
+--     the IDENTICAL row never both proceed to the write; the loser skips
+--     to the next candidate instead.
+--   - AND ingest_jobs.status = 'queued' on the outer UPDATE is now
+--     redundant most of the time (this transaction already holds j's row
+--     lock from the CTE by the time it writes), but is kept as the same
+--     defense-in-depth every other guarded UPDATE in this codebase uses
+--     (CompleteIngestJob, FailIngestJob, RequeueIngestJob below;
+--     work_branches.sql's own transitions).
+--
+-- A write this statement attempts can still lose to
+-- ingest_jobs_one_running_per_repo -- e.g. this transaction's NOT EXISTS
+-- snapshot missed a just-committed running job for the same repo.
+-- internal/ingestjobs.Store.Claim catches that unique_violation and
+-- retries the whole statement, which is an ordinary, expected outcome
+-- ("someone beat me"), not a failure: a fresh attempt gets a fresh
+-- snapshot that does see the collision and picks a different candidate
+-- (or correctly finds none).
 --
 -- Returns zero rows (pgx.ErrNoRows) when nothing is claimable right now --
 -- every repo either has no queued job or already has one running --
@@ -53,42 +87,22 @@ SELECT * FROM ingest_jobs WHERE id = $1;
 -- errNoJobAvailable sentinel.
 --
 -- ORDER BY j.queued_at, j.id: the id tiebreak matches ListIngestJobs'
--- own (queued_at, id) convention below. Without it, two jobs enqueued
--- close enough together to land on the same timestamptz value (the
--- column's actual stored precision is microseconds, but two Enqueue
--- calls back-to-back with no intervening work can still tie) sort in an
--- UNSPECIFIED order -- proven by this bead's own test suite, which
--- caught it directly: a fixture enqueuing two same-repo jobs with no
--- delay between them claimed the wrong one first often enough to fail.
---
--- AND ingest_jobs.status = 'queued' on the OUTER UPDATE (not just inside
--- the candidate CTE) closes a real double-claim race the concurrency
--- integration tests caught: FOR UPDATE OF rp SKIP LOCKED only locks the
--- CANDIDATE'S repos row, never the ingest_jobs row itself, so the
--- candidate CTE's own snapshot of j.status can still be pre-claim-stale
--- by the time the outer UPDATE runs (e.g. two claims for DIFFERENT repos
--- racing: one blocks briefly acquiring a different repo's rp lock, and by
--- the time it proceeds, the row it picked as "the globally oldest queued
--- job" across BOTH repos has already been claimed by the other). Without
--- this repeated check, that UPDATE would silently re-run against an
--- already-running row (RETURNING it a second time -- observed directly as
--- two concurrent Claim calls for two different repos both getting the
--- SAME job back) instead of matching zero rows the way every other
--- guarded UPDATE in this codebase is written to (see CompleteIngestJob,
--- FailIngestJob, RequeueIngestJob below, and work_branches.sql's own
--- transitions): the precondition and the write must be re-checked
--- together, atomically, at the statement that actually writes.
+-- own (queued_at, id) convention below, so two rows that land on the
+-- same queued_at (the column's stored precision is microseconds; a
+-- forced tie is achievable, though back-to-back Enqueue calls in
+-- practice do not produce one -- see TestClaim_QueuedAtTie_BreaksOnID in
+-- store_integration_test.go) still sort deterministically rather than in
+-- an order Postgres is free to pick arbitrarily.
 WITH candidate AS (
     SELECT j.id
     FROM ingest_jobs j
-    JOIN repos rp ON rp.id = j.repo_id
     WHERE j.status = 'queued'
       AND NOT EXISTS (
           SELECT 1 FROM ingest_jobs running
           WHERE running.repo_id = j.repo_id AND running.status = 'running'
       )
     ORDER BY j.queued_at, j.id
-    FOR UPDATE OF rp SKIP LOCKED
+    FOR UPDATE OF j SKIP LOCKED
     LIMIT 1
 )
 UPDATE ingest_jobs
