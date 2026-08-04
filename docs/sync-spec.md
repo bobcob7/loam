@@ -52,10 +52,11 @@ implementation. The rule: an **exact** match on `github.com` or its REST-API
 alias `api.github.com` is GitHub; everything else is Forgejo — self-hosted
 forges live at arbitrary domains, so there is no positive signal to require
 before trusting one, and requiring one would break every already-enrolled
-repo. A host that *looks* like GitHub Enterprise Server (contains "github" but
-isn't one of the two exact aliases) is rejected outright, naming the host,
-rather than silently treated as Forgejo — see "Limits" below
-for why that host shape isn't just unsupported but actively refused.
+repo. A host **containing the substring "github"** but not one of the two
+exact aliases is rejected outright, naming the host, rather than silently
+treated as Forgejo — this is a narrow heuristic aimed at vendor-named GitHub
+Enterprise Server hosts, not general GHE detection; see "Limits" below for
+exactly what it does and does not catch.
 
 Two call shapes reach this seam:
 
@@ -158,13 +159,28 @@ rediscovered per provider, once.
 
 An operator should learn these from this document, not from a failure:
 
-- **GitHub Enterprise Server is not supported.** A host that resolves to
-  neither `github.com`/`api.github.com` nor a recognizably self-hosted forge
-  (i.e. one containing "github" but not matching those two aliases) is
-  refused at credential/enrollment time with an explicit error naming the
-  host — it is never silently treated as Forgejo, which would send its token
-  to a Forgejo-shaped API URL and fail in a way that looks like a bad
-  credential rather than "unsupported host."
+- **GitHub Enterprise Server is not supported, and detection of it is a
+  heuristic, not a guarantee.** A host containing the substring "github" but
+  not matching `github.com`/`api.github.com` exactly is refused at
+  credential/enrollment time with an explicit error naming the host, rather
+  than silently treated as Forgejo. **This only catches GHE installs an
+  operator happened to name after the vendor** (`github.example.com`,
+  `github-internal.acme.com`). GitHub Enterprise Server installs at whatever
+  hostname the customer chooses, and most don't mention GitHub at all —
+  `git.acme.com`, `source.corp.io`, `scm.example.net` are all ordinary GHE
+  hostnames, and every one of them resolves silently to Forgejo, unmitigated
+  (`internal/forge.TestKindForHost_NonGitHubNamedEnterpriseHostsResolveToForgejoUnmitigated`
+  demonstrates this directly). If you run GitHub Enterprise Server, do not
+  rely on this check to catch a misconfiguration — Loam has no way to tell
+  your GHE host apart from a self-hosted Forgejo at the same shape of
+  hostname, and will send your token to a Forgejo-shaped API URL that fails
+  in a way that looks like a bad credential, not "unsupported forge."
+  **This is also a narrow, deliberate behaviour change**: a self-hosted
+  Forgejo whose own hostname happens to contain "github" (e.g.
+  `github-mirror.internal.corp`) previously resolved fine and now fails to
+  resolve at all, refused by the same heuristic — see `KindForHost`'s own
+  doc comment (`internal/forge/resolve.go`) for why that tradeoff was
+  accepted rather than avoided.
 - **Only classic personal-access tokens are supported for GitHub.**
   Fine-grained PATs and GitHub App installation tokens are not — see
   `github.go`'s own doc comment for the reasoning (no generic scope-listing

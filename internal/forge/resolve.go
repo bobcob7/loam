@@ -17,11 +17,16 @@ type Kind string
 
 const (
 	// KindForgejo is the default kind: every host that does not match a
-	// more specific pattern below resolves here, preserving this
-	// project's original behaviour byte-for-byte (loam-tmds.1) for
-	// every self-hosted forge already enrolled — self-hosted forges live
-	// at arbitrary domains, so there is no positive signal to require
-	// before trusting one as Forgejo.
+	// more specific pattern below resolves here — self-hosted forges
+	// live at arbitrary domains, so there is no positive signal to
+	// require before trusting one as Forgejo. This preserves prior
+	// behaviour for essentially every already-enrolled host, but NOT
+	// byte-for-byte for all of them: a self-hosted Forgejo whose host
+	// happens to contain the substring "github" (e.g.
+	// "github-mirror.internal.corp") now fails to resolve at all
+	// instead of defaulting here — see KindForHost's doc comment for
+	// why that narrow behaviour change is accepted deliberately rather
+	// than an oversight.
 	KindForgejo Kind = "forgejo"
 	// KindGitHub is github.com and its REST-API alias api.github.com.
 	// GitHub Enterprise Server (a customer's own domain) is out of
@@ -65,16 +70,24 @@ var errUnsupportedForgeKind = errors.New("forge: unsupported or unrecognized for
 // is no positive signal to require before trusting one, and requiring
 // one would silently break every already-enrolled repo.
 //
-// The one deliberate exception is a host that CONTAINS "github" but is
-// neither exact alias: that is almost certainly a GitHub Enterprise
-// Server instance on its own domain, which this package does not
-// implement. Defaulting it to KindForgejo would send its token to a
-// Forgejo-shaped API URL, producing an authentication failure that
-// reads nothing like "GitHub Enterprise is unsupported" -- exactly the
-// silent-misrouting failure mode loam-tmds.1's own notes warn is the
-// worst one available here. Failing loudly, naming the host, is the
-// whole point of this function existing separately from a bare
-// string-equality check.
+// One exception: a host that CONTAINS "github" but is neither exact
+// alias fails loudly instead of defaulting to KindForgejo, naming the
+// host. THIS IS A SUBSTRING HEURISTIC, NOT GITHUB ENTERPRISE SERVER
+// DETECTION, and the difference matters: GitHub Enterprise Server
+// installs at whatever hostname the customer chooses -- "git.acme.com",
+// "source.corp.io", "scm.example.net" are all ordinary GHE hostnames,
+// and every one of them still falls through to KindForgejo below,
+// unmitigated, sending its token to a Forgejo-shaped API URL exactly
+// the way loam-tmds.1's own notes call the worst failure mode here.
+// This check only catches the minority of GHE installs an operator
+// happened to name after the vendor (or a host some OTHER Forgejo
+// operator happened to name that way, with no GitHub involved at all --
+// seeKindForgejo's own doc comment on that cost). It exists because
+// catching that minority loudly is strictly better than catching none
+// of them, not because it is a general Enterprise Server detector -- see
+// docs/sync-spec.md's Limits section for the operator-facing statement
+// of exactly what this does and does not catch, and KindForgejo's own
+// doc comment for the corresponding cost against a non-GitHub host.
 //
 // An empty host (used by the three call sites that bind gittransport's
 // shared, host-agnostic credential converter -- see Resolver) is also

@@ -108,6 +108,39 @@ func TestKindForHost_GitHubEnterpriseErrorNamesTheHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "github.example.com")
 }
 
+// TestKindForHost_NonGitHubNamedEnterpriseHostsResolveToForgejoUnmitigated
+// is the boundary a review found this package's own comments and
+// docs/sync-spec.md previously overstated: the "contains github" check
+// is a substring heuristic, not GitHub Enterprise Server detection.
+// GHE installs at a hostname NOT containing "github" (the ordinary
+// case -- an operator names their GHE instance after their own company,
+// not GitHub's) are indistinguishable from a genuine self-hosted
+// Forgejo and silently resolve to KindForgejo here, exactly the
+// silent-misrouting failure this package's other tests prove is caught
+// for the narrower, vendor-named case. This test exists so that gap is
+// demonstrated, not merely described in prose that could drift from the
+// code — see docs/sync-spec.md's Limits section for the operator-facing
+// statement this test backs.
+func TestKindForHost_NonGitHubNamedEnterpriseHostsResolveToForgejoUnmitigated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+	}{
+		{name: "a GHE host named after the customer's own company", host: "git.acme.com"},
+		{name: "a GHE host with no forge-branded token at all", host: "source.corp.io"},
+		{name: "a GHE host named scm", host: "scm.example.net"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			kind, err := KindForHost(tt.host)
+			require.NoError(t, err, "this is the documented gap: a non-github-named GHE host resolves with no error at all")
+			assert.Equal(t, KindForgejo, kind, "and resolves to Forgejo, exactly as an actual self-hosted Forgejo at this host would -- the two are indistinguishable by host alone")
+		})
+	}
+}
+
 // TestNewProvider_Forgejo proves NewProvider constructs a working
 // *Forgejo for a Forgejo-shaped host — the seam plus Forgejo behind it,
 // with everything still passing, loam-tmds.1's own summary of its
