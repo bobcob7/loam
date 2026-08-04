@@ -444,8 +444,9 @@ func (t forgePRTracker) FindOpenPR(ctx context.Context, repo, headBranch, target
 // unauthenticated PR read against a private repo answers 404, which
 // StorePRPoller would report as an unknown state rather than as the
 // credential problem it actually is. A host that resolves to no known
-// Kind (forge.ErrUnsupportedForgeKind) is returned exactly the same way
-// -- named with the repo, never silently defaulted to Forgejo.
+// Kind (forge.NewProvider's own resolution error, via forge.KindForHost)
+// is returned exactly the same way -- named with the repo, never
+// silently defaulted to Forgejo.
 func (t forgePRTracker) provider(ctx context.Context, repo string) (forge.Provider, error) {
 	row, err := t.repos.GetRepoByName(ctx, repo)
 	if err != nil {

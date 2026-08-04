@@ -154,6 +154,19 @@ type Harness interface {
 	Provider(t *testing.T, token string) forge.Provider
 	// SeedRepo creates a fresh, private, non-empty repository with one
 	// commit on its default branch, isolated from every other test's.
+	//
+	// ONE IMPLEMENTATION DEVIATES ON PURPOSE: the real-GitHub leg
+	// (github_integration_test.go, unexecuted — see that file's doc
+	// comment) creates PUBLIC repos instead. Classic PATs have no scope
+	// that grants read-only access to a PRIVATE repo — "repo" grants
+	// full read+write, there is nothing narrower — so a private repo
+	// would make that leg's read-only token fail CheckRepo's read probe
+	// too, collapsing "read-only" into "no access at all," a case this
+	// suite has no row for. See CheckRepo/BogusTokenFoldsIntoRepoNotFound
+	// below, whose fold is justified by repos being private: that
+	// justification does not hold against a public repo, and that row
+	// may need attention the first time the real-GitHub leg actually
+	// runs.
 	SeedRepo(t *testing.T) Repo
 	// MissingRepo names a repository that does not exist on this forge.
 	MissingRepo(t *testing.T) Repo
@@ -322,10 +335,19 @@ var contractCases = []contractCase{
 	{"CheckRepo/BogusTokenFoldsIntoRepoNotFound", func(t *testing.T, e *env) {
 		// Both implementations deliberately FOLD "the credential was
 		// rejected on the read probe" into ErrRepoNotFound, because from
-		// outside a private repo the two are indistinguishable: Forgejo
+		// outside a PRIVATE repo the two are indistinguishable: Forgejo
 		// fails ls-remote with "Authentication failed", the fake 401s its
 		// info/refs. This row pins the fold on both sides so a later
 		// "improvement" on one side alone shows up here.
+		//
+		// THIS PREMISE IS VOID FOR A PUBLIC REPO: git serves an
+		// unauthenticated (or wrongly-authenticated) read of a public
+		// repo just fine, so a bogus token's ls-remote would SUCCEED
+		// rather than fail, and this row would not observe
+		// ErrRepoNotFound at all. The real-GitHub leg's SeedRepo creates
+		// public repos (Harness.SeedRepo's own doc comment explains why),
+		// so this row may need attention the first time that leg
+		// actually runs — flagged here rather than discovered live.
 		repo := e.h.SeedRepo(t)
 		err := e.provider(t, TokenBogus).CheckRepo(t.Context(), repo.GitURL)
 		require.Error(t, err)

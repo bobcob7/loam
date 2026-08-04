@@ -30,9 +30,9 @@ type ForgeChecker struct {
 // CheckRepo builds a single-use forge.Provider bound to host+token (of
 // whichever Kind host resolves to) and delegates to its CheckRepo,
 // satisfying upstreamChecker. A host that resolves to no known Kind
-// (forge.ErrUnsupportedForgeKind) fails here, before any network probe,
-// naming the unresolvable host -- never silently falling back to
-// Forgejo.
+// (forge.NewProvider's own resolution error, via forge.KindForHost)
+// fails here, before any network probe, naming the unresolvable host --
+// never silently falling back to Forgejo.
 func (f ForgeChecker) CheckRepo(ctx context.Context, host, token, upstreamURL string) error {
 	provider, err := forge.NewProvider(host, token, f.HTTPClient, f.Logger)
 	if err != nil {
