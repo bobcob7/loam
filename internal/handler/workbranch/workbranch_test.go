@@ -1280,3 +1280,66 @@ func TestGetWorkBranchDiff_NoMergeBase_MapsToFailedPrecondition(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestGetWorkBranch_Conflict_RoundTripsEveryEnumValue is conflictToProto's
+// round-trip proof, in the same shape as the state one above and for the
+// same reason: this is the surface the admin console's proposal detail page
+// reads a work branch through, and until loam-giq.11 the conflict column
+// was server-internal, so a demoted branch looked exactly like a clean one
+// to every client.
+func TestGetWorkBranch_Conflict_RoundTripsEveryEnumValue(t *testing.T) {
+	t.Parallel()
+	cases := map[workbranchstore.Conflict]loamv1.WorkBranchConflict{
+		workbranchstore.ConflictNone:    loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE,
+		workbranchstore.ConflictFlagged: loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_FLAGGED,
+		workbranchstore.ConflictReset:   loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET,
+	}
+	for store, want := range cases {
+		t.Run(string(store), func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+			workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+				wb := sampleTitledWorkBranch(workbranchstore.StateReviewed)
+				wb.Conflict = store
+				return wb, nil
+			}
+			h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+			require.NoError(t, err)
+			assert.Equal(t, want, resp.Msg.GetWorkBranch().GetConflict())
+		})
+	}
+}
+
+// TestGetWorkBranch_UpstreamDrift_RoundTripsEveryEnumValue is the same
+// proof for driftToProto. The two fields are asserted separately, never as
+// one badge: 'flagged'/'reset' mean "the target moved, catch up" while
+// 'diverged' means "someone rewrote the branch Loam pushed", and they call
+// for different operator actions (docs/sync-spec.md -> Upstream Drift).
+func TestGetWorkBranch_UpstreamDrift_RoundTripsEveryEnumValue(t *testing.T) {
+	t.Parallel()
+	cases := map[workbranchstore.UpstreamDrift]loamv1.UpstreamDrift{
+		workbranchstore.DriftNone:     loamv1.UpstreamDrift_UPSTREAM_DRIFT_NONE,
+		workbranchstore.DriftDiverged: loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED,
+	}
+	for store, want := range cases {
+		t.Run(string(store), func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			workBranches, repos, rounds, diff, threads, verdicts, publisher := allMocks()
+			workBranches.GetByNameFunc = func(_ context.Context, _ uuid.UUID, _ string) (workbranchstore.WorkBranch, error) {
+				wb := sampleTitledWorkBranch(workbranchstore.StateReviewed)
+				wb.UpstreamDrift = store
+				wb.Conflict = workbranchstore.ConflictNone
+				return wb, nil
+			}
+			h := newHandler(workBranches, repos, rounds, diff, threads, verdicts, publisher, []handler.Capability{handler.CapabilityWorkRead}, &buf)
+			resp, err := h.GetWorkBranch(agentCtx(t, "reviewer"), connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: "bobcob7/doc-server", WorkBranch: "wb-9c2f1a"}))
+			require.NoError(t, err)
+			assert.Equal(t, want, resp.Msg.GetWorkBranch().GetUpstreamDrift())
+			assert.Equal(t, loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_NONE, resp.Msg.GetWorkBranch().GetConflict(),
+				"drift must travel on its own field, never collapsed into the conflict one")
+		})
+	}
+}

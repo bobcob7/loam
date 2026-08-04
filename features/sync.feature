@@ -60,3 +60,23 @@ Feature: Upstream sync
     When the next sync runs
     Then the work branch is in state "complete"
     And the "loam/" branch is removed from the upstream forge
+
+  Scenario: A commit pushed straight to the upstream branch is adopted, and the approvals reset
+    Given a proposal in state "reviewed" with one "approve" verdict
+    And I accept it
+    And someone pushes a commit directly to the upstream "loam/" branch
+    When the next sync runs
+    Then the work branch advances to that commit
+    And a new review round is opened by the server
+    And the accepted tip records that commit
+    And accepting it is refused until it is approved again
+
+  Scenario: An upstream branch someone rewrote is flagged for the admin, never guessed at
+    Given a proposal in state "reviewed" with one "approve" verdict
+    And I accept it
+    And the upstream "loam/" branch moves on while the work branch moves on separately
+    When the next sync runs
+    Then the work branch still holds the commit its author pushed
+    And the admin sees the work branch flagged as diverged from upstream
+    When I try to accept it
+    Then the attempt is rejected as a failed precondition
