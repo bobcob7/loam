@@ -195,17 +195,24 @@ This is where you first meet the credential model, and the order matters:
 a credential is **per forge host**, not per repo, and enrolment needs it to
 already exist.
 
-1. On your forge (Forgejo is the MVP target), create an access token with
-   `write:repository` and `write:user` scope.
-2. In the console, add it under the forge host — `CredentialService` validates
-   the token against the host as you save it, so a bad token fails here rather
-   than at the first sync.
-3. Enrol the repo by its `<group>/<name>` identifier and target branch. Loam
-   probes the upstream, creates a bare mirror under `LOAM_DATA_DIR`, and starts
-   fetching it every `LOAM_SYNC_INTERVAL`.
+1. On your forge, create an access token:
+   - **Forgejo**: `write:repository` and `write:user` scope.
+   - **GitHub**: a **classic** personal access token with `repo` scope.
+     Fine-grained PATs and GitHub App installation tokens are not supported
+     (`docs/sync-spec.md` → Provider Interface, Limits). GitHub Enterprise
+     Server is not supported either — only `github.com` itself.
+2. In the console, add it under the forge host — for GitHub, enter `github.com`
+   (or `api.github.com`; both resolve to the same credential).
+   `CredentialService` validates the token against the host as you save it, so
+   a bad token fails here rather than at the first sync.
+3. Enrol the repo by its `<group>/<name>` identifier (for GitHub, `<owner>/<repo>`)
+   and target branch. Loam probes the upstream, creates a bare mirror under
+   `LOAM_DATA_DIR`, and starts fetching it every `LOAM_SYNC_INTERVAL`.
 
 One credential covers every repo on that host, for both the REST API and git
-transport.
+transport. Which forge a repo uses is resolved automatically from its host —
+nothing to configure beyond the host and token above
+(`docs/sync-spec.md` → "Selecting a provider").
 
 ## 7. Point an agent at it
 
