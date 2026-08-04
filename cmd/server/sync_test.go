@@ -421,6 +421,29 @@ func TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed(t *test
 	require.ErrorIs(t, err, wantErr)
 }
 
+// noNetworkTransport is an http.RoundTripper that records whether it was
+// ever invoked and refuses every request. Used below to PROVE resolution
+// fails before any network call is attempted, rather than relying on a
+// live DNS lookup's failure message to coincidentally look right -- a
+// review found the previous version of this test used a real
+// *http.Client against an unresolvable hostname, whose DNS error message
+// happens to embed both the host (net.DNSError's own Error() string
+// includes it) and, once wrapped by GetPRState's own "getting PR %s#%d
+// state" formatting, the repo name too. That made the test PASS even
+// with the resolution guard deleted entirely: a real Forgejo instance
+// bound to the bad host, actually dialing it, produces a DNS failure
+// with the same two substrings the assertions checked for -- and it did
+// so via a genuine outbound DNS lookup in the plain unit test gate,
+// which should never happen regardless of correctness.
+type noNetworkTransport struct {
+	called bool
+}
+
+func (t *noNetworkTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.called = true
+	return nil, errors.New("noNetworkTransport: no network call should ever be made for an unresolvable forge kind")
+}
+
 // TestForgePRTracker_UnsupportedForgeKind_FailsLoudly is loam-tmds.1's
 // AC4 pinned at the composition root: a repo enrolled against a host
 // this tree cannot resolve to a Kind (a GitHub-Enterprise-shaped host,
@@ -429,9 +452,20 @@ func TestForgePRTracker_CreatePR_MissingCredentialIsReportedNotSwallowed(t *test
 // treating it as Forgejo -- which would send its token to a
 // Forgejo-shaped API URL on that host and fail in a way that looks
 // nothing like "this forge kind is unsupported".
+//
+// The discriminating assertion is transport.called being false: if the
+// resolution guard were deleted, forge.NewProvider would silently
+// construct a *Forgejo bound to the bad host, GetPRState would issue a
+// real HTTP request through this test's httpClient, noNetworkTransport
+// would be invoked, and transport.called would flip true -- failing
+// this test for the right reason instead of passing by DNS-error
+// coincidence. The two Contains checks below are kept because the real
+// resolution error DOES name both, but neither one alone (nor together,
+// as the previous revision showed) proves the guard actually ran.
 func TestForgePRTracker_UnsupportedForgeKind_FailsLoudly(t *testing.T) {
 	t.Parallel()
 	credentialsCalled := false
+	transport := &noNetworkTransport{}
 	tracker := forgePRTracker{
 		repos: &repoForgeLookupMock{GetRepoByNameFunc: func(_ context.Context, name string) (reposstore.Repo, error) {
 			return reposstore.Repo{Name: name, ForgeHost: "github-enterprise.example.com"}, nil
@@ -440,11 +474,12 @@ func TestForgePRTracker_UnsupportedForgeKind_FailsLoudly(t *testing.T) {
 			credentialsCalled = true
 			return credentialstore.Credential{Host: host, Token: "tkn"}, nil
 		}},
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Transport: transport},
 		logger:     syncTestLogger(),
 	}
 	_, err := tracker.GetPRState(t.Context(), "acme/widgets", 7)
 	require.Error(t, err)
+	assert.False(t, transport.called, "resolution must fail BEFORE any network call is attempted -- a network call at all means the guard silently fell through to a real provider")
 	assert.Contains(t, err.Error(), "acme/widgets", "the error must name the repo whose forge kind could not be resolved")
 	assert.Contains(t, err.Error(), "github-enterprise.example.com", "the error must name the unresolvable host")
 	assert.True(t, credentialsCalled, "the credential lookup still runs -- resolution fails on the Kind, not on finding a token")
