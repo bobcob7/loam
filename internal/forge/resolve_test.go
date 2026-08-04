@@ -138,18 +138,18 @@ func TestNewProvider_UnsupportedForgeKind_DoesNotFallBackToForgejo(t *testing.T)
 	assert.Nil(t, provider, "an unresolvable host must not silently construct any provider, Forgejo included")
 }
 
-// TestNewProvider_GitHubHost_NotYetImplemented pins loam-tmds.1's own
-// constraint: this bead adds no GitHub code, so a GitHub-shaped host is
-// recognized (KindForHost succeeds) but NewProvider itself must still
-// refuse to construct anything for it — a documented, temporary gap this
-// same test will need updating for once loam-tmds.2 lands NewGitHub.
-func TestNewProvider_GitHubHost_NotYetImplemented(t *testing.T) {
+// TestNewProvider_GitHub proves NewProvider constructs a working
+// *GitHub for a GitHub-shaped host (loam-tmds.2 wires this in; before
+// that bead landed, this same host resolved to an explicit
+// not-implemented error — see loam-tmds.1's commit).
+func TestNewProvider_GitHub(t *testing.T) {
 	t.Parallel()
 	kind, err := KindForHost("github.com")
-	require.NoError(t, err, "github.com must already resolve to a recognized Kind")
+	require.NoError(t, err)
 	assert.Equal(t, KindGitHub, kind)
-	_, err = NewProvider("github.com", "tkn", &http.Client{}, resolveTestLogger())
-	require.Error(t, err, "loam-tmds.1 adds no GitHub implementation, so NewProvider must not silently succeed for a recognized-but-unimplemented Kind")
+	provider, err := NewProvider("github.com", "tkn", &http.Client{}, resolveTestLogger())
+	require.NoError(t, err)
+	assert.IsType(t, &GitHub{}, provider)
 }
 
 // TestResolver_ValidateToken_DispatchesPerCallHost proves the whole

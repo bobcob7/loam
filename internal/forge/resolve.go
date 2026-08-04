@@ -116,11 +116,9 @@ func NewProvider(host, token string, httpClient *http.Client, logger *slog.Logge
 	switch kind {
 	case KindForgejo:
 		return NewForgejo(host, token, httpClient, logger), nil
+	case KindGitHub:
+		return NewGitHub(host, token, httpClient, logger), nil
 	default:
-		// KindGitHub reaches here until loam-tmds.2 lands NewGitHub: a
-		// host recognized as GitHub-shaped must still fail loudly
-		// rather than silently constructing a Forgejo provider that
-		// would send the token to the wrong API (see KindForHost).
 		return nil, fmt.Errorf("resolving forge kind for host %q: %s support is not implemented: %w", host, kind, errUnsupportedForgeKind)
 	}
 }

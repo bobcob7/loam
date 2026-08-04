@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,16 +17,27 @@ import (
 )
 
 // CheckRepo confirms upstreamURL exists and is accessible for both git
-// read and git write, using the instance's bound token. The read probe
-// is an authenticated `git ls-remote`; the write probe is the smart-HTTP
-// receive-pack advertisement request — the same first request a real
-// `git push` makes, so it proves write access without transferring any
-// pack data or touching a ref.
-//
-// upstreamURL's host must match the instance's bound host: the bound
-// token belongs to one forge host, and CheckRepo must never send it to
-// a different one just because a caller passed an arbitrary URL.
+// read and git write, using the instance's bound token, by delegating
+// to checkRepoOverGit -- the forge-agnostic git-protocol implementation
+// GitHub.CheckRepo (github.go) shares byte for byte: neither the
+// ls-remote read probe nor the receive-pack write probe touches a
+// forge's REST API at all, and GitHub's classic-PAT git-over-HTTPS
+// convention coincides with Forgejo's (gitCredentialsConvention), so
+// there is nothing left that differs per Kind here.
 func (f *Forgejo) CheckRepo(ctx context.Context, upstreamURL string) error {
+	return checkRepoOverGit(ctx, f.host, f.token, f.httpClient, f.logger, upstreamURL)
+}
+
+// checkRepoOverGit is CheckRepo's shared implementation: an
+// authenticated `git ls-remote` for read, and the smart-HTTP
+// receive-pack advertisement request for write -- the same first
+// request a real `git push` makes, so it proves write access without
+// transferring any pack data or touching a ref.
+//
+// upstreamURL's host must match boundHost: the token belongs to one
+// forge host, and this must never send it to a different one just
+// because a caller passed an arbitrary URL.
+func checkRepoOverGit(ctx context.Context, boundHost, token string, httpClient *http.Client, logger *slog.Logger, upstreamURL string) error {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		// upstreamURL is deliberately never interpolated into this
@@ -38,25 +50,32 @@ func (f *Forgejo) CheckRepo(ctx context.Context, upstreamURL string) error {
 		return errors.New("checking repo: parsing upstream URL: invalid URL")
 	}
 	redacted := redactUserinfo(u)
-	if boundHost := hostOf(f.host); u.Host != boundHost {
-		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q", redacted, u.Host, boundHost)
+	if bound := hostOf(boundHost); u.Host != bound {
+		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q", redacted, u.Host, bound)
 	}
-	if err := f.lsRemoteProbe(ctx, upstreamURL); err != nil {
+	if err := lsRemoteProbeOverGit(ctx, upstreamURL, token, logger); err != nil {
 		return fmt.Errorf("checking repo %s: %w", redacted, err)
 	}
-	if err := f.receivePackProbe(ctx, u); err != nil {
+	if err := receivePackProbeOverGit(ctx, u, token, httpClient, logger); err != nil {
 		return fmt.Errorf("checking repo %s: %w", redacted, err)
 	}
 	return nil
 }
 
 // lsRemoteProbe runs an authenticated `git ls-remote` against
-// upstreamURL to confirm read access and existence. It returns an error
-// wrapping ErrRepoNotFound only when the failure is plausibly "the repo
-// isn't there or isn't readable" — a cancelled/deadline-exceeded context
-// or a missing git binary are reported unclassified so callers don't
-// mistake infrastructure trouble for a missing repo.
+// upstreamURL to confirm read access and existence, delegating to
+// lsRemoteProbeOverGit with the instance's bound token and logger.
 func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
+	return lsRemoteProbeOverGit(ctx, upstreamURL, f.token, f.logger)
+}
+
+// lsRemoteProbeOverGit is lsRemoteProbe's shared implementation. It
+// returns an error wrapping ErrRepoNotFound only when the failure is
+// plausibly "the repo isn't there or isn't readable" — a
+// cancelled/deadline-exceeded context or a missing git binary are
+// reported unclassified so callers don't mistake infrastructure trouble
+// for a missing repo.
+func lsRemoteProbeOverGit(ctx context.Context, upstreamURL, token string, logger *slog.Logger) error {
 	redacted := redactURLString(upstreamURL)
 	home, err := os.MkdirTemp("", "loam-forge-probe-*")
 	if err != nil {
@@ -64,12 +83,12 @@ func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
 	}
 	defer func() { _ = os.RemoveAll(home) }()
 	cmd := exec.CommandContext(ctx, "git", "-c", "credential.helper=", "ls-remote", upstreamURL)
-	cmd.Env = f.gitAuthEnv(home)
+	cmd.Env = gitAuthEnvFor(home, token)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	f.logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", redacted, "err", err, "output", string(bytes.TrimSpace(out)))
+	logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", redacted, "err", err, "output", string(bytes.TrimSpace(out)))
 	if ctx.Err() != nil {
 		return fmt.Errorf("ls-remote %s: %w", redacted, ctx.Err())
 	}
@@ -80,13 +99,20 @@ func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
 }
 
 // receivePackProbe issues the GET request that a `git push` makes as its
-// first step (the receive-pack ref advertisement) and classifies the
-// result: only an explicit auth rejection (401/403) means write access
-// is denied. Any other non-2xx status or transport failure (DNS, TCP,
-// TLS, rate-limiting, a 5xx) is reported unclassified — it says nothing
+// first step, delegating to receivePackProbeOverGit with the instance's
+// bound token, HTTP client, and logger.
+func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) error {
+	return receivePackProbeOverGit(ctx, upstreamURL, f.token, f.httpClient, f.logger)
+}
+
+// receivePackProbeOverGit is receivePackProbe's shared implementation:
+// the receive-pack ref advertisement request, classified so that only
+// an explicit auth rejection (401/403) means write access is denied.
+// Any other non-2xx status or transport failure (DNS, TCP, TLS,
+// rate-limiting, a 5xx) is reported unclassified — it says nothing
 // about the token's git permissions. No pack data is ever sent and no
 // ref is ever touched.
-func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) error {
+func receivePackProbeOverGit(ctx context.Context, upstreamURL *url.URL, token string, httpClient *http.Client, logger *slog.Logger) error {
 	probe := *upstreamURL
 	probe.Path = strings.TrimSuffix(probe.Path, "/") + "/info/refs"
 	probe.RawQuery = "service=git-receive-pack"
@@ -97,16 +123,16 @@ func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) er
 	if err != nil {
 		return fmt.Errorf("building receive-pack probe request: %w", err)
 	}
-	if f.token != "" {
-		req.SetBasicAuth(gitUsername, f.token)
+	if token != "" {
+		req.SetBasicAuth(gitUsername, token)
 	}
-	resp, err := f.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		f.logger.DebugContext(ctx, "receive-pack probe transport error", "url", redacted, "err", err)
+		logger.DebugContext(ctx, "receive-pack probe transport error", "url", redacted, "err", err)
 		return fmt.Errorf("receive-pack probe %s: %w", redacted, err)
 	}
 	defer drainAndClose(resp.Body)
-	f.logger.DebugContext(ctx, "receive-pack probe response", "url", redacted, "status", resp.StatusCode)
+	logger.DebugContext(ctx, "receive-pack probe response", "url", redacted, "status", resp.StatusCode)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("receive-pack probe %s: %w", redacted, ErrNoWriteAccess)
 	}
@@ -160,6 +186,15 @@ func (f *Forgejo) receivePackProbe(ctx context.Context, upstreamURL *url.URL) er
 // does before the overrides below are appended. The other GIT_TRACE*
 // variables are ordinary booleans and are safe to override with "0".
 func (f *Forgejo) gitAuthEnv(home string) []string {
+	return gitAuthEnvFor(home, f.token)
+}
+
+// gitAuthEnvFor is gitAuthEnv's shared implementation, parameterized on
+// token so lsRemoteProbeOverGit (and, through it, GitHub.CheckRepo) can
+// build the identical isolated environment for whichever Kind's bound
+// token is in play — the isolation properties documented above apply
+// uniformly regardless of which forge the token belongs to.
+func gitAuthEnvFor(home, token string) []string {
 	env := append(dropGitCurlVerbose(os.Environ()),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_PARAMETERS=",
@@ -175,10 +210,10 @@ func (f *Forgejo) gitAuthEnv(home string) []string {
 		"GIT_TRACE_PACK_ACCESS=0",
 		"GIT_TRACE_SETUP=0",
 	)
-	if f.token == "" {
+	if token == "" {
 		return append(env, "GIT_CONFIG_COUNT=0")
 	}
-	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(gitUsername+":"+f.token))
+	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(gitUsername+":"+token))
 	return append(env,
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=http.extraHeader",
