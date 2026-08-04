@@ -90,15 +90,28 @@ type Unit struct {
 	Content   string
 }
 
-// Result reports what EnforceBudget did, for a caller (the eventual
-// orchestrator, loam-c94.12) to log or fold into ingest_jobs.stats — the
-// visibility loam-zoa requires for an over-budget chunk's handling.
+// Result reports what happened while turning one file into chunk units --
+// primarily what EnforceBudget did (UnitsSplit/PiecesProduced, for loam-
+// zoa's over-budget-chunk visibility), plus SanitizedInvalidUTF8, which
+// chunker.Chunker.ChunkFile sets earlier in the same pipeline (loam-c94.20)
+// -- for a caller (the orchestrator, loam-c94.12) to log or fold into
+// ingest_jobs.stats.
 type Result struct {
 	// UnitsSplit is how many input units exceeded the budget.
 	UnitsSplit int
 	// PiecesProduced is the total number of output units those split
 	// units became (always > UnitsSplit when UnitsSplit > 0).
 	PiecesProduced int
+	// SanitizedInvalidUTF8 reports whether the file's content contained at
+	// least one invalid UTF-8 byte sequence that Chunker.ChunkFile replaced
+	// with the Unicode replacement character before chunking (loam-c94.20),
+	// so text leaving the chunker is always valid UTF-8. This field is set
+	// by ChunkFile itself, not by EnforceBudget (sanitisation happens
+	// earlier in the pipeline, at the same point that decides chunk-or-skip)
+	// -- Result is simply the one per-file report both steps fold their
+	// findings into, so batch.go's Stats aggregation has a single place to
+	// read from, mirroring how UnitsSplit/PiecesProduced already work.
+	SanitizedInvalidUTF8 bool
 }
 
 // EnforceBudget is the chunk-time safety net loam-zoa adds: given units

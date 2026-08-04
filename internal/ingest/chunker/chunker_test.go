@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/bobcob7/loam/internal/ingest/chunk"
 	"github.com/bobcob7/loam/internal/parser"
@@ -295,6 +296,51 @@ func TestChunkFile_BinaryFile_SkippedWithNoChunksAndNoError(t *testing.T) {
 	assert.False(t, ok, "binary content must be reported as skipped, not chunked")
 	assert.Empty(t, units)
 	assert.Equal(t, chunk.Result{}, result)
+}
+
+// TestChunkFile_InvalidUTF8NotBinary_IsSanitizedAndCounted is loam-c94.20's
+// core ChunkFile-level proof: a file with no NUL byte anywhere (so isBinary
+// lets it through) but one invalid UTF-8 byte -- 0xa5, the exact byte the
+// production incident reported -- placed past binarySniffLen (proving the
+// sanitize step scans the WHOLE file, not merely isBinary's prefix) is
+// chunked, not skipped, with every returned unit's content valid UTF-8 and
+// result.SanitizedInvalidUTF8 true so a caller can count it.
+func TestChunkFile_InvalidUTF8NotBinary_IsSanitizedAndCounted(t *testing.T) {
+	t.Parallel()
+	c := newRealChunker(t)
+	padding := strings.Repeat("-- padding comment to push the bad byte past binarySniffLen\n", (binarySniffLen/62)+5)
+	src := []byte(padding + "-- old Mac Roman bullet: \xa5 end of comment\nSELECT 1;\n")
+	require.Greater(t, len(src), binarySniffLen)
+	require.NotContains(t, string(src[:binarySniffLen]), "\xa5", "the bad byte must be past isBinary's own sniff window for this test to prove what it claims")
+	units, result, ok, err := c.ChunkFile(t.Context(), "queries/legacy.sql", src, fixedBudgeter(1_000_000))
+	require.NoError(t, err)
+	require.True(t, ok, "a file with no NUL byte must not be treated as binary just because it has an encoding problem")
+	require.NotEmpty(t, units)
+	assert.True(t, result.SanitizedInvalidUTF8, "the sanitize must be reported, not silent")
+	for i, u := range units {
+		assert.Truef(t, utf8.ValidString(u.Content), "unit %d content is not valid UTF-8: %q", i, u.Content)
+	}
+}
+
+// TestChunkFile_ValidMultibyteUTF8_IsByteIdentical is loam-c94.20 acceptance
+// criterion 6: a file that is already valid UTF-8, including multibyte
+// characters, must not be mangled by the sanitize step -- concatenating
+// every returned unit's content must reproduce the input exactly, and
+// result.SanitizedInvalidUTF8 must be false.
+func TestChunkFile_ValidMultibyteUTF8_IsByteIdentical(t *testing.T) {
+	t.Parallel()
+	c := newRealChunker(t)
+	src := []byte("-- café résumé 日本語 emoji 🎉 naïve\nSELECT 'ñ';\n")
+	units, result, ok, err := c.ChunkFile(t.Context(), "queries/unicode.sql", src, fixedBudgeter(1_000_000))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, units)
+	assert.False(t, result.SanitizedInvalidUTF8)
+	var rebuilt strings.Builder
+	for _, u := range units {
+		rebuilt.WriteString(u.Content)
+	}
+	assert.Equal(t, strings.TrimSuffix(string(src), "\n"), rebuilt.String(), "valid multibyte UTF-8 content must survive the pipeline byte-identical")
 }
 
 // TestChunkFile_EnforceBudgetSplitsEveryStrategysOutput is this bead's

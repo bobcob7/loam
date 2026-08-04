@@ -61,6 +61,28 @@ func TestChunkFiles_BinaryFileStillYieldsAnEntryToDropItsStaleChunks(t *testing.
 	assert.Empty(t, out[0].Units)
 }
 
+// TestChunkFiles_InvalidUTF8FileCountedNotSkipped is loam-c94.20's Stats-level
+// proof: a file that is not binary (no NUL byte) but carries an invalid
+// UTF-8 byte is chunked -- it still gets real units and lands in
+// FilesChunked, distinct from FilesSkippedBinary -- and is additionally
+// counted in FilesSanitizedInvalidUTF8, so an operator can tell it was
+// altered without it being missing from the index.
+func TestChunkFiles_InvalidUTF8FileCountedNotSkipped(t *testing.T) {
+	t.Parallel()
+	c := newRealChunker(t)
+	files := []FileInput{
+		{Path: "queries/legacy.sql", Content: []byte("SELECT 1; -- old comment \xa5 bullet\n")},
+		{Path: "a.go", Content: []byte("package a\n\nfunc A() {}\n")},
+	}
+	out, stats, err := c.ChunkFiles(t.Context(), files, fixedBudgeter(2048))
+	require.NoError(t, err)
+	assert.Equal(t, 2, stats.FilesChunked)
+	assert.Equal(t, 0, stats.FilesSkippedBinary)
+	assert.Equal(t, 1, stats.FilesSanitizedInvalidUTF8, "only the .sql file carried an invalid byte")
+	require.Len(t, out, 2)
+	assert.NotEmpty(t, out[0].Units, "the sanitized file must still be chunked, not dropped")
+}
+
 // TestChunkFiles_HardFailureCountedNotFatal proves one file's genuine parse
 // failure does not abort the rest of the batch, mirroring internal/ingest/
 // graph's TestIngestFiles-equivalent resilience -- and that the failed file
