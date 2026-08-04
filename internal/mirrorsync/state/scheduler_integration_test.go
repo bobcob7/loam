@@ -40,8 +40,9 @@ func testLoggerForScheduler() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
-// noopFetcher, noopAdvanceDetector, noopMergeabilityChecker, and
-// noopPRPoller are trivial, inert stand-ins for the four Scheduler
+// noopFetcher, noopAdvanceDetector, noopMergeabilityChecker,
+// noopPRPoller, and noopDriftReconciler are trivial, inert stand-ins for
+// the five Scheduler
 // collaborators this test does not exercise -- they exist only because
 // mirrorsync.New needs a concrete value for each, mirroring
 // internal/testsched/sync_realscheduler_test.go's rationale for
@@ -68,6 +69,10 @@ func (noopMergeabilityChecker) CheckMergeability(context.Context, mirrorsync.Rep
 type noopPRPoller struct{}
 
 func (noopPRPoller) PollPRs(context.Context, mirrorsync.RepoID) error { return nil }
+
+type noopDriftReconciler struct{}
+
+func (noopDriftReconciler) ReconcileDrift(context.Context, mirrorsync.RepoID) error { return nil }
 
 // stubIngestEnqueuer answers every EnqueueIngest call with the fixed
 // (enqueued, err) this test configures, so each test can drive the
@@ -105,6 +110,7 @@ func newIntegrationScheduler(reporter mirrorsync.SyncStateReporter, repo mirrors
 		noopMergeabilityChecker{},
 		stubIngestEnqueuer{enqueued: enqueued},
 		noopPRPoller{},
+		noopDriftReconciler{},
 		reporter,
 	)
 }
@@ -176,6 +182,7 @@ func TestSchedulerIntegration_EnqueueErrorLeavesRowInErrorState(t *testing.T) {
 		noopMergeabilityChecker{},
 		erroringIngestEnqueuer{err: wantErr},
 		noopPRPoller{},
+		noopDriftReconciler{},
 		reporter,
 	)
 	repos, err := scheduler.Tick(ctx)
