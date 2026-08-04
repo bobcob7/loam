@@ -104,7 +104,8 @@ initial bare-mirror clone runs as its first sync (`syncing` until it completes,
 ## Mergeability Check
 
 The server is a **broker and a store — it never authors commits or contributes
-code**. Work-branch refs advance only by agent pushes. On a target advance, the
+code**. Work-branch refs advance by agent pushes, and by nothing else here — the one
+exception in the whole system is drift adoption, below. On a target advance, the
 server *tests* each **open (non-terminal) work branch targeting that branch**
 against the new tip with `git merge-tree` — no worktree, no writes to any ref:
 
