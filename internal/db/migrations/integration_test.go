@@ -237,15 +237,18 @@ func assertTablesAbsent(ctx context.Context, t *testing.T, dsn string) {
 //
 // Each role is looked up BY NAME rather than by its position in a
 // count-pinned slice (loam-w8li). The earlier shape asserted len(got) == 3
-// and then read got[0]/got[1]/got[2]; 0009 already forced one renumbering
-// of it, and the fourth built-in role would force another -- while the
-// version that did NOT get renumbered, internal/rolestore's ListRoles test,
-// went on asserting the reviewer's capabilities against the orchestrator.
-// Keying by name makes this assertion insensitive to both the count and the
-// order, so a new built-in role adds a line here instead of rewriting the
-// function. It is deliberately not an exhaustive check of the role set: the
-// built-ins below must be seeded and must be builtin, and an operator's own
-// roles in a restored database are none of this assertion's business.
+// and then read got[0]/got[1]/got[2]. 0009 already forced one renumbering of
+// it, and a fourth built-in role would force another; the copy of this shape
+// that did NOT get renumbered, internal/rolestore's ListRoles test, went red
+// on its count -- and its four operation assertions, had that count been
+// bumped rather than removed, would then have been reading the orchestrator
+// while naming the reviewer.
+//
+// So the count goes, for the reason it broke: every future built-in role
+// breaks a pinned count again, and neither the presence check below nor the
+// operation sets are about how many roles exist. Name keying is insensitive
+// to both the count and the order, and a new built-in adds one string to the
+// list below instead of rewriting the function.
 func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)

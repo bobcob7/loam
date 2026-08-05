@@ -108,14 +108,27 @@ func TestGetRole_UnknownRole_ReturnsErrNotFound(t *testing.T) {
 // two roles, keyed BY NAME.
 //
 // Keyed by name and not by position on purpose (loam-w8li). This test used
-// to read roles[0] as author and roles[1] as reviewer over a two-role seed.
-// Migration 0009_orchestrator_role seeds a third built-in, so by name order
-// roles[1] became the ORCHESTRATOR: the count assertion failed loudly, but
-// the four operation assertions below had silently moved to the wrong role
-// -- exactly the failure mode this test's own comment says it exists to
-// catch, turned on the test itself. A name-keyed lookup is insensitive to
-// both the count and the order, so the next built-in role does not touch
-// this test at all.
+// to read roles[0] as author and roles[1] as reviewer over a two-role seed,
+// behind a require.Len(roles, 2). Migration 0009_orchestrator_role seeds a
+// third built-in, so by name order roles[1] became the ORCHESTRATOR.
+//
+// What actually happened at runtime is worth being exact about, because the
+// lesson is not the obvious one: the require.Len called FailNow, so the four
+// operation assertions never executed at all. The count guard was the ONLY
+// thing standing between this suite and four assertions silently addressing
+// the wrong role -- and it was standing there by accident, since a count is
+// not what any of them is about. Renumbering the 2 to a 3 would have removed
+// that accidental guard and let them run misdirected: three would still have
+// passed, one of them (NotContains git.push, against a role that happens not
+// to hold it) for entirely the wrong reason. Keying by name removes the
+// count deliberately and makes the misdirection impossible instead of merely
+// fatal, so the next built-in role does not touch this test at all.
+//
+// Dropping the count costs nothing HERE: what this test is about is
+// ListRoles' grouping, and ListRoles reads a database that may legitimately
+// hold operator-created roles besides the seeded ones. The seed's exact
+// membership is pinned where it is checkable -- internal/db/migrations'
+// assertBuiltinRolesSeeded, over a fresh database.
 func TestListRoles_AttachesEachBuiltinsOperationsToTheRightRole(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

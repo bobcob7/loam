@@ -124,8 +124,9 @@ func (s *Store) ListRoles(ctx context.Context) ([]Role, error) {
 // over-privileged) authorization record, which is not a state any later
 // call can detect as wrong.
 //
-// The created role is never builtin. The builtin flag marks the two roles
-// migration 0001_init seeds and is the only thing standing between
+// The created role is never builtin. The builtin flag marks the roles the
+// migrations seed -- author and reviewer from 0001_init, orchestrator from
+// 0009_orchestrator_role -- and is the only thing standing between
 // DeleteRole and them, so nothing reachable from an RPC may set it -- the
 // CreateRole statement does not even accept it as a parameter (see
 // queries/roles.sql).
