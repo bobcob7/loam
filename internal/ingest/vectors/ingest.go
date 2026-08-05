@@ -447,6 +447,19 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 // rejection and would now -- with rejections finally survivable -- be
 // retried once per remaining file.
 //
+// Its POSITION is not cosmetic, and a later tidy that sorts these checks
+// into a prettier order would silently break it. The *pgconn.PgError block
+// below RETURNS its boolean rather than falling through, and its seven
+// pgerrcode families do not include class 3B (savepoint_exception) --
+// which is exactly what RELEASE and ROLLBACK TO SAVEPOINT raise, i.e.
+// precisely the statements this sentinel reports on. Demonstrated during
+// review: an ErrTransactionUnusable carrying a 3B001 PgError classifies
+// true as written and FALSE with this check moved below that block, which
+// is the retry storm it exists to prevent. Relatedly and also deliberate,
+// savepointTransactor wraps fn's own error with %v and only the savepoint
+// statement's error with %w (chunkstore/store.go), so a rejected file's
+// PgError never enters this chain to be misread here.
+//
 // Everything else here is Postgres-specific because the store this
 // package actually writes through in production is chunkstore.Store, a
 // pgx-backed implementation; a caller's own mock in a unit test will not
