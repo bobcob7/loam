@@ -101,7 +101,7 @@ func (h *Handler) CreateRole(ctx context.Context, req *connect.Request[adminv1.C
 		return nil, h.errors.ToConnectErr(err)
 	}
 	if req.Msg.GetRole().GetBuiltin() {
-		return nil, h.errors.ToConnectErr(fmt.Errorf("creating role %s: builtin is assigned by Loam and cannot be requested (only the author and reviewer roles shipped with the server are built-in): %w", params.Name, handler.ErrInvalidArgument))
+		return nil, h.errors.ToConnectErr(fmt.Errorf("creating role %s: builtin is assigned by Loam and cannot be requested (only the roles seeded by migration are built-in): %w", params.Name, handler.ErrInvalidArgument))
 	}
 	role, err := h.roles.CreateRole(ctx, params)
 	if err != nil {
@@ -164,9 +164,9 @@ func (h *Handler) UpdateRole(ctx context.Context, req *connect.Request[adminv1.U
 	return connect.NewResponse(&adminv1.UpdateRoleResponse{Role: roleToProto(role)}), nil
 }
 
-// DeleteRole removes an admin-defined role. A built-in (author, reviewer)
-// is refused with CodeFailedPrecondition -- the request is well-formed and
-// the role exists; its state does not permit deletion (docs/web-spec.md ->
+// DeleteRole removes an admin-defined role. A built-in role is refused
+// with CodeFailedPrecondition -- the request is well-formed and the role
+// exists; its state does not permit deletion (docs/web-spec.md ->
 // RoleService: "built-in roles cannot be deleted"; features/roles.feature:
 // "Built-in roles cannot be deleted").
 //
