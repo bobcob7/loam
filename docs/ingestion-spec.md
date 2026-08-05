@@ -121,7 +121,8 @@ cheap enough to keep simple.
   `truncate: false` (its default is `true`), so a chunk exceeding the model's context window
   errors instead of being embedded from silently truncated text — a vector that stopped
   representing the persisted chunk, undetectable downstream, is exactly the kind of
-  partial-degrade this pipeline forbids (see Consistency & Failure below). The failure rides
+  SILENT degrade this pipeline forbids — the one partial-degrade it does permit is counted
+  and logged per file (see Consistency & Failure below). The failure rides
   the same embedder error path as any other embed failure, so the enclosing ingest
   transaction aborts and the previous index stays live, per the stale-but-consistent rule.
 - **The chunker keeps chunks under that budget so the failure above is a rare defensive
@@ -152,10 +153,34 @@ cheap enough to keep simple.
 ## Consistency & Failure
 
 - Each ingest is one transaction; readers see the prior index until it commits.
-- **Stale-but-consistent** is the rule: on any failure — including an unreachable
-  embedder — nothing commits, so the graph and the chunks never disagree about which
-  commit they reflect. The previous index stays live until a retry succeeds; there is no
-  partial-degrade mode.
+- **Stale-but-consistent** is the rule: on a failure that reaches the job — including an
+  unreachable embedder — nothing commits, so the graph and the chunks never disagree about
+  which commit they reflect. The previous index stays live until a retry succeeds.
+- **There is exactly one partial-degrade mode, and it is per file on the chunk track**
+  (`loam-c94.21`, `loam-c94.24`). If the chunks store rejects one file's write — a type
+  error, a constraint, a size limit — that file is skipped, counted in the ingest's
+  rejected-file count, and logged at ERROR naming the file; the rest of the batch is
+  written and the transaction commits. This is implemented with a `SAVEPOINT` around each
+  `chunkstore.ReplaceFileChunks` call, because Postgres aborts an entire transaction the
+  instant any statement in it errors: without the savepoint the skip happened in Go and
+  the commit discarded the batch anyway, which is what the reported production failure
+  actually was. What a rejected file leaves behind is precise:
+  - Its **previous chunks are kept, whole**, not emptied and not half-replaced — the
+    `DELETE` unwinds together with the `INSERT`s. On a file's first ingest there are no
+    previous chunks, so it is simply absent from vector search until a later ingest
+    succeeds.
+  - Its **symbols, references and edges are written normally.** The graph track runs
+    earlier in the same transaction and `ROLLBACK TO SAVEPOINT` only unwinds statements
+    issued after its savepoint. So the degrade is one-sided: the file stays in the graph
+    and drops out of RAG search, rather than disappearing from both.
+  - The **ingested ref still advances**, so the job is a success and search answers
+    correctly report which commit they reflect. A rejected file is visible as the rejected
+    count and the ERROR log line, not as a failed job.
+- **The graph track has no equivalent mode and takes no savepoint.** Its per-file
+  tolerances — no grammar for the extension, an unparseable file, syntax errors — are all
+  decided during extraction, before the transaction opens, and skip the store call
+  entirely. Once inside the transaction the first failed write aborts the ingest, so
+  nothing there continues past a failure that the commit would then discard.
 - The transaction also records the **ingested ref** — the commit the index now reflects —
   in `repo_target_branches.ingested_ref` (`docs/persistence-spec.md`). Graph and search
   responses surface it (`docs/cli-spec.md`) so a client can compare it against the
