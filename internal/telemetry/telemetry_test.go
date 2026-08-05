@@ -77,12 +77,16 @@ const tracesPath = "/v1/traces"
 // than merely counting requests, so a test can assert on the resource
 // attributes that reached it.
 type otlpRecorder struct {
-	mu       sync.Mutex
-	requests []*coltracepb.ExportTraceServiceRequest
+	mu           sync.Mutex
+	requests     []*coltracepb.ExportTraceServiceRequest
+	otherSignals int
 }
 
 func (r *otlpRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path != tracesPath {
+		r.mu.Lock()
+		r.otherSignals++
+		r.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = w.Write(nil)
 		return
@@ -123,6 +127,15 @@ func (r *otlpRecorder) snapshot() []*coltracepb.ExportTraceServiceRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]*coltracepb.ExportTraceServiceRequest(nil), r.requests...)
+}
+
+// nonTraceRequests counts POSTs to any signal path other than /v1/traces --
+// in practice /v1/metrics. It exists so the documented asymmetry between the
+// two signals can be asserted rather than assumed.
+func (r *otlpRecorder) nonTraceRequests() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.otherSignals
 }
 
 // settledGoroutines returns runtime.NumGoroutine() once it has stopped
@@ -492,7 +505,7 @@ func TestBuildVersion_IsNeverEmpty(t *testing.T) {
 // actually reached the wire. Root spans specifically: the sampler under test
 // is ParentBased, so a span with a sampled parent is kept regardless of the
 // ratio and would tell us nothing about the ratio at all.
-func countExportedSpans(t *testing.T, ratio float64, rootSpanCount int) int {
+func countExportedSpans(t *testing.T, ratio float64, rootSpanCount int) (int, *otlpRecorder) {
 	t.Helper()
 	recorder := &otlpRecorder{}
 	server := httptest.NewServer(recorder)
@@ -518,7 +531,7 @@ func countExportedSpans(t *testing.T, ratio float64, rootSpanCount int) int {
 			}
 		}
 	}
-	return exported
+	return exported, recorder
 }
 
 // TestNew_SampleRatioActuallyReachesTheSampler closes the hole every other
@@ -543,10 +556,20 @@ func countExportedSpans(t *testing.T, ratio float64, rootSpanCount int) int {
 func TestNew_SampleRatioActuallyReachesTheSampler(t *testing.T) {
 	t.Parallel()
 	const rootSpanCount = 50
-	assert.Equal(t, 0, countExportedSpans(t, 0, rootSpanCount),
+	atZero, zeroRecorder := countExportedSpans(t, 0, rootSpanCount)
+	assert.Equal(t, 0, atZero,
 		"at ratio 0 no root span may be sampled; a non-zero count here means the ratio never reached the sampler")
-	assert.Equal(t, rootSpanCount, countExportedSpans(t, 1, rootSpanCount),
+	atOne, _ := countExportedSpans(t, 1, rootSpanCount)
+	assert.Equal(t, rootSpanCount, atOne,
 		"at ratio 1 every root span must be sampled; a short count here means the sampler is hardcoded to drop")
+	// The asymmetry LOAM_OTEL_SAMPLE_RATIO's doc comment in internal/config
+	// warns about, asserted rather than assumed: the sampler is a TRACE
+	// concept, sdkmetric has no equivalent, so ratio 0 silences traces and
+	// leaves the metric exporter pushing on its periodic reader exactly as
+	// before. An operator reaching for ratio 0 as an off switch gets half of
+	// one.
+	assert.NotZero(t, zeroRecorder.nonTraceRequests(),
+		"ratio 0 must NOT stop metrics; if it does, internal/config's argument for declining LOAM_OTEL_ENABLED needs rewriting, not just its doc comment")
 }
 
 // TestNew_SamplerIsParentBasedSoASampledParentsChildrenSurvive pins the

@@ -36,6 +36,9 @@ variables are prefixed `LOAM_`; durations use Go syntax (`60s`, `5m`).
 | `LOAM_EMBEDDER_MODEL` | Embedding model; pins the `vector(N)` dimension — changing it forces a full re-embed. | no | `nomic-embed-text` |
 | `LOAM_INGEST_WORKERS` | Ingest worker pool size (cross-repo parallelism; ingest is serialized per repo regardless). Must be an integer from 1 to 256 — there is no "disabled" value; 0 and below are rejected at startup rather than silently disabling ingest. | no | `2` |
 | `LOAM_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. | no | `info` |
+| `LOAM_OTEL_ENDPOINT` | OpenTelemetry collector base URL for OTLP-over-HTTP push, e.g. `http://otel-collector:4318`. **Unset disables telemetry entirely** — no exporter is created, no connection opened, no background goroutine started. Must be an absolute `http://` or `https://` URL: the scheme is what selects TLS, and a bare `host:port` is rejected at startup rather than silently exporting nowhere. | no | — (disabled) |
+| `LOAM_OTEL_SERVICE_NAME` | `service.name` resource attribute on every span and metric. Overrides the standard `OTEL_SERVICE_NAME` if both are set. | no | `loam` |
+| `LOAM_OTEL_SAMPLE_RATIO` | Head-sampling probability for **root spans**, as a float from 0 to 1 inclusive. Values outside that range are rejected at startup, as are `NaN` and `Inf`. The sampler is parent-based, so a request arriving with an already-sampled trace context is always kept regardless of this value — a sampled trace is never a partially-recorded one. | no | `0.1` |
 
 **Postgres DSN: two forms, one required.** The server needs a Postgres DSN,
 supplied either as `LOAM_DATABASE_URL` directly or assembled at startup from
@@ -63,11 +66,34 @@ reads like a networking problem.
   (missing required variable), the same failure as before this form
   existed.
 
+**Telemetry is push, and it is off by default.** loam pushes OTLP to a
+collector; nothing scrapes loam. There is no `/metrics` endpoint and one is
+not planned — `/healthz` and `/readyz` are the only unauthenticated routes
+(see Health, below), a property the router enforces in code, and a scrape
+endpoint would need a third exemption to it. All three `LOAM_OTEL_*`
+variables are optional, and with `LOAM_OTEL_ENDPOINT` unset the process does
+no telemetry work at all.
+
+Two things worth knowing before turning it on:
+
+- **`LOAM_OTEL_SAMPLE_RATIO=0` is not an off switch.** Sampling applies to
+  traces only; there is no metric-side equivalent, so a ratio of 0 silences
+  traces while metrics keep being pushed on their normal interval. To stop
+  both, unset `LOAM_OTEL_ENDPOINT`.
+- **An unreachable collector degrades, it does not fail.** The server still
+  boots (the endpoint is validated, never dialled, at startup) and still
+  shuts down promptly: the flush at shutdown is bounded, so a dead collector
+  cannot hold `SIGTERM` open past the pod's termination grace period.
+
+Deployment wiring for these variables — Helm values, compose, and
+`docs/observability-spec.md` — is tracked separately as `loam-uwus`; this
+table documents the configuration surface itself.
+
 **Fail fast.** The server validates configuration at startup and exits on the first
 problem: missing required variables, a key that isn't 32 bytes after decoding, an
 unreachable database, an unwritable data dir, or `LOAM_SYNC_INTERVAL` /
-`LOAM_INGEST_WORKERS` outside the range documented in the table above. A
-misconfigured server never half-starts.
+`LOAM_INGEST_WORKERS` / `LOAM_OTEL_SAMPLE_RATIO` outside the range documented
+in the table above. A misconfigured server never half-starts.
 
 Logging is structured JSON on stdout via `slog`; level from `LOAM_LOG_LEVEL`. No log
 files — the platform captures stdout.

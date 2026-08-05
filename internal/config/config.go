@@ -180,10 +180,22 @@ func loadOptional(cfg *Config) error {
 //   - The stated benefit is already available without new surface.
 //     Unsetting LOAM_OTEL_ENDPOINT is a one-line change in precisely the
 //     same file (a Helm values.yaml or a compose env block) that setting
-//     LOAM_OTEL_ENABLED=false would be, and LOAM_OTEL_SAMPLE_RATIO=0
-//     additionally gives a "keep the endpoint, stop sampling traces" knob
-//     for the narrower case where an operator wants the collector wiring
-//     left visibly in place.
+//     LOAM_OTEL_ENABLED=false would be.
+//
+// One correction to that last point, because an earlier version of this
+// comment overstated it and the overstatement mattered: LOAM_OTEL_SAMPLE_RATIO=0
+// is NOT a "keep the endpoint, stop collecting" switch. Sampling is a TRACE
+// concept -- sdkmetric has no sampler -- so ratio 0 silences traces while the
+// metric exporter keeps pushing on its periodic reader, unchanged. That
+// asymmetry is asserted, not assumed, by the last case in
+// internal/telemetry's TestNew_SampleRatioActuallyReachesTheSampler, and it
+// is documented in docs/server-spec.md's table so an operator does not
+// discover it from their collector's bill.
+//
+// The decision to decline the second variable stands on the first two
+// bullets, which do not depend on it: the four-state ambiguity, and the
+// state that cannot be honoured at all. An operator who genuinely wants
+// telemetry off unsets the endpoint.
 func loadTelemetry(cfg *Config) error {
 	cfg.OTelEndpoint = lookupDefault("LOAM_OTEL_ENDPOINT", "")
 	if cfg.OTelEndpoint != "" {
