@@ -528,15 +528,23 @@ func TestIngestFileChunks_RejectionInASharedTransactionSparesTheRestOfTheBatch(t
 
 	require.NoError(t, tx.Commit(ctx), "the savepoint confines the rejection to its own file, so the shared transaction is still committable -- before loam-c94.24 this failed with \"commit unexpectedly resulted in rollback\"")
 
-	byFile := map[string]string{}
+	// map[string][]string, not map[string]string, and deliberately so: a
+	// map keyed by file with a single content value collapses N copies of a
+	// row into one entry, so a botched unwind that kept the INSERTs and
+	// rolled back only the DELETE would still satisfy it. Keeping the
+	// per-file SLICE makes row cardinality visible, matching the shape
+	// chunkstore's sibling fixture (chunkContents) already uses for the same
+	// reason -- two fixtures over the same data must not disagree about what
+	// they are able to see.
+	byFile := map[string][]string{}
 	for _, row := range storedChunks(t, repoID) {
-		byFile[row.file] = row.content
+		byFile[row.file] = append(byFile[row.file], row.content)
 	}
-	assert.Equal(t, map[string]string{
-		"pkg/first/first.go":   "func First() {}",
-		"pkg/second/second.go": "func Second() {}",
-		"pkg/third/third.go":   "func Third() {}",
-	}, byFile, "exactly the three good files, with their own contents -- the one written before the rejection and the two written after it -- and nothing at all for the rejected file")
+	assert.Equal(t, map[string][]string{
+		"pkg/first/first.go":   {"func First() {}"},
+		"pkg/second/second.go": {"func Second() {}"},
+		"pkg/third/third.go":   {"func Third() {}"},
+	}, byFile, "exactly the three good files, one chunk each, with their own contents -- the one written before the rejection and the two written after it -- and nothing at all for the rejected file")
 }
 
 // Decision #3 from loam-c94.21's bead, re-verified WITH savepoints in place
