@@ -759,14 +759,19 @@ func TestNewInTx_AlreadyAbortedTransaction_ReportsUnusableRatherThanABare25P02(t
 //	savepoint                1797 / 1766 / 1841 ms per 500-file batch
 //	none                     1633 / 1639 / 1531 ms
 //	savepointstatementsonly   228 /  229 /  223 ms  (~453us per file)
+//	bareroundtrip             234 /  231 /  229 ms  (1000x SELECT 1)
 //
 // so ~+12% on the batch, and the isolated arm (227ms) accounts for the
-// paired delta (200ms) within noise. The decisive comparison is against a
-// bare round trip: 1000 "SELECT 1" statements on the same connection ran
+// paired delta (200ms) within noise. The decisive comparison is the
+// bareroundtrip arm: the same 1000 statements, but "SELECT 1", ran
 // 234 / 231 / 229 ms -- indistinguishable from the same count of
 // SAVEPOINT/RELEASE. The savepoint statements do no measurable server-side
 // work; the entire cost is round-trip latency, which is a property of
-// where Postgres sits relative to the process, not of this change.
+// where Postgres sits relative to the process, not of this change. That
+// arm is committed rather than described precisely because it is the claim
+// everything else here rests on: re-run it before believing the +12%,
+// which is machine- and load-specific in a way the RATIO between these two
+// arms is not.
 //
 // This is also why the narrower alternative the bead offers -- a savepoint
 // around only the statements that can be rejected -- is not actually
@@ -835,6 +840,39 @@ func BenchmarkReplaceFileChunks_SavepointOverhead(b *testing.B) {
 			}
 		})
 	}
+	// bareroundtrip is the control the "savepointstatementsonly" arm is only
+	// meaningful against: the same COUNT of the cheapest statement Postgres
+	// can answer, on the same connection, in the same transaction. If the
+	// savepoint arm matches it, SAVEPOINT and RELEASE are doing no
+	// server-side work worth measuring and the overhead is round-trip
+	// latency. That is the doc comment's decisive claim, and it lives here
+	// so a reader who doubts the +12% can re-run it rather than take it from
+	// a comment (it was measured, deleted as scratch, and then had to be
+	// rewritten by review to be checked -- which is the argument for
+	// keeping it).
+	b.Run("bareroundtrip", func(b *testing.B) {
+		for b.Loop() {
+			b.StopTimer()
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+			for range benchmarkFiles {
+				if _, err := tx.Exec(ctx, "SELECT 1"); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := tx.Exec(ctx, "SELECT 1"); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if err := tx.Rollback(ctx); err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+		}
+	})
 	b.Run("savepointstatementsonly", func(b *testing.B) {
 		for b.Loop() {
 			b.StopTimer()
