@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -134,6 +135,36 @@ func TestOrchestratorRoleSeedMigration_GrantsExactlyGraphQueryAndSearch(t *testi
 	}
 }
 
+// trackerNames are the issue-tracker names the seeded text must not
+// contain, as WORD-BOUNDARY patterns rather than bare substrings. The
+// boundary is load-bearing, and it is load-bearing for precisely the one
+// name that matters most here -- the tracker this repository itself
+// mandates.
+//
+// "bd" is two characters, which puts it in the gap between two wrong
+// answers. This test originally used the needle " bd ", spaces on both
+// sides; loam-hi5o.31's round-1 review mutated the seeded text to "Track
+// the task in bd, and file follow-ups with bd." and the test PASSED, exit
+// 0 -- "bd," and "bd." never match " bd ". A bare strings.Contains(…,
+// "bd") fails the other way, matching "verified" or "forbidden" and
+// failing on prose that names no tracker at all. \bbd\b is the only form
+// that catches the realistic violation without inventing one.
+//
+// The list is deliberately short and made of names that are not also
+// ordinary English: "linear" and "shortcut" are real trackers but also
+// words this text could legitimately use, and a needle that fires on
+// correct prose would be removed by the next person to hit it, taking the
+// whole check with it.
+var trackerNames = []*regexp.Regexp{
+	regexp.MustCompile(`\bbd\b`),
+	regexp.MustCompile(`\bbeads\b`),
+	regexp.MustCompile(`\bjira\b`),
+	regexp.MustCompile(`\btrello\b`),
+	regexp.MustCompile(`\basana\b`),
+	regexp.MustCompile(`\b(github|gitlab) issues?\b`),
+	regexp.MustCompile(`\bclaude\.md\b`),
+}
+
 // TestOrchestratorRoleSeedMigration_SeededTextNamesNoIssueTracker pins
 // loam-hi5o.31's most easily-inverted requirement. docs/orchestration.md
 // lives in this repository and may name the tracker this repository
@@ -154,8 +185,8 @@ func TestOrchestratorRoleSeedMigration_SeededTextNamesNoIssueTracker(t *testing.
 
 	instructions, _ := orchestratorRow(ctx, t, db, "orchestrator")
 	lowered := strings.ToLower(instructions)
-	for _, tracker := range []string{"beads", " bd ", "`bd`", "jira", "github issue", "gitlab issue", "linear.app", "claude.md"} {
-		assert.NotContainsf(t, lowered, tracker, "the seeded orchestrator instructions must name no issue tracker, found %q", tracker)
+	for _, tracker := range trackerNames {
+		assert.Falsef(t, tracker.MatchString(lowered), "the seeded orchestrator instructions must name no issue tracker, matched %s", tracker)
 	}
 	assert.NotContains(t, instructions, "\n## ", "the seeded text must be prose for an agent, not docs/orchestration.md pasted in")
 	assert.NotContains(t, instructions, "| Hazard |", "the seeded text must be prose for an agent, not docs/orchestration.md pasted in")
