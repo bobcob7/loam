@@ -100,6 +100,51 @@ func parseIntEnv(key string, def int) (int, error) {
 	return n, nil
 }
 
+// parseFloatEnv parses the named environment variable as a float64, or
+// returns def if it is unset or empty. Note for callers: strconv.ParseFloat
+// ACCEPTS "NaN", "Inf", and "-Inf", so a range check of the returned value
+// must use math.IsNaN rather than relying on comparisons -- every ordered
+// comparison against NaN is false, so `v < lo || v > hi` waves it straight
+// through.
+func parseFloatEnv(key string, def float64) (float64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w: %w", key, errInvalidFloat, err)
+	}
+	return f, nil
+}
+
+// validateOTelEndpoint checks LOAM_OTEL_ENDPOINT looks like the OTLP/HTTP
+// base URL internal/telemetry hands to WithEndpointURL: an absolute http or
+// https URL with a host. It never dials -- an unreachable collector must
+// degrade to dropped telemetry, not to a server that refuses to boot (see
+// internal/telemetry.New's doc comment) -- so this catches only the errors
+// that are decidable locally.
+//
+// The scheme is load-bearing, not decoration: it is what selects TLS for the
+// exporter, which is why this variable is a full URL rather than the bare
+// host:port the OTEL_EXPORTER_OTLP_ENDPOINT convention also permits. A bare
+// "otel-collector:4318" parses as a URL with scheme "otel-collector" and no
+// host, and is rejected here with a message that says what to write instead
+// -- rather than being accepted and silently exporting nowhere.
+func validateOTelEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("LOAM_OTEL_ENDPOINT: %w: %w", errInvalidOTelEndpoint, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("LOAM_OTEL_ENDPOINT: %w: want an absolute http:// or https:// URL such as http://otel-collector:4318, got %q", errInvalidOTelEndpoint, raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("LOAM_OTEL_ENDPOINT: %w: no host in %q", errInvalidOTelEndpoint, raw)
+	}
+	return nil
+}
+
 // parseLogLevel maps the LOAM_LOG_LEVEL string to a slog.Level.
 func parseLogLevel(v string) (slog.Level, error) {
 	switch strings.ToLower(v) {

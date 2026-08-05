@@ -55,6 +55,9 @@ func baseEnv(t *testing.T, dataDir string) {
 	t.Setenv("LOAM_EMBEDDER_MODEL", "")
 	t.Setenv("LOAM_INGEST_WORKERS", "")
 	t.Setenv("LOAM_LOG_LEVEL", "")
+	t.Setenv("LOAM_OTEL_ENDPOINT", "")
+	t.Setenv("LOAM_OTEL_SERVICE_NAME", "")
+	t.Setenv("LOAM_OTEL_SAMPLE_RATIO", "")
 }
 
 func TestLoad_Defaults(t *testing.T) {
@@ -294,6 +297,10 @@ func TestLoad_InvalidInput(t *testing.T) {
 		{name: "invalid log level", override: map[string]string{"LOAM_LOG_LEVEL": "verbose"}, wantErr: errInvalidLogLevel},
 		{name: "invalid database url scheme", override: map[string]string{"LOAM_DATABASE_URL": "mysql://localhost/loam"}, wantErr: errInvalidDatabaseURL},
 		{name: "data dir is a regular file", override: map[string]string{"LOAM_DATA_DIR": regularFile.Name()}, wantErr: errDataDirNotWritable},
+		{name: "unparseable otel sample ratio", override: map[string]string{"LOAM_OTEL_SAMPLE_RATIO": "half"}, wantErr: errInvalidFloat},
+		{name: "otel endpoint with no scheme", override: map[string]string{"LOAM_OTEL_ENDPOINT": "otel-collector:4318"}, wantErr: errInvalidOTelEndpoint},
+		{name: "otel endpoint with a non-http scheme", override: map[string]string{"LOAM_OTEL_ENDPOINT": "grpc://otel-collector:4317"}, wantErr: errInvalidOTelEndpoint},
+		{name: "otel endpoint with no host", override: map[string]string{"LOAM_OTEL_ENDPOINT": "http:///v1/traces"}, wantErr: errInvalidOTelEndpoint},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -394,4 +401,123 @@ func TestLoad_UnwritableDataDirErrorNamesUIDAndPath(t *testing.T) {
 	assert.Contains(t, err.Error(), fmt.Sprintf("gid %d", os.Getgid()))
 	assert.Contains(t, err.Error(), fmt.Sprintf("chown -R %d:%d", os.Getuid(), os.Getgid()),
 		"the message should carry the fix, not only the diagnosis")
+}
+
+// TestLoad_TelemetryDefaults pins the state a deployment that has never
+// heard of OpenTelemetry gets: no endpoint, and therefore telemetry
+// disabled entirely (internal/telemetry treats an empty endpoint as the
+// single off switch). The two other variables still resolve to their
+// documented defaults, so an operator who later sets only
+// LOAM_OTEL_ENDPOINT gets a working, conservatively-sampled configuration
+// without having to discover two more variables.
+func TestLoad_TelemetryDefaults(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	baseEnv(t, t.TempDir())
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.OTelEndpoint)
+	assert.Equal(t, "loam", cfg.OTelServiceName)
+	assert.InDelta(t, 0.1, cfg.OTelSampleRatio, 0)
+}
+
+// TestLoad_TelemetryOverrides proves all three variables are read, not just
+// declared, and -- the part that matters structurally -- that a fully
+// configured telemetry setup still uses only OPTIONAL variables. Nothing
+// here is lookupRequired, which is what keeps internal/deploycheck's
+// TestComposeEnvironmentSatisfiesConfigLoad green while deployment wiring
+// remains a separate bead.
+func TestLoad_TelemetryOverrides(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	baseEnv(t, t.TempDir())
+	t.Setenv("LOAM_OTEL_ENDPOINT", "https://collector.example:4318")
+	t.Setenv("LOAM_OTEL_SERVICE_NAME", "loam-staging")
+	t.Setenv("LOAM_OTEL_SAMPLE_RATIO", "0.25")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "https://collector.example:4318", cfg.OTelEndpoint)
+	assert.Equal(t, "loam-staging", cfg.OTelServiceName)
+	assert.InDelta(t, 0.25, cfg.OTelSampleRatio, 0)
+}
+
+// TestLoad_OTelSampleRatioBoundaries exercises LOAM_OTEL_SAMPLE_RATIO's
+// range check exactly the way TestLoad_SyncIntervalAndIngestWorkersBoundaries
+// exercises LOAM_INGEST_WORKERS': at and around both edges, asserting on the
+// sentinel AND on the message an operator would actually read.
+//
+// The NaN row is the one that is not merely thorough. strconv.ParseFloat
+// ACCEPTS "NaN", and every ordered comparison against NaN is false, so a
+// range check written as `v < 0 || v > 1` -- the obvious translation of the
+// LOAM_INGEST_WORKERS check this one is modelled on -- passes NaN straight
+// through to sdktrace.TraceIDRatioBased. Delete the math.IsNaN guard in
+// loadTelemetry and this row is the only thing in the suite that fails.
+func TestLoad_OTelSampleRatioBoundaries(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	tests := []struct {
+		name        string
+		value       string
+		want        float64
+		wantErr     error
+		wantErrText string
+	}{
+		{name: "zero is accepted", value: "0", want: 0},
+		{name: "one is accepted", value: "1", want: 1},
+		{name: "a fraction is accepted", value: "0.05", want: 0.05},
+		{name: "just below zero is rejected", value: "-0.0001", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got -0.0001, want between 0 and 1"},
+		{name: "just above one is rejected", value: "1.0001", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got 1.0001, want between 0 and 1"},
+		{name: "NaN is rejected", value: "NaN", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got NaN, want between 0 and 1"},
+		{name: "positive infinity is rejected", value: "Inf", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got +Inf, want between 0 and 1"},
+		{name: "negative infinity is rejected", value: "-Inf", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got -Inf, want between 0 and 1"},
+		{name: "a percentage is rejected rather than silently rescaled", value: "10", wantErr: errOTelSampleRatioRange, wantErrText: "LOAM_OTEL_SAMPLE_RATIO: OTel sample ratio out of range: got 10, want between 0 and 1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			baseEnv(t, t.TempDir())
+			t.Setenv("LOAM_OTEL_SAMPLE_RATIO", tc.value)
+			cfg, err := Load()
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+				assert.InDelta(t, tc.want, cfg.OTelSampleRatio, 0)
+				return
+			}
+			require.ErrorIs(t, err, tc.wantErr)
+			assert.EqualError(t, err, tc.wantErrText)
+		})
+	}
+}
+
+// TestLoad_OTelEndpointRejectsWhatWouldSilentlyExportNowhere covers the
+// forms an operator plausibly writes. The bare host:port case is the
+// interesting one: it is what the OTEL_EXPORTER_OTLP_ENDPOINT convention
+// accepts elsewhere, it parses as a perfectly valid url.URL (scheme
+// "otel-collector", empty host), and without this check it would reach
+// otlptracehttp.WithEndpointURL and export to nowhere without a word.
+func TestLoad_OTelEndpointRejectsWhatWouldSilentlyExportNowhere(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	tests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "http url with a port", value: "http://otel-collector:4318", valid: true},
+		{name: "https url", value: "https://collector.example.com", valid: true},
+		{name: "http url with a path prefix", value: "http://collector.example.com/otlp", valid: true},
+		{name: "bare host and port", value: "otel-collector:4318"},
+		{name: "bare host", value: "otel-collector"},
+		{name: "grpc scheme", value: "grpc://otel-collector:4317"},
+		{name: "scheme with no host", value: "http://"},
+		{name: "control character in the url", value: "http://otel\x7f-collector:4318"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			baseEnv(t, t.TempDir())
+			t.Setenv("LOAM_OTEL_ENDPOINT", tc.value)
+			cfg, err := Load()
+			if tc.valid {
+				require.NoError(t, err)
+				assert.Equal(t, tc.value, cfg.OTelEndpoint)
+				return
+			}
+			require.ErrorIs(t, err, errInvalidOTelEndpoint)
+		})
+	}
 }

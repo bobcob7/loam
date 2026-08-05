@@ -21,6 +21,17 @@ import (
 // so tests can shrink it") -- run always passes this default.
 const defaultShutdownGrace = 30 * time.Second
 
+// telemetryFlushGrace bounds the OTLP flush at the end of serve's shutdown
+// sequence, ON TOP OF defaultShutdownGrace rather than inside it -- see the
+// comment at the call site for why it cannot share shutdownCtx. Five seconds
+// is chosen against the deployment's terminationGracePeriodSeconds, not
+// against grace: the two together must stay under it, or the kubelet
+// SIGKILLs the pod and the careful draining above is wasted. internal/
+// telemetry applies its own bound of the same size independently, so this
+// value is the sequencing decision and that one is the package's own
+// guarantee.
+const telemetryFlushGrace = 5 * time.Second
+
 // listenerFDEnv names the env var a test harness sets to hand this
 // process an already-bound listener via os/exec's ExtraFiles, instead of
 // this process binding cfg.HTTPAddr itself. This closes the bind-close-
@@ -110,7 +121,7 @@ func newListener(addr string) (net.Listener, error) {
 // (policyCtx), independent of ctx, specifically so cancelling it can be
 // deferred past httpServer.Shutdown's return without also having to defer
 // background's cancellation.
-func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, listener net.Listener, httpServer *http.Server, background runner, policySocket runner, db closer, grace time.Duration) error {
+func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, listener net.Listener, httpServer *http.Server, background runner, policySocket runner, db closer, flushTelemetry func(context.Context) error, grace time.Duration) error {
 	defer db.Close()
 	policyCtx, cancelPolicySocket := context.WithCancel(context.Background())
 	defer cancelPolicySocket()
@@ -216,6 +227,35 @@ func serve(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, li
 	case <-shutdownCtx.Done():
 		logger.Warn("background components did not drain within the shutdown grace period")
 	}
+	// The telemetry flush goes HERE, and the position is load-bearing in
+	// both directions (loam-p56y):
+	//
+	//   - AFTER httpServer.Shutdown, the policy socket close, and the
+	//     background drain, so every span those paths were still recording
+	//     has been ended and handed to the batch processor. Flushing before
+	//     any of them would ship exactly the spans that were already
+	//     complete and drop the in-flight ones -- the ones a shutdown
+	//     investigation actually wants.
+	//   - BEFORE db.Close, which is the top-of-function defer and therefore
+	//     runs strictly after this returns. A span recording a database
+	//     call, or a future exporter that reads anything through the pool,
+	//     must still find a live pool while it finishes. This is the same
+	//     rule the pool close already follows for every runner above it,
+	//     applied to one more participant.
+	//
+	// It gets its OWN context rather than reusing shutdownCtx. shutdownCtx
+	// may already be expired by the time control reaches this line -- that
+	// is precisely the slow-shutdown case where the traces matter most --
+	// and reusing it would hand the flush a zero budget exactly then. The
+	// budget is deliberately small next to grace: internal/telemetry bounds
+	// itself as well, so an unreachable collector cannot hold SIGTERM open,
+	// which in Kubernetes would mean a SIGKILL and the loss of the graceful
+	// shutdown the rest of this function exists to provide.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), telemetryFlushGrace)
+	if err := flushTelemetry(flushCtx); err != nil {
+		logger.Warn("flushing telemetry", "error", err)
+	}
+	cancelFlush()
 	// serveRead, not "serveResult == nil", is what distinguishes "already
 	// read serveErr in the select above" from "haven't read it yet": nil
 	// is Serve's own legitimate success value (http.ErrServerClosed maps

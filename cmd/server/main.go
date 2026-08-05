@@ -125,6 +125,7 @@ import (
 	"github.com/bobcob7/loam/internal/reviewstore"
 	"github.com/bobcob7/loam/internal/rolestore"
 	"github.com/bobcob7/loam/internal/server"
+	"github.com/bobcob7/loam/internal/telemetry"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 	loamweb "github.com/bobcob7/loam/web"
 )
@@ -261,6 +262,38 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	if err := validateSyncInterval(cfg.SyncInterval); err != nil {
 		return err
 	}
+	// Telemetry is constructed FIRST, before anything it might one day
+	// instrument exists, so a later bead can hand its providers to the pgx
+	// pool's QueryTracer, the router, and the ingest pool without moving
+	// this line. With LOAM_OTEL_ENDPOINT unset this costs nothing at all:
+	// telemetry.New returns upstream's no-op providers, having created no
+	// exporter and started no goroutine (internal/telemetry's package doc).
+	telemetryProvider, err := telemetry.New(ctx, telemetry.Config{
+		Endpoint:       cfg.OTelEndpoint,
+		ServiceName:    cfg.OTelServiceName,
+		ServiceVersion: telemetry.BuildVersion(),
+		SampleRatio:    cfg.OTelSampleRatio,
+	}, cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	// This defer covers only the STARTUP-FAILURE paths below -- every
+	// `pool.Close(); return err` between here and serve -- so a boot that
+	// dies at, say, mirror reconciliation still stops the exporter's
+	// goroutines instead of leaking them until the process exits. It is NOT
+	// where the real flush happens: a defer here runs after serve has
+	// returned, and serve closes the pgx pool via its own defer, which
+	// would put the flush on the wrong side of the pool close. serve takes
+	// the shutdown hook explicitly and calls it at the one correct point
+	// (see serve's doc comment); Provider.Shutdown is idempotent, so this
+	// defer is a no-op on the path that reaches serve.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.DefaultShutdownTimeout)
+		defer cancel()
+		if err := telemetryProvider.Shutdown(shutdownCtx); err != nil {
+			cfg.Logger.Warn("shutting down telemetry", "error", err)
+		}
+	}()
 	pool, err := connectDatabase(ctx, cfg, migrations.Migrate, db.NewPool)
 	if err != nil {
 		return err
@@ -351,7 +384,7 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	if onReady != nil {
 		onReady(pool, ingestPool, hookBinaryPath)
 	}
-	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, policyServer, pool, defaultShutdownGrace)
+	return serve(ctx, stop, cfg.Logger, listener, httpServer, background, policyServer, pool, telemetryProvider.Shutdown, defaultShutdownGrace)
 }
 
 // loamhookBinaryPathName is the filename this process expects to find its

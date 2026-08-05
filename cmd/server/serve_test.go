@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -82,6 +83,13 @@ func newTestListener(t *testing.T) net.Listener {
 	return listener
 }
 
+// noopFlush is the telemetry shutdown hook every test in this file that is
+// not ABOUT telemetry passes: serve's flush seam is exercised on its own by
+// TestServe_FlushesTelemetryAfterDrainAndBeforeClosingTheDatabase, and
+// giving the rest of the suite a hook that does nothing keeps those tests
+// asserting about what they were written to assert about.
+func noopFlush(context.Context) error { return nil }
+
 // runServeAsync starts serve in a goroutine and returns a channel its
 // result lands on, so tests can assert both "serve is still blocked" (by
 // checking the channel is empty) and "serve returned within a bound" (by
@@ -90,7 +98,7 @@ func newTestListener(t *testing.T) net.Listener {
 func runServeAsync(ctx context.Context, stop context.CancelFunc, listener net.Listener, httpServer *http.Server, background runner, policySocket runner, db closer, grace time.Duration) <-chan error {
 	done := make(chan error, 1)
 	go func() {
-		done <- serve(ctx, stop, testLogger(), listener, httpServer, background, policySocket, db, grace)
+		done <- serve(ctx, stop, testLogger(), listener, httpServer, background, policySocket, db, noopFlush, grace)
 	}()
 	return done
 }
@@ -659,7 +667,7 @@ func TestPolicySocketPanicCrashesTheProcess(t *testing.T) {
 		db, _ := newTrackedCloser()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		_ = serve(ctx, cancel, testLogger(), listener, httpServer, background, policySocket, db, time.Second)
+		_ = serve(ctx, cancel, testLogger(), listener, httpServer, background, policySocket, db, noopFlush, time.Second)
 		return
 	}
 	childCtx, cancelChild := context.WithTimeout(context.Background(), 10*time.Second)
@@ -677,4 +685,104 @@ func TestPolicySocketPanicCrashesTheProcess(t *testing.T) {
 	assert.False(t, exitErr.Success(), "the child process must exit with a non-zero/abnormal status")
 	assert.Contains(t, output.String(), policySocketPanicCrashMessage, "the crash output must carry the original panic value")
 	assert.Contains(t, output.String(), "panic:", "the crash output must be a real, unrecovered Go panic")
+}
+
+// TestServe_FlushesTelemetryAfterEverythingDrainsAndBeforeClosingTheDatabase
+// pins loam-p56y's shutdown ORDERING, which is the half of that bead a unit
+// test of internal/telemetry cannot reach. Both neighbours matter and they
+// fail in opposite directions:
+//
+//   - Flushing too EARLY (before the HTTP drain, the policy socket close, or
+//     the background drain) ships the spans that were already finished and
+//     drops the in-flight ones -- precisely the spans a shutdown
+//     investigation wants.
+//   - Flushing too LATE (after db.Close, which is serve's top-of-function
+//     defer) means a span still recording a database call finds a closed
+//     pool underneath it.
+//
+// The test records a single ordered event log across all four participants
+// rather than asserting on each in isolation, because "flush happened" and
+// "flush happened in the right place" are different claims and only the
+// second one is the bead's.
+func TestServe_FlushesTelemetryAfterEverythingDrainsAndBeforeClosingTheDatabase(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var events []string
+	record := func(event string) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}
+	listener := newTestListener(t)
+	httpServer := &http.Server{Handler: http.NewServeMux()}
+	background, _ := newTrackedRunner(func(ctx context.Context) {
+		<-ctx.Done()
+		record("background drained")
+	})
+	policySocket, _ := newTrackedRunner(func(ctx context.Context) {
+		<-ctx.Done()
+		record("policy socket closed")
+	})
+	db := &closerMock{CloseFunc: func() { record("database closed") }}
+	flush := func(ctx context.Context) error {
+		record("telemetry flushed")
+		deadline, ok := ctx.Deadline()
+		assert.True(t, ok, "the flush must be given a bounded context, or an unreachable collector hangs SIGTERM")
+		assert.True(t, time.Until(deadline) > 0, "the flush was handed an already-expired context, so it has no budget at all")
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, cancel, testLogger(), listener, httpServer, background, policySocket, db, flush, time.Second)
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, events, 4)
+	// The two drains' order RELATIVE TO EACH OTHER is deliberately not
+	// pinned: serve cancels background's context the instant the shutdown
+	// signal arrives and the policy socket's only after httpServer.Shutdown
+	// returns, so which of the two finishes first is a genuine race that
+	// this test is not about (loam-48y's own tests cover each separately).
+	// What is pinned is that BOTH precede the flush and the flush precedes
+	// the pool close.
+	assert.ElementsMatch(t, []string{"policy socket closed", "background drained"}, events[:2])
+	assert.Equal(t, "telemetry flushed", events[2])
+	assert.Equal(t, "database closed", events[3])
+}
+
+// TestServe_ReportsButDoesNotFailOnAFlushError pins the other half of the
+// contract: an unreachable collector is a telemetry problem, not a shutdown
+// problem. If a failed flush propagated out of serve, run() would return
+// non-nil, main() would log "server exited with error" and os.Exit(1), and a
+// perfectly clean shutdown would be reported to the orchestrator as a crash
+// purely because a collector was down.
+func TestServe_ReportsButDoesNotFailOnAFlushError(t *testing.T) {
+	t.Parallel()
+	listener := newTestListener(t)
+	httpServer := &http.Server{Handler: http.NewServeMux()}
+	background, _ := newTrackedRunner(nil)
+	policySocket, _ := newTrackedRunner(nil)
+	db, isClosed := newTrackedCloser()
+	flush := func(context.Context) error { return errors.New("collector unreachable") }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, cancel, testLogger(), listener, httpServer, background, policySocket, db, flush, time.Second)
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return")
+	}
+	assert.True(t, isClosed(), "the database must still be closed after a failed flush")
 }
