@@ -32,10 +32,13 @@ import styles from "./Roles.module.css";
  *
  * Instead this derives the checkbox set from what ListRoles actually
  * returned: the union of every role's own `operations`. That is not a
- * workaround by coincidence -- 0001_init.up.sql seeds the two built-in roles
- * (author, reviewer), which cannot be deleted, with operations that between
- * them cover the whole vocabulary, so the union is complete in every real
- * deployment. It degrades honestly rather than silently if that ever stops
+ * workaround by coincidence -- the built-in roles seeded by migration, which
+ * cannot be deleted, carry operations that between them cover the whole
+ * vocabulary, so the union is complete in every real deployment. (0001_init
+ * alone already does: author and reviewer between them hold all ten. Later
+ * built-ins can only add to the union, never shrink it, which is why this
+ * holds without naming them -- 0009's orchestrator grants graph.query and
+ * search, both already covered.) It degrades honestly rather than silently if that ever stops
  * being true (e.g. a fresh vocabulary member added to AllCapabilities but not
  * yet granted to either built-in): the new operation simply cannot be granted
  * from this screen until some role carries it, which is a real gap -- see the
@@ -175,9 +178,10 @@ const roleColumns = (
 /**
  * Roles (`/roles`) — the agent role editor (docs/web-frontend-spec.md ->
  * Routing & Screens). Lists every role from `RoleService.ListRoles` and lets
- * the admin create, edit and delete admin-defined roles; built-in roles
- * (author, reviewer) can be edited but never deleted (internal/handler/role.go
- * -> DeleteRole), so their Delete button is natively `disabled` -- genuinely
+ * the admin create, edit and delete admin-defined roles; built-in roles can be
+ * edited but never deleted (internal/handler/role.go -> DeleteRole, which
+ * checks the builtin flag rather than any list of names), so their Delete
+ * button is natively `disabled` -- genuinely
  * unavailable, not merely `pending` -- and stays out of the tab order.
  */
 export function Roles(): ReactElement {

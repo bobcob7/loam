@@ -66,8 +66,10 @@ plaintext-HTTP forge -- see `repos.forge_host` above), `token_ciphertext` (bytea
 transport to the upstream (`docs/sync-spec.md`). Secrets encrypted at rest (§Secrets).
 
 ### roles
-`id`, `name` (unique), `instructions` (text), `builtin` (bool), timestamps. Built-in `author`
-and `reviewer` are seeded by migration and cannot be deleted.
+`id`, `name` (unique), `instructions` (text), `builtin` (bool), timestamps. Built-in roles are
+seeded by migration and cannot be deleted; `builtin` is written by migrations alone, never by
+an RPC. For which roles ship built in and what each grants, see `docs/web-spec.md` →
+RoleService.
 
 ### role_operations
 `role_id` (fk → roles), `operation` (text, from the capability vocabulary). PK

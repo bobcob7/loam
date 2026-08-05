@@ -229,8 +229,11 @@ func assertTablesAbsent(ctx context.Context, t *testing.T, dsn string) {
 	}
 }
 
-// assertBuiltinRolesSeeded checks the author/reviewer built-in role seed and
-// its role_operations rows, matching docs/web-spec.md's fixed vocabulary.
+// assertBuiltinRolesSeeded checks the author/reviewer/orchestrator built-in
+// role seed and its role_operations rows, matching docs/web-spec.md's fixed
+// vocabulary. author and reviewer come from 0001_init; orchestrator is
+// seeded by 0009_orchestrator_role (loam-hi5o.31), so this runs over the
+// FULLY migrated schema and must count three, not two.
 func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -249,11 +252,13 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 		got = append(got, r)
 	}
 	require.NoError(t, rows.Err())
-	require.Len(t, got, 2)
+	require.Len(t, got, 3)
 	assert.Equal(t, "author", got[0].name)
 	assert.True(t, got[0].builtin)
-	assert.Equal(t, "reviewer", got[1].name)
+	assert.Equal(t, "orchestrator", got[1].name)
 	assert.True(t, got[1].builtin)
+	assert.Equal(t, "reviewer", got[2].name)
+	assert.True(t, got[2].builtin)
 
 	// Compare the exact operation SETS, not just their cardinality: a seed
 	// that swapped one capability for another (e.g. reviewer seeded with
@@ -268,8 +273,16 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	wantReviewerOps := []string{
 		"git.clone", "graph.query", "search", "work.read", "work.reply", "work.verdict",
 	}
+	// The orchestrator supervises and does not act: read-only capabilities
+	// only, and NO work-branch capability at all (loam-hi5o.31). Asserted as
+	// an exact set here, and again from the other direction --
+	// capability-by-capability -- in
+	// orchestrator_role_seed_integration_test.go, so a later edit to 0009
+	// cannot quietly widen it.
+	wantOrchestratorOps := []string{"graph.query", "search"}
 	assert.Equal(t, wantAuthorOps, roleOperations(ctx, t, pool, "author"))
 	assert.Equal(t, wantReviewerOps, roleOperations(ctx, t, pool, "reviewer"))
+	assert.Equal(t, wantOrchestratorOps, roleOperations(ctx, t, pool, "orchestrator"))
 }
 
 // roleOperations returns the sorted set of operations role_operations grants

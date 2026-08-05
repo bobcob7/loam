@@ -159,6 +159,16 @@ defaults:
 - **reviewer** — `work.read`, `work.reply`, `work.verdict`, `git.clone`, `graph.query`,
   `search`; cannot start work branches or push. Clone access lets a reviewer run their own
   tools against the branch under review (see `docs/git-spec.md`).
+- **orchestrator** — `graph.query`, `search`, and nothing else. It supervises work it does
+  not perform: it can read the code but cannot start a branch, clone, push, comment, or cast
+  a verdict. The two it does hold are what let it check a task's factual claims about the
+  code before an agent is dispatched against them, without a clone. See
+  [`docs/orchestration.md`](orchestration.md), and `loam instructions` in
+  `docs/cli-spec.md` for the well-known identity the `LOAM_AGENT_*` variables default to,
+  whose role this is. Seeded by migration `0009_orchestrator_role`, which fills
+  its instructions only where they are still empty, so an operator's own text survives a
+  re-run — as with `0006_role_instructions_seed`, editing the migration is not how you
+  change the text of a deployment that has already applied it; `UpdateRole` is.
 
 ### ProposalService
 Only the genuinely admin-exclusive actions on work branches. Everything shared — viewing

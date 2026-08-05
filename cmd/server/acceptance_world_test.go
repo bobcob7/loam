@@ -218,9 +218,31 @@ type acceptanceWorld struct {
 	// unreachable" so "whoami works without contacting the server" can
 	// prove no RPC reached anywhere reachable, while every other scenario
 	// in this suite keeps talking to the real in-process server.
-	currentActor         acceptanceActor
-	lastWhoami           acceptanceWhoamiOutput
-	unreachableServerURL string
+	// identityEnvMode selects which of the three LOAM_AGENT_* variables
+	// runLoamAs writes into the CLI's environment (loam-hi5o.31). They are
+	// configuration fields with a built-in default -- the well-known
+	// orchestrator identity -- so which of them a scenario LEAVES UNSET is
+	// itself behaviour under test, not just setup:
+	//
+	//   ""        all three, from world.currentActor (every other scenario)
+	//   "none"    none of the three: the defaults apply
+	//   "no-role" LOAM_AGENT_NAME and LOAM_AGENT_ID only: a partial
+	//             identity, which must be a usage error rather than a
+	//             per-variable default to orchestrator
+	//
+	// runLoamAs builds cmd.Env explicitly from nothing, so an omitted entry
+	// is genuinely unset -- these scenarios never depend on whatever the
+	// developer's or CI's own environment happens to export.
+	//
+	// lastInstructionsAttempt is the raw result of an `instructions` run a
+	// scenario EXPECTS to fail, kept separately from lastInstructions
+	// (which is only ever a decoded success) so a rejection can be asserted
+	// on without a successful decode having to happen first.
+	currentActor            acceptanceActor
+	lastWhoami              acceptanceWhoamiOutput
+	unreachableServerURL    string
+	identityEnvMode         string
+	lastInstructionsAttempt loamCLIResult
 	// The enrollment state (acceptance_enrollment_test.go, loam-ofg.12).
 	// lastEnrolledRepo is the most recent EnrolledRepo this scenario
 	// observed -- an EnrollRepo/SetTargetBranches response or a plain
