@@ -353,6 +353,18 @@ func TestCreateRole_PassesNameOperationsAndInstructionsToTheStore(t *testing.T) 
 // TestCreateRole_BuiltinRequested_IsRejected proves an admin cannot mint a
 // role that reports as built-in. The flag is the only thing DeleteRole
 // consults, so a forged one would hand out an undeletable role.
+//
+// It also pins the SHAPE of the refusal's wording, the way this file
+// already pins it for the accepted-operation list and the built-in delete
+// refusal below. The reason is specific rather than general: this message
+// used to enumerate the built-ins ("only the author and reviewer roles
+// shipped with the server are built-in") and that enumeration became a
+// FALSE FACTUAL CLAIM, told to an admin about their own deployment, the
+// moment migration 0009 seeded a third. Nothing caught it -- reverting the
+// message to that wording left this package's tests green (loam-hi5o.31
+// round 2 verified exactly that) -- because no assertion looked at the
+// prose at all. The substring below is chosen to fail on any future
+// rewrite that goes back to naming roles instead of naming the mechanism.
 func TestCreateRole_BuiltinRequested_IsRejected(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
@@ -364,6 +376,8 @@ func TestCreateRole_BuiltinRequested_IsRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
 	assert.Empty(t, d.store.CreateRoleCalls(), "a forged builtin request must not reach the store")
+	assert.Contains(t, err.Error(), "seeded by migration",
+		"the refusal must not name a fixed set of roles -- migrations decide which are built-in, and 0009 already added a third")
 }
 
 func TestCreateRole_DuplicateName_IsAlreadyExists(t *testing.T) {
