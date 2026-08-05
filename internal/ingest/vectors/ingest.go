@@ -303,7 +303,17 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // shutdown), and 58 (system error) -- plus pgx's own ErrTxClosed,
 // ErrTxCommitRollback, and puddle.ErrClosedPool (what pgxpool.Pool.Begin
 // actually surfaces once the pool is closed) sentinels for the same
-// "the pipe itself is gone" case a bare PgError might not carry. None of
+// "the pipe itself is gone" case a bare PgError might not carry, plus
+// chunkstore.ErrTransactionUnusable, which is the only one of these that
+// is EVIDENCE rather than a guess (loam-c94.24): the store reports it when
+// its own ROLLBACK TO SAVEPOINT could not be driven, which is a statement
+// that had to reach the server, so a raw TCP death -- carrying no
+// *pgconn.PgError and matching none of the three sentinels above -- is
+// caught by it and nothing else. That matters precisely because savepoints
+// made rejections survivable: before them the AdvanceIngestedRef cascade
+// forced a safe rollback no matter how a dead connection was classified,
+// whereas now a misclassified dead connection would be retried once per
+// remaining file, turning one infrastructure failure into N. None of
 // that is guessable from a mock's plain error in a unit test, which is
 // deliberate: an unclassified error defaults to "rejection," so this
 // package's own tests (a moq store returning errors.New(...)) exercise the
@@ -338,30 +348,35 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // threshold Persist enforced by returning an error would trigger the same
 // whole-transaction rollback as a single rejection would.
 //
-// # This is necessary, not sufficient, against a REAL store
+// # What makes the skip actually pay off against a REAL store
 //
 // Everything above holds unconditionally against the store interface this
 // package depends on, and is exactly what this package's own tests (a moq
-// mock that rejects one named file among several) prove. It does NOT, on
-// its own, make "one bad file costs one file" true when st is
+// mock that rejects one named file among several) prove. On its own it was
+// NOT enough to make "one bad file costs one file" true when st is
 // chunkstore.NewInTx over the orchestrator's shared transaction, which is
-// how production actually constructs it (internal/ingest/orchestrator/
-// production.go's vectorAdapter.Persist). Postgres aborts that ENTIRE
-// transaction -- not just the failing statement -- the instant one
-// statement in it errors, with no way back short of a SAVEPOINT neither
-// this package nor chunkstore.ReplaceFileChunks currently takes. Confirmed
-// against a real server, not assumed: see
-// TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit
-// in integration_test.go, which shows the caller's tx.Commit failing with
-// "commit unexpectedly resulted in rollback" even when the rejected file is
-// the LAST one Persist ever touches -- so continuing the loop past a
-// rejection cannot be what saves the transaction; only a SAVEPOINT around
-// each ReplaceFileChunks call (in chunkstore, outside this package) can.
-// Skipping and counting here is still the correct, necessary half of the
-// fix -- it is what makes a single-file batch, a rejection that lands last,
-// or a future savepoint-protected store actually recover -- it is simply
-// not the WHOLE fix for today's shared-transaction wiring, and this doc
-// comment says so rather than leaving that gap to be discovered later.
+// how production constructs it (internal/ingest/orchestrator/production.go's
+// vectorAdapter.Persist): Postgres aborts that ENTIRE transaction -- not
+// just the failing statement -- the instant one statement in it errors, so
+// this loop would skip past a rejection, keep writing, and then watch the
+// caller's COMMIT fail with "commit unexpectedly resulted in rollback",
+// discarding the files that HAD landed. Worse, the orchestrator's very
+// next statement after Persist is always AdvanceIngestedRef, so the
+// poisoned transaction was detected on essentially every ingest, not only
+// when the bad file happened to land last (loam-c94.24).
+//
+// The other half of the fix lives in chunkstore, not here:
+// ReplaceFileChunks now wraps each call in a SAVEPOINT and unwinds to it on
+// failure, so a rejection costs that file's statements and leaves the
+// transaction usable (chunkstore.NewInTx, chunkstore's savepointTransactor).
+// With both halves in place the skip below delivers what it describes.
+// Confirmed against a real server, not assumed:
+// TestIngestFileChunks_RejectionInASharedTransactionSpares
+// TheRestOfTheBatch in integration_test.go commits a batch with one
+// rejected file and reads back exactly the other files' chunks, and
+// TestIngestFileChunks_RejectedReparse_LeavesTheFilesPriorChunksIntact
+// shows the rejected file keeping its own prior chunks through that same
+// commit.
 func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, p Prepared) (Stats, error) {
 	var stats Stats
 	var firstRejection error
@@ -409,6 +424,16 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 // call it was observed, so asking ctx directly is the one check that
 // cannot be fooled by how the driver happened to phrase it.
 //
+// chunkstore.ErrTransactionUnusable is checked next and is the load-bearing
+// one (loam-c94.24). The store returns it when the SAVEPOINT it wraps every
+// write in could not be established, rolled back to, or released -- which
+// is a fact it OBSERVED by issuing a statement, not a shape it guessed
+// from. That closes the one hole the sentinel/SQLSTATE checks below cannot:
+// a raw dead TCP connection surfaces as neither a *pgconn.PgError nor any
+// of pgx's named sentinels, so before this it was classified as a per-file
+// rejection and would now -- with rejections finally survivable -- be
+// retried once per remaining file.
+//
 // Everything else here is Postgres-specific because the store this
 // package actually writes through in production is chunkstore.Store, a
 // pgx-backed implementation; a caller's own mock in a unit test will not
@@ -417,6 +442,9 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 // one).
 func isFatalStoreError(ctx context.Context, err error) bool {
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		return true
+	}
+	if errors.Is(err, chunkstore.ErrTransactionUnusable) {
 		return true
 	}
 	if errors.Is(err, pgx.ErrTxClosed) || errors.Is(err, pgx.ErrTxCommitRollback) || errors.Is(err, puddle.ErrClosedPool) {

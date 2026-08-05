@@ -23,6 +23,36 @@ import (
 // can be matched with errors.Is if a caller ever needs to.
 var errInvalidUUID = errors.New("chunks: invalid uuid column")
 
+// ErrTransactionUnusable means the failure was NOT confined to the one
+// file's statements: the SAVEPOINT machinery savepointTransactor wraps
+// every NewInTx write in could not be driven, so the caller's shared
+// transaction (and possibly the connection under it) is gone, and every
+// later write on it will fail the same way.
+//
+// It is exported because the classification is only decidable HERE and is
+// consumed THERE: internal/ingest/vectors.Persist treats a plain
+// ReplaceFileChunks error as a per-file rejection and keeps going, which
+// is right for a bad row and catastrophic for a dead connection -- a dead
+// connection would otherwise be re-attempted once per remaining file,
+// turning one infrastructure failure into N (loam-c94.24). Matching on
+// this sentinel is strictly better than inspecting the error's shape:
+// a raw TCP death carries no *pgconn.PgError and matches none of pgx's
+// named sentinels, but it is unmissable here, because ROLLBACK TO
+// SAVEPOINT is itself a statement that has to reach the server. A
+// rejection this store CAN unwind never carries it -- the fn error is
+// returned bare in that case, exactly as before.
+var ErrTransactionUnusable = errors.New("chunks: shared transaction is no longer usable")
+
+// fileSavepoint is the savepoint name savepointTransactor establishes
+// around each call. One fixed name is safe because the calls are strictly
+// sequential and every one of them is balanced -- RELEASE on success,
+// ROLLBACK TO then RELEASE on failure -- so no two are ever live at once
+// and none can accumulate on the server across a long batch. It is
+// prefixed rather than something like "sp" so it cannot collide with a
+// savepoint pgx's own tx.Begin() (which uses sp_<n>) might establish on
+// the same transaction.
+const fileSavepoint = "loam_chunkstore_file"
+
 // Chunk is one row of a RAG chunk: a file-scoped span of source text plus
 // the embedding vector search ranks it by (docs/persistence-spec.md
 // "chunks").
@@ -70,18 +100,29 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *Store {
 }
 
 // NewInTx builds a Store bound to tx, an already-open transaction the
-// caller owns: every ReplaceFileChunks call runs its delete-then-insert
-// directly against tx and neither begins nor commits anything itself
-// (passthroughTransactor never calls tx.Begin), so a caller composing
-// several stores' writes into one commit -- the atomic swap loam-c94.12
-// orchestrates -- can hand each store the same tx and be certain none of
-// them opens a nested transaction of its own. Search also reads through tx,
-// so it sees this transaction's own uncommitted writes, consistent with
-// every other read inside it. The caller alone decides when tx commits or
-// rolls back.
+// caller owns: every write runs directly against tx, and this Store
+// neither begins nor commits a transaction of its own, so a caller
+// composing several stores' writes into one commit -- the atomic swap
+// loam-c94.12 orchestrates -- can hand each store the same tx and be
+// certain none of them opens a competing one. Search also reads through
+// tx, so it sees this transaction's own uncommitted writes, consistent
+// with every other read inside it. The caller alone decides when tx
+// commits or rolls back; nothing here can reach Commit or Rollback
+// (savepointExecer is one method wide, and that method is Exec).
+//
+// Each write IS wrapped in its own SAVEPOINT (loam-c94.24). Postgres
+// aborts the ENTIRE transaction the instant any statement in it errors --
+// every later statement then fails with SQLSTATE 25P02 and the commit
+// itself fails with "commit unexpectedly resulted in rollback" -- so
+// without a savepoint one rejected file would discard every other file in
+// the batch, and every write the caller had already staged alongside them,
+// no matter how gracefully the caller's loop skipped past it. The
+// savepoint confines that blast radius to the one call: on failure the
+// call's own statements are unwound with ROLLBACK TO SAVEPOINT and the
+// transaction is left usable for the next file. See savepointTransactor.
 func NewInTx(tx pgx.Tx, logger *slog.Logger) *Store {
 	q := gen.New(tx)
-	return newStore(q, &passthroughTransactor{q: q}, logger)
+	return newStore(q, &savepointTransactor{tx: tx, q: q}, logger)
 }
 
 // newStore is New's and NewInTx's unexported core, taking the
@@ -113,18 +154,62 @@ func (t *pgxTransactor) withinTx(ctx context.Context, fn func(q queries) error) 
 	return nil
 }
 
-// passthroughTransactor is transactor's implementation for NewInTx: q is
-// already bound to the caller's open transaction, so withinTx just invokes
-// fn against it. There is no Begin/Commit/Rollback call anywhere in this
-// type -- not merely an unused one -- so a Store built via NewInTx cannot
-// nest a transaction inside the caller's, whether by a savepoint or by
-// mistake; the code path to do so does not exist.
-type passthroughTransactor struct {
-	q queries
+// savepointTransactor is transactor's implementation for NewInTx. q is
+// already bound to the caller's open transaction, so fn runs against it
+// directly; what this type adds is a SAVEPOINT around fn and a ROLLBACK TO
+// SAVEPOINT if fn fails, which is the difference between "this file's
+// chunks were not written" and "this transaction is dead and everything in
+// it is lost" (loam-c94.24).
+//
+// It calls no Begin, Commit or Rollback -- it cannot, savepointExecer
+// exposes only Exec -- so the caller's transaction lifecycle stays
+// entirely the caller's. A savepoint is not a nested transaction: it takes
+// no new snapshot, holds no separate locks, and commits nothing; it is a
+// rollback marker inside the one transaction the caller will commit.
+//
+// The success path costs two extra round trips per call (SAVEPOINT,
+// RELEASE SAVEPOINT) and the failure path three. Measured against a real
+// server on a 500-file batch that is a low-single-digit percentage of the
+// call's own cost, because a real ReplaceFileChunks call already issues
+// one DELETE plus one INSERT per chunk on the same connection; see
+// BenchmarkReplaceFileChunks_SavepointOverhead in integration_test.go for
+// the numbers rather than taking that on trust.
+type savepointTransactor struct {
+	tx savepointExecer
+	q  queries
 }
 
-func (t *passthroughTransactor) withinTx(_ context.Context, fn func(q queries) error) error {
-	return fn(t.q)
+// withinTx establishes the savepoint, runs fn, and then either releases the
+// savepoint (fn succeeded) or rolls back to it and releases it (fn failed).
+//
+// The RELEASE after a ROLLBACK TO is not redundant: ROLLBACK TO SAVEPOINT
+// undoes the statements but leaves the savepoint itself established, so
+// omitting the release would leave one savepoint per rejected file alive
+// on the server for the rest of the batch.
+//
+// fn's own error is returned unwrapped whenever the unwind succeeded --
+// that is the signal "only this file failed, the transaction is fine."
+// Any failure of the three savepoint statements themselves is returned
+// wrapped in ErrTransactionUnusable instead, carrying fn's error along in
+// the message when there was one, because at that point the caller must
+// stop rather than try the next file.
+func (t *savepointTransactor) withinTx(ctx context.Context, fn func(q queries) error) error {
+	if _, err := t.tx.Exec(ctx, "SAVEPOINT "+fileSavepoint); err != nil {
+		return fmt.Errorf("%w: establishing savepoint: %w", ErrTransactionUnusable, err)
+	}
+	if fnErr := fn(t.q); fnErr != nil {
+		if _, err := t.tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+fileSavepoint); err != nil {
+			return fmt.Errorf("%w: rolling back to savepoint after %v: %w", ErrTransactionUnusable, fnErr, err)
+		}
+		if _, err := t.tx.Exec(ctx, "RELEASE SAVEPOINT "+fileSavepoint); err != nil {
+			return fmt.Errorf("%w: releasing savepoint after rolling back %v: %w", ErrTransactionUnusable, fnErr, err)
+		}
+		return fnErr
+	}
+	if _, err := t.tx.Exec(ctx, "RELEASE SAVEPOINT "+fileSavepoint); err != nil {
+		return fmt.Errorf("%w: releasing savepoint: %w", ErrTransactionUnusable, err)
+	}
+	return nil
 }
 
 // ReplaceFileChunks atomically deletes every existing chunk for
@@ -133,9 +218,21 @@ func (t *passthroughTransactor) withinTx(_ context.Context, fn func(q queries) e
 // (docs/persistence-spec.md "chunks"; docs/ingestion-spec.md "Incremental
 // Build" — "only changed files are re-embedded"). Passing an empty inputs
 // deletes the file's chunks without inserting any, e.g. for a file removed
-// from the tree. The delete and every insert commit as one transaction: a
-// failure partway through leaves the file's prior chunks intact rather
-// than half-replaced.
+// from the tree.
+//
+// The delete and every insert are one atomic unit, both ways this Store
+// can be built: a real transaction under New, a SAVEPOINT under NewInTx.
+// A failure partway through therefore leaves the file's prior chunks
+// intact rather than half-replaced -- the DELETE unwinds together with
+// whatever INSERTs got as far as the server, so the file keeps the chunks
+// it had before the call, stale but whole.
+//
+// Under NewInTx a failure ALSO leaves the caller's transaction usable, so
+// a batch loop may treat one file's rejection as that file's own problem
+// and carry on (internal/ingest/vectors.Persist does exactly that), with
+// one exception it must respect: an error matching ErrTransactionUnusable
+// means the savepoint could not be driven at all, the transaction is gone,
+// and continuing is pointless.
 func (s *Store) ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []ChunkInput) ([]Chunk, error) {
 	result := make([]Chunk, 0, len(inputs))
 	err := s.tx.withinTx(ctx, func(q queries) error {

@@ -11,10 +11,12 @@ package chunkstore
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/bobcob7/loam/internal/db/gen"
 )
 
-//go:generate go tool moq -out moq_test.go . queries transactor
+//go:generate go tool moq -out moq_test.go . queries transactor savepointExecer
 
 // queries is the sqlc-generated surface Store calls, defined here at the
 // consumer so Store is unit-testable against a moq mock instead of a live
@@ -42,4 +44,24 @@ type queries interface {
 // directly.
 type transactor interface {
 	withinTx(ctx context.Context, fn func(q queries) error) error
+}
+
+// savepointExecer is the ONE method savepointTransactor needs from the
+// pgx.Tx a NewInTx caller hands over: the ability to issue a bare SQL
+// statement on that transaction's connection, which is how SAVEPOINT /
+// RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT are issued (loam-c94.24).
+// Declared here at the consumer, one method wide, so a unit test can pin
+// the exact statement sequence with a moq mock instead of needing a live
+// server -- and so nothing in this package can reach Commit or Rollback on
+// the caller's transaction, which remains the caller's alone to decide.
+//
+// pgx.Tx satisfies this unmodified. pgx also offers tx.Begin(), which
+// implements a pseudo-nested transaction with its own internally-numbered
+// savepoint; this package issues the statements itself instead, because
+// the failure this whole mechanism exists to survive is a statement error
+// mid-transaction, and being able to assert "SAVEPOINT, then ROLLBACK TO,
+// then RELEASE, in that order, and nothing else" in a plain unit test is
+// worth more here than reusing pgx's counter.
+type savepointExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
