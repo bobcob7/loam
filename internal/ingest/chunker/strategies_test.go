@@ -1,8 +1,10 @@
 package chunker
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +28,38 @@ func TestIsBinary_NulByteBeyondSniffWindow_IsNotDetected(t *testing.T) {
 	// is a pinned characteristic, not a bug report.
 	content := append([]byte(strings.Repeat("a", binarySniffLen+10)), 0)
 	assert.False(t, isBinary(content))
+}
+
+func TestSanitizeUTF8_ValidContent_ReturnedUnchangedByteIdentical(t *testing.T) {
+	t.Parallel()
+	// loam-c94.20 acceptance criterion 6: valid UTF-8, including multibyte
+	// characters, must not be mangled by the fix -- exact bytes, not just
+	// "looks the same".
+	valid := []byte("café: 日本語, emoji 🎉, and a stray Ñ\n")
+	out, sanitized := sanitizeUTF8(valid)
+	assert.False(t, sanitized)
+	assert.True(t, bytes.Equal(valid, out), "valid UTF-8 content must be byte-identical after sanitizeUTF8")
+}
+
+func TestSanitizeUTF8_InvalidByte_ReplacedWithReplacementCharacter(t *testing.T) {
+	t.Parallel()
+	// The exact byte the production incident reported: 0xa5, a lone
+	// continuation byte -- valid Mac Roman/Latin-1, invalid UTF-8.
+	invalid := []byte("SELECT 1; -- old comment \xa5 bullet\n")
+	out, sanitized := sanitizeUTF8(invalid)
+	require.True(t, sanitized)
+	assert.True(t, utf8.Valid(out), "sanitized output must always be valid UTF-8")
+	assert.NotContains(t, string(out), "\xa5")
+	assert.Contains(t, string(out), invalidUTF8Replacement)
+	assert.Contains(t, string(out), "SELECT 1; -- old comment", "bytes surrounding the bad one must be preserved")
+	assert.Contains(t, string(out), "bullet\n", "bytes surrounding the bad one must be preserved")
+}
+
+func TestSanitizeUTF8_EmptyContent_ReturnedUnchanged(t *testing.T) {
+	t.Parallel()
+	out, sanitized := sanitizeUTF8(nil)
+	assert.False(t, sanitized)
+	assert.Empty(t, out)
 }
 
 func TestIsMarkdownPath_RecognizesMdAndMarkdownExtensionsCaseInsensitively(t *testing.T) {

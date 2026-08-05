@@ -53,6 +53,14 @@ type Stats struct {
 	// per-file.
 	UnitsSplit      int
 	PiecesFromSplit int
+	// FilesSanitizedInvalidUTF8 is how many chunked files contained at
+	// least one invalid UTF-8 byte sequence that ChunkFile replaced with
+	// the Unicode replacement character before chunking (loam-c94.20) --
+	// counted here, and separately logged per file by ChunkFile itself, so
+	// an operator whose search results show a stray "�" where a file's
+	// content should be has an answer in the job's own stats rather than a
+	// silent surprise.
+	FilesSanitizedInvalidUTF8 int
 }
 
 // ChunkFiles chunks each of files via ChunkFile, tolerating any single
@@ -113,6 +121,9 @@ func (c *Chunker) ChunkFiles(ctx context.Context, files []FileInput, budgeter Bu
 		stats.UnitsProduced += len(units)
 		stats.UnitsSplit += result.UnitsSplit
 		stats.PiecesFromSplit += result.PiecesProduced
+		if result.SanitizedInvalidUTF8 {
+			stats.FilesSanitizedInvalidUTF8++
+		}
 		out = append(out, FileChunks{Path: f.Path, Units: units})
 	}
 	return out, stats, nil

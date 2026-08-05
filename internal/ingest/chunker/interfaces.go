@@ -18,6 +18,17 @@
 //   - A binary file (sniffed for a NUL byte) is skipped: no chunks, no
 //     error.
 //
+// A file that passes the binary sniff but still contains invalid UTF-8
+// (loam-c94.20 -- e.g. a large, otherwise-valid .sql file carrying one
+// stray byte from an old Mac-Roman save) is sanitized, not skipped: every
+// invalid byte sequence is replaced with the Unicode replacement character
+// before any strategy runs, so the invariant "text leaving this package is
+// valid UTF-8" holds for every unit ever returned, and Chunker.ChunkFile's
+// caller can tell it happened via chunk.Result.SanitizedInvalidUTF8 (folded
+// into Stats.FilesSanitizedInvalidUTF8 by ChunkFiles) -- counted and
+// logged, never silent. See chunker.go's sanitizeUTF8 for the full
+// sanitize-vs-skip argument.
+//
 // Every strategy's raw units are then run through
 // internal/ingest/chunk.EnforceBudget before being returned, so no unit
 // this package hands back can exceed the configured embedding model's
