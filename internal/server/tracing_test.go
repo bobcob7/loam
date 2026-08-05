@@ -319,18 +319,31 @@ func TestRouter_NilTracerProvider_IsInert(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.StatusCode)
 }
 
-// TestRouter_RPCOptions_CallerCannotMutateTheRouters covers the defensive
-// copy in RPCOptions: appending to the returned slice must not write into
-// the Router's own backing array and change what every later-registered
-// handler is built with.
-func TestRouter_RPCOptions_CallerCannotMutateTheRouters(t *testing.T) {
+// TestRouter_RPCOptions_CallerCannotMutateTheRouter covers the defensive
+// copy in RPCOptions: a caller that writes into the returned slice must not
+// be changing what every handler registered afterwards is built with.
+//
+// Note the assertion is an ELEMENT OVERWRITE, not an append. An append
+// cannot detect the missing copy here — the Router's slice has cap == len,
+// so append reallocates whether or not RPCOptions cloned — and a test built
+// on one would pass against a RPCOptions that returned rt.rpcOptions
+// directly. Mutation-checked: replacing slices.Clone with a bare return
+// fails this test.
+func TestRouter_RPCOptions_CallerCannotMutateTheRouter(t *testing.T) {
 	t.Parallel()
 	router := server.New(httpauth.New(testAdminUser, testAdminPassword), nil)
-	before := router.RPCOptions()
-	_ = append(router.RPCOptions(), connect.WithCompressMinBytes(1)) //nolint:staticcheck // the append is the point
+	original := router.RPCOptions()
+	require.NotEmpty(t, original)
+	// The expected VALUE is copied out before the mutation. Holding the
+	// slice and re-reading original[0] afterwards would read through the
+	// same backing array the mutation wrote to, and the comparison would
+	// hold either way.
+	want := original[0]
+	handed := router.RPCOptions()
+	handed[0] = connect.WithCompressMinBytes(1)
 	after := router.RPCOptions()
-	require.Len(t, after, len(before))
-	assert.Equal(t, before[0], after[0])
+	require.Len(t, after, len(original))
+	assert.Equal(t, want, after[0])
 }
 
 func jsonBody() *strings.Reader { return strings.NewReader("{}") }
