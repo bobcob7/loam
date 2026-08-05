@@ -61,15 +61,20 @@ func blackHoleCollector(t *testing.T) string {
 // ResourceSpans with a COMPLETE, CORRECT resource -- all seven attributes,
 // right schema URL -- and no scope_spans.
 //
-// The consequence, verified by deleting the filter and running the suite:
-// TestNew_ExportsSpansStampedWithTheExpectedResourceAttributes still PASSES,
-// because every attribute it checks is present on the wrong payload too.
-// TestNew_SampleRatioActuallyReachesTheSampler also passes, since it counts
-// spans inside scope_spans and the impostor contributes none. The only
-// assertion that fails is TestShutdown_IsIdempotent's request COUNT
-// ("should have 1 item(s), but has 2"). If that count assertion is ever
-// relaxed, this filter loses its last guard -- do not assume the
+// The consequence: TestNew_ExportsSpansStampedWithTheExpectedResourceAttributes
+// still PASSES, because every attribute it checks is present on the wrong
+// payload too. TestNew_SampleRatioActuallyReachesTheSampler also passes,
+// since it counts spans inside scope_spans and the impostor contributes
+// none. The only assertion that fails is TestShutdown_IsIdempotent's request
+// COUNT ("should have 1 item(s), but has 2"). If that count assertion is
+// ever relaxed, this filter loses its last guard -- do not assume the
 // attribute test covers it.
+//
+// To reproduce that, remove ONLY the early return and the two response lines
+// below, keeping the otherSignals counter. Deleting the whole branch is a
+// different experiment and gives a different answer: the counter goes with
+// it, so TestNew_SampleRatioActuallyReachesTheSampler's traces-vs-metrics
+// assertion fails too and TWO tests go red rather than one. Both measured.
 const tracesPath = "/v1/traces"
 
 // otlpRecorder is a minimal OTLP/HTTP collector: it decodes the
@@ -580,11 +585,32 @@ func TestNew_SampleRatioActuallyReachesTheSampler(t *testing.T) {
 // randomly-punctured one once loam sits downstream of another instrumented
 // service.
 //
-// Ratio 0 is the only setting where the two candidate wirings diverge: a
-// bare TraceIDRatioBased(0) drops this child, ParentBased(TraceIDRatioBased(0))
-// keeps it because the incoming remote parent is flagged sampled. Drop the
-// ParentBased wrapper and this test fails while every other test in the file,
-// including the ratio one above, stays green.
+// Ratio 0 is the only setting where the two candidate wirings are
+// GUARANTEED to diverge -- guaranteed being the operative word, and the
+// reason the fixture uses 0 rather than anything more realistic.
+//
+// The two wirings actually disagree over a whole interval, but where that
+// interval ENDS depends on the trace ID. TraceIDRatioBased samples when
+// (traceID[8:16] >> 1) < uint64(ratio * (1<<63)), so for the trace ID
+// hardcoded below -- whose low 8 bytes are 0x090a0b0c0d0e0f10 -- the bare
+// sampler starts keeping this span at ratio 0x090a0b0c0d0e0f10 / 2^64 =
+// 0.0353, and above that the two wirings agree. Measured directly against
+// both samplers: divergence holds up to 0.035300 and the first agreement is
+// at 0.035350, matching the arithmetic to five decimals.
+//
+// Two things follow, and both are why this comment is longer than the test.
+// First, the trace-ID constant below is LOAD-BEARING at every ratio except
+// 0; it is not an arbitrary filler value to be swapped for convenience.
+// Second -- the trap one layer down -- at the DEFAULT ratio of 0.1 both
+// wirings keep this span, so the identical test written at the default would
+// pass against both and catch nothing. Do not "simplify" this fixture to use
+// the default. Ratio 0 is the one setting where the trace ID cannot matter:
+// the upper bound is 0, so the bare sampler drops everything, and only the
+// ParentBased wrapper can keep a span whose remote parent is flagged
+// sampled.
+//
+// Drop the ParentBased wrapper and this test fails while every other test in
+// the file, including the ratio one above, stays green.
 func TestNew_SamplerIsParentBasedSoASampledParentsChildrenSurvive(t *testing.T) {
 	t.Parallel()
 	recorder := &otlpRecorder{}

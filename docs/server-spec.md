@@ -80,10 +80,19 @@ Two things worth knowing before turning it on:
   traces only; there is no metric-side equivalent, so a ratio of 0 silences
   traces while metrics keep being pushed on their normal interval. To stop
   both, unset `LOAM_OTEL_ENDPOINT`.
-- **An unreachable collector degrades, it does not fail.** The server still
-  boots (the endpoint is validated, never dialled, at startup) and still
-  shuts down promptly: the flush at shutdown is bounded, so a dead collector
-  cannot hold `SIGTERM` open past the pod's termination grace period.
+- **An unreachable collector degrades, it does not fail — given enough
+  termination grace.** The server still boots: the endpoint is validated,
+  never dialled, at startup. Shutdown stays bounded rather than hanging, but
+  the bound is additive and the deployment has to budget for it. The shutdown
+  grace period is 30s and the telemetry flush gets its own 5s on top of it
+  (`cmd/server/serve.go`: `defaultShutdownGrace`, `telemetryFlushGrace`), so
+  the worst case is **35s** — and it is reached in exactly the slow-shutdown
+  case this bullet is about. The deployment must therefore set
+  `terminationGracePeriodSeconds` to **at least 35**; Kubernetes' default of
+  30 SIGKILLs the pod five seconds short, discarding the drain rather than
+  the telemetry. Note the margin was already zero before telemetry existed (a
+  30s drain against a 30s default), so this is a chart value to set, not a
+  regression to absorb — tracked on `loam-uwus`.
 
 Deployment wiring for these variables — Helm values, compose, and
 `docs/observability-spec.md` — is tracked separately as `loam-uwus`; this
