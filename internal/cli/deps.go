@@ -53,8 +53,7 @@ func NewErrorMapper() ErrorMapper { return newErrorMapper() }
 // args is the command line about to be dispatched (main() passes
 // os.Args[1:], after its own cli.TryHelp check has already ruled out a
 // help route -- see help.go). It decides which config-loading strategy to
-// use via configForArgs, which OWNS that rule and is the only place it is
-// written down.
+// use via configForArgs, which OWNS that rule.
 //
 // This comment deliberately does not restate which commands need which
 // variables. It used to, and the census read "every other command still
@@ -109,11 +108,14 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 }
 
 // configForArgs picks the config-loading strategy from the top-level
-// command about to run (see NewProductionDeps's doc comment). Three cases,
-// and everything not named below -- including an empty/unrecognized args,
-// which will go on to fail Dispatch's own routing checks exactly as before
-// -- still goes through the full four-variable loadConfig, unchanged from
-// before loam-dc2v.
+// command about to run. NewProductionDeps' doc comment covers why that
+// choice is made during Deps CONSTRUCTION at all; which command gets which
+// loader is here, and only here, so the two no longer point at each other.
+//
+// Three cases, and everything not named below -- including an empty or
+// unrecognized args, which will go on to fail Dispatch's own routing
+// checks exactly as before -- still goes through the full four-variable
+// loadConfig, unchanged from before loam-dc2v.
 //
 //   - `whoami` gets the relaxed, identity-only loader: identity IS the
 //     environment it needs, and a server it does not talk to must not gate
