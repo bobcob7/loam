@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
@@ -48,13 +49,27 @@ func blackHoleCollector(t *testing.T) string {
 }
 
 // tracesPath is the OTLP/HTTP signal path the trace exporter POSTs to.
-// otlpRecorder MUST filter on it. Without the filter the metric exporter's
-// POST to /v1/metrics is also recorded, and -- this is the trap --
+// otlpRecorder MUST filter on it, and the exact shape of what gets through
+// without the filter matters, because it decides WHICH assertion is the
+// guard.
+//
 // ExportMetricsServiceRequest.resource_metrics carries the same protobuf
-// field number as ExportTraceServiceRequest.resource_spans, so it decodes
-// as a perfectly plausible (and completely empty) trace request instead of
-// failing. A test counting "how many trace exports happened" would silently
-// count two.
+// field number as ExportTraceServiceRequest.resource_spans, and
+// ResourceMetrics.resource is likewise field-identical to
+// ResourceSpans.resource. So the metric exporter's POST to /v1/metrics does
+// not fail to decode and does not decode to something empty: it yields a
+// ResourceSpans with a COMPLETE, CORRECT resource -- all seven attributes,
+// right schema URL -- and no scope_spans.
+//
+// The consequence, verified by deleting the filter and running the suite:
+// TestNew_ExportsSpansStampedWithTheExpectedResourceAttributes still PASSES,
+// because every attribute it checks is present on the wrong payload too.
+// TestNew_SampleRatioActuallyReachesTheSampler also passes, since it counts
+// spans inside scope_spans and the impostor contributes none. The only
+// assertion that fails is TestShutdown_IsIdempotent's request COUNT
+// ("should have 1 item(s), but has 2"). If that count assertion is ever
+// relaxed, this filter loses its last guard -- do not assume the
+// attribute test covers it.
 const tracesPath = "/v1/traces"
 
 // otlpRecorder is a minimal OTLP/HTTP collector: it decodes the
@@ -470,4 +485,113 @@ func TestResolveVersion(t *testing.T) {
 func TestBuildVersion_IsNeverEmpty(t *testing.T) {
 	t.Parallel()
 	assert.NotEmpty(t, BuildVersion())
+}
+
+// countExportedSpans runs a provider at the given sample ratio against a
+// recording collector, starts rootSpanCount ROOT spans, and returns how many
+// actually reached the wire. Root spans specifically: the sampler under test
+// is ParentBased, so a span with a sampled parent is kept regardless of the
+// ratio and would tell us nothing about the ratio at all.
+func countExportedSpans(t *testing.T, ratio float64, rootSpanCount int) int {
+	t.Helper()
+	recorder := &otlpRecorder{}
+	server := httptest.NewServer(recorder)
+	t.Cleanup(server.Close)
+	provider, err := New(t.Context(), Config{
+		Endpoint:       server.URL,
+		ServiceName:    "loam",
+		ServiceVersion: "v0.0.0-test",
+		SampleRatio:    ratio,
+	}, testLogger())
+	require.NoError(t, err)
+	tracer := provider.TracerProvider().Tracer("telemetry-test")
+	for range rootSpanCount {
+		_, span := tracer.Start(context.Background(), "root-span")
+		span.End()
+	}
+	require.NoError(t, provider.Shutdown(context.Background()))
+	exported := 0
+	for _, request := range recorder.snapshot() {
+		for _, resourceSpans := range request.GetResourceSpans() {
+			for _, scopeSpans := range resourceSpans.GetScopeSpans() {
+				exported += len(scopeSpans.GetSpans())
+			}
+		}
+	}
+	return exported
+}
+
+// TestNew_SampleRatioActuallyReachesTheSampler closes the hole every other
+// enabled-path test in this file leaves open: they all run at ratio 1, where
+// TraceIDRatioBased(1) and AlwaysSample() are INDISTINGUISHABLE. Delete the
+// WithSampler option entirely -- so cfg.SampleRatio is read, validated,
+// logged, and then ignored -- and every one of them stays green.
+//
+// That is the shape of defect this repository has paid for most often: a
+// fixture whose seed value lets two different code paths produce identical
+// output, so a thorough-looking battery passes over unverified wiring. It is
+// especially acute here because LOAM_OTEL_SAMPLE_RATIO's VALIDATION is the
+// most heavily tested code on this branch (nine boundary rows, including the
+// NaN guard) while the thing that validation exists to protect was, until
+// this test, not exercised at all.
+//
+// The two endpoints of the range are what make this a discriminator rather
+// than an assertion, and both are needed: ratio 0 alone would pass against a
+// mutant hardcoding NeverSample, and ratio 1 alone would pass against one
+// hardcoding AlwaysSample. Only requiring both to hold pins the value
+// through.
+func TestNew_SampleRatioActuallyReachesTheSampler(t *testing.T) {
+	t.Parallel()
+	const rootSpanCount = 50
+	assert.Equal(t, 0, countExportedSpans(t, 0, rootSpanCount),
+		"at ratio 0 no root span may be sampled; a non-zero count here means the ratio never reached the sampler")
+	assert.Equal(t, rootSpanCount, countExportedSpans(t, 1, rootSpanCount),
+		"at ratio 1 every root span must be sampled; a short count here means the sampler is hardcoded to drop")
+}
+
+// TestNew_SamplerIsParentBasedSoASampledParentsChildrenSurvive pins the
+// other half of the sampler wiring, which the ratio test above cannot see.
+// Config.SampleRatio's doc comment claims the ratio is "applied through a
+// ParentBased sampler so a sampled parent's children are always kept", and
+// that claim is what makes a sampled trace a WHOLE trace rather than a
+// randomly-punctured one once loam sits downstream of another instrumented
+// service.
+//
+// Ratio 0 is the only setting where the two candidate wirings diverge: a
+// bare TraceIDRatioBased(0) drops this child, ParentBased(TraceIDRatioBased(0))
+// keeps it because the incoming remote parent is flagged sampled. Drop the
+// ParentBased wrapper and this test fails while every other test in the file,
+// including the ratio one above, stays green.
+func TestNew_SamplerIsParentBasedSoASampledParentsChildrenSurvive(t *testing.T) {
+	t.Parallel()
+	recorder := &otlpRecorder{}
+	server := httptest.NewServer(recorder)
+	t.Cleanup(server.Close)
+	provider, err := New(t.Context(), Config{
+		Endpoint:       server.URL,
+		ServiceName:    "loam",
+		ServiceVersion: "v0.0.0-test",
+		SampleRatio:    0,
+	}, testLogger())
+	require.NoError(t, err)
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), parent)
+	_, span := provider.TracerProvider().Tracer("telemetry-test").Start(ctx, "child-of-a-sampled-remote-parent")
+	span.End()
+	require.NoError(t, provider.Shutdown(context.Background()))
+	exported := 0
+	for _, request := range recorder.snapshot() {
+		for _, resourceSpans := range request.GetResourceSpans() {
+			for _, scopeSpans := range resourceSpans.GetScopeSpans() {
+				exported += len(scopeSpans.GetSpans())
+			}
+		}
+	}
+	assert.Equal(t, 1, exported,
+		"a child of a sampled remote parent must be kept even at ratio 0, or loam punctures traces that arrive already sampled")
 }
