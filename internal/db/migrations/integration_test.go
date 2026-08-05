@@ -249,6 +249,10 @@ func assertTablesAbsent(ctx context.Context, t *testing.T, dsn string) {
 // operation sets are about how many roles exist. Name keying is insensitive
 // to both the count and the order, and a new built-in adds one string to the
 // list below instead of rewriting the function.
+//
+// The exact BUILT-IN membership is still pinned, because that is the one
+// thing the count was doing on purpose, and this fixture is the only place
+// in the tree where it is checkable -- see the ElementsMatch below.
 func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -257,13 +261,16 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	rows, err := pool.Query(ctx, `SELECT name, builtin FROM roles ORDER BY name`)
 	require.NoError(t, err)
 	builtinByName := map[string]bool{}
-	var names []string
+	var names, builtins []string
 	for rows.Next() {
 		var name string
 		var builtin bool
 		require.NoError(t, rows.Scan(&name, &builtin))
 		builtinByName[name] = builtin
 		names = append(names, name)
+		if builtin {
+			builtins = append(builtins, name)
+		}
 	}
 	require.NoError(t, rows.Err())
 	for _, want := range []string{"author", "reviewer", "orchestrator"} {
@@ -271,6 +278,18 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 		require.Truef(t, ok, "the built-in %q role must be seeded; roles present: %v", want, names)
 		assert.Truef(t, builtin, "the seeded %q role must carry builtin = true, or it could be deleted", want)
 	}
+	// And NO OTHER built-in, which only this fixture can assert: it migrates
+	// a fresh, empty database, so every builtin row present is one a
+	// migration put there. This is what the dropped count was accidentally
+	// doing -- a migration seeding a fourth built-in role, and with it a
+	// fourth set of standing capabilities, would otherwise go unnoticed by
+	// the whole tree. Unlike the count it is insensitive to order, and
+	// unaffected by any change to a role's operations. The equivalent
+	// assertion is deliberately NOT made in internal/rolestore: ListRoles
+	// reads a live database where an operator's own roles legitimately
+	// exist, so there the built-in membership is not knowable.
+	assert.ElementsMatch(t, []string{"author", "reviewer", "orchestrator"}, builtins,
+		"migrations must seed exactly these built-in roles -- a new one is a new set of standing capabilities and belongs in this list, and in docs/web-spec.md's built-in role list, deliberately")
 
 	// Compare the exact operation SETS, not just their cardinality: a seed
 	// that swapped one capability for another (e.g. reviewer seeded with
