@@ -524,12 +524,29 @@ func TestIngestFileChunks_DeadPool_AbortsAtThatFileWithoutTouchingLaterOnes(t *t
 }
 
 // A transaction already poisoned by an earlier statement's error (Postgres
-// SQLSTATE 25P02, in_failed_sql_transaction -- see this package's own
-// integration test proving a real server produces exactly this once one
-// ReplaceFileChunks call in a shared transaction fails) must also abort
-// rather than being treated as yet another independent rejection, and the
-// returned error must still name the EARLIER rejection that actually
-// caused it, not just the immediate symptom.
+// SQLSTATE 25P02, in_failed_sql_transaction) must abort rather than being
+// treated as yet another independent rejection, and the returned error
+// must still name the EARLIER rejection that actually caused it, not just
+// the immediate symptom.
+//
+// NARROWED by loam-c94.24, not deleted. This test was written when 25P02
+// was the EXPECTED sequel to any rejection in a shared transaction --
+// chunkstore took no savepoint, so one bad file poisoned the transaction
+// and every later file reported 25P02. It now takes a savepoint and
+// unwinds to it, so that cascade no longer happens on this package's own
+// write path, and the sibling integration test
+// (...RejectionInASharedTransactionSparesTheRestOfTheBatch) proves it
+// against a real server.
+//
+// What survives is a genuinely different and still-reachable claim: 25P02
+// remains the code Postgres returns for ANY statement issued on a
+// transaction some OTHER participant already aborted -- the caller's
+// transaction is shared with the graph track and with AdvanceIngestedRef,
+// none of which are savepoint-protected -- and if Persist ever sees it, it
+// must stop rather than count N more rejections and report a batch that
+// nothing will commit. This is now defence in depth on the classifier
+// rather than a description of the common path, which is exactly why it
+// keeps its assertions and loses its old framing.
 func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierRejection(t *testing.T) {
 	t.Parallel()
 	firstRejectErr := errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5 (SQLSTATE 22021)")
@@ -561,6 +578,53 @@ func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierReje
 	assert.Contains(t, err.Error(), testFileB, "the error must also name the EARLIER rejection, or an operator reading only the final error sees a misleading culprit")
 	require.Len(t, *calls, 1, "the fourth file must never be attempted once the transaction was found unusable")
 	assert.Equal(t, 1, stats.FilesRejected, "only the genuine rejection is counted, not the cascade symptom")
+}
+
+// chunkstore.ErrTransactionUnusable is the classification loam-c94.24
+// folds in, and it is the one that closes the hole every check around it
+// leaves open. A raw dead TCP connection -- the socket simply gone, no
+// server response at all -- carries no *pgconn.PgError and matches none of
+// pgx.ErrTxClosed, pgx.ErrTxCommitRollback or puddle.ErrClosedPool, so
+// under this package's deliberate "unclassified means rejection" default
+// it was counted as a per-file rejection and the loop carried on.
+//
+// That was harmless only by accident: the orchestrator's AdvanceIngestedRef
+// ran immediately after Persist on the same doomed transaction and forced a
+// rollback regardless. Savepoints removed that accident -- rejections are
+// now genuinely survivable -- so a misclassified dead connection would be
+// re-attempted once per remaining file, turning one infrastructure failure
+// into N. The store reports the sentinel because it OBSERVED the failure:
+// its own ROLLBACK TO SAVEPOINT is a statement that had to reach the
+// server.
+//
+// The error here is wrapped exactly as chunkstore wraps it, so this test
+// fails if that wrapping ever stops preserving the sentinel in the chain.
+func TestIngestFileChunks_StoreReportsTransactionUnusable_AbortsWithoutTouchingLaterFiles(t *testing.T) {
+	t.Parallel()
+	deadConn := errors.New("write tcp 127.0.0.1:55000->127.0.0.1:5432: write: broken pipe")
+	st, calls := newFakeStore()
+	base := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		if file == testFileB {
+			return nil, fmt.Errorf("replacing chunks for repo %s file %s: %w: rolling back to savepoint after boom: %w",
+				repoID, file, chunkstore.ErrTransactionUnusable, deadConn)
+		}
+		return base(ctx, repoID, targetBranch, file, inputs)
+	}
+	files := []chunker.FileChunks{
+		unitsFor(testFileA, "alpha"),
+		unitsFor(testFileB, "beta"),
+		unitsFor("pkg/c/c.go", "gamma"),
+	}
+
+	stats, err := New(newFakeEmbedder(), testLogger()).IngestFileChunks(t.Context(), st, uuid.Must(uuid.NewV7()), testBranch, files)
+
+	require.Error(t, err, "a transaction the store could not even unwind must abort the batch, not be counted as a per-file rejection")
+	assert.ErrorIs(t, err, chunkstore.ErrTransactionUnusable)
+	assert.ErrorIs(t, err, deadConn, "the driver's own error must still be in the chain for the operator")
+	require.Len(t, *calls, 1, "the third file must never be attempted once the transaction was found unusable -- retrying a dead connection per file is exactly what this classification prevents")
+	assert.Equal(t, testFileA, (*calls)[0].file)
+	assert.Zero(t, stats.FilesRejected, "an unusable transaction is not a rejection, however much it looks like one from the call site")
 }
 
 // ctx cancellation observed BETWEEN two store calls (rather than before the
