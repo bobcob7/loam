@@ -7,6 +7,10 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/puddle/v2"
 
 	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/ingest/chunk"
@@ -94,6 +98,19 @@ type Stats struct {
 	// ChunksWritten is the total number of chunks rows inserted across
 	// every file in the batch.
 	ChunksWritten int
+	// FilesRejected is how many files in the batch the store itself
+	// refused to write (loam-c94.21) -- a malformed row, a constraint, a
+	// size limit, anything Postgres raised for that ONE file's statement
+	// rather than for the connection or transaction as a whole (see
+	// Persist's doc comment for exactly where that line is drawn). Each
+	// one is also logged at ERROR with the file's path, so this count is
+	// never the only record of which files are missing. It is deliberately
+	// NOT folded into FilesReplaced (a rejected file was NOT replaced --
+	// its prior chunks are what a reader still sees, per Persist's own doc
+	// comment) or treated as reason alone to fail the batch: see Persist's
+	// doc comment for why returning an error here would defeat the point
+	// of counting rejections in the first place.
+	FilesRejected int
 	// EmbedCalls is how many Embed requests the batch cost -- the
 	// expensive, network-bound step, so it is worth reporting directly
 	// rather than leaving a reader to divide ChunksWritten by
@@ -156,11 +173,12 @@ func New(e embedder, logger *slog.Logger) *Indexer {
 // caller with no such constraint, and it is what this package's own
 // single-call tests exercise.
 //
-// Anything that goes wrong -- ctx cancellation, an embed failure, a vector
-// count or width that disagrees with the Embedder's own Dimension(), or a
-// store write failing -- returns immediately, wrapped. There is no
-// per-file skip-and-continue here (see the package doc comment for why):
-// the enclosing transaction is going to roll back either way.
+// ctx cancellation, an embed failure, or a vector count/width that
+// disagrees with the Embedder's own Dimension() still returns immediately,
+// wrapped -- Prepare has nothing partial to skip past (see its own doc
+// comment). A per-file store write failing during Persist does NOT abort
+// the batch on its own as of loam-c94.21: see Persist's doc comment for
+// which errors are survivable, which still abort, and why.
 func (ix *Indexer) IngestFileChunks(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, files []chunker.FileChunks) (Stats, error) {
 	prepared, stats, err := ix.Prepare(ctx, repoID, targetBranch, files)
 	if err != nil {
@@ -259,14 +277,112 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // chunks of a file that now chunks to nothing, or that chunker.ChunkFiles
 // could only emit a zero-unit entry for because it turned binary or
 // stopped parsing (loam-8uo).
+//
+// # Which errors are survivable (loam-c94.21)
+//
+// A single file's ReplaceFileChunks call failing is, by default, treated
+// as a REJECTION: counted in Stats.FilesRejected, logged at ERROR naming
+// the file, and skipped -- Persist moves on to the next file rather than
+// returning. A malformed row, a constraint hit, or a size limit is that
+// file's own problem and says nothing about whether the file after it can
+// be written, so one such file must not cost the rest of the batch, the
+// exact asymmetry with chunker.ChunkFiles's own per-file skip-and-continue
+// (see the package doc comment) this bead exists to close.
+//
+// isFatalStoreError narrows that default: ctx cancellation (checked here
+// AND at the top of every iteration, so a cancellation observed only via
+// the store call's own error still stops the loop immediately, matching
+// embedAll's identical re-check after an Embed error) and a fixed set of
+// Postgres error classes that mean the CONNECTION or the TRANSACTION
+// itself is unusable -- 08 (connection exception), 25 (invalid
+// transaction state, which is what a PRIOR statement's error turns every
+// later one on the same transaction into -- see below), 40 (transaction
+// rollback, e.g. a deadlock), 42 (syntax/access-rule violation, a code or
+// permissions bug that will recur identically for every remaining file),
+// 53 (insufficient resources), 57 (operator intervention, e.g. an admin
+// shutdown), and 58 (system error) -- plus pgx's own ErrTxClosed,
+// ErrTxCommitRollback, and puddle.ErrClosedPool (what pgxpool.Pool.Begin
+// actually surfaces once the pool is closed) sentinels for the same
+// "the pipe itself is gone" case a bare PgError might not carry. None of
+// that is guessable from a mock's plain error in a unit test, which is
+// deliberate: an unclassified error defaults to "rejection," so this
+// package's own tests (a moq store returning errors.New(...)) exercise the
+// common case, and the fatal classes are exercised with the real pgx/pgconn
+// values production actually returns.
+//
+// A fatal classification still returns immediately, exactly like before
+// loam-c94.21: continuing to hammer a dead connection or an already-aborted
+// transaction cannot recover anything and would just turn one real failure
+// into a wall of identical ones. If an earlier file in this same call was
+// already counted as a rejection, that file and its error are folded into
+// the returned error too (firstRejection below) -- see the next section for
+// why that matters.
+//
+// # Why a rejection does not make Persist itself return an error
+//
+// It would be tempting to have Persist return a distinguishable error once
+// Stats.FilesRejected > 0, so the caller can decide the job is a "failure
+// wearing a green badge." That is wrong for THIS caller specifically: the
+// swap orchestrator (loam-c94.12, see internal/ingest/orchestrator's
+// writeSwap) rolls back its ENTIRE transaction -- the graph track's writes
+// included -- the moment Persist returns any error. Doing that over a
+// handful of rejected files would re-commit the exact bug this bead exists
+// to fix, just one layer up: the files this call DID successfully replace
+// would be discarded along with the rejected ones. So Persist reports
+// rejections only through Stats and the ERROR-level log line for each one;
+// a caller that wants "success with warnings" vs. "failure" as a job-level
+// verdict must read Stats.FilesRejected AFTER a successful commit and
+// decide there (loam-c94.13, the ingest_jobs.stats writer, is the natural
+// place -- not yet built, and out of this package's reach). There is
+// deliberately no numeric threshold here for the same reason: any
+// threshold Persist enforced by returning an error would trigger the same
+// whole-transaction rollback as a single rejection would.
+//
+// # This is necessary, not sufficient, against a REAL store
+//
+// Everything above holds unconditionally against the store interface this
+// package depends on, and is exactly what this package's own tests (a moq
+// mock that rejects one named file among several) prove. It does NOT, on
+// its own, make "one bad file costs one file" true when st is
+// chunkstore.NewInTx over the orchestrator's shared transaction, which is
+// how production actually constructs it (internal/ingest/orchestrator/
+// production.go's vectorAdapter.Persist). Postgres aborts that ENTIRE
+// transaction -- not just the failing statement -- the instant one
+// statement in it errors, with no way back short of a SAVEPOINT neither
+// this package nor chunkstore.ReplaceFileChunks currently takes. Confirmed
+// against a real server, not assumed: see
+// TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit
+// in integration_test.go, which shows the caller's tx.Commit failing with
+// "commit unexpectedly resulted in rollback" even when the rejected file is
+// the LAST one Persist ever touches -- so continuing the loop past a
+// rejection cannot be what saves the transaction; only a SAVEPOINT around
+// each ReplaceFileChunks call (in chunkstore, outside this package) can.
+// Skipping and counting here is still the correct, necessary half of the
+// fix -- it is what makes a single-file batch, a rejection that lands last,
+// or a future savepoint-protected store actually recover -- it is simply
+// not the WHOLE fix for today's shared-transaction wiring, and this doc
+// comment says so rather than leaving that gap to be discovered later.
 func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, p Prepared) (Stats, error) {
 	var stats Stats
+	var firstRejection error
 	for _, f := range p.files {
 		if err := ctx.Err(); err != nil {
 			return stats, fmt.Errorf("replacing chunks for %s: %w", f.path, err)
 		}
 		if _, err := st.ReplaceFileChunks(ctx, repoID, targetBranch, f.path, f.inputs); err != nil {
-			return stats, fmt.Errorf("replacing chunks for %s: %w", f.path, err)
+			if isFatalStoreError(ctx, err) {
+				if firstRejection != nil {
+					return stats, fmt.Errorf("replacing chunks for %s: %w (transaction already unusable after an earlier rejected file: %v)", f.path, err, firstRejection)
+				}
+				return stats, fmt.Errorf("replacing chunks for %s: %w", f.path, err)
+			}
+			stats.FilesRejected++
+			if firstRejection == nil {
+				firstRejection = fmt.Errorf("file %s: %w", f.path, err)
+			}
+			ix.logger.ErrorContext(ctx, "store rejected file's chunks; skipping and counting it so the rest of the batch still lands",
+				"file", f.path, "repo_id", repoID, "target_branch", targetBranch, "error", err)
+			continue
 		}
 		stats.FilesReplaced++
 		stats.ChunksWritten += len(f.inputs)
@@ -278,6 +394,47 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 	return stats, nil
 }
 
+// isFatalStoreError reports whether err from a ReplaceFileChunks call means
+// the FAILURE IS NOT SPECIFIC TO THAT FILE -- ctx was cancelled, or the
+// connection/transaction itself is unusable -- as opposed to a rejection
+// (a malformed row, a constraint, a size limit) that only that one file's
+// statement raised. See Persist's doc comment ("Which errors are
+// survivable") for the reasoning; this function is only the mechanics of
+// it.
+//
+// ctx.Err() is checked first and takes priority over anything err itself
+// says, matching the check the top of Persist's loop already makes and
+// embedAll's identical re-check after an Embed error: a cancellation can
+// surface as almost any wrapped error shape depending on where in the
+// call it was observed, so asking ctx directly is the one check that
+// cannot be fooled by how the driver happened to phrase it.
+//
+// Everything else here is Postgres-specific because the store this
+// package actually writes through in production is chunkstore.Store, a
+// pgx-backed implementation; a caller's own mock in a unit test will not
+// produce any of these shapes, so an unclassified error is NOT fatal by
+// default (see Persist's doc comment for why that default is the correct
+// one).
+func isFatalStoreError(ctx context.Context, err error) bool {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return true
+	}
+	if errors.Is(err, pgx.ErrTxClosed) || errors.Is(err, pgx.ErrTxCommitRollback) || errors.Is(err, puddle.ErrClosedPool) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgerrcode.IsConnectionException(pgErr.Code) ||
+			pgerrcode.IsInvalidTransactionState(pgErr.Code) ||
+			pgerrcode.IsTransactionRollback(pgErr.Code) ||
+			pgerrcode.IsSyntaxErrororAccessRuleViolation(pgErr.Code) ||
+			pgerrcode.IsInsufficientResources(pgErr.Code) ||
+			pgerrcode.IsOperatorIntervention(pgErr.Code) ||
+			pgerrcode.IsSystemError(pgErr.Code)
+	}
+	return false
+}
+
 // merge folds other's write-phase counters into s, which already carries
 // the embed-phase ones. Prepare and Persist each populate a disjoint set
 // of Stats fields, so this is an addition, never an overwrite.
@@ -285,6 +442,7 @@ func (s *Stats) merge(other Stats) {
 	s.FilesReplaced += other.FilesReplaced
 	s.FilesWithoutChunks += other.FilesWithoutChunks
 	s.ChunksWritten += other.ChunksWritten
+	s.FilesRejected += other.FilesRejected
 	s.EmbedCalls += other.EmbedCalls
 }
 

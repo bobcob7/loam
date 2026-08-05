@@ -3,9 +3,14 @@ package vectors
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -413,14 +418,92 @@ func TestIngestFileChunks_EmbedErrorMidBatch_StopsAtTheFailingRequest(t *testing
 	assert.Empty(t, *calls)
 }
 
-func TestIngestFileChunks_StoreError_AbortsAtThatFileWithoutTouchingLaterOnes(t *testing.T) {
+// The bead's central case (loam-c94.21): a store rejection on ONE file must
+// not cost the rest of the batch. Three files with distinct paths AND
+// distinct content are seeded (not identical content -- see the package's
+// own note on what a fixture makes indistinguishable) so this test can
+// prove the RIGHT files landed, not merely that some count of files landed.
+func TestIngestFileChunks_StoreRejectsOneFile_SkipsItAndWritesTheRest(t *testing.T) {
 	t.Parallel()
-	storeErr := errors.New("deadlock detected")
+	rejectErr := errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5")
+	st, calls := newFakeStore()
+	succeeding := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		if file == testFileB {
+			return nil, rejectErr
+		}
+		return succeeding(ctx, repoID, targetBranch, file, inputs)
+	}
+	logger, records := newCapturingLogger()
+	files := []chunker.FileChunks{
+		unitsFor(testFileA, "func Alpha() {}"),
+		unitsFor(testFileB, "func Beta() {}"),
+		unitsFor("pkg/c/c.go", "func Gamma() {}"),
+	}
+
+	stats, err := New(newFakeEmbedder(), logger).IngestFileChunks(t.Context(), st, uuid.Must(uuid.NewV7()), testBranch, files)
+
+	require.NoError(t, err, "a rejection alone must not fail the batch -- see Persist's doc comment for why")
+	require.Len(t, *calls, 2, "the rejected file must be skipped, not retried, and the file after it must still be attempted")
+	assert.Equal(t, testFileA, (*calls)[0].file)
+	assert.Equal(t, "func Alpha() {}", (*calls)[0].inputs[0].Content, "the surviving files must carry THEIR OWN content, not the rejected file's")
+	assert.Equal(t, "pkg/c/c.go", (*calls)[1].file)
+	assert.Equal(t, "func Gamma() {}", (*calls)[1].inputs[0].Content)
+	assert.Equal(t, Stats{FilesReplaced: 2, FilesRejected: 1, ChunksWritten: 2, EmbedCalls: 1}, stats, "the casualty must be counted separately from the files that landed")
+
+	var rejectionLog *slog.Record
+	for i, r := range *records {
+		if r.Level == slog.LevelError {
+			rejectionLog = &(*records)[i]
+		}
+	}
+	require.NotNil(t, rejectionLog, "a rejected file must be logged at ERROR, not only counted")
+	assert.Equal(t, testFileB, recordAttr(*rejectionLog, "file"), "the log line must name the file that was rejected")
+}
+
+// The same case run through Prepare then Persist separately (the shape the
+// swap orchestrator, loam-c94.12, actually uses) rather than the combined
+// IngestFileChunks convenience call, so the skip-and-continue behaviour is
+// proven at the entry point production wires up, not only the test-only one.
+func TestPersist_StoreRejectsOneFile_SkipsItAndWritesTheRest(t *testing.T) {
+	t.Parallel()
+	rejectErr := errors.New("constraint violation")
+	st, calls := newFakeStore()
+	succeeding := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		if file == testFileA {
+			return nil, rejectErr
+		}
+		return succeeding(ctx, repoID, targetBranch, file, inputs)
+	}
+	ix := New(newFakeEmbedder(), testLogger())
+	repoID := uuid.Must(uuid.NewV7())
+	files := []chunker.FileChunks{unitsFor(testFileA, "one"), unitsFor(testFileB, "two")}
+
+	prepared, _, err := ix.Prepare(t.Context(), repoID, testBranch, files)
+	require.NoError(t, err)
+	stats, err := ix.Persist(t.Context(), st, repoID, testBranch, prepared)
+
+	require.NoError(t, err)
+	require.Len(t, *calls, 1, "newFakeStore only records a call that reaches the base function, i.e. one that was actually attempted and succeeded -- the rejected file's own attempt is proven by Stats.FilesRejected below, not by this slice")
+	assert.Equal(t, testFileB, (*calls)[0].file, "the first file's rejection must not stop the second from being attempted")
+	assert.Equal(t, Stats{FilesReplaced: 1, FilesRejected: 1, ChunksWritten: 1}, stats)
+}
+
+// A dead connection pool is exactly the class of failure this bead's own
+// DESCRIPTION says must still abort: continuing to call ReplaceFileChunks
+// against a pool that cannot serve any connection would just turn one real
+// failure into N identical ones. puddle.ErrClosedPool is the actual
+// sentinel pgxpool surfaces once its pool is closed (confirmed by reading
+// pgxpool.Pool.Begin -> Acquire -> puddle.Pool.Acquire in pgx v5.10.0), so
+// this test uses that value rather than an invented one.
+func TestIngestFileChunks_DeadPool_AbortsAtThatFileWithoutTouchingLaterOnes(t *testing.T) {
+	t.Parallel()
 	st, calls := newFakeStore()
 	failing := st.ReplaceFileChunksFunc
 	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
 		if file == testFileB {
-			return nil, storeErr
+			return nil, fmt.Errorf("replacing chunks for %s: %w", file, puddle.ErrClosedPool)
 		}
 		return failing(ctx, repoID, targetBranch, file, inputs)
 	}
@@ -432,13 +515,76 @@ func TestIngestFileChunks_StoreError_AbortsAtThatFileWithoutTouchingLaterOnes(t 
 
 	stats, err := New(newFakeEmbedder(), testLogger()).IngestFileChunks(t.Context(), st, uuid.Must(uuid.NewV7()), testBranch, files)
 
-	require.Error(t, err)
-	assert.ErrorIs(t, err, storeErr)
-	assert.Contains(t, err.Error(), testFileB, "the error must name the file that failed")
-	require.Len(t, *calls, 1, "the third file must never be attempted once the second failed")
+	require.Error(t, err, "a dead pool must abort the batch, not be counted as a per-file rejection")
+	assert.ErrorIs(t, err, puddle.ErrClosedPool)
+	require.Len(t, *calls, 1, "the third file must never be attempted once the pool was found dead -- only file A's successful call is recorded")
 	assert.Equal(t, testFileA, (*calls)[0].file)
 	assert.Equal(t, 1, stats.FilesReplaced, "stats must report only the file that actually landed")
-	assert.Equal(t, 1, stats.ChunksWritten)
+	assert.Zero(t, stats.FilesRejected, "a fatal, infrastructure-class failure is not a rejection")
+}
+
+// A transaction already poisoned by an earlier statement's error (Postgres
+// SQLSTATE 25P02, in_failed_sql_transaction -- see this package's own
+// integration test proving a real server produces exactly this once one
+// ReplaceFileChunks call in a shared transaction fails) must also abort
+// rather than being treated as yet another independent rejection, and the
+// returned error must still name the EARLIER rejection that actually
+// caused it, not just the immediate symptom.
+func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierRejection(t *testing.T) {
+	t.Parallel()
+	firstRejectErr := errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5 (SQLSTATE 22021)")
+	cascadeErr := &pgconn.PgError{Code: pgerrcode.InFailedSQLTransaction, Message: "current transaction is aborted, commands ignored until end of transaction block"}
+	st, calls := newFakeStore()
+	base := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		switch file {
+		case testFileB:
+			return nil, firstRejectErr
+		case "pkg/c/c.go":
+			return nil, cascadeErr
+		default:
+			return base(ctx, repoID, targetBranch, file, inputs)
+		}
+	}
+	files := []chunker.FileChunks{
+		unitsFor(testFileA, "alpha"),
+		unitsFor(testFileB, "beta"),
+		unitsFor("pkg/c/c.go", "gamma"),
+		unitsFor("pkg/d/d.go", "delta"),
+	}
+
+	stats, err := New(newFakeEmbedder(), testLogger()).IngestFileChunks(t.Context(), st, uuid.Must(uuid.NewV7()), testBranch, files)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cascadeErr, "the immediate fatal error must still be in the chain")
+	assert.Contains(t, err.Error(), "pkg/c/c.go", "the error must name the file whose call actually failed")
+	assert.Contains(t, err.Error(), testFileB, "the error must also name the EARLIER rejection, or an operator reading only the final error sees a misleading culprit")
+	require.Len(t, *calls, 1, "the fourth file must never be attempted once the transaction was found unusable")
+	assert.Equal(t, 1, stats.FilesRejected, "only the genuine rejection is counted, not the cascade symptom")
+}
+
+// ctx cancellation observed BETWEEN two store calls (rather than before the
+// loop starts, already covered elsewhere) must also stop the loop
+// immediately, matching the top-of-loop ctx.Err() check that is this
+// package's existing precedent for "this class aborts."
+func TestIngestFileChunks_ContextCanceledBetweenStoreCalls_StopsWithoutTouchingLaterFiles(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	st, calls := newFakeStore()
+	succeeding := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(c context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		if file == testFileA {
+			cancel()
+		}
+		return succeeding(c, repoID, targetBranch, file, inputs)
+	}
+	files := []chunker.FileChunks{unitsFor(testFileA, "alpha"), unitsFor(testFileB, "beta")}
+
+	stats, err := New(newFakeEmbedder(), testLogger()).IngestFileChunks(ctx, st, uuid.Must(uuid.NewV7()), testBranch, files)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	require.Len(t, *calls, 1, "the second file must never be attempted once ctx was canceled after the first")
+	assert.Equal(t, 1, stats.FilesReplaced)
 }
 
 func TestIngestFileChunks_CanceledContext_MakesNoEmbedOrStoreCall(t *testing.T) {
