@@ -19,6 +19,57 @@ const (
 	envOutputFormat = "LOAM_OUTPUT_FORMAT"
 )
 
+// The well-known orchestrator identity `instructions` falls back to when no
+// LOAM_AGENT_* variable is configured at all (loam-hi5o.31). It resolves to
+// the built-in `orchestrator` role seeded by migration
+// 0009_orchestrator_role, which grants graph.query and search and no
+// work-branch capability.
+//
+// WHY AN IDENTITY RATHER THAN AN UNAUTHENTICATED ROUTE: the request then
+// travels the ORDINARY authenticated path, carrying Loam-Agent-* headers
+// like every other call. That preserves cmd/server/main.go's property that
+// RegisterUnauthenticated covers /healthz and /readyz and is "the only such
+// exemption" (asserted in docs/server-spec.md), leaves the handler with one
+// code path and no no-caller branch, and keeps the call auditable.
+//
+// It weakens nothing that is not already weak, and docs/orchestration.md
+// and README -> Agent Identity & Roles say so where the MVP trust caveat
+// already lives, so the two move together: features/roles.feature records
+// that an agent's role is trusted exactly as asserted in its environment,
+// so a caller who wanted search and graph.query could already have claimed
+// role=reviewer and been given them. This is the same trust model, and it
+// hardens when that model does.
+//
+// WHY THESE VALUES, AND WHY THEY ARE FIXED. They are compile-time
+// constants, not a fourth environment variable, and an operator cannot
+// change them -- the escape hatch is the ordinary one: set LOAM_AGENT_* and
+// you get a real identity instead. What genuinely differs between
+// deployments is the orchestrator role's TEXT AND CAPABILITIES, and those
+// live in an editable role row (see 0009_orchestrator_role.up.sql); a
+// variable whose only effect is which synthetic name appears in a log would
+// be configuration for its own sake, and a mis-set one would resolve to a
+// role that does not exist and fail with a permission denial that named the
+// wrong cause.
+//
+// The resulting identifier is obviously synthetic wherever it is recorded:
+// `loam-orchestrator-0-orchestrator`. wellKnownAgentName still satisfies
+// requireAgentName's `<first-name>-<last-name>` shape, so it is a legal
+// value everywhere a configured name is, but it is plainly not a human name
+// of the "ada-lovelace" kind that convention is for, and the id is 0.
+//
+// Nothing PREVENTS a real agent from being configured with these three
+// values: the server never validates the Loam-Agent-* headers at all
+// (internal/httpauth's agentIdentityFromHeaders takes them as given), so
+// non-collision here is a naming convention, not an enforced guarantee.
+// The convention is chosen to be one nobody reaches for by accident, and
+// an agent that DID adopt it would gain nothing -- it would resolve to the
+// same read-only role.
+const (
+	wellKnownAgentName = "loam-orchestrator"
+	wellKnownAgentID   = "0"
+	wellKnownAgentRole = "orchestrator"
+)
+
 // envConfig is the loaded, validated LOAM_* configuration (see
 // docs/cli-spec.md -> Environment Variables). Immutable once returned by
 // loadConfig; there is no package-level mutable state.
@@ -151,6 +202,54 @@ func loadIdentityConfig() (*envConfig, error) {
 		agentRole:    agentRole,
 		outputFormat: resolveOutputFormat(),
 		identifier:   fmt.Sprintf("%s-%s-%s", agentName, agentID, agentRole),
+	}, nil
+}
+
+// identityEnvUnset reports whether NONE of the three LOAM_AGENT_* variables
+// is set -- the only state loadOrchestratorConfig's fallback applies to. A
+// PARTIALLY configured identity (say LOAM_AGENT_ROLE set but NAME and ID
+// forgotten) is deliberately NOT this state: it is a configuration mistake,
+// and answering it with the orchestrator's instructions would hide it
+// behind a plausible-looking success, telling an agent it may do less than
+// its real role allows. Those callers fall through to loadConfig and get
+// the same per-variable errors they always did.
+func identityEnvUnset() bool {
+	return os.Getenv(envAgentName) == "" && os.Getenv(envAgentID) == "" && os.Getenv(envAgentRole) == ""
+}
+
+// loadOrchestratorConfig builds the configuration for `loam instructions`
+// run with no identity at all: LOAM_SERVER_URL from the environment,
+// validated exactly as loadConfig validates it, and the three identity
+// values from the well-known orchestrator constants above (loam-hi5o.31).
+//
+// "No identity" means no LOAM_AGENT_*, NOT no environment. LOAM_SERVER_URL
+// stays genuinely required, because the CLI cannot invent where the server
+// is and this command makes a real RPC -- so with it unset the command must
+// still fail, and the error must name ONLY that variable rather than the
+// list of four an unconfigured workspace used to get. There is no list to
+// join here: the identity values cannot be missing, so requireServerURL's
+// own error is the whole answer and is returned unwrapped. It already
+// carries codeUsage, errUsage and errMissingEnv (newUsageCLIError), which
+// is exactly what joinConfigErrors would have produced for a single member.
+//
+// This deliberately reuses the loader seam loam-hi5o.dc2v already
+// established -- configForArgs picking a per-command strategy, with
+// loadConfig and loadIdentityConfig as the existing two -- rather than
+// adding a validation body of its own: every variable it does validate goes
+// through the same requireServerURL/resolveOutputFormat helpers the other
+// two use, and the only thing new here is which values are required.
+func loadOrchestratorConfig() (*envConfig, error) {
+	serverURL, err := requireServerURL()
+	if err != nil {
+		return nil, err
+	}
+	return &envConfig{
+		serverURL:    serverURL,
+		agentName:    wellKnownAgentName,
+		agentID:      wellKnownAgentID,
+		agentRole:    wellKnownAgentRole,
+		outputFormat: resolveOutputFormat(),
+		identifier:   fmt.Sprintf("%s-%s-%s", wellKnownAgentName, wellKnownAgentID, wellKnownAgentRole),
 	}, nil
 }
 

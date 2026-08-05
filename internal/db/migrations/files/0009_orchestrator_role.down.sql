@@ -1,0 +1,31 @@
+-- Reverses 0009_orchestrator_role.up.sql: intentionally a no-op.
+--
+-- The obvious down -- DELETE FROM roles WHERE name = 'orchestrator' AND
+-- builtin, cascading to role_operations -- is wrong here for the same
+-- reason 0006_role_instructions_seed.down.sql is a no-op, and then for one
+-- more that is specific to this migration.
+--
+-- The shared reason: the up migration's instructions fill is guarded on
+-- `coalesce(instructions, '') = ''` precisely so an operator's own text is
+-- never overwritten, and it does not record which rows it wrote versus
+-- which were already non-empty. A down that deleted the row would destroy
+-- operator-written instructions and operator-granted capabilities that this
+-- migration went out of its way to protect, with no way to tell them from
+-- the seeded defaults.
+--
+-- The reason specific to this one: the up is idempotent by design (ON
+-- CONFLICT DO NOTHING on the row and on each operation, plus the
+-- coalesce-empty guard on the text), which makes down-then-up SILENTLY
+-- LOSSY rather than loudly broken. A destructive down would drop an
+-- operator's edited row, and the following up would recreate it carrying
+-- the shipped defaults with no error anywhere -- a rollback that looks like
+-- it worked and quietly replaced the deployment's orchestration policy.
+--
+-- Nor is leaving the row in place a hazard on rollback: a deployment rolled
+-- back to 0008 simply has an extra built-in role its CLI never resolves,
+-- and role_operations' CHECK constraint already contained both 'graph.query'
+-- and 'search' as of 0001_init, so no schema this migration can be rolled
+-- back to is unable to hold these rows.
+--
+-- golang-migrate requires a down file to exist for every up file; this one
+-- deliberately does nothing.

@@ -96,15 +96,47 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in), nil
 }
 
-// configForArgs picks loadConfig or loadIdentityConfig based on the
-// top-level command about to run (see NewProductionDeps's doc comment).
-// Only `whoami` gets the relaxed, identity-only loader; everything else --
-// including an empty/unrecognized args, which will go on to fail
-// Dispatch's own routing checks exactly as before -- goes through the full
-// loadConfig, unchanged from before loam-dc2v.
+// configForArgs picks the config-loading strategy from the top-level
+// command about to run (see NewProductionDeps's doc comment). Three cases,
+// and everything not named below -- including an empty/unrecognized args,
+// which will go on to fail Dispatch's own routing checks exactly as before
+// -- still goes through the full four-variable loadConfig, unchanged from
+// before loam-dc2v.
+//
+//   - `whoami` gets the relaxed, identity-only loader: identity IS the
+//     environment it needs, and a server it does not talk to must not gate
+//     it (loam-dc2v defect 3). It deliberately does NOT get the
+//     orchestrator fallback below: whoami reports the identity an operator
+//     CONFIGURED, and answering it with a synthetic one nobody set would
+//     make "misconfigured" indistinguishable from "deliberately anonymous"
+//     in the one command whose whole job is diagnosing that.
+//   - `instructions` with no LOAM_AGENT_* set at all gets the well-known
+//     orchestrator identity (loam-hi5o.31), so an orchestrator that has
+//     configured nothing but LOAM_SERVER_URL can still ask what its job is.
+//     With any LOAM_AGENT_* set it takes the loadConfig branch below and
+//     behaves exactly as it always has.
+//   - everything else: loadConfig.
+//
+// This supersedes loam-hi5o.3's decision that `instructions` must not run
+// without an identity, but only narrowly, and its reasoning is preserved
+// rather than discarded: that bead's concern was an agent reading an
+// UNFILTERED command list as its own permissions. Nothing here returns an
+// unfiltered list. The response is the orchestrator role's own
+// capability-filtered commands and instructions -- a real, narrow role
+// holding graph.query and search and no work-branch capability -- produced
+// by the same server-side filter every other role's answer goes through
+// (internal/handler/meta's filterCommands). `loam help` remains the
+// unfiltered listing, and remains the one route that needs no environment
+// at all.
 func configForArgs(args []string) (*envConfig, error) {
-	if len(args) > 0 && args[0] == "whoami" {
+	if len(args) == 0 {
+		return loadConfig()
+	}
+	if args[0] == "whoami" {
 		return loadIdentityConfig()
+	}
+	if args[0] == "instructions" && identityEnvUnset() {
+		return loadOrchestratorConfig()
 	}
 	return loadConfig()
 }
