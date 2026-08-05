@@ -10,6 +10,8 @@ import (
 	"math"
 	"os"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // maxIngestWorkers bounds LOAM_INGEST_WORKERS from above. Unlike the sync
@@ -62,6 +64,20 @@ type Config struct {
 	OTelEndpoint    string
 	OTelServiceName string
 	OTelSampleRatio float64
+	// TracerProvider is the resolved handle instrumentation creates tracers
+	// from. Like Logger above it is NOT an environment variable: Load leaves
+	// it nil, and cmd/server sets it from telemetry.Provider once
+	// telemetry.New has run, which cannot happen inside Load because
+	// constructing the provider needs a context and can fail.
+	//
+	// It rides on Config for the same reason Logger does -- every
+	// buildRouter/register* function in cmd/server already takes a Config,
+	// and this is the observability handle they all need. A nil value means
+	// "not instrumented", which is what the composition-root tests that
+	// build a bare Config literal get, and is a no-op rather than a panic
+	// at every consumer (internal/db's Config.TracerProvider,
+	// forge.InstrumentHTTPClient, ollama.InstrumentHTTPClient).
+	TracerProvider trace.TracerProvider
 }
 
 // Load reads and validates every LOAM_* environment variable, applying the

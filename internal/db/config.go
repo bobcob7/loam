@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ErrMissingDatabaseURL is returned when DATABASE_URL is unset or empty.
@@ -25,6 +27,19 @@ type Config struct {
 	DatabaseURL string
 	// EncryptionKey is the app-level secret-encryption key (LOAM_ENCRYPTION_KEY).
 	EncryptionKey string
+	// TracerProvider, when non-nil, attaches this package's pgx tracing
+	// hook (tracer.go) to every connection the pool opens, so each query
+	// and CopyFrom becomes a span nested under whatever span its caller's
+	// context already carries.
+	//
+	// It is NOT read from the environment -- LoadConfig leaves it nil, and
+	// the composition root sets it from telemetry.Provider after
+	// telemetry.New has run. A nil value means the pool is built exactly as
+	// it was before loam-9v9s: no tracer, no per-query allocation, no
+	// behaviour change. That is what keeps the many integration tests that
+	// build a pool from a bare db.Config{DatabaseURL: dsn} untouched by
+	// this field's existence.
+	TracerProvider trace.TracerProvider
 }
 
 // LoadConfig reads Config from the environment, requiring both DATABASE_URL
