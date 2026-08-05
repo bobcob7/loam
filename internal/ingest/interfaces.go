@@ -48,9 +48,34 @@ type Job struct {
 // ingest_jobs.stats (docs/ingestion-spec.md "Chunk -> Embed -> Vectors";
 // bead DESCRIPTION: "Persist stats (files parsed, chunks embedded) on
 // success").
+// This struct IS the ingest_jobs.stats column: Pool.succeed marshals it
+// verbatim into the jsonb, so every json tag here is a durable, queryable
+// column key and renaming one silently orphans every row already written
+// under the old name.
 type Stats struct {
 	FilesParsed    int `json:"files_parsed"`
 	ChunksEmbedded int `json:"chunks_embedded"`
+	// FilesRejected is how many files the chunks store refused to write
+	// during this job (vectors.Stats.FilesRejected, loam-c94.21/c94.24) --
+	// files whose symbols and edges are in the index but whose chunks are
+	// not, so they are missing from RAG search while the job still reports
+	// success. Zero on a fully indexed ingest.
+	//
+	// It is carried here rather than only logged (loam-2d44) because a
+	// non-zero value is the ONLY durable record that a committed ingest was
+	// partial. Before per-file savepoints (loam-c94.24) a rejection aborted
+	// the whole transaction, so the job FAILED and the failure was the
+	// signal; savepoints deliberately removed that signal, which is what
+	// turned this counter from decorative into the only one there is.
+	//
+	// It deliberately does NOT change repos.sync_state, which stays 'idle'.
+	// See docs/ingestion-spec.md "Consistency & Failure": a rejection is a
+	// property of one JOB, whereas sync_state is a property of the REPO,
+	// and the next incremental ingest -- which re-plans from a git diff
+	// that cannot name a file no one touched -- would clear a repo-level
+	// "degraded" while the file was still missing. A state that announces
+	// "fixed" without anything having been fixed is worse than no state.
+	FilesRejected int `json:"files_rejected"`
 }
 
 // Enqueuer is the seam other components use to request an ingest job: the

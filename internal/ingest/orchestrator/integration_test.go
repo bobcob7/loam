@@ -209,7 +209,17 @@ type chunkEmbedder interface {
 // watch what the rest of the swap does about it (loam-c94.24).
 func newOrchestratorWithEmbedder(t *testing.T, f *fixture, tx transactor, embedder chunkEmbedder) *Orchestrator {
 	t.Helper()
-	logger := testLogger()
+	return newOrchestratorWithLogger(t, f, tx, embedder, testLogger())
+}
+
+// newOrchestratorWithLogger is newOrchestratorWithEmbedder with the logger
+// substitutable too, so a test can assert on what the pipeline actually
+// TOLD an operator rather than only on what it returned (loam-2d44: the
+// log line is one of the surfaces a rejection count has to reach, and a
+// count that reaches the return value but not the line an operator reads
+// is the same gap one layer over).
+func newOrchestratorWithLogger(t *testing.T, f *fixture, tx transactor, embedder chunkEmbedder, logger *slog.Logger) *Orchestrator {
+	t.Helper()
 	parsers := parser.NewParserPool(logger)
 	extractor, err := graph.New(parsers, logger)
 	require.NoError(t, err)

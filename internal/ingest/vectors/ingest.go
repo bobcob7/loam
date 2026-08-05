@@ -348,18 +348,23 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // threshold Persist enforced by returning an error would trigger the same
 // whole-transaction rollback as a single rejection would.
 //
-// As of loam-c94.24, NO caller does read it. The swap orchestrator keeps
-// this Stats in a local writeResult and takes only ChunksWritten out of it;
-// ingest.Stats has just FilesParsed and ChunksEmbedded, and the "ingest
-// committed" log line does not mention rejections. So FilesRejected is
-// computed here and discarded one frame up, and the per-file ERROR log
-// below is in practice the ONLY signal a rejection emits. That was a
-// latent gap while a rejection doomed the commit anyway -- the job failed,
-// loudly, whatever the counter said. Savepoints made the job SUCCEED, which
-// is what turns it into a real observability gap: a partially indexed repo
-// now reports success. Recorded here and in docs/ingestion-spec.md
-// "Consistency & Failure" rather than fixed here, because surfacing it is
-// the orchestrator's and loam-c94.13's work, not this package's.
+// As of loam-2d44 a caller finally does read it, and this paragraph
+// records where it goes so the next reader does not have to re-derive it.
+// The swap orchestrator copies it out of its writeResult into
+// ingest.Stats.FilesRejected, which internal/ingest.Pool.succeed marshals
+// verbatim into the ingest_jobs.stats jsonb -- so the count is durable and
+// queryable per job -- and includes it in the "ingest committed" log line,
+// plus one WARN line naming the job when it is non-zero. Until then it was
+// computed here and discarded one frame up, leaving the per-file ERROR log
+// below as the only signal a rejection emitted anywhere. That was a latent
+// gap while a rejection doomed the commit anyway -- the job failed, loudly,
+// whatever the counter said -- and loam-c94.24's savepoints made the job
+// SUCCEED, which is precisely what turned it into a real observability gap.
+//
+// What it deliberately still does NOT reach is repos.sync_state, which
+// stays 'idle' on a partial ingest. That is a decision with a reason, not
+// an unfinished half: see internal/ingest.Stats.FilesRejected and
+// docs/ingestion-spec.md "Consistency & Failure".
 //
 // # What makes the skip actually pay off against a REAL store
 //
