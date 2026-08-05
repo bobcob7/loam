@@ -34,19 +34,22 @@
 // survivable and still aborts the whole batch immediately -- see Persist's
 // own doc comment for the exact line this bead draws and why.
 //
-// That per-file tolerance is necessary but NOT sufficient to keep one bad
-// file from costing a whole repo when st is bound to a shared transaction
-// (chunkstore.NewInTx, which is how the swap orchestrator, loam-c94.12,
-// actually constructs it): Postgres aborts the ENTIRE transaction, not
-// just the offending statement, the moment any statement in it errors --
-// confirmed against a real server in this package's own integration
-// tests -- so a rejection anywhere in the batch dooms that transaction's
-// COMMIT regardless of how many files Persist still manages to attempt
-// afterward, INCLUDING the ones that landed before the rejection. Making
-// "one bad file costs one file, not a repo" true end to end needs a
-// per-file SAVEPOINT (or equivalent isolation) at the point
-// chunkstore.ReplaceFileChunks runs, which is out of this package's reach
-// -- see Persist's doc comment and TestIngestFileChunks_RejectionInASharedTransactionStillDoomsTheWholeCommit.
+// That per-file tolerance was necessary but NOT sufficient on its own to
+// keep one bad file from costing a whole repo when st is bound to a shared
+// transaction (chunkstore.NewInTx, which is how the swap orchestrator,
+// loam-c94.12, actually constructs it): Postgres aborts the ENTIRE
+// transaction, not just the offending statement, the moment any statement
+// in it errors, so a rejection anywhere in the batch used to doom that
+// transaction's COMMIT along with every file that had already landed.
+// loam-c94.24 supplied the other half in chunkstore: ReplaceFileChunks
+// wraps each call in a SAVEPOINT and unwinds to it on failure, so the
+// rejection costs that one file's statements and leaves the transaction
+// usable. Both halves together are what make "one bad file costs one file,
+// not a repo" true end to end -- confirmed against a real server in this
+// package's own integration tests, which commit a batch containing a
+// rejected file and read back the other files' chunks afterward. See
+// Persist's doc comment and
+// TestIngestFileChunks_RejectionInASharedTransactionSparesTheRestOfTheBatch.
 package vectors
 
 import (

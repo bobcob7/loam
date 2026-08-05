@@ -524,12 +524,51 @@ func TestIngestFileChunks_DeadPool_AbortsAtThatFileWithoutTouchingLaterOnes(t *t
 }
 
 // A transaction already poisoned by an earlier statement's error (Postgres
-// SQLSTATE 25P02, in_failed_sql_transaction -- see this package's own
-// integration test proving a real server produces exactly this once one
-// ReplaceFileChunks call in a shared transaction fails) must also abort
-// rather than being treated as yet another independent rejection, and the
-// returned error must still name the EARLIER rejection that actually
-// caused it, not just the immediate symptom.
+// SQLSTATE 25P02, in_failed_sql_transaction) must abort rather than being
+// treated as yet another independent rejection, and the returned error
+// must still name the EARLIER rejection that actually caused it, not just
+// the immediate symptom.
+//
+// NARROWED by loam-c94.24, not deleted. This test was written when 25P02
+// was the EXPECTED sequel to any rejection in a shared transaction --
+// chunkstore took no savepoint, so one bad file poisoned the transaction
+// and every later file reported 25P02. It now takes a savepoint and
+// unwinds to it, so that cascade no longer happens on this package's own
+// write path, and the sibling integration test
+// (...RejectionInASharedTransactionSparesTheRestOfTheBatch) proves it
+// against a real server.
+//
+// What survives is a claim about the CLASSIFIER, not about the wiring.
+// Persist takes a store INTERFACE, never *chunkstore.Store: any
+// implementation may hand it a bare 25P02, and when one does, that must be
+// fatal rather than counted as rejection N+1 on a transaction nothing will
+// commit. Most of this test's assertions -- the loop stopping, the earlier
+// rejection being named in the returned error, the cascade symptom not
+// being counted -- are mechanics that any fatal classification triggers,
+// and are independent of which SQLSTATE provoked them.
+//
+// Two earlier framings of this comment are worth recording as WRONG, since
+// both are the kind of confident claim about an absent code path that reads
+// as design rationale (this branch's own ERGONOMICS notes flag the pattern,
+// and then it happened here):
+//
+//   - "25P02 is the expected sequel to a rejection" -- true before
+//     loam-c94.24, false after it.
+//   - "the shared transaction has participants that are not
+//     savepoint-protected (the graph track, AdvanceIngestedRef), so they
+//     can hand Persist a 25P02" -- false. writeSwap returns on EVERY step's
+//     error, so graph.Persist's failure returns before vectors.Persist
+//     runs, and AdvanceIngestedRef runs strictly after it. Neither can
+//     poison a transaction Persist is still using.
+//
+// And through chunkstore.NewInTx specifically, a bare 25P02 is not merely
+// unlikely but unreachable: SAVEPOINT is itself a statement, so on an
+// already-aborted transaction the savepoint fails with 25P02 first and the
+// error arrives wrapped in chunkstore.ErrTransactionUnusable, which
+// isFatalStoreError matches EARLIER. That is pinned against a real server
+// by chunkstore's
+// TestNewInTx_AlreadyAbortedTransaction_ReportsUnusableRatherThanABare25P02,
+// so this comment does not have to be believed either.
 func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierRejection(t *testing.T) {
 	t.Parallel()
 	firstRejectErr := errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5 (SQLSTATE 22021)")
@@ -561,6 +600,103 @@ func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierReje
 	assert.Contains(t, err.Error(), testFileB, "the error must also name the EARLIER rejection, or an operator reading only the final error sees a misleading culprit")
 	require.Len(t, *calls, 1, "the fourth file must never be attempted once the transaction was found unusable")
 	assert.Equal(t, 1, stats.FilesRejected, "only the genuine rejection is counted, not the cascade symptom")
+}
+
+// chunkstore.ErrTransactionUnusable is the classification loam-c94.24
+// folds in, and it is the one that closes the hole every check around it
+// leaves open. A raw dead TCP connection -- the socket simply gone, no
+// server response at all -- carries no *pgconn.PgError and matches none of
+// pgx.ErrTxClosed, pgx.ErrTxCommitRollback or puddle.ErrClosedPool, so
+// under this package's deliberate "unclassified means rejection" default
+// it was counted as a per-file rejection and the loop carried on.
+//
+// That was harmless only by accident: the orchestrator's AdvanceIngestedRef
+// ran immediately after Persist on the same doomed transaction and forced a
+// rollback regardless. Savepoints removed that accident -- rejections are
+// now genuinely survivable -- so a misclassified dead connection would be
+// re-attempted once per remaining file, turning one infrastructure failure
+// into N. The store reports the sentinel because it OBSERVED the failure:
+// its own ROLLBACK TO SAVEPOINT is a statement that had to reach the
+// server.
+//
+// The error here is wrapped exactly as chunkstore wraps it, so this test
+// fails if that wrapping ever stops preserving the sentinel in the chain.
+func TestIngestFileChunks_StoreReportsTransactionUnusable_AbortsWithoutTouchingLaterFiles(t *testing.T) {
+	t.Parallel()
+	deadConn := errors.New("write tcp 127.0.0.1:55000->127.0.0.1:5432: write: broken pipe")
+	st, calls := newFakeStore()
+	base := st.ReplaceFileChunksFunc
+	st.ReplaceFileChunksFunc = func(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
+		if file == testFileB {
+			return nil, fmt.Errorf("replacing chunks for repo %s file %s: %w: rolling back to savepoint after boom: %w",
+				repoID, file, chunkstore.ErrTransactionUnusable, deadConn)
+		}
+		return base(ctx, repoID, targetBranch, file, inputs)
+	}
+	files := []chunker.FileChunks{
+		unitsFor(testFileA, "alpha"),
+		unitsFor(testFileB, "beta"),
+		unitsFor("pkg/c/c.go", "gamma"),
+	}
+
+	stats, err := New(newFakeEmbedder(), testLogger()).IngestFileChunks(t.Context(), st, uuid.Must(uuid.NewV7()), testBranch, files)
+
+	require.Error(t, err, "a transaction the store could not even unwind must abort the batch, not be counted as a per-file rejection")
+	assert.ErrorIs(t, err, chunkstore.ErrTransactionUnusable)
+	assert.ErrorIs(t, err, deadConn, "the driver's own error must still be in the chain for the operator")
+	require.Len(t, *calls, 1, "the third file must never be attempted once the transaction was found unusable -- retrying a dead connection per file is exactly what this classification prevents")
+	assert.Equal(t, testFileA, (*calls)[0].file)
+	assert.Zero(t, stats.FilesRejected, "an unusable transaction is not a rejection, however much it looks like one from the call site")
+}
+
+// TestIsFatalStoreError_TransactionUnusableOutranksTheSQLSTATEBlock is the
+// test loam-c94.24's doc comment on isFatalStoreError needed and did not
+// have: that comment declares the ORDER of the checks load-bearing, and
+// until this test nothing held it up. The check could be moved below the
+// *pgconn.PgError block -- exactly the "later tidy" the comment warns
+// about -- and every test on the branch stayed green. A comment asserting
+// an invariant that no test pins is the same defect this branch's own
+// notes flag elsewhere, so it gets a test rather than a firmer adjective.
+//
+// The mechanism, verified rather than asserted: SQLSTATE 3B001
+// (invalid_savepoint_specification, class 3B savepoint_exception) is what
+// RELEASE and ROLLBACK TO SAVEPOINT actually raise, and it belongs to NONE
+// of the seven pgerrcode families the block below tests -- pgerrcode has
+// IsSavepointException, and it is deliberately not in that list. Because
+// the block RETURNS its boolean instead of falling through, an error
+// carrying both ErrTransactionUnusable and a 3B001 PgError is fatal only
+// while the sentinel is checked FIRST.
+//
+// That is why the sub-assertion on the bare PgError is not decoration: it
+// establishes that the block below answers "not fatal" for this shape, so
+// the true verdict on the wrapped error can only be coming from the
+// earlier sentinel check. Together the two assertions ARE the ordering,
+// expressed executably. Reordering the two checks flips the second one.
+//
+// The wrapped error is built with chunkstore's own format string
+// (store.go's savepointTransactor), including its %v-for-fn / %w-for-Exec
+// asymmetry, so this also fails if that wrapping ever stops preserving the
+// sentinel or starts admitting the rejected file's own PgError.
+func TestIsFatalStoreError_TransactionUnusableOutranksTheSQLSTATEBlock(t *testing.T) {
+	t.Parallel()
+	savepointErr := &pgconn.PgError{
+		Code:    pgerrcode.InvalidSavepointSpecification,
+		Message: "no such savepoint",
+	}
+	require.False(t, isFatalStoreError(t.Context(), savepointErr),
+		"PRECONDITION: class 3B is in none of the seven pgerrcode families below, so the PgError block answers \"not fatal\" for it -- if this ever becomes true the test below stops proving anything about ordering")
+
+	unusable := fmt.Errorf("replacing chunks for repo %s file %s: %w",
+		uuid.Must(uuid.NewV7()), testFileA,
+		fmt.Errorf("%w: rolling back to savepoint after %v: %w",
+			chunkstore.ErrTransactionUnusable,
+			errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5"),
+			savepointErr))
+
+	assert.True(t, isFatalStoreError(t.Context(), unusable),
+		"an unusable transaction must be fatal even when the only SQLSTATE it carries is one the block below calls survivable -- this is false if the ErrTransactionUnusable check is moved below that block, which is the retry storm the sentinel exists to prevent")
+	assert.ErrorIs(t, unusable, chunkstore.ErrTransactionUnusable,
+		"guard on the fixture itself: if chunkstore's wrapping stopped preserving the sentinel, the assertion above would pass for the wrong reason")
 }
 
 // ctx cancellation observed BETWEEN two store calls (rather than before the

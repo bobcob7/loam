@@ -6,6 +6,7 @@ package chunkstore
 import (
 	"context"
 	"github.com/bobcob7/loam/internal/db/gen"
+	"github.com/jackc/pgx/v5/pgconn"
 	"sync"
 )
 
@@ -300,5 +301,83 @@ func (mock *transactorMock) withinTxCalls() []struct {
 	mock.lockwithinTx.RLock()
 	calls = mock.calls.withinTx
 	mock.lockwithinTx.RUnlock()
+	return calls
+}
+
+// Ensure, that savepointExecerMock does implement savepointExecer.
+// If this is not the case, regenerate this file with moq.
+var _ savepointExecer = &savepointExecerMock{}
+
+// savepointExecerMock is a mock implementation of savepointExecer.
+//
+//	func TestSomethingThatUsessavepointExecer(t *testing.T) {
+//
+//		// make and configure a mocked savepointExecer
+//		mockedsavepointExecer := &savepointExecerMock{
+//			ExecFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+//				panic("mock out the Exec method")
+//			},
+//		}
+//
+//		// use mockedsavepointExecer in code that requires savepointExecer
+//		// and then make assertions.
+//
+//	}
+type savepointExecerMock struct {
+	// ExecFunc mocks the Exec method.
+	ExecFunc func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Exec holds details about calls to the Exec method.
+		Exec []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// SQL is the sql argument value.
+			SQL string
+			// Args is the args argument value.
+			Args []any
+		}
+	}
+	lockExec sync.RWMutex
+}
+
+// Exec calls ExecFunc.
+func (mock *savepointExecerMock) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if mock.ExecFunc == nil {
+		panic("savepointExecerMock.ExecFunc: method is nil but savepointExecer.Exec was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		SQL  string
+		Args []any
+	}{
+		Ctx:  ctx,
+		SQL:  sql,
+		Args: args,
+	}
+	mock.lockExec.Lock()
+	mock.calls.Exec = append(mock.calls.Exec, callInfo)
+	mock.lockExec.Unlock()
+	return mock.ExecFunc(ctx, sql, args...)
+}
+
+// ExecCalls gets all the calls that were made to Exec.
+// Check the length with:
+//
+//	len(mockedsavepointExecer.ExecCalls())
+func (mock *savepointExecerMock) ExecCalls() []struct {
+	Ctx  context.Context
+	SQL  string
+	Args []any
+} {
+	var calls []struct {
+		Ctx  context.Context
+		SQL  string
+		Args []any
+	}
+	mock.lockExec.RLock()
+	calls = mock.calls.Exec
+	mock.lockExec.RUnlock()
 	return calls
 }
