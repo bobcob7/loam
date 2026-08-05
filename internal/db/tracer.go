@@ -92,6 +92,14 @@ func (t *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 
 // TraceQueryEnd closes the span TraceQueryStart opened, recording the row
 // count on success and the SQLSTATE on failure -- never the error message.
+//
+// For Query (as opposed to Exec/QueryRow) pgx defers this call until the
+// resulting pgx.Rows is CLOSED, so the span's duration covers row iteration
+// as well as the round trip -- which is what you want, and is also why a
+// caller that leaks a pgx.Rows leaks a never-ended span with it. Every
+// caller in this tree goes through sqlc-generated code, which always
+// `defer rows.Close()`s, so that path does not exist today; a hand-written
+// pool.Query would be the way to introduce it.
 func (t *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
 	span := trace.SpanFromContext(ctx)
 	recordOutcome(span, data.CommandTag, data.Err)
@@ -133,10 +141,14 @@ func (t *queryTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pg
 func recordOutcome(span trace.Span, tag pgconn.CommandTag, err error) {
 	if err != nil {
 		span.SetStatus(codes.Error, "")
-		span.SetAttributes(attribute.String("db.response.status_code", sqlState(err)))
+		span.SetAttributes(semconv.DBResponseStatusCode(sqlState(err)))
 		return
 	}
-	span.SetAttributes(attribute.Int64("db.response.returned_rows", tag.RowsAffected()))
+	// CommandTag.RowsAffected covers both senses: rows returned for a
+	// SELECT, rows written for an INSERT/UPDATE/DELETE. It is a COUNT, so
+	// unlike everything else pgx offers at this point it carries no row
+	// content.
+	span.SetAttributes(semconv.DBResponseReturnedRows(int(tag.RowsAffected())))
 }
 
 // sqlState extracts Postgres's five-character SQLSTATE from err, which is
