@@ -451,23 +451,31 @@ func isRunningPerRepoViolation(err error) bool {
 }
 
 // maxClaimAttempts bounds how many candidates one claim call will try
-// before giving up and reporting "nothing to claim". Each attempt that
-// loses to ingest_jobs_one_running_per_repo adds that candidate's repo to
-// the exclusion set for the next attempt, so the loop is strictly
-// monotone -- attempt N+1 chooses from strictly fewer repos than attempt
-// N -- and cannot livelock on the repo that just rejected it. That
-// exclusion is what makes retrying correct here at all, and it is the
-// substantive difference from internal/ingestjobs.Store.Claim's
-// superficially similar retry: Store.Claim re-runs an IDENTICAL statement
-// and relies on the fresh snapshot seeing the now-committed running row,
-// which works because ClaimIngestJob's NOT EXISTS is a hard filter on
-// every candidate. This statement has that filter too, but a claim can
-// also lose to a row that is STILL uncommitted at the moment of the
-// retry's snapshot (the loser blocks on the winner's transactionid, so it
-// resumes the instant the winner commits -- but a third writer's claim
-// for the same repo need not have committed by then). Excluding the repo
-// outright makes the retry independent of that timing instead of
-// hostage to it.
+// before giving up and reporting "nothing to claim". The bound is the
+// point: an unbounded loop against a constraint that keeps rejecting is a
+// livelock, and this one spins while holding mu.
+//
+// WHY RETRYING MAKES PROGRESS AT ALL, precisely, since a retry that kept
+// choosing the same rejected candidate would BE the livelock rather than
+// the fix. A unique violation is only ever raised against a COMMITTED
+// conflicting entry -- a claim that meets an uncommitted one blocks on
+// that transaction's id instead, and is rejected only once it commits --
+// so by the time this loop sees the error, the winning 'running' row is
+// committed, and claimQuery's own NOT EXISTS filter takes that repo out
+// of contention on the very next attempt without being asked to.
+//
+// claim nonetheless adds the rejected repo to its exclusion set, and the
+// honest description of that line is belt-and-braces, not the
+// load-bearing mechanism: it makes termination independent of the
+// conflicting row still BEING 'running' when the retry's snapshot is
+// taken. The one reachable case where the two differ is a winner whose
+// job completes inside the retry window, freeing the repo again -- where
+// the exclusion costs one skipped-but-still-claimable job (recovered on
+// the next claim, which the completing job's own release/wakeUp has
+// already signalled) and buys a candidate set that shrinks monotonically
+// and therefore cannot churn. loam-54o.17's mutation sweep measured
+// exactly that asymmetry: deleting this exclusion leaves the suite green,
+// deleting the NOT EXISTS filter does not.
 //
 // 5, not internal/ingestjobs' 25, because this loop holds mu for its
 // whole duration: every retry blocks every other worker in this process
@@ -500,13 +508,13 @@ const maxClaimAttempts = 5
 // already has that repo, which is precisely the outcome the constraint
 // exists to produce; before the constraint existed the same race silently
 // double-ran the repo. So the response is neither "fail the claim" (the
-// job is untouched and perfectly claimable later; the transaction rolled
-// back, so sync_state was never moved to 'syncing' either -- the
-// ingest_jobs write is deliberately issued BEFORE the repos write so a
-// rejected claim cannot leave a repo stuck 'syncing') nor "give up and
-// idle" (other repos' jobs are still claimable and this worker is
-// otherwise free). It is: exclude that repo and try the next candidate,
-// up to maxClaimAttempts.
+// job is untouched and perfectly claimable later, and the rejected
+// attempt's whole transaction rolls back, so repos.sync_state was never
+// moved to 'syncing' either -- that follows from the two writes sharing
+// ONE transaction, not from the order they are issued in, which is why
+// swapping them changes nothing) nor "give up and idle" (other repos'
+// jobs are still claimable and this worker is otherwise free). It is:
+// exclude that repo and try the next candidate, up to maxClaimAttempts.
 //
 // SHOULD Pool KEEP ITS OWN CLAIM SQL? No -- but not in this bead, and the
 // reason is worth writing down rather than rediscovering. Two writers of

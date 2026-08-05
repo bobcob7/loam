@@ -159,10 +159,15 @@ func insertQueuedJobAt(ctx context.Context, t *testing.T, pgPool *pgxpool.Pool, 
 // releases the busy slot but leaves the row -- must take that repo out of
 // the running before any write is attempted.
 //
-// The repo's queued job here is the OLDEST, so under the previous query
-// (which filtered only on this process's own busy map) it would have been
-// selected, written, and rejected by the constraint. Claiming the younger
-// repoB job instead is the observable difference.
+// The repo's queued job here is the OLDEST, so without the filter it
+// would be selected, written, and rejected by the constraint.
+//
+// THE RETURNED JOB ALONE CANNOT SHOW THAT. With the filter gone, claim's
+// retry loop recovers -- it eats the unique violation, excludes repoA,
+// and returns repoB's job anyway -- so every assertion about WHAT was
+// claimed passes either way. What separates "skipped it" from "collided
+// with it and recovered" is that no rejection was ever logged, which is
+// the assertion that makes this test able to fail at all.
 func TestClaim_SkipsARepoWhoseRunningJobItDidNotStart(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -172,7 +177,8 @@ func TestClaim_SkipsARepoWhoseRunningJobItDidNotStart(t *testing.T) {
 	insertRunningJob(ctx, t, pgPool, repoA, "main", KindFull)
 	orphanedQueued := insertQueuedJob(ctx, t, pgPool, repoA, "main", KindIncremental)
 	wantedJob := insertQueuedJob(ctx, t, pgPool, repoB, "main", KindIncremental)
-	pool := NewPool(testLogger(), pgPool, &OrchestratorMock{}, 1)
+	handler, logger := newCapturingHandler()
+	pool := NewPool(logger, pgPool, &OrchestratorMock{}, 1)
 	job, claimed, err := pool.claim(ctx)
 	require.NoError(t, err)
 	require.True(t, claimed, "repoB's job is claimable and must be claimed")
@@ -182,6 +188,9 @@ func TestClaim_SkipsARepoWhoseRunningJobItDidNotStart(t *testing.T) {
 		"repoA's queued job must be left alone, not claimed and not failed")
 	assert.Equal(t, "idle", repoSyncState(ctx, t, pgPool, repoA),
 		"a repo the claim skipped must not have been moved to syncing")
+	_, collided := handler.find("ingest job claim lost a race for a repo that is already running elsewhere; trying another repo")
+	assert.False(t, collided,
+		"a repo whose running job is already committed must be filtered out by the query, not discovered by eating a unique violation and retrying")
 }
 
 // TestClaim_RejectedByTheGuardThenClaimsADifferentRepo is the core
