@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,12 +189,31 @@ func (f *fixture) commit(t *testing.T, msg string, files map[string]string, remo
 // observe or break the swap, the transactor.
 func newOrchestratorFor(t *testing.T, f *fixture, tx transactor) *Orchestrator {
 	t.Helper()
+	return newOrchestratorWithEmbedder(t, f, tx, testembed.New())
+}
+
+// chunkEmbedder is everything newOrchestratorWithEmbedder needs from an
+// embedder: the two methods internal/ingest/vectors consumes, plus the two
+// the orchestrator itself does (the chunker's token budget and the model id
+// in the recorded version triple). *testembed.Embedder satisfies it, and so
+// does anything wrapping one.
+type chunkEmbedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+	Dimension() int
+	ModelID() string
+	ContextWindow() int
+}
+
+// newOrchestratorWithEmbedder is newOrchestratorFor with the embedder
+// substitutable, so a test can make ONE named file's vector unwritable and
+// watch what the rest of the swap does about it (loam-c94.24).
+func newOrchestratorWithEmbedder(t *testing.T, f *fixture, tx transactor, embedder chunkEmbedder) *Orchestrator {
+	t.Helper()
 	logger := testLogger()
 	parsers := parser.NewParserPool(logger)
 	extractor, err := graph.New(parsers, logger)
 	require.NoError(t, err)
 	t.Cleanup(extractor.Close)
-	embedder := testembed.New()
 	return newOrchestrator(
 		logger,
 		f.dataDir,
@@ -548,4 +569,91 @@ func TestIngest_IncrementalDeleteDropsTheFilesRowsAndRecomputesEdges(t *testing.
 	assert.Zero(t, edgeCount(t, f),
 		"graph_edges is recomputed for the whole repo after the drops, so an edge into a deleted symbol cannot survive")
 	assert.Contains(t, symbolFiles(t, f), "handler.go")
+}
+
+// --- one rejected chunk file does not cost the ingest (loam-c94.24) ---
+
+// nanVectorEmbedder wraps the deterministic test embedder and poisons the
+// vector of every chunk whose text contains marker, by setting one
+// coordinate to NaN. pgvector rejects NaN at INSERT ("NaN not allowed in
+// vector", SQLSTATE 22P02) -- a real per-statement error raised by the
+// SERVER, in the same class as a constraint or a type error, which is
+// exactly what internal/ingest/vectors.Persist classifies as a per-file
+// rejection.
+//
+// Invalid UTF-8, the shape the original production incident took, can no
+// longer be used to provoke this: loam-c94.20 sanitises it in the chunker,
+// so it never reaches the store. That is the right fix for that cause, and
+// it is why this test needs a different one -- the point here is the
+// pipeline's response to ANY store rejection, not to that one.
+//
+// Dimension() is left alone at testembed's real width, so
+// vectors.Prepare's own dimension check passes and the failure genuinely
+// happens at the INSERT rather than before it.
+type nanVectorEmbedder struct {
+	*testembed.Embedder
+	marker string
+}
+
+func (e nanVectorEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	out, err := e.Embedder.Embed(ctx, texts)
+	if err != nil {
+		return nil, err
+	}
+	for i, text := range texts {
+		if strings.Contains(text, e.marker) {
+			poisoned := append([]float32(nil), out[i]...)
+			poisoned[0] = float32(math.NaN())
+			out[i] = poisoned
+		}
+	}
+	return out, nil
+}
+
+// TestIngest_OneRejectedChunkFile_StillCommitsTheRestOfTheIngest is
+// loam-c94.24 end to end, through the production collaborator graph, and
+// it is the test that answers the bead's question about the GRAPH track
+// rather than reasoning about it.
+//
+// All three writers share ONE transaction: the graph track's symbols and
+// edges, the chunk track's vectors, and AdvanceIngestedRef. Before this
+// change, one rejected chunk file aborted that transaction, so the very
+// next statement -- AdvanceIngestedRef, which always runs immediately
+// after vectors.Persist (writeSwap) -- failed with SQLSTATE 25P02 and the
+// whole ingest was lost. Not an edge case reachable only when the bad file
+// landed last: in production it was every case.
+//
+// So the assertions are deliberately spread across all three writers. The
+// graph track's rows must be present for EVERY file including the rejected
+// one (a chunk rejection says nothing about that file's symbols, and
+// ROLLBACK TO SAVEPOINT only unwinds statements issued after its savepoint
+// -- the graph writes ran before any of them). The chunk track must have
+// rows for the good files and none for the rejected one. And the ingested
+// ref must have advanced, which is the single fact that says the
+// transaction committed rather than rolled back.
+func TestIngest_OneRejectedChunkFile_StillCommitsTheRestOfTheIngest(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.commit(t, "poisoned", map[string]string{
+		"alpha.go":  "package alpha\n\nfunc AlphaOnly() {}\n",
+		"poison.go": "package poison\n\nfunc PoisonedSymbol() {}\n",
+		"omega.go":  "package omega\n\nfunc OmegaOnly() { AlphaOnly() }\n",
+	})
+	embedder := nanVectorEmbedder{Embedder: testembed.New(), marker: "PoisonedSymbol"}
+
+	_, err := newOrchestratorWithEmbedder(t, f, realTransactor(), embedder).Run(t.Context(), f.job(ingest.KindIncremental))
+	require.NoError(t, err, "a single rejected chunk file must not fail the job")
+
+	assert.Equal(t, []string{"alpha.go", "omega.go", "poison.go"}, symbolFiles(t, f),
+		"the graph track writes before the chunk track and is not savepoint-wrapped, so a chunk rejection must leave every file's symbols -- including the rejected file's own -- committed")
+	assert.Contains(t, symbolNames(t, f), "PoisonedSymbol",
+		"the rejected file's SYMBOL is unaffected: only its vector was unwritable")
+	assert.Positive(t, edgeCount(t, f), "the edge recompute ran after the graph writes and before the rejection, and must have committed with them")
+
+	assert.Positive(t, chunkCountFor(t, f, "alpha.go"), "the chunk file written BEFORE the rejection must survive it")
+	assert.Positive(t, chunkCountFor(t, f, "omega.go"), "the chunk file written AFTER the rejection must have been writable at all")
+	assert.Zero(t, chunkCountFor(t, f, "poison.go"), "the rejected file must have no chunks -- unsearchable until a later ingest, which is the documented partial-degrade, not a half-written row")
+	assert.Zero(t, chunkTextMentioning(t, f, "PoisonedSymbol"), "no partial content from the rejected file may reach the index")
+
+	assert.NotEmpty(t, ingestedRef(t, f), "the ingested ref must have advanced -- this is what proves the shared transaction COMMITTED rather than rolling back the way it did before loam-c94.24")
 }

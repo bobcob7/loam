@@ -192,6 +192,35 @@ func (e *Extractor) ExtractFiles(ctx context.Context, files []FileInput) (Extrac
 // The final ctx.Err() check before RecomputeGraphEdges guards the
 // empty-batch path, where the per-file loop never runs at all -- an
 // already-canceled context must abort rather than reach the recompute.
+//
+// # Why this track needs no SAVEPOINT (loam-c94.24, established not assumed)
+//
+// The sibling chunk track wraps every store call in a savepoint, because
+// its own loop (internal/ingest/vectors.Persist) SKIPS a rejected file and
+// keeps going: without a savepoint, Postgres had already aborted the
+// shared transaction those later writes were landing in, so the loop's
+// verdict ("one file lost") and the commit's ("everything lost")
+// disagreed, and the commit won.
+//
+// No such gap exists here, and the reason is structural rather than
+// fortunate. Every per-file tolerance this package has -- unsupported
+// language, hard parse failure, syntax errors -- lives in ExtractFiles,
+// which runs BEFORE the transaction is even open and makes no store call
+// at all for the files it skips. The loop below, the only part inside the
+// transaction, has no `continue`: the first ReplaceFileSymbols,
+// ReplaceFileReferences or RecomputeGraphEdges error returns, the swap
+// orchestrator rolls the whole transaction back, and nothing was staged
+// past the failure to be surprised by. Loop and commit agree, so a
+// savepoint would isolate a failure nothing continues past. Adding one
+// would ALSO be a behaviour change, not a safety net: it would only start
+// mattering if this loop grew a skip-and-continue policy, and that is the
+// change that should carry it (docs/ingestion-spec.md "Consistency &
+// Failure" records the resulting asymmetry as intended).
+//
+// The ORDER dependency runs the other way and is worth stating: the swap
+// runs this track's writes before the chunk track's, and ROLLBACK TO
+// SAVEPOINT only unwinds statements issued after its savepoint, so a
+// chunk-file rejection cannot disturb anything written here.
 func (e *Extractor) PersistFiles(ctx context.Context, st store, repoID uuid.UUID, targetBranch string, ex Extracted) (Stats, error) {
 	var stats Stats
 	for _, f := range ex.files {
