@@ -233,7 +233,26 @@ func assertTablesAbsent(ctx context.Context, t *testing.T, dsn string) {
 // role seed and its role_operations rows, matching docs/web-spec.md's fixed
 // vocabulary. author and reviewer come from 0001_init; orchestrator is
 // seeded by 0009_orchestrator_role (loam-hi5o.31), so this runs over the
-// FULLY migrated schema and must count three, not two.
+// FULLY migrated schema.
+//
+// Each role is looked up BY NAME rather than by its position in a
+// count-pinned slice (loam-w8li). The earlier shape asserted len(got) == 3
+// and then read got[0]/got[1]/got[2]. 0009 already forced one renumbering of
+// it, and a fourth built-in role would force another; the copy of this shape
+// that did NOT get renumbered, internal/rolestore's ListRoles test, went red
+// on its count -- and its four operation assertions, had that count been
+// bumped rather than removed, would then have been reading the orchestrator
+// while naming the reviewer.
+//
+// So the count goes, for the reason it broke: every future built-in role
+// breaks a pinned count again, and neither the presence check below nor the
+// operation sets are about how many roles exist. Name keying is insensitive
+// to both the count and the order, and a new built-in adds one string to the
+// list below instead of rewriting the function.
+//
+// The exact BUILT-IN membership is still pinned, because that is the one
+// thing the count was doing on purpose, and this fixture is the only place
+// in the tree where it is checkable -- see the ElementsMatch below.
 func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -241,24 +260,36 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	defer pool.Close()
 	rows, err := pool.Query(ctx, `SELECT name, builtin FROM roles ORDER BY name`)
 	require.NoError(t, err)
-	type role struct {
-		name    string
-		builtin bool
-	}
-	var got []role
+	builtinByName := map[string]bool{}
+	var names, builtins []string
 	for rows.Next() {
-		var r role
-		require.NoError(t, rows.Scan(&r.name, &r.builtin))
-		got = append(got, r)
+		var name string
+		var builtin bool
+		require.NoError(t, rows.Scan(&name, &builtin))
+		builtinByName[name] = builtin
+		names = append(names, name)
+		if builtin {
+			builtins = append(builtins, name)
+		}
 	}
 	require.NoError(t, rows.Err())
-	require.Len(t, got, 3)
-	assert.Equal(t, "author", got[0].name)
-	assert.True(t, got[0].builtin)
-	assert.Equal(t, "orchestrator", got[1].name)
-	assert.True(t, got[1].builtin)
-	assert.Equal(t, "reviewer", got[2].name)
-	assert.True(t, got[2].builtin)
+	for _, want := range []string{"author", "reviewer", "orchestrator"} {
+		builtin, ok := builtinByName[want]
+		require.Truef(t, ok, "the built-in %q role must be seeded; roles present: %v", want, names)
+		assert.Truef(t, builtin, "the seeded %q role must carry builtin = true, or it could be deleted", want)
+	}
+	// And NO OTHER built-in, which only this fixture can assert: it migrates
+	// a fresh, empty database, so every builtin row present is one a
+	// migration put there. This is what the dropped count was accidentally
+	// doing -- a migration seeding a fourth built-in role, and with it a
+	// fourth set of standing capabilities, would otherwise go unnoticed by
+	// the whole tree. Unlike the count it is insensitive to order, and
+	// unaffected by any change to a role's operations. The equivalent
+	// assertion is deliberately NOT made in internal/rolestore: ListRoles
+	// reads a live database where an operator's own roles legitimately
+	// exist, so there the built-in membership is not knowable.
+	assert.ElementsMatch(t, []string{"author", "reviewer", "orchestrator"}, builtins,
+		"migrations must seed exactly these built-in roles -- a new one is a new set of standing capabilities and belongs in this list, and in docs/web-spec.md's built-in role list, deliberately")
 
 	// Compare the exact operation SETS, not just their cardinality: a seed
 	// that swapped one capability for another (e.g. reviewer seeded with
