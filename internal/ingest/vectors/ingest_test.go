@@ -649,6 +649,56 @@ func TestIngestFileChunks_StoreReportsTransactionUnusable_AbortsWithoutTouchingL
 	assert.Zero(t, stats.FilesRejected, "an unusable transaction is not a rejection, however much it looks like one from the call site")
 }
 
+// TestIsFatalStoreError_TransactionUnusableOutranksTheSQLSTATEBlock is the
+// test loam-c94.24's doc comment on isFatalStoreError needed and did not
+// have: that comment declares the ORDER of the checks load-bearing, and
+// until this test nothing held it up. The check could be moved below the
+// *pgconn.PgError block -- exactly the "later tidy" the comment warns
+// about -- and every test on the branch stayed green. A comment asserting
+// an invariant that no test pins is the same defect this branch's own
+// notes flag elsewhere, so it gets a test rather than a firmer adjective.
+//
+// The mechanism, verified rather than asserted: SQLSTATE 3B001
+// (invalid_savepoint_specification, class 3B savepoint_exception) is what
+// RELEASE and ROLLBACK TO SAVEPOINT actually raise, and it belongs to NONE
+// of the seven pgerrcode families the block below tests -- pgerrcode has
+// IsSavepointException, and it is deliberately not in that list. Because
+// the block RETURNS its boolean instead of falling through, an error
+// carrying both ErrTransactionUnusable and a 3B001 PgError is fatal only
+// while the sentinel is checked FIRST.
+//
+// That is why the sub-assertion on the bare PgError is not decoration: it
+// establishes that the block below answers "not fatal" for this shape, so
+// the true verdict on the wrapped error can only be coming from the
+// earlier sentinel check. Together the two assertions ARE the ordering,
+// expressed executably. Reordering the two checks flips the second one.
+//
+// The wrapped error is built with chunkstore's own format string
+// (store.go's savepointTransactor), including its %v-for-fn / %w-for-Exec
+// asymmetry, so this also fails if that wrapping ever stops preserving the
+// sentinel or starts admitting the rejected file's own PgError.
+func TestIsFatalStoreError_TransactionUnusableOutranksTheSQLSTATEBlock(t *testing.T) {
+	t.Parallel()
+	savepointErr := &pgconn.PgError{
+		Code:    pgerrcode.InvalidSavepointSpecification,
+		Message: "no such savepoint",
+	}
+	require.False(t, isFatalStoreError(t.Context(), savepointErr),
+		"PRECONDITION: class 3B is in none of the seven pgerrcode families below, so the PgError block answers \"not fatal\" for it -- if this ever becomes true the test below stops proving anything about ordering")
+
+	unusable := fmt.Errorf("replacing chunks for repo %s file %s: %w",
+		uuid.Must(uuid.NewV7()), testFileA,
+		fmt.Errorf("%w: rolling back to savepoint after %v: %w",
+			chunkstore.ErrTransactionUnusable,
+			errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5"),
+			savepointErr))
+
+	assert.True(t, isFatalStoreError(t.Context(), unusable),
+		"an unusable transaction must be fatal even when the only SQLSTATE it carries is one the block below calls survivable -- this is false if the ErrTransactionUnusable check is moved below that block, which is the retry storm the sentinel exists to prevent")
+	assert.ErrorIs(t, unusable, chunkstore.ErrTransactionUnusable,
+		"guard on the fixture itself: if chunkstore's wrapping stopped preserving the sentinel, the assertion above would pass for the wrong reason")
+}
+
 // ctx cancellation observed BETWEEN two store calls (rather than before the
 // loop starts, already covered elsewhere) must also stop the loop
 // immediately, matching the top-of-loop ctx.Err() check that is this

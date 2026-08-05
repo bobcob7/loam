@@ -448,17 +448,26 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 // retried once per remaining file.
 //
 // Its POSITION is not cosmetic, and a later tidy that sorts these checks
-// into a prettier order would silently break it. The *pgconn.PgError block
-// below RETURNS its boolean rather than falling through, and its seven
-// pgerrcode families do not include class 3B (savepoint_exception) --
-// which is exactly what RELEASE and ROLLBACK TO SAVEPOINT raise, i.e.
-// precisely the statements this sentinel reports on. Demonstrated during
-// review: an ErrTransactionUnusable carrying a 3B001 PgError classifies
-// true as written and FALSE with this check moved below that block, which
-// is the retry storm it exists to prevent. Relatedly and also deliberate,
-// savepointTransactor wraps fn's own error with %v and only the savepoint
-// statement's error with %w (chunkstore/store.go), so a rejected file's
-// PgError never enters this chain to be misread here.
+// into a prettier order would break it. The *pgconn.PgError block below
+// RETURNS its boolean rather than falling through, and its seven pgerrcode
+// families do not include class 3B (savepoint_exception) -- which is
+// exactly what RELEASE and ROLLBACK TO SAVEPOINT raise, i.e. precisely the
+// statements this sentinel reports on. So an ErrTransactionUnusable
+// carrying a 3B001 PgError is fatal only while this check runs FIRST;
+// below the block it classifies as a per-file rejection, which is the
+// retry storm the sentinel exists to prevent.
+//
+// That is pinned by
+// TestIsFatalStoreError_TransactionUnusableOutranksTheSQLSTATEBlock, not
+// merely asserted here -- an earlier version of this paragraph said the
+// same thing with nothing holding it up, and the reorder it warns about
+// left every test on the branch green. A comment is not a guard.
+//
+// Relatedly and also deliberate: savepointTransactor wraps fn's own error
+// with %v and only the savepoint statement's error with %w
+// (chunkstore/store.go), so a rejected file's PgError never enters this
+// chain to be misread here. The two decisions only hold together jointly;
+// the same test fails if that wrapping stops preserving the sentinel.
 //
 // Everything else here is Postgres-specific because the store this
 // package actually writes through in production is chunkstore.Store, a
