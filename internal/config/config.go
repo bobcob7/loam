@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"time"
 )
@@ -26,6 +27,19 @@ import (
 // value outright.
 const maxIngestWorkers = 256
 
+// defaultOTelServiceName is the service.name every span and metric this
+// process emits carries unless LOAM_OTEL_SERVICE_NAME overrides it.
+const defaultOTelServiceName = "loam"
+
+// defaultOTelSampleRatio is the head-sampling probability applied when
+// LOAM_OTEL_SAMPLE_RATIO is unset. It is deliberately conservative: the
+// first deployment to set LOAM_OTEL_ENDPOINT should not simultaneously
+// discover its collector's ingest volume. The sampler is ParentBased
+// (internal/telemetry), so this ratio is a decision about ROOT spans only --
+// once a trace is sampled, all of its spans in this process are kept, and a
+// sampled trace is therefore never a partial one.
+const defaultOTelSampleRatio = 0.1
+
 // Config holds the fully validated server configuration decoded from the
 // LOAM_* environment variables in docs/server-spec.md.
 type Config struct {
@@ -42,6 +56,12 @@ type Config struct {
 	IngestWorkers int
 	LogLevel      slog.Level
 	Logger        *slog.Logger
+	// OTelEndpoint is the collector's OTLP/HTTP base URL. EMPTY MEANS
+	// TELEMETRY IS DISABLED ENTIRELY -- see loadOptional for why this is
+	// the only switch.
+	OTelEndpoint    string
+	OTelServiceName string
+	OTelSampleRatio float64
 }
 
 // Load reads and validates every LOAM_* environment variable, applying the
@@ -125,8 +145,65 @@ func loadOptional(cfg *Config) error {
 		return err
 	}
 	cfg.LogLevel = logLevel
+	if err := loadTelemetry(cfg); err != nil {
+		return err
+	}
 	if err := checkDataDirWritable(cfg.DataDir); err != nil {
 		return err
 	}
+	return nil
+}
+
+// loadTelemetry reads the three OTel variables (loam-p56y). All three are
+// OPTIONAL, via lookupDefault, and that is a structural requirement rather
+// than a preference: internal/deploycheck's
+// TestComposeEnvironmentSatisfiesConfigLoad RUNS this loader against
+// deploy/docker-compose.yml's environment instead of modelling it, so a new
+// lookupRequired here breaks compose the moment it lands, while a
+// lookupDefault does not. Wiring telemetry into the deployment artifacts is
+// a separate bead, and this one must not force it early.
+//
+// LOAM_OTEL_ENDPOINT's presence is the ONLY enable switch; there is
+// deliberately no LOAM_OTEL_ENABLED. The case for a second variable is that
+// it lets an operator keep an endpoint configured while turning collection
+// off. The case against, which wins here:
+//
+//   - Two switches make four states, three of which mean "off", and an
+//     operator debugging silent telemetry then has to work out WHICH off
+//     they are in. One switch has no such ambiguity.
+//   - One of those four states, ENABLED=true with no endpoint, cannot be
+//     honoured at all. Either it is an error -- which makes
+//     LOAM_OTEL_ENABLED a de-facto required variable the moment anyone sets
+//     it, exactly the coupling deploycheck punishes -- or it is silently
+//     ignored, which is the failure mode the second variable was supposed
+//     to prevent.
+//   - The stated benefit is already available without new surface.
+//     Unsetting LOAM_OTEL_ENDPOINT is a one-line change in precisely the
+//     same file (a Helm values.yaml or a compose env block) that setting
+//     LOAM_OTEL_ENABLED=false would be, and LOAM_OTEL_SAMPLE_RATIO=0
+//     additionally gives a "keep the endpoint, stop sampling traces" knob
+//     for the narrower case where an operator wants the collector wiring
+//     left visibly in place.
+func loadTelemetry(cfg *Config) error {
+	cfg.OTelEndpoint = lookupDefault("LOAM_OTEL_ENDPOINT", "")
+	if cfg.OTelEndpoint != "" {
+		if err := validateOTelEndpoint(cfg.OTelEndpoint); err != nil {
+			return err
+		}
+	}
+	cfg.OTelServiceName = lookupDefault("LOAM_OTEL_SERVICE_NAME", defaultOTelServiceName)
+	sampleRatio, err := parseFloatEnv("LOAM_OTEL_SAMPLE_RATIO", defaultOTelSampleRatio)
+	if err != nil {
+		return err
+	}
+	// math.IsNaN first, and not as an afterthought: strconv.ParseFloat
+	// accepts "NaN", and every ordered comparison against NaN is false, so
+	// the range check below would wave it through to
+	// sdktrace.TraceIDRatioBased -- which would then sample nothing while
+	// reporting a perfectly valid configuration.
+	if math.IsNaN(sampleRatio) || sampleRatio < 0 || sampleRatio > 1 {
+		return fmt.Errorf("LOAM_OTEL_SAMPLE_RATIO: %w: got %v, want between 0 and 1", errOTelSampleRatioRange, sampleRatio)
+	}
+	cfg.OTelSampleRatio = sampleRatio
 	return nil
 }

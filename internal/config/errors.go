@@ -14,4 +14,7 @@ var (
 	errDataDirNotWritable     = errors.New("data directory not writable")
 	errSyncIntervalRange      = errors.New("sync interval must be positive")
 	errIngestWorkersRange     = errors.New("ingest workers out of range")
+	errInvalidFloat           = errors.New("invalid number")
+	errInvalidOTelEndpoint    = errors.New("invalid OTLP endpoint")
+	errOTelSampleRatioRange   = errors.New("OTel sample ratio out of range")
 )
