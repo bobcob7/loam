@@ -233,7 +233,19 @@ func assertTablesAbsent(ctx context.Context, t *testing.T, dsn string) {
 // role seed and its role_operations rows, matching docs/web-spec.md's fixed
 // vocabulary. author and reviewer come from 0001_init; orchestrator is
 // seeded by 0009_orchestrator_role (loam-hi5o.31), so this runs over the
-// FULLY migrated schema and must count three, not two.
+// FULLY migrated schema.
+//
+// Each role is looked up BY NAME rather than by its position in a
+// count-pinned slice (loam-w8li). The earlier shape asserted len(got) == 3
+// and then read got[0]/got[1]/got[2]; 0009 already forced one renumbering
+// of it, and the fourth built-in role would force another -- while the
+// version that did NOT get renumbered, internal/rolestore's ListRoles test,
+// went on asserting the reviewer's capabilities against the orchestrator.
+// Keying by name makes this assertion insensitive to both the count and the
+// order, so a new built-in role adds a line here instead of rewriting the
+// function. It is deliberately not an exhaustive check of the role set: the
+// built-ins below must be seeded and must be builtin, and an operator's own
+// roles in a restored database are none of this assertion's business.
 func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)
@@ -241,24 +253,21 @@ func assertBuiltinRolesSeeded(ctx context.Context, t *testing.T, dsn string) {
 	defer pool.Close()
 	rows, err := pool.Query(ctx, `SELECT name, builtin FROM roles ORDER BY name`)
 	require.NoError(t, err)
-	type role struct {
-		name    string
-		builtin bool
-	}
-	var got []role
+	builtinByName := map[string]bool{}
+	var names []string
 	for rows.Next() {
-		var r role
-		require.NoError(t, rows.Scan(&r.name, &r.builtin))
-		got = append(got, r)
+		var name string
+		var builtin bool
+		require.NoError(t, rows.Scan(&name, &builtin))
+		builtinByName[name] = builtin
+		names = append(names, name)
 	}
 	require.NoError(t, rows.Err())
-	require.Len(t, got, 3)
-	assert.Equal(t, "author", got[0].name)
-	assert.True(t, got[0].builtin)
-	assert.Equal(t, "orchestrator", got[1].name)
-	assert.True(t, got[1].builtin)
-	assert.Equal(t, "reviewer", got[2].name)
-	assert.True(t, got[2].builtin)
+	for _, want := range []string{"author", "reviewer", "orchestrator"} {
+		builtin, ok := builtinByName[want]
+		require.Truef(t, ok, "the built-in %q role must be seeded; roles present: %v", want, names)
+		assert.Truef(t, builtin, "the seeded %q role must carry builtin = true, or it could be deleted", want)
+	}
 
 	// Compare the exact operation SETS, not just their cardinality: a seed
 	// that swapped one capability for another (e.g. reviewer seeded with

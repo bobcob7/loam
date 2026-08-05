@@ -101,24 +101,47 @@ func TestGetRole_UnknownRole_ReturnsErrNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
-// TestListRoles_ReturnsBothBuiltinsWithTheirOperations proves ListRoles'
-// two-query grouping attaches the right operations to the right role
-// against the real seed -- the failure mode a single-role fixture cannot
-// catch is operations landing on the wrong role, so this asserts both.
-func TestListRoles_ReturnsBothBuiltinsWithTheirOperations(t *testing.T) {
+// TestListRoles_AttachesEachBuiltinsOperationsToTheRightRole proves
+// ListRoles' two-query grouping attaches the right operations to the right
+// role against the real seed -- the failure mode a single-role fixture
+// cannot catch is operations landing on the wrong role, so this asserts
+// two roles, keyed BY NAME.
+//
+// Keyed by name and not by position on purpose (loam-w8li). This test used
+// to read roles[0] as author and roles[1] as reviewer over a two-role seed.
+// Migration 0009_orchestrator_role seeds a third built-in, so by name order
+// roles[1] became the ORCHESTRATOR: the count assertion failed loudly, but
+// the four operation assertions below had silently moved to the wrong role
+// -- exactly the failure mode this test's own comment says it exists to
+// catch, turned on the test itself. A name-keyed lookup is insensitive to
+// both the count and the order, so the next built-in role does not touch
+// this test at all.
+func TestListRoles_AttachesEachBuiltinsOperationsToTheRightRole(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	roles, err := store.ListRoles(t.Context())
 	require.NoError(t, err)
-	require.Len(t, roles, 2, "0001_init seeds exactly author and reviewer")
-	assert.Equal(t, "author", roles[0].Name, "roles are ordered by name")
-	assert.Equal(t, "reviewer", roles[1].Name)
-	assert.True(t, roles[0].Builtin)
-	assert.True(t, roles[1].Builtin)
-	assert.Contains(t, roles[0].Operations, "git.push", "the author role carries git.push")
-	assert.NotContains(t, roles[1].Operations, "git.push", "the reviewer role must not carry git.push")
-	assert.Contains(t, roles[1].Operations, "work.verdict", "the reviewer role carries work.verdict")
-	assert.NotContains(t, roles[0].Operations, "work.verdict", "the author role must not carry work.verdict")
+	byName := make(map[string]Role, len(roles))
+	names := make([]string, 0, len(roles))
+	for _, role := range roles {
+		byName[role.Name] = role
+		names = append(names, role.Name)
+	}
+	require.Len(t, byName, len(roles), "ListRoles must return each role once -- a duplicate name would hide one role behind another in this map, and every assertion below would then be reading a role it did not mean to")
+	author, ok := byName["author"]
+	require.Truef(t, ok, "the built-in author role must be listed; got %v", names)
+	reviewer, ok := byName["reviewer"]
+	require.Truef(t, ok, "the built-in reviewer role must be listed; got %v", names)
+	// ListRoles documents "ordered by name"; asserted over the whole slice
+	// rather than by pinning indexes, so the ordering contract survives the
+	// switch to name keying and still holds for any number of roles.
+	assert.IsIncreasing(t, names, "ListRoles returns roles ordered by name")
+	assert.True(t, author.Builtin)
+	assert.True(t, reviewer.Builtin)
+	assert.Contains(t, author.Operations, "git.push", "the author role carries git.push")
+	assert.NotContains(t, reviewer.Operations, "git.push", "the reviewer role must not carry git.push")
+	assert.Contains(t, reviewer.Operations, "work.verdict", "the reviewer role carries work.verdict")
+	assert.NotContains(t, author.Operations, "work.verdict", "the author role must not carry work.verdict")
 }
 
 // TestCreateRole_RoundTripsThroughGetRole proves a created role and its
