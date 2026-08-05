@@ -70,13 +70,25 @@ Each agent has an assigned name, ID, and role, supplied through environment vari
 - **Role** — determines which operations the agent may perform and what the CLI
   `instructions` command returns to it.
 
-Roles are configurable in the web console but ship with sane defaults. Authorization is
-role-based and global: a role grants the same operations across every enrolled repo, with
-no per-repo or per-branch scoping in the MVP.
+Roles are configurable in the web console but ship with sane defaults: **author**,
+**reviewer**, and **orchestrator** — the last a read-only supervisor holding `graph.query`
+and `search` and no work-branch capability at all, described in
+[`docs/orchestration.md`](docs/orchestration.md). Authorization is role-based and global: a
+role grants the same operations across every enrolled repo, with no per-repo or per-branch
+scoping in the MVP.
 
 For the MVP there is no authentication — identity and role are trusted exactly as asserted
 in the environment, and the server does not verify them. Verified, server-issued
 credentials and finer-grained scoping are planned (see Future Work).
+
+One consequence of that, stated here so it moves with the caveat itself rather than drifting
+from it: `loam instructions` run with no `LOAM_AGENT_*` configured resolves to a fixed,
+well-known identity (`loam-orchestrator-0-orchestrator`) whose role is **orchestrator**, and
+makes an ordinary authenticated call like any other. This adds no hole. Under the trust model
+above, a caller who wanted `search` and `graph.query` could already have asserted
+`LOAM_AGENT_ROLE=reviewer` and been given them; the well-known identity asserts less, not
+more. It is not an unauthenticated route — `/healthz` and `/readyz` remain the only ones —
+and it hardens exactly when the trust model does.
 
 #### Graph DB
 

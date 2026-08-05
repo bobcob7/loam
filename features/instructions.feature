@@ -20,6 +20,12 @@ Feature: Agent orientation
     When I ask for instructions for one command
     Then I receive only that command's usage
 
+  Scenario: An agent with no identity configured is answered as the orchestrator
+    Given no agent identity is configured
+    When I ask for instructions
+    Then I receive the orchestrator role's instructions
+    And only the commands the orchestrator role permits
+
   Scenario: whoami reports my identity
     When I ask who I am
     Then I am told my name, id, role, and full identifier

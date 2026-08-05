@@ -38,6 +38,8 @@ func (h *acceptanceHarness) registerRoleSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^only the commands its role permits$`, h.stepOnlyTheCommandsItsRolePermits)
 	sc.Step(`^I list roles$`, h.stepIListRoles)
 	sc.Step(`^a built-in "([^"]*)" role and a built-in "([^"]*)" role exist$`, h.stepBuiltinRolesExist)
+	sc.Step(`^the built-in "([^"]*)" role grants only "([^"]*)" and "([^"]*)"$`, h.stepTheBuiltinRoleGrantsOnly)
+	sc.Step(`^it holds no work-branch capability$`, h.stepItHoldsNoWorkBranchCapability)
 	sc.Step(`^I am an agent with the "([^"]*)" role$`, h.stepIAmAnAgentWithTheRole)
 	sc.Step(`^I try to submit a verdict$`, h.stepITryToSubmitAVerdict)
 	sc.Step(`^the operation is denied$`, h.stepTheOperationIsDenied)
@@ -251,6 +253,56 @@ func (h *acceptanceHarness) stepBuiltinRolesExist(ctx context.Context, first, se
 		}
 		if !role.GetBuiltin() {
 			return fmt.Errorf("role %q was returned but is not marked builtin", name)
+		}
+	}
+	return nil
+}
+
+// --- "The orchestrator role supervises but cannot act" ---
+
+// stepTheBuiltinRoleGrantsOnly asserts the named role is built-in and its
+// granted operations are EXACTLY the two the scenario names -- set
+// equality, not containment, so a seed that granted a third would fail here
+// (loam-hi5o.31). It reads the live ListRoles response the previous When
+// captured, so this is what an admin would actually see in the console.
+func (h *acceptanceHarness) stepTheBuiltinRoleGrantsOnly(ctx context.Context, name, first, second string) error {
+	world := worldFrom(ctx)
+	role := findRoleByName(world.lastRoles, name)
+	if role == nil {
+		return fmt.Errorf("no role named %q in the ListRoles response (%d roles returned)", name, len(world.lastRoles))
+	}
+	if !role.GetBuiltin() {
+		return fmt.Errorf("role %q was returned but is not marked builtin, so it could be deleted", name)
+	}
+	got := append([]string(nil), role.GetOperations()...)
+	want := []string{first, second}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("role %q grants %v, want exactly %v", name, got, want)
+	}
+	return nil
+}
+
+// stepItHoldsNoWorkBranchCapability is the same claim from the other
+// direction, and it exists because the exact-set check above would still
+// pass if the vocabulary itself were renamed underneath it. This one names
+// the forbidden capabilities individually, so a failure says WHICH one
+// leaked in. The orchestrator supervises; the agents act.
+func (h *acceptanceHarness) stepItHoldsNoWorkBranchCapability(ctx context.Context) error {
+	world := worldFrom(ctx)
+	role := findRoleByName(world.lastRoles, "orchestrator")
+	if role == nil {
+		return fmt.Errorf("no orchestrator role in the ListRoles response (%d roles returned)", len(world.lastRoles))
+	}
+	forbidden := []handler.Capability{
+		handler.CapabilityWorkStart, handler.CapabilityWorkSet, handler.CapabilityWorkRequestReview,
+		handler.CapabilityWorkReply, handler.CapabilityWorkVerdict, handler.CapabilityWorkRead,
+		handler.CapabilityGitClone, handler.CapabilityGitPush,
+	}
+	for _, capability := range forbidden {
+		if slices.Contains(role.GetOperations(), string(capability)) {
+			return fmt.Errorf("the orchestrator role holds %q; it supervises, the agents act", capability)
 		}
 	}
 	return nil

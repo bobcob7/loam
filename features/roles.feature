@@ -11,6 +11,11 @@ Feature: Roles and authorization
     When I list roles
     Then a built-in "author" role and a built-in "reviewer" role exist
 
+  Scenario: The orchestrator role supervises but cannot act
+    When I list roles
+    Then the built-in "orchestrator" role grants only "graph.query" and "search"
+    And it holds no work-branch capability
+
   Scenario: A role's instructions reach its agents
     Given the "reviewer" role has instructions configured
     When a "reviewer" agent asks for its instructions
