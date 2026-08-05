@@ -103,15 +103,21 @@ README → Agent Identity & Roles. Names are provisional.
 | Variable | Purpose | Required | Default |
 | --- | --- | --- | --- |
 | `LOAM_SERVER_URL` | Base URL of the Loam server — the Connect APIs and the git smart-HTTP endpoint (`clone` composes `<LOAM_SERVER_URL>/git/<group>/<repo>.git`). A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes, except bare `whoami` | — |
-| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | defaults to the well-known orchestrator identity; all three, or none | — |
-| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | defaults to the well-known orchestrator identity; all three, or none | — |
-| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | defaults to the well-known orchestrator identity; all three, or none | — |
+| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes, except `instructions` | `loam-orchestrator` — applied only when all three `LOAM_AGENT_*` are unset |
+| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes, except `instructions` | `0` — applied only when all three `LOAM_AGENT_*` are unset |
+| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes, except `instructions` | `orchestrator` — applied only when all three `LOAM_AGENT_*` are unset |
 | `LOAM_OUTPUT_FORMAT` | Output format: `json`, `yaml`, `xml`, or `human`. Unknown values fall back to `json`. | no | `json` |
 
 On the wire, the `LOAM_AGENT_*` values travel as the request headers `Loam-Agent-Name`,
 `Loam-Agent-Id`, and `Loam-Agent-Role` — attached by the CLI to every RPC, and written
 into a clone's git config by `clone` so plain git carries them too (see
 `docs/git-spec.md`).
+
+The three `LOAM_AGENT_*` defaults are all-or-nothing: they apply only when none of the three
+is set, so a partly configured identity is a usage error naming the variables actually
+missing rather than a silent completion into `<name>-<id>-orchestrator`. They are fixed in
+the binary and not themselves configurable; what varies between deployments is the
+`orchestrator` role's text and granted operations, which are an ordinary editable role row.
 
 Every applicable missing or malformed required variable is reported together in one run,
 not one per run: the CLI validates all of them before failing, so an operator setting up a
