@@ -166,9 +166,15 @@ cheap enough to keep simple.
   the commit discarded the batch anyway, which is what the reported production failure
   actually was. What a rejected file leaves behind is precise:
   - Its **previous chunks are kept, whole**, not emptied and not half-replaced — the
-    `DELETE` unwinds together with the `INSERT`s. On a file's first ingest there are no
-    previous chunks, so it is simply absent from vector search until a later ingest
-    succeeds.
+    `DELETE` unwinds together with the `INSERT`s. Two different things are true at once
+    here, and the rest of this section depends on both: the file's **prior** chunks
+    survive the rejection intact, and its **new** chunks never land. So a file that had
+    chunks before stays **searchable but stale**, matching the content of an earlier
+    commit, while a file whose very first ingest was rejected is **absent** from vector
+    search entirely. Neither is corrected until that file is chunked successfully by a
+    later ingest. Where text below says a rejected file's chunks are "missing", it means
+    this: not that the rows were deleted, but that no row reflects the commit the repo's
+    ingested ref now claims.
   - Its **symbols, references and edges are written normally.** The graph track runs
     earlier in the same transaction and `ROLLBACK TO SAVEPOINT` only unwinds statements
     issued after its savepoint. So the degrade is one-sided: the file stays in the graph

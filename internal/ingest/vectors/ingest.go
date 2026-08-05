@@ -342,8 +342,9 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // rejections only through Stats and the ERROR-level log line for each one;
 // a caller that wants "success with warnings" vs. "failure" as a job-level
 // verdict must read Stats.FilesRejected AFTER a successful commit and
-// decide there (loam-c94.13, the ingest_jobs.stats writer, is the natural
-// place -- not yet built, and out of this package's reach). There is
+// decide there (the ingest_jobs.stats writer is the natural place;
+// loam-2d44 built exactly that, and it stays out of this package's reach
+// -- see the next section for where the count now goes). There is
 // deliberately no numeric threshold here for the same reason: any
 // threshold Persist enforced by returning an error would trigger the same
 // whole-transaction rollback as a single rejection would.
