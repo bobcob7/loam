@@ -277,12 +277,17 @@ func (h *acceptanceHarness) runLoamAs(world *acceptanceWorld, actor acceptanceAc
 		"PATH=" + os.Getenv("PATH"),
 		"LOAM_SERVER_URL=" + serverURL,
 	}
-	// world.omitIdentity leaves the three LOAM_AGENT_* entries off
-	// entirely (loam-hi5o.31): the CLI then has no configured identity at
-	// all, which is what `instructions` resolves to the well-known
-	// orchestrator identity. Every other scenario appends them and runs as
-	// actor exactly as before.
-	if !world.omitIdentity {
+	// world.identityEnvMode decides which LOAM_AGENT_* entries are written
+	// at all (loam-hi5o.31, and see its doc comment on acceptanceWorld):
+	// leaving all three off is what makes the CLI use their built-in
+	// default, the well-known orchestrator identity; leaving only the role
+	// off is the partial-identity case that must stay a usage error. The
+	// empty default writes all three and runs as actor, exactly as before.
+	switch world.identityEnvMode {
+	case "none":
+	case "no-role":
+		cmd.Env = append(cmd.Env, "LOAM_AGENT_NAME="+actor.name, "LOAM_AGENT_ID="+actor.id)
+	default:
 		cmd.Env = append(cmd.Env,
 			"LOAM_AGENT_NAME="+actor.name,
 			"LOAM_AGENT_ID="+actor.id,

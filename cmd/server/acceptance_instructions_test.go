@@ -32,8 +32,8 @@ import (
 )
 
 // registerInstructionsSteps wires every step features/instructions.feature
-// needs: the Background identity, the three `instructions` scenarios, and
-// the two `whoami` scenarios.
+// needs: the Background identity, the `instructions` scenarios (including
+// loam-hi5o.31's two on the LOAM_AGENT_* defaults), and the `whoami` ones.
 func (h *acceptanceHarness) registerInstructionsSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I am the agent "([^"]*)" with the "([^"]*)" role$`, h.stepIAmTheAgentWithRole)
 	sc.Step(`^I ask for instructions$`, h.stepIAskForInstructions)
@@ -43,9 +43,12 @@ func (h *acceptanceHarness) registerInstructionsSteps(sc *godog.ScenarioContext)
 	sc.Step(`^commands my role cannot perform are not listed$`, h.stepCommandsMyRoleCannotPerformAreNotListed)
 	sc.Step(`^I ask for instructions for one command$`, h.stepIAskForInstructionsForOneCommand)
 	sc.Step(`^I receive only that command's usage$`, h.stepIReceiveOnlyThatCommandsUsage)
-	sc.Step(`^no agent identity is configured$`, h.stepNoAgentIdentityIsConfigured)
+	sc.Step(`^the agent identity variables are left at their defaults$`, h.stepTheAgentIdentityVariablesAreLeftAtTheirDefaults)
+	sc.Step(`^only my agent name and id are set$`, h.stepOnlyMyAgentNameAndIDAreSet)
 	sc.Step(`^I receive the orchestrator role's instructions$`, h.stepIReceiveTheOrchestratorRolesInstructions)
 	sc.Step(`^only the commands the orchestrator role permits$`, h.stepOnlyTheCommandsTheOrchestratorRolePermits)
+	sc.Step(`^I try to ask for instructions$`, h.stepITryToAskForInstructions)
+	sc.Step(`^the attempt is rejected, naming the role variable$`, h.stepTheAttemptIsRejectedNamingTheRoleVariable)
 	sc.Step(`^I ask who I am$`, h.stepIAskWhoIAm)
 	sc.Step(`^I am told my name, id, role, and full identifier$`, h.stepIAmToldMyIdentity)
 	sc.Step(`^the server is unreachable$`, h.stepTheServerIsUnreachable)
@@ -147,32 +150,72 @@ func (h *acceptanceHarness) grantedCapabilities(ctx context.Context, role string
 	return granted, nil
 }
 
-// --- "An agent with no identity configured is answered as the orchestrator" ---
+// --- "The agent identity defaults to the built-in orchestrator" / "A partly
+// configured identity is an error, not a default role" ---
 
-// acceptanceOrchestratorRole is the role name the CLI's well-known identity
-// resolves to (internal/cli/config.go's wellKnownAgentRole), seeded as a
+// acceptanceOrchestratorRole is the role the three LOAM_AGENT_* variables
+// default to (internal/cli/config.go's wellKnownAgentRole), seeded as a
 // built-in by migration 0009_orchestrator_role.
 const acceptanceOrchestratorRole = "orchestrator"
 
-// stepNoAgentIdentityIsConfigured drops the three LOAM_AGENT_* variables
-// from every subsequent `loam` invocation in this scenario (runLoamAs reads
-// world.omitIdentity), leaving LOAM_SERVER_URL as the only LOAM_* variable
-// set. This is the whole precondition loam-hi5o.31 is about: "no identity"
-// means no LOAM_AGENT_*, NOT no environment at all -- the CLI cannot invent
-// where the server is.
-func (h *acceptanceHarness) stepNoAgentIdentityIsConfigured(ctx context.Context) error {
-	worldFrom(ctx).omitIdentity = true
+// stepTheAgentIdentityVariablesAreLeftAtTheirDefaults drops all three
+// LOAM_AGENT_* variables from every subsequent `loam` invocation in this
+// scenario (runLoamAs reads world.identityEnvMode), leaving LOAM_SERVER_URL
+// as the only LOAM_* variable set. That is the precondition loam-hi5o.31 is
+// about, and the reason LOAM_SERVER_URL stays: three of the four variables
+// have a built-in default, and the fourth cannot -- the CLI can invent who
+// it is, not where the server lives.
+func (h *acceptanceHarness) stepTheAgentIdentityVariablesAreLeftAtTheirDefaults(ctx context.Context) error {
+	worldFrom(ctx).identityEnvMode = "none"
 	return nil
 }
 
-// stepIReceiveTheOrchestratorRolesInstructions asserts the identity-free
+// stepOnlyMyAgentNameAndIDAreSet is the all-or-nothing rule's precondition:
+// a real name and id with LOAM_AGENT_ROLE forgotten. The three variables
+// default TOGETHER, so this must be rejected rather than silently completed
+// into "<name>-<id>-orchestrator" -- an agent handed a role nobody chose for
+// it, writing that role into permanent review records with no signal
+// anything was wrong.
+func (h *acceptanceHarness) stepOnlyMyAgentNameAndIDAreSet(ctx context.Context) error {
+	worldFrom(ctx).identityEnvMode = "no-role"
+	return nil
+}
+
+// stepITryToAskForInstructions runs `loam instructions` expecting it to
+// FAIL, keeping the raw result for the following Then. Separate from
+// stepIAskForInstructions, which decodes a successful response and would
+// fail the step itself on a non-zero exit.
+func (h *acceptanceHarness) stepITryToAskForInstructions(ctx context.Context) error {
+	world := worldFrom(ctx)
+	world.lastInstructionsAttempt = h.runLoamAs(world, world.currentActor, "", "instructions")
+	return nil
+}
+
+// stepTheAttemptIsRejectedNamingTheRoleVariable asserts the partial-identity
+// run failed as a usage error naming LOAM_AGENT_ROLE -- and, critically,
+// that it did not succeed. A check on the message alone would pass against a
+// run that both printed a warning and went on to answer as the orchestrator,
+// which is precisely the silent outcome the all-or-nothing rule exists to
+// prevent.
+func (h *acceptanceHarness) stepTheAttemptIsRejectedNamingTheRoleVariable(ctx context.Context) error {
+	res := worldFrom(ctx).lastInstructionsAttempt
+	if err := requireLoamRejected(res, "instructions with only a name and id set", "usage", 2); err != nil {
+		return err
+	}
+	if !strings.Contains(res.stdout, "LOAM_AGENT_ROLE") {
+		return fmt.Errorf("the rejection must name the missing variable; got stdout %q", res.stdout)
+	}
+	return nil
+}
+
+// stepIReceiveTheOrchestratorRolesInstructions asserts the defaulted-identity
 // response carried the ORCHESTRATOR role's configured text, read fresh from
 // the admin RoleService -- byte-identical, the same standard
-// stepTheInstructionsConfiguredForMyRole holds an identified agent to. It
+// stepTheInstructionsConfiguredForMyRole holds a configured agent to. It
 // additionally refuses the Background author's text explicitly: this
 // scenario runs after a Background that set currentActor to an author, and
-// a regression that ignored world.omitIdentity would answer as that author
-// and otherwise look like a success.
+// a regression that ignored world.identityEnvMode would answer as that
+// author and otherwise look like a success.
 func (h *acceptanceHarness) stepIReceiveTheOrchestratorRolesInstructions(ctx context.Context) error {
 	world := worldFrom(ctx)
 	getResp, err := h.newRoleServiceClient().GetRole(ctx, connect.NewRequest(&adminv1.GetRoleRequest{Name: acceptanceOrchestratorRole}))
@@ -191,16 +234,16 @@ func (h *acceptanceHarness) stepIReceiveTheOrchestratorRolesInstructions(ctx con
 		return fmt.Errorf("reading role %s's instructions to contrast: %w", world.currentActor.role, err)
 	}
 	if world.lastInstructions.RoleInstructions == authorResp.Msg.GetRole().GetInstructions() {
-		return fmt.Errorf("the identity-free response returned the Background %q role's instructions, not the orchestrator's", world.currentActor.role)
+		return fmt.Errorf("the defaulted-identity response returned the Background %q role's instructions, not the orchestrator's", world.currentActor.role)
 	}
 	return nil
 }
 
 // stepOnlyTheCommandsTheOrchestratorRolePermits is loam-hi5o.3's
 // superseded-but-not-discarded requirement made checkable. That bead
-// refused to let `instructions` run without an identity because an
-// UNFILTERED command list could be read by an agent as its own
-// permissions; this asserts the identity-free response is filtered to the
+// refused to let `instructions` run without a configured identity because
+// an UNFILTERED command list could be read by an agent as its own
+// permissions; this asserts the defaulted-identity response is filtered to the
 // orchestrator's own narrow grant in BOTH directions -- every command its
 // capabilities predict present, every other gated command absent. A
 // response that had regressed to an unfiltered catalog would list `work

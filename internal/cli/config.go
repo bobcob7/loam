@@ -19,13 +19,18 @@ const (
 	envOutputFormat = "LOAM_OUTPUT_FORMAT"
 )
 
-// The well-known orchestrator identity `instructions` falls back to when no
-// LOAM_AGENT_* variable is configured at all (loam-hi5o.31). It resolves to
-// the built-in `orchestrator` role seeded by migration
-// 0009_orchestrator_role, which grants graph.query and search and no
-// work-branch capability.
+// The BUILT-IN DEFAULT VALUE of the three LOAM_AGENT_* variables
+// (loam-hi5o.31). They are configuration fields with a default, like any
+// other; there is no such thing as a request without an identity, and this
+// is not a fallback for the absence of one. Left unset, they resolve to the
+// well-known orchestrator identity, whose role is the built-in
+// `orchestrator` seeded by migration 0009_orchestrator_role -- graph.query
+// and search, and no work-branch capability.
 //
-// WHY AN IDENTITY RATHER THAN AN UNAUTHENTICATED ROUTE: the request then
+// That framing is also why LOAM_SERVER_URL cannot have a default and stays
+// required: the CLI can invent who it is, but not where the server lives.
+//
+// WHY A DEFAULT IDENTITY RATHER THAN AN UNAUTHENTICATED ROUTE: the request
 // travels the ORDINARY authenticated path, carrying Loam-Agent-* headers
 // like every other call. That preserves cmd/server/main.go's property that
 // RegisterUnauthenticated covers /healthz and /readyz and is "the only such
@@ -43,7 +48,7 @@ const (
 // WHY THESE VALUES, AND WHY THEY ARE FIXED. They are compile-time
 // constants, not a fourth environment variable, and an operator cannot
 // change them -- the escape hatch is the ordinary one: set LOAM_AGENT_* and
-// you get a real identity instead. What genuinely differs between
+// you override the defaults with your own identity. What genuinely differs between
 // deployments is the orchestrator role's TEXT AND CAPABILITIES, and those
 // live in an editable role row (see 0009_orchestrator_role.up.sql); a
 // variable whose only effect is which synthetic name appears in a log would
@@ -205,32 +210,44 @@ func loadIdentityConfig() (*envConfig, error) {
 	}, nil
 }
 
-// identityEnvUnset reports whether NONE of the three LOAM_AGENT_* variables
-// is set -- the only state loadOrchestratorConfig's fallback applies to. A
-// PARTIALLY configured identity (say LOAM_AGENT_ROLE set but NAME and ID
-// forgotten) is deliberately NOT this state: it is a configuration mistake,
-// and answering it with the orchestrator's instructions would hide it
-// behind a plausible-looking success, telling an agent it may do less than
-// its real role allows. Those callers fall through to loadConfig and get
-// the same per-variable errors they always did.
-func identityEnvUnset() bool {
+// identityDefaultsApply reports whether NONE of the three LOAM_AGENT_*
+// variables is set -- the only state in which the built-in defaults above
+// are used.
+//
+// THE THREE DEFAULT TOGETHER OR NOT AT ALL, which is a real design choice
+// and the alternative is worse. Per-variable defaults would read more
+// naturally ("each field has a default"), but they would mean a forgotten
+// `export LOAM_AGENT_ROLE` silently produced `ada-lovelace-7-orchestrator`:
+// an agent handed a role nobody chose for it, with no signal anything was
+// wrong, writing that role into permanent review records. This repository
+// has already shipped one identity mistake into irreversible verdict rows
+// (a misbriefed NAME that produced
+// `alan-kay-6-reviewer-alan-kay-6-reviewer-reviewer`, unfixable without
+// rewriting review history), and that is the same class of error with a
+// quieter failure mode. So a PARTIAL identity is a usage error naming the
+// variables actually missing: those callers fall through to loadConfig and
+// get exactly the errors they always did. See docs/orchestration.md ->
+// Identity.
+func identityDefaultsApply() bool {
 	return os.Getenv(envAgentName) == "" && os.Getenv(envAgentID) == "" && os.Getenv(envAgentRole) == ""
 }
 
 // loadOrchestratorConfig builds the configuration for `loam instructions`
-// run with no identity at all: LOAM_SERVER_URL from the environment,
-// validated exactly as loadConfig validates it, and the three identity
-// values from the well-known orchestrator constants above (loam-hi5o.31).
+// run with the three LOAM_AGENT_* variables left at their defaults:
+// LOAM_SERVER_URL from the environment, validated exactly as loadConfig
+// validates it, and the identity from the well-known orchestrator constants
+// above (loam-hi5o.31).
 //
-// "No identity" means no LOAM_AGENT_*, NOT no environment. LOAM_SERVER_URL
-// stays genuinely required, because the CLI cannot invent where the server
-// is and this command makes a real RPC -- so with it unset the command must
-// still fail, and the error must name ONLY that variable rather than the
-// list of four an unconfigured workspace used to get. There is no list to
-// join here: the identity values cannot be missing, so requireServerURL's
-// own error is the whole answer and is returned unwrapped. It already
-// carries codeUsage, errUsage and errMissingEnv (newUsageCLIError), which
-// is exactly what joinConfigErrors would have produced for a single member.
+// Defaulted identity is NOT a defaulted environment. LOAM_SERVER_URL stays
+// genuinely required -- it is the one variable of the four that cannot have
+// a default, because the CLI cannot invent where the server is and this
+// command makes a real RPC -- so with it unset the command must still fail,
+// and the error must name ONLY that variable rather than the list of four
+// an unconfigured workspace used to get. There is no list to join here: the
+// identity values cannot be missing, so requireServerURL's own error is the
+// whole answer and is returned unwrapped. It already carries codeUsage,
+// errUsage and errMissingEnv (newUsageCLIError), which is exactly what
+// joinConfigErrors would have produced for a single member.
 //
 // This deliberately reuses the loader seam loam-hi5o.dc2v already
 // established -- configForArgs picking a per-command strategy, with

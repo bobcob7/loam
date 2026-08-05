@@ -308,14 +308,55 @@ func TestLoam_Whoami_NoServerURL_VerifyFlag_IsUsageErrorNotPanic(t *testing.T) {
 // every missing variable in its single structured error, not just
 // LOAM_SERVER_URL (the first one loadConfig used to check before this
 // fix).
+//
+// The vehicle is `work list` rather than `instructions`, which it used to
+// be: loam-hi5o.31 made `instructions` the one command that no longer
+// requires the three LOAM_AGENT_* variables at all (it falls back to the
+// well-known orchestrator identity), so naming them in ITS error would now
+// be the bug. `work list` still requires all four, and the property under
+// test here -- report every missing variable in ONE run, never one per run
+// -- is unchanged for it and for every other command.
 func TestLoam_MissingEverything_ReportsEveryVariableInOneRun(t *testing.T) {
 	t.Parallel()
-	result := runLoam(t, emptyEnv(), "instructions")
+	result := runLoam(t, emptyEnv(), "work", "list")
 	assert.Equal(t, 2, result.exitCode)
 	assert.Contains(t, result.stdout, `"code":"usage"`)
 	for _, name := range []string{"LOAM_SERVER_URL", "LOAM_AGENT_NAME", "LOAM_AGENT_ID", "LOAM_AGENT_ROLE"} {
 		assert.Contains(t, result.stdout, name, "a fully unconfigured run must name every missing variable in one output")
 	}
+}
+
+// TestLoam_Instructions_MissingEverything_NamesOnlyServerURL is
+// loam-hi5o.31 acceptance criterion 13's failing half, run against the real
+// binary with a genuinely empty environment. The assertion that matters is
+// the NEGATIVE one: the old message named all four variables, so a check
+// for "contains LOAM_SERVER_URL" alone would pass against the exact
+// behaviour this replaced. Three of the four are no longer required for
+// this command, and naming them would send an operator to configure things
+// that would change nothing.
+func TestLoam_Instructions_MissingEverything_NamesOnlyServerURL(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "instructions")
+	assert.Equal(t, 2, result.exitCode)
+	assert.Contains(t, result.stdout, `"code":"usage"`)
+	assert.Contains(t, result.stdout, "LOAM_SERVER_URL")
+	for _, name := range []string{"LOAM_AGENT_NAME", "LOAM_AGENT_ID", "LOAM_AGENT_ROLE"} {
+		assert.NotContainsf(t, result.stdout, name, "%s is not required by `instructions` and must not be named", name)
+	}
+}
+
+// TestLoam_Help_StillWorksWithNoEnvironmentAtAll guards the other half of
+// the cold-start story loam-hi5o.31 leaves in place: `loam help` needs no
+// LOAM_* variable at all -- not even LOAM_SERVER_URL, which `instructions`
+// does need -- and must still name `instructions` as the authority on what
+// a role may do. Cold start is now two steps (help lists everything,
+// instructions gives the orchestrator's guidance) and both halves have to
+// keep working.
+func TestLoam_Help_StillWorksWithNoEnvironmentAtAll(t *testing.T) {
+	t.Parallel()
+	result := runLoam(t, emptyEnv(), "help")
+	assert.Equal(t, 0, result.exitCode, "stdout: %s stderr: %s", result.stdout, result.stderr)
+	assert.Contains(t, result.stdout, "instructions")
 }
 
 // TestMainWiring_NoPlaceholderCollaborators is loam-qdr's own acceptance

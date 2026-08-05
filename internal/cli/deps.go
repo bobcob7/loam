@@ -105,21 +105,25 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 //
 //   - `whoami` gets the relaxed, identity-only loader: identity IS the
 //     environment it needs, and a server it does not talk to must not gate
-//     it (loam-dc2v defect 3). It deliberately does NOT get the
-//     orchestrator fallback below: whoami reports the identity an operator
-//     CONFIGURED, and answering it with a synthetic one nobody set would
-//     make "misconfigured" indistinguishable from "deliberately anonymous"
-//     in the one command whose whole job is diagnosing that.
-//   - `instructions` with no LOAM_AGENT_* set at all gets the well-known
-//     orchestrator identity (loam-hi5o.31), so an orchestrator that has
-//     configured nothing but LOAM_SERVER_URL can still ask what its job is.
-//     With any LOAM_AGENT_* set it takes the loadConfig branch below and
-//     behaves exactly as it always has.
+//     it (loam-dc2v defect 3). It deliberately does NOT take the identity
+//     defaults below: whoami reports the identity an operator CONFIGURED,
+//     and answering it with a defaulted synthetic one would make
+//     "misconfigured" indistinguishable from "deliberately left at the
+//     defaults" in the one command whose whole job is diagnosing that.
+//   - `instructions` gets the built-in DEFAULT VALUE of the three
+//     LOAM_AGENT_* variables when none of them is set (loam-hi5o.31): the
+//     well-known orchestrator identity, so an orchestrator that configured
+//     nothing but LOAM_SERVER_URL can still ask what its job is. This is a
+//     defaulted identity, not a missing one -- the request carries a real
+//     identity over the ordinary authenticated path either way. With any
+//     LOAM_AGENT_* set it takes the loadConfig branch below and behaves
+//     exactly as it always has; see identityDefaultsApply for why the three
+//     default together rather than one at a time.
 //   - everything else: loadConfig.
 //
 // This supersedes loam-hi5o.3's decision that `instructions` must not run
-// without an identity, but only narrowly, and its reasoning is preserved
-// rather than discarded: that bead's concern was an agent reading an
+// without a configured identity, but only narrowly, and its reasoning is
+// preserved rather than discarded: that bead's concern was an agent reading an
 // UNFILTERED command list as its own permissions. Nothing here returns an
 // unfiltered list. The response is the orchestrator role's own
 // capability-filtered commands and instructions -- a real, narrow role
@@ -135,7 +139,7 @@ func configForArgs(args []string) (*envConfig, error) {
 	if args[0] == "whoami" {
 		return loadIdentityConfig()
 	}
-	if args[0] == "instructions" && identityEnvUnset() {
+	if args[0] == "instructions" && identityDefaultsApply() {
 		return loadOrchestratorConfig()
 	}
 	return loadConfig()

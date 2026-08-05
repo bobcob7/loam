@@ -20,10 +20,12 @@ import (
 	"github.com/bobcob7/loam/internal/httpauth"
 )
 
-// loam-hi5o.31's CLI half: `loam instructions` with no LOAM_AGENT_*
-// configured resolves to the well-known orchestrator identity and calls
-// GetInstructions through the ORDINARY authenticated path, while
-// LOAM_SERVER_URL stays genuinely required.
+// loam-hi5o.31's CLI half: the three LOAM_AGENT_* variables have a BUILT-IN
+// DEFAULT VALUE -- the well-known orchestrator identity -- which `loam
+// instructions` uses when none of them is set, calling GetInstructions
+// through the ORDINARY authenticated path with a real identity like every
+// other command. LOAM_SERVER_URL is the one of the four that cannot have a
+// default and stays required.
 //
 // NOTE: every test in this file uses t.Setenv, which the testing package
 // forbids combining with t.Parallel() since environment variables are
@@ -33,10 +35,11 @@ import (
 // precondition under test and an ambient LOAM_AGENT_ROLE would silently
 // turn several of these green for the wrong reason.
 
-// noIdentityEnv blanks every LOAM_AGENT_* variable and LOAM_OUTPUT_FORMAT,
-// leaving LOAM_SERVER_URL at serverURL -- the exact state an orchestrator
-// that configured nothing but the server address is in.
-func noIdentityEnv(t *testing.T, serverURL string) {
+// defaultedIdentityEnv blanks every LOAM_AGENT_* variable and
+// LOAM_OUTPUT_FORMAT, leaving LOAM_SERVER_URL at serverURL -- the exact
+// state an orchestrator that configured nothing but the server address is
+// in, and the one in which the identity defaults apply.
+func defaultedIdentityEnv(t *testing.T, serverURL string) {
 	t.Helper()
 	t.Setenv(envServerURL, serverURL)
 	t.Setenv(envAgentName, "")
@@ -45,13 +48,16 @@ func noIdentityEnv(t *testing.T, serverURL string) {
 	t.Setenv(envOutputFormat, "")
 }
 
-// TestLoadOrchestratorConfig_NoIdentity_ResolvesWellKnownIdentity is the
+// TestLoadOrchestratorConfig_UnsetIdentity_ResolvesTheDefaultIdentity is the
 // first half of acceptance criterion 13: with LOAM_SERVER_URL set and every
-// LOAM_AGENT_* unset, config loading succeeds and yields the well-known
-// orchestrator identity rather than an error.
-func TestLoadOrchestratorConfig_NoIdentity_ResolvesWellKnownIdentity(t *testing.T) {
+// LOAM_AGENT_* left unset, config loading succeeds and yields the well-known
+// orchestrator identity rather than an error. It asserts the whole identity,
+// including the assembled identifier -- which must read as obviously
+// synthetic in any record that stores it, since a review row carrying it is
+// permanent.
+func TestLoadOrchestratorConfig_UnsetIdentity_ResolvesTheDefaultIdentity(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "https://loam.example")
+	defaultedIdentityEnv(t, "https://loam.example")
 	cfg, err := loadOrchestratorConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "https://loam.example", cfg.ServerURL())
@@ -62,8 +68,10 @@ func TestLoadOrchestratorConfig_NoIdentity_ResolvesWellKnownIdentity(t *testing.
 }
 
 // TestLoadOrchestratorConfig_MissingServerURL_NamesOnlyThatVariable is the
-// second half of acceptance criterion 13, and the specific regression it
-// guards is the OLD behaviour: an unconfigured workspace used to be told
+// second half of acceptance criterion 13. LOAM_SERVER_URL is the one of the
+// four variables that cannot have a default -- the CLI can invent who it
+// is, not where the server lives. The specific regression it guards is the
+// OLD behaviour: an unconfigured workspace used to be told
 // all four of LOAM_SERVER_URL, LOAM_AGENT_NAME, LOAM_AGENT_ID and
 // LOAM_AGENT_ROLE were missing. Three of those are no longer required for
 // this command, so naming them would send an operator to configure things
@@ -72,7 +80,7 @@ func TestLoadOrchestratorConfig_NoIdentity_ResolvesWellKnownIdentity(t *testing.
 // verbatim, so this asserts the other three are ABSENT too.
 func TestLoadOrchestratorConfig_MissingServerURL_NamesOnlyThatVariable(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "")
+	defaultedIdentityEnv(t, "")
 	_, err := loadOrchestratorConfig()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), envServerURL)
@@ -89,18 +97,18 @@ func TestLoadOrchestratorConfig_MissingServerURL_NamesOnlyThatVariable(t *testin
 // as loadConfig treats it.
 func TestLoadOrchestratorConfig_MalformedServerURL_StillRejected(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "not-a-url")
+	defaultedIdentityEnv(t, "not-a-url")
 	_, err := loadOrchestratorConfig()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errMalformedEnv)
 }
 
-// TestConfigForArgs_InstructionsWithoutIdentity_UsesOrchestratorConfig
-// proves the fallback is reached through the real dispatch-time seam, not
+// TestConfigForArgs_InstructionsWithDefaultedIdentity_UsesOrchestratorConfig
+// proves the defaults are reached through the real dispatch-time seam, not
 // only by calling loadOrchestratorConfig directly.
-func TestConfigForArgs_InstructionsWithoutIdentity_UsesOrchestratorConfig(t *testing.T) {
+func TestConfigForArgs_InstructionsWithDefaultedIdentity_UsesOrchestratorConfig(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "https://loam.example")
+	defaultedIdentityEnv(t, "https://loam.example")
 	for _, args := range [][]string{{"instructions"}, {"instructions", "work start"}} {
 		cfg, err := configForArgs(args)
 		require.NoErrorf(t, err, "args %v", args)
@@ -109,12 +117,18 @@ func TestConfigForArgs_InstructionsWithoutIdentity_UsesOrchestratorConfig(t *tes
 }
 
 // TestConfigForArgs_InstructionsWithAnyIdentitySet_UsesFullConfig is the
-// fallback's boundary, and the surprising case it exists to rule out. A
-// PARTIALLY configured identity is a mistake, not an orchestrator: silently
-// answering it as the orchestrator would tell an agent that misspelled
-// LOAM_AGENT_NAME it may do less than its real role allows, and it would
-// look like a success. Each subtest sets exactly one of the three and
-// asserts the error still names the two that are genuinely missing.
+// all-or-nothing rule, and the design alternative it rules out. The three
+// LOAM_AGENT_* variables default TOGETHER: per-variable defaults would mean
+// a forgotten `export LOAM_AGENT_ROLE` silently produced
+// `ada-lovelace-7-orchestrator` -- an agent handed a role nobody chose for
+// it, with no signal anything was wrong, writing that role into permanent
+// review records. So a PARTIAL identity is a usage error naming the
+// variables actually missing. Each subtest sets exactly one of the three
+// and asserts the error still names the other two.
+//
+// This is the case a later refactor breaks without noticing, because both
+// readings look reasonable in isolation; see docs/orchestration.md ->
+// Identity for the rule stated in one sentence.
 func TestConfigForArgs_InstructionsWithAnyIdentitySet_UsesFullConfig(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -129,7 +143,7 @@ func TestConfigForArgs_InstructionsWithAnyIdentitySet_UsesFullConfig(t *testing.
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			// Not parallel: t.Setenv is incompatible with t.Parallel.
-			noIdentityEnv(t, "https://loam.example")
+			defaultedIdentityEnv(t, "https://loam.example")
 			t.Setenv(tt.set, tt.value)
 			_, err := configForArgs([]string{"instructions"})
 			require.Error(t, err, "a partial identity must not silently resolve to the orchestrator")
@@ -141,6 +155,29 @@ func TestConfigForArgs_InstructionsWithAnyIdentitySet_UsesFullConfig(t *testing.
 			}
 		})
 	}
+}
+
+// TestConfigForArgs_InstructionsWithNameAndIDButNoRole_IsAUsageError is the
+// all-or-nothing rule's worst case, spelled out because it is the one a
+// per-variable-defaults design would get wrong most convincingly: an agent
+// briefed with a real name and id whose `export LOAM_AGENT_ROLE` was
+// forgotten. Under per-variable defaults this would quietly become
+// `ada-lovelace-7-orchestrator` and succeed. It must not: the assertion
+// that carries the weight is that no config comes back at all, since a
+// message check alone would still pass for a config that had ALSO been
+// built.
+func TestConfigForArgs_InstructionsWithNameAndIDButNoRole_IsAUsageError(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	defaultedIdentityEnv(t, "https://loam.example")
+	t.Setenv(envAgentName, "ada-lovelace")
+	t.Setenv(envAgentID, "7")
+	cfg, err := configForArgs([]string{"instructions"})
+	require.Error(t, err, "a forgotten LOAM_AGENT_ROLE must never default to orchestrator")
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), envAgentRole, "the error must name the one variable actually missing")
+	assert.NotContains(t, err.Error(), envAgentName+" is required")
+	assert.NotContains(t, err.Error(), envAgentID+" is required")
+	assert.ErrorIs(t, err, errUsage)
 }
 
 // TestConfigForArgs_InstructionsWithFullIdentity_UnchangedFromBefore proves
@@ -155,15 +192,15 @@ func TestConfigForArgs_InstructionsWithFullIdentity_UnchangedFromBefore(t *testi
 	assert.Equal(t, "ada-lovelace-7-reviewer", cfg.Identifier())
 }
 
-// TestConfigForArgs_WhoamiWithoutIdentity_StillErrors pins the deliberate
+// TestConfigForArgs_WhoamiWithUnsetIdentity_StillErrors pins the deliberate
 // asymmetry between the two ungated orientation commands. `whoami` reports
-// the identity an operator CONFIGURED; handing it a synthetic one nobody
-// set would make "I misconfigured this agent" indistinguishable from "I ran
-// this deliberately anonymous" in the one command whose whole job is
-// diagnosing the former.
-func TestConfigForArgs_WhoamiWithoutIdentity_StillErrors(t *testing.T) {
+// the identity an operator CONFIGURED; handing it the defaulted synthetic
+// one would make "I misconfigured this agent" indistinguishable from "I
+// left the identity at its defaults on purpose" in the one command whose
+// whole job is diagnosing the former.
+func TestConfigForArgs_WhoamiWithUnsetIdentity_StillErrors(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "https://loam.example")
+	defaultedIdentityEnv(t, "https://loam.example")
 	_, err := configForArgs([]string{"whoami"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), envAgentName)
@@ -171,21 +208,21 @@ func TestConfigForArgs_WhoamiWithoutIdentity_StillErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), envAgentRole)
 }
 
-// TestInstructionsWithoutIdentity_SendsWellKnownHeadersOverTheOrdinaryAuthPath
+// TestInstructionsWithDefaultedIdentity_SendsRealHeadersOverTheOrdinaryAuthPath
 // is this bead's end-to-end CLI proof, and the reason it routes through
 // internal/httpauth's REAL CLI() wrapper rather than reading the raw
-// headers: the design's central claim is that the well-known identity uses
-// the ORDINARY AUTHENTICATED PATH and needs no unauthenticated route. A
-// request that failed httpauth's own fail-closed check would 401 here
-// exactly as it would in production, so this fails if the fallback ever
-// stopped producing a complete, resolvable identity.
+// headers: the design's central claim is that the defaulted identity is a
+// REAL identity travelling the ORDINARY AUTHENTICATED PATH, needing no
+// unauthenticated route. A request that failed httpauth's own fail-closed
+// check would 401 here exactly as it would in production, so this fails if
+// the defaults ever stopped producing a complete, resolvable identity.
 //
 // It drives the whole binary's entry sequence -- NewProductionDeps (which
 // is where configForArgs runs), NewRouter, Run -- rather than calling
-// runInstructions with a hand-built Deps, because the fallback lives in
+// runInstructions with a hand-built Deps, because the defaulting lives in
 // Deps CONSTRUCTION and a test that built Deps itself would skip it
 // entirely.
-func TestInstructionsWithoutIdentity_SendsWellKnownHeadersOverTheOrdinaryAuthPath(t *testing.T) {
+func TestInstructionsWithDefaultedIdentity_SendsRealHeadersOverTheOrdinaryAuthPath(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
 	var gotIdentifier string
 	path, handler := loamv1connect.NewMetaServiceHandler(metaHandlerFunc(
@@ -204,7 +241,7 @@ func TestInstructionsWithoutIdentity_SendsWellKnownHeadersOverTheOrdinaryAuthPat
 	mux.Handle(path, auth.CLI(handler))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	noIdentityEnv(t, srv.URL)
+	defaultedIdentityEnv(t, srv.URL)
 
 	var out bytes.Buffer
 	args := []string{"instructions"}
@@ -219,15 +256,15 @@ func TestInstructionsWithoutIdentity_SendsWellKnownHeadersOverTheOrdinaryAuthPat
 	assert.Len(t, payload.Commands, 1, "the command list is whatever the server's role filter returned, never widened here")
 }
 
-// TestInstructionsWithoutIdentityOrServerURL_FailsNamingOnlyServerURL is
+// TestInstructionsWithNoServerURL_FailsNamingOnlyServerURL is
 // acceptance criterion 13's failure half at the CLI's real entry point, and
 // it checks the EXIT CODE as well as the message: NewProductionDeps reports
 // a config failure through the encoder before any Deps exists, so a
 // regression that turned this into an internal error (exit 1) rather than a
 // usage error (exit 2) would still print a plausible message.
-func TestInstructionsWithoutIdentityOrServerURL_FailsNamingOnlyServerURL(t *testing.T) {
+func TestInstructionsWithNoServerURL_FailsNamingOnlyServerURL(t *testing.T) {
 	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	noIdentityEnv(t, "")
+	defaultedIdentityEnv(t, "")
 	var out bytes.Buffer
 	_, err := NewProductionDeps(slog.New(slog.NewJSONHandler(io.Discard, nil)), http.DefaultClient, &out, strings.NewReader(""), []string{"instructions"})
 	require.Error(t, err)

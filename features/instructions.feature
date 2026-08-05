@@ -20,11 +20,16 @@ Feature: Agent orientation
     When I ask for instructions for one command
     Then I receive only that command's usage
 
-  Scenario: An agent with no identity configured is answered as the orchestrator
-    Given no agent identity is configured
+  Scenario: The agent identity defaults to the built-in orchestrator
+    Given the agent identity variables are left at their defaults
     When I ask for instructions
     Then I receive the orchestrator role's instructions
     And only the commands the orchestrator role permits
+
+  Scenario: A partly configured identity is an error, not a default role
+    Given only my agent name and id are set
+    When I try to ask for instructions
+    Then the attempt is rejected, naming the role variable
 
   Scenario: whoami reports my identity
     When I ask who I am

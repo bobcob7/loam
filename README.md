@@ -82,13 +82,16 @@ in the environment, and the server does not verify them. Verified, server-issued
 credentials and finer-grained scoping are planned (see Future Work).
 
 One consequence of that, stated here so it moves with the caveat itself rather than drifting
-from it: `loam instructions` run with no `LOAM_AGENT_*` configured resolves to a fixed,
-well-known identity (`loam-orchestrator-0-orchestrator`) whose role is **orchestrator**, and
-makes an ordinary authenticated call like any other. This adds no hole. Under the trust model
-above, a caller who wanted `search` and `graph.query` could already have asserted
-`LOAM_AGENT_ROLE=reviewer` and been given them; the well-known identity asserts less, not
-more. It is not an unauthenticated route — `/healthz` and `/readyz` remain the only ones —
-and it hardens exactly when the trust model does.
+from it: the three `LOAM_AGENT_*` variables have a **built-in default value** — the
+well-known identity `loam-orchestrator-0-orchestrator`, whose role is **orchestrator**.
+`loam instructions` uses it when all three are left unset, and makes an ordinary
+authenticated call like any other; there is no such thing as a request without an identity.
+This adds no hole. Under the trust model above, a caller who wanted `search` and
+`graph.query` could already have asserted `LOAM_AGENT_ROLE=reviewer` and been given them;
+the default identity asserts less, not more. It is not an unauthenticated route — `/healthz`
+and `/readyz` remain the only ones — and it hardens exactly when the trust model does. The
+three default together: set any one and all three are required, so a forgotten export is a
+usage error rather than a silent role nobody chose.
 
 #### Graph DB
 

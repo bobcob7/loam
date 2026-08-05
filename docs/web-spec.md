@@ -164,8 +164,8 @@ defaults:
   a verdict. The two it does hold are what let it check a task's factual claims about the
   code before an agent is dispatched against them, without a clone. See
   [`docs/orchestration.md`](orchestration.md), and `loam instructions` in
-  `docs/cli-spec.md` for the well-known identity that resolves to this role when no
-  `LOAM_AGENT_*` is configured. Seeded by migration `0009_orchestrator_role`, which fills
+  `docs/cli-spec.md` for the well-known identity the `LOAM_AGENT_*` variables default to,
+  whose role this is. Seeded by migration `0009_orchestrator_role`, which fills
   its instructions only where they are still empty, so an operator's own text survives a
   re-run — as with `0006_role_instructions_seed`, editing the migration is not how you
   change the text of a deployment that has already applied it; `UpdateRole` is.

@@ -96,16 +96,16 @@ The complete set of environment variables the CLI reads. All are **required exce
 `LOAM_OUTPUT_FORMAT`**, with two further exceptions, one per direction: `whoami` without
 `--verify` does not require `LOAM_SERVER_URL` (see `whoami` below — "Local only, no server
 call" means exactly that), and `instructions` does not require the three `LOAM_AGENT_*`
-variables, falling back to the well-known orchestrator identity when *none* of them is set
-(see `instructions` below). Identity & role feed the authorization model described in
+variables, which have a built-in default value — the well-known orchestrator identity — used
+when *none* of them is set (see `instructions` below). Identity & role feed the authorization model described in
 README → Agent Identity & Roles. Names are provisional.
 
 | Variable | Purpose | Required | Default |
 | --- | --- | --- | --- |
 | `LOAM_SERVER_URL` | Base URL of the Loam server — the Connect APIs and the git smart-HTTP endpoint (`clone` composes `<LOAM_SERVER_URL>/git/<group>/<repo>.git`). A URL (not host/port) so future transports like local sockets can be expressed via scheme. | yes, except bare `whoami` | — |
-| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | yes, except `instructions` (all three, or none) | — |
-| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes, except `instructions` (all three, or none) | — |
-| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes, except `instructions` (all three, or none) | — |
+| `LOAM_AGENT_NAME` | Agent name, a `<first-name>-<last-name>` combination. | defaults to the well-known orchestrator identity; all three, or none | — |
+| `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | defaults to the well-known orchestrator identity; all three, or none | — |
+| `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | defaults to the well-known orchestrator identity; all three, or none | — |
 | `LOAM_OUTPUT_FORMAT` | Output format: `json`, `yaml`, `xml`, or `human`. Unknown values fall back to `json`. | no | `json` |
 
 On the wire, the `LOAM_AGENT_*` values travel as the request headers `Loam-Agent-Name`,
@@ -160,14 +160,14 @@ conventions above) with the role-specific instructions fetched from the server (
 per role in the web console). The command list is filtered to what the caller's role may
 do.
 
-**With no identity configured**, this is the one command that still answers. When none of
-`LOAM_AGENT_NAME`, `LOAM_AGENT_ID` or `LOAM_AGENT_ROLE` is set, the CLI resolves a fixed,
-well-known identity — name `loam-orchestrator`, id `0`, role `orchestrator`, identifier
-`loam-orchestrator-0-orchestrator` — and makes the same authenticated call it always makes,
-returning the built-in **orchestrator** role's instructions and its capability-filtered
-command list (`graph.query` and `search`, plus the ungated `instructions`/`whoami`; see
-`docs/web-spec.md` → RoleService and [`orchestration.md`](orchestration.md)). Three things
-this deliberately is not:
+**The identity variables have a built-in default**, and this is the one command that uses
+it. `LOAM_AGENT_NAME`, `LOAM_AGENT_ID` and `LOAM_AGENT_ROLE` default to a fixed, well-known
+identity — `loam-orchestrator`, `0`, `orchestrator`, identifier
+`loam-orchestrator-0-orchestrator` — so with none of them set the CLI makes the same
+authenticated call it always makes, carrying a real identity, and returns the built-in
+**orchestrator** role's instructions and its capability-filtered command list (`graph.query`
+and `search`, plus the ungated `instructions`/`whoami`; see `docs/web-spec.md` → RoleService
+and [`orchestration.md`](orchestration.md)). Three things this deliberately is not:
 
 - **Not an unauthenticated route.** The request carries `Loam-Agent-*` headers and travels
   the ordinary authenticated path; `/healthz` and `/readyz` remain the server's only
@@ -175,18 +175,23 @@ this deliberately is not:
 - **Not an unfiltered command list.** The response is one narrow role's own commands. An
   agent cannot read it as a listing of everything the CLI can do — that is `loam help`,
   which needs no environment at all.
-- **Not a relaxation of `LOAM_SERVER_URL`.** It stays required: the CLI cannot invent where
-  the server is, and this command makes a real RPC. With it unset the command still fails
-  as a usage error naming *only* `LOAM_SERVER_URL`, not the identity variables it no longer
-  needs.
+- **Not a relaxation of `LOAM_SERVER_URL`.** It is the one variable of the four that cannot
+  have a default — the CLI can invent who it is, not where the server lives — and this
+  command makes a real RPC. With it unset the command still fails as a usage error naming
+  *only* `LOAM_SERVER_URL`, not the identity variables it no longer needs.
 
-The identity values are fixed in the binary and not configurable — what varies between
-deployments is the orchestrator role's text and granted operations, and those are an
-ordinary editable role row. Setting `LOAM_AGENT_*` is itself the escape hatch: with any of
-the three set, all three are required and the command behaves exactly as it always has,
-answering for that role. A *partial* identity is therefore a configuration error, not an
-orchestrator, and is reported as one. `whoami` is deliberately unchanged: it reports the
-identity an operator configured, and still fails when none is.
+**The three default together, or not at all.** Set any one of them and all three are
+required, and the command behaves exactly as it always has, answering for that role. A
+*partial* identity is a configuration error and is reported as one, naming the variables
+actually missing: a forgotten `LOAM_AGENT_ROLE` must never be quietly completed into
+`<name>-<id>-orchestrator`, which would hand an agent a role nobody chose for it and write
+that role into permanent review records with no signal anything was wrong.
+
+The default identity's values are fixed in the binary and not configurable — what varies
+between deployments is the orchestrator role's text and granted operations, and those are an
+ordinary editable role row. `whoami` is deliberately unchanged: it reports the identity an
+operator configured, and still fails when none is, so "misconfigured" stays distinguishable
+from "left at the defaults" in the one command whose job is diagnosing the former.
 
 **Output** (JSON; minimal by design — identity is deliberately excluded, see `whoami`):
 
@@ -214,7 +219,8 @@ neither positional arguments nor a stdin note (e.g. `work list`).
 
 **Errors:** exit `1` if the server is unreachable while fetching role instructions. Exit `2`
 if `LOAM_SERVER_URL` is missing or malformed — the only variable this command requires when
-no identity is configured.
+the identity is left at its defaults — or if some but not all of the `LOAM_AGENT_*` variables
+are set.
 
 ### whoami
 

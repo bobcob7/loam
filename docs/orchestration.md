@@ -10,9 +10,11 @@ An orchestrator is a loam identity, but a narrow one. It holds `search` and
 a branch, push, comment or cast a verdict. It reads the task, dispatches agents,
 carries findings between them, and records outcomes.
 
-`loam instructions` with no identity configured resolves to the well-known
-orchestrator identity and returns that role's guidance; with an identity set it
-returns that role's, exactly as before.
+`loam instructions` needs no `LOAM_AGENT_*` configuration: those three variables
+default to the well-known orchestrator identity, and the command returns that
+role's guidance over the ordinary authenticated path, carrying a real identity
+like every other call. Set them and it returns your own role's guidance, exactly
+as before.
 
 ## The loop
 
@@ -52,6 +54,13 @@ Setting `NAME` to the whole string produces identifiers like
 `ada-lovelace-7-author-ada-lovelace-7-author-author` in permanent review
 records. This is easy to do and impossible to fix afterwards without rewriting
 review history.
+
+The three default **together or not at all**: leave all of them unset and you
+get the well-known orchestrator identity, `loam-orchestrator-0-orchestrator`,
+which is synthetic on its face wherever it is recorded; set any one of them and
+all three are required. A forgotten `LOAM_AGENT_ROLE` is a usage error, never a
+silent promotion to orchestrator — a per-variable default would write the wrong
+role into permanent review records for exactly the reason above.
 
 Author and reviewer must be **different identities**. Roles gate capabilities:
 a reviewer holds `git.clone` but not `git.push` and genuinely cannot push.
