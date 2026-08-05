@@ -29,6 +29,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -188,8 +189,7 @@ func TestClaim_SkipsARepoWhoseRunningJobItDidNotStart(t *testing.T) {
 		"repoA's queued job must be left alone, not claimed and not failed")
 	assert.Equal(t, "idle", repoSyncState(ctx, t, pgPool, repoA),
 		"a repo the claim skipped must not have been moved to syncing")
-	_, collided := handler.find("ingest job claim lost a race for a repo that is already running elsewhere; trying another repo")
-	assert.False(t, collided,
+	assert.False(t, handler.findLevel(claimRejectedMsg, slog.LevelDebug),
 		"a repo whose running job is already committed must be filtered out by the query, not discovered by eating a unique violation and retrying")
 }
 
@@ -207,10 +207,18 @@ func TestClaim_SkipsARepoWhoseRunningJobItDidNotStart(t *testing.T) {
 //     worker doing nothing while other repos' jobs sit queued;
 //  3. repoA's queued job is untouched -- still 'queued', still claimable
 //     by whoever finishes the repo's running job, never 'failed';
-//  4. repoA's sync_state is untouched. claimOnce writes ingest_jobs
-//     BEFORE repos precisely so a rejected claim rolls back before it can
-//     strand a repo in 'syncing', a state nothing but a successful claim
-//     is supposed to be able to produce.
+//  4. repoA's sync_state is untouched, because the rejected attempt's
+//     whole transaction rolls back and claimOnce's two writes share it.
+//     Note what this does NOT establish: the ORDER of those two writes is
+//     irrelevant to this property, and an earlier draft of this comment
+//     claimed otherwise. A mutation that swaps them keeps the suite green
+//     (loam-54o.17's M8), which is correct -- 'syncing' is unreachable
+//     from a rejected claim either way;
+//  5. the rejection is logged at DEBUG and at no other level. This is the
+//     bead's headline symptom: the pre-change code surfaced ordinary
+//     contention on work()'s ERROR path, and nothing about the returned
+//     values distinguishes "handled quietly" from "handled, but still
+//     shouting about it every time two replicas race".
 func TestClaim_RejectedByTheGuardThenClaimsADifferentRepo(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -247,10 +255,12 @@ func TestClaim_RejectedByTheGuardThenClaimsADifferentRepo(t *testing.T) {
 		"the claim that DID succeed still owns its repo's sync_state handover")
 	assert.Equal(t, map[uuid.UUID]struct{}{repoB: {}}, pool.busy,
 		"only the repo actually claimed may hold a serialization slot -- a slot leaked on the rejection path would wedge repoA forever")
-	_, logged := handler.find("ingest job claim lost a race for a repo that is already running elsewhere; trying another repo")
-	assert.True(t, logged, "the rejection must be observable at DEBUG for diagnosis")
-	_, escalated := handler.find("claiming ingest job")
-	assert.False(t, escalated, "the rejection must never reach work()'s ERROR line")
+	assert.True(t, handler.findLevel(claimRejectedMsg, slog.LevelDebug),
+		"the rejection must be observable at DEBUG for diagnosis")
+	assert.False(t, handler.findLevel(claimRejectedMsg, slog.LevelError),
+		"ordinary contention logged at ERROR is this bead's headline symptom -- a repeated ERROR for expected behaviour trains operators to ignore the log")
+	assert.False(t, handler.findLevel(claimRejectedMsg, slog.LevelWarn),
+		"nor at WARN: one lost race per busy repo is routine, not something an operator must look at")
 }
 
 // TestClaim_EveryCandidateRejected_ReportsNothingToClaimNotAnError walks
@@ -308,8 +318,10 @@ func TestClaim_EveryCandidateRejected_ReportsNothingToClaimNotAnError(t *testing
 		assert.Equalf(t, "queued", fetchJob(ctx, t, pgPool, jobID).status,
 			"repo %d's rejected job must still be queued and claimable", i)
 	}
-	_, warned := handler.find("ingest job claim gave up after every candidate repo was already running elsewhere; will retry on the next wake or poll")
-	assert.True(t, warned, "exhausting the bound is rare enough to be worth a WARN -- unlike the per-rejection DEBUG, which is ordinary contention")
+	assert.True(t, handler.findLevel(claimExhaustedMsg, slog.LevelWarn),
+		"exhausting the bound is rare enough to be worth a WARN -- unlike the per-rejection DEBUG, which is ordinary contention")
+	assert.False(t, handler.findLevel(claimExhaustedMsg, slog.LevelDebug),
+		"nor is it DEBUG: every visible repo running elsewhere is a standing symptom (fleet-wide contention, or a stranded 'running' row) an operator should see")
 }
 
 // TestClaim_NonGuardErrorStillSurfaces is the other side of matching by
@@ -424,8 +436,8 @@ func TestClaim_ConcurrentPoolsRacingOneRepo(t *testing.T) {
 		busyCount := len(poolA.busy) + len(poolB.busy)
 		assert.Equalf(t, 1, busyCount, "round %d: exactly one pool may hold the repo's serialization slot", round)
 	}
-	_, exercised := handler.find("ingest job claim lost a race for a repo that is already running elsewhere; trying another repo")
-	t.Logf("guard-rejection path exercised across %d rounds: %v", claimRaceRounds, exercised)
+	t.Logf("guard-rejection path exercised across %d rounds: %v",
+		claimRaceRounds, handler.findLevel(claimRejectedMsg, slog.LevelDebug))
 }
 
 // TestClaim_QueuedAtTie_BreaksOnID closes the repo-wide gap loam-c94.18

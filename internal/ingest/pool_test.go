@@ -546,6 +546,29 @@ func (h *capturingHandler) find(msg string) (slog.Record, bool) {
 	return slog.Record{}, false
 }
 
+// findLevel reports whether any captured record has BOTH the given
+// message and the given level.
+//
+// find (above) matches on message alone, which cannot express the
+// assertion loam-54o.17 needs. That bead's whole subject is a behaviour
+// that was already "logged" before the fix and is still "logged" after it
+// -- what changed is the LEVEL, from work()'s ERROR (ordinary contention
+// reported as a fault, the symptom operators learn to ignore) to DEBUG.
+// A message-only assertion passes identically either way, so the
+// deliberate decision would have been documented in a doc comment and
+// guarded by nothing. Asserting the true case AND the false case at the
+// wrong level pins it in both directions.
+func (h *capturingHandler) findLevel(msg string, level slog.Level) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message == msg && r.Level == level {
+			return true
+		}
+	}
+	return false
+}
+
 // attrString returns the string form of key's value on r, or "" if key was
 // never set -- good enough for these tests, which only assert non-empty /
 // Contains, never an exact numeric or structured comparison.

@@ -450,6 +450,26 @@ func isRunningPerRepoViolation(err error) bool {
 	return pgErr.Code == uniqueViolation && pgErr.ConstraintName == runningPerRepoConstraint
 }
 
+// claimRejectedMsg and claimExhaustedMsg are claim's two contention log
+// messages, and their LEVELS are a deliberate decision the tests pin in
+// both directions (see capturingHandler.findLevel): DEBUG per rejection,
+// because ordinary contention reported as a fault is precisely the
+// symptom loam-54o.17 removes and a repeated ERROR for expected behaviour
+// trains operators to ignore the log; WARN on exhaustion, because every
+// visible repo running elsewhere is a standing symptom -- fleet-wide
+// contention, or a row stranded in 'running' -- and rare enough to be
+// worth looking at.
+//
+// They are constants rather than inline literals because the assertions
+// that matter most here are NEGATIVE ones ("this was not logged at
+// ERROR"), and a negative assertion written against a copied literal
+// starts passing vacuously the instant the two strings drift apart.
+// Same-package tests referencing these cannot drift.
+const (
+	claimRejectedMsg  = "ingest job claim lost a race for a repo that is already running elsewhere; trying another repo"
+	claimExhaustedMsg = "ingest job claim gave up after every candidate repo was already running elsewhere; will retry on the next wake or poll"
+)
+
 // maxClaimAttempts bounds how many candidates one claim call will try
 // before giving up and reporting "nothing to claim". The bound is the
 // point: an unbounded loop against a constraint that keeps rejecting is a
@@ -520,20 +540,36 @@ const maxClaimAttempts = 5
 // reason is worth writing down rather than rediscovering. Two writers of
 // one table with independent concurrency handling is how the original
 // double-run survived unnoticed, and this bead is that cost being paid a
-// second time. Consolidating onto internal/ingestjobs.Store, though, is
-// blocked on three things that store does not have: (1) the claim must
-// commit in the SAME transaction as syncStateSyncingQuery, or repos.
-// sync_state and ingest_jobs.status become observable in disagreement
-// (see the syncStateSyncingQuery block's ownership contract), and Store
-// exposes no transaction a caller can join; (2) it must accept this
-// process's busy-repo exclusion set, which ClaimIngestJob has no
-// parameter for; (3) Job here is internal/ingest's own type, and
-// ingestjobs.Job is a different shape. Each is small; together they are a
-// cross-package refactor with its own test surface, not a paragraph in a
-// bug fix. The right sequencing is: land the correct behaviour here first
-// (so production is not exposed while the refactor is designed), then
-// move Pool onto a tx-scoped ingestjobs.Store that takes an exclusion
-// set, and delete claimQuery.
+// second time -- and it was never even undocumented: internal/ingestjobs'
+// own package doc has said so since it landed ("internal/ingest.Pool
+// already owns a separate, hand-written-SQL path against this same table
+// ... deliberately parallel"). The duplication was a recorded decision
+// that nobody revisited once 0008 made it load-bearing.
+//
+// Consolidating onto internal/ingestjobs.Store is blocked on three
+// things, and the FIRST is subtler than it looks. Store is constructed
+// over a querier (= gen.DBTX), which pgx.Tx already satisfies, so
+// NewStore(tx, logger) compiles today -- "Store exposes no transaction a
+// caller can join", an earlier draft of this comment, is simply false.
+// The real obstacle is that Store.Claim's RETRY cannot survive inside a
+// caller's transaction: the first unique violation aborts that
+// transaction, and every statement after it fails with 25P02 (current
+// transaction is aborted, commands ignored until end of transaction
+// block) instead of retrying. A tx-scoped Claim therefore needs each
+// attempt wrapped in a SAVEPOINT it can roll back to -- exactly the shape
+// loam-c94.24 established for internal/chunkstore's per-file writes --
+// before the claim and syncStateSyncingQuery can share one transaction,
+// which they must, or repos.sync_state and ingest_jobs.status become
+// observable in disagreement (see the syncStateSyncingQuery block's
+// ownership contract). The other two: (2) it must accept this process's
+// busy-repo exclusion set, which ClaimIngestJob has no parameter for;
+// (3) Job here is internal/ingest's own type, and ingestjobs.Job is a
+// different shape. Together that is a cross-package refactor with its own
+// test surface, not a paragraph in a bug fix. The right sequencing is:
+// land the correct behaviour here first (so production is not exposed
+// while the refactor is designed), then give Store a
+// SAVEPOINT-per-attempt tx-scoped Claim that takes an exclusion set, move
+// Pool onto it, and delete claimQuery.
 func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -552,11 +588,11 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 		if !isRunningPerRepoViolation(err) {
 			return Job{}, false, err
 		}
-		p.logger.DebugContext(ctx, "ingest job claim lost a race for a repo that is already running elsewhere; trying another repo",
+		p.logger.DebugContext(ctx, claimRejectedMsg,
 			"job_id", job.ID, "repo_id", job.RepoID, "claim_attempt", attempt, "max_claim_attempts", maxClaimAttempts)
 		excluded = append(excluded, job.RepoID)
 	}
-	p.logger.WarnContext(ctx, "ingest job claim gave up after every candidate repo was already running elsewhere; will retry on the next wake or poll",
+	p.logger.WarnContext(ctx, claimExhaustedMsg,
 		"max_claim_attempts", maxClaimAttempts)
 	return Job{}, false, nil
 }
@@ -564,8 +600,12 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 // claimOnce is one attempt of claim's loop: select a candidate not in
 // excluded, flip it to running, and mark its repo syncing, all in one
 // transaction. It returns the candidate it selected even when the write
-// then fails, so claim can add that repo to excluded -- without which a
-// retry would re-select the identical row and spin.
+// then fails, so claim can add that repo to excluded -- see
+// maxClaimAttempts for why that exclusion is belt-and-braces rather than
+// what keeps the retry from spinning on the identical row (claimQuery's
+// NOT EXISTS filter is, since the conflicting row is necessarily
+// committed by the time the violation is raised). An earlier draft of
+// this comment credited the exclusion with that job; it does not have it.
 //
 // Callers must hold mu (claim does). The write can BLOCK rather than fail
 // outright: if a concurrent transaction has an uncommitted 'running' row
