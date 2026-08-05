@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -32,6 +33,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/bobcob7/loam/internal/db"
+	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
 	"github.com/bobcob7/loam/internal/testdb"
 	"github.com/bobcob7/loam/internal/testembed"
@@ -459,4 +461,366 @@ func TestSearch_ScopedByTargetBranch_ExcludesOtherBranches(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "main.go", results[0].File)
+}
+
+// --- SAVEPOINT isolation (loam-c94.24) ---
+
+// badUTF8 is content Postgres itself rejects: 0xff is not a valid UTF-8
+// byte in any position, so the INSERT fails with SQLSTATE 22021 (character
+// not in repertoire) at the SERVER, which is the only way to get a genuine
+// mid-transaction statement error rather than a Go-side one that never
+// reaches the connection. Everything in this section depends on that
+// distinction -- the defect under test lives entirely in Postgres's
+// transaction semantics, so a failure the driver short-circuits would
+// prove nothing.
+func badUTF8(prefix string) string {
+	return prefix + string([]byte{0xff})
+}
+
+// chunkContents reads back the content of every chunks row for repoID,
+// keyed by file, so an assertion can name WHICH file survived rather than
+// counting how many did. Each file in these tests carries distinct content
+// for exactly that reason: with identical content per file, "the right rows
+// were written" and "some rows were written" are indistinguishable.
+func chunkContents(ctx context.Context, t *testing.T, pool *pgxpool.Pool, repoID uuid.UUID) map[string][]string {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT file, content FROM chunks WHERE repo_id = $1 ORDER BY file, start_line`, repoID)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var file, content string
+		require.NoError(t, rows.Scan(&file, &content))
+		out[file] = append(out[file], content)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestNewInTx_OneRejectedFileStillLetsTheOthersCommit is this bead's
+// central proof, and it is deliberately an END-TO-COMMIT assertion: the
+// rows are read back from a fresh pool query AFTER the caller's own
+// tx.Commit returns, not from inside the transaction where every write
+// still looks fine.
+//
+// Before loam-c94.24 this could not pass at any point in the batch.
+// Postgres aborts the ENTIRE transaction the instant one statement in it
+// errors, so the bad file's INSERT poisoned everything: the two later
+// files' statements failed with SQLSTATE 25P02 and the commit itself
+// failed with "commit unexpectedly resulted in rollback", taking the file
+// that had ALREADY landed down with it.
+//
+// The rejected file sits in the MIDDLE on purpose. A file that fails last
+// leaves nothing after it to be poisoned, and a file that fails first
+// leaves nothing before it to be discarded; only a middle failure tests
+// both directions at once.
+func TestNewInTx_OneRejectedFileStillLetsTheOthersCommit(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newRegisteredPool(t, sharedDSN)
+	repoID := insertRepo(ctx, t, pool, "group/savepoint-batch-repo")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	s := NewInTx(tx, logger)
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "before.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func Before() {}", Embedding: unit(0)},
+	})
+	require.NoError(t, err)
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "bad.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: badUTF8("func Bad() {}"), Embedding: unit(1)},
+	})
+	require.Error(t, err, "Postgres must actually reject the invalid UTF-8, or this test proves nothing about surviving a rejection")
+	assert.NotErrorIs(t, err, ErrTransactionUnusable,
+		"a rejection the savepoint unwound must NOT be reported as an unusable transaction -- that sentinel is what makes a batch loop give up")
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "after.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func After() {}", Embedding: unit(2)},
+	})
+	require.NoError(t, err, "the transaction must still be usable after a rejection -- before loam-c94.24 this failed with SQLSTATE 25P02")
+
+	require.NoError(t, tx.Commit(ctx), "the commit must succeed; before loam-c94.24 it failed with \"commit unexpectedly resulted in rollback\"")
+
+	assert.Equal(t, map[string][]string{
+		"before.go": {"func Before() {}"},
+		"after.go":  {"func After() {}"},
+	}, chunkContents(ctx, t, pool, repoID),
+		"exactly the two good files' own contents must be committed -- the one before the rejection and the one after it -- and nothing for the rejected file")
+}
+
+// TestNewInTx_RejectedReplace_LeavesThePriorChunksIntactThroughTheCommit is
+// acceptance criterion 3, and it is verified WITH savepoints rather than
+// carried over from the whole-transaction-abort case, where "prior chunks
+// intact" was true only because nothing committed at all.
+//
+// Now the transaction DOES commit, so the delete and the inserts must
+// unwind TOGETHER inside it: ROLLBACK TO SAVEPOINT has to undo the DELETE
+// that ReplaceFileChunks issues first, not just the INSERT that failed.
+// If it did not, the file would commit with zero chunks -- silently
+// unsearchable, and far worse than stale.
+//
+// The prior chunks are two rows with distinct content, so "the prior
+// chunks survived" cannot be confused with "some row survived".
+func TestNewInTx_RejectedReplace_LeavesThePriorChunksIntactThroughTheCommit(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newRegisteredPool(t, sharedDSN)
+	repoID := insertRepo(ctx, t, pool, "group/savepoint-prior-repo")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	_, err := New(pool, logger).ReplaceFileChunks(ctx, repoID, "main", "stale.go", []ChunkInput{
+		{StartLine: 1, EndLine: 5, Content: "func Old1() {}", Embedding: unit(0)},
+		{StartLine: 6, EndLine: 9, Content: "func Old2() {}", Embedding: unit(1)},
+	})
+	require.NoError(t, err)
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	s := NewInTx(tx, logger)
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "stale.go", []ChunkInput{
+		{StartLine: 1, EndLine: 5, Content: "func New1() {}", Embedding: unit(2)},
+		{StartLine: 6, EndLine: 9, Content: badUTF8("func New2() {}"), Embedding: unit(3)},
+	})
+	require.Error(t, err, "the second chunk's invalid UTF-8 must be rejected AFTER the delete and the first insert already ran, or the unwind is not being tested")
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "other.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func Other() {}", Embedding: unit(4)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	assert.Equal(t, map[string][]string{
+		"stale.go": {"func Old1() {}", "func Old2() {}"},
+		"other.go": {"func Other() {}"},
+	}, chunkContents(ctx, t, pool, repoID),
+		"the rejected file must keep BOTH of its prior chunks -- the DELETE must have unwound with the INSERTs, never leaving it emptied or half-replaced -- while the unrelated file still commits")
+}
+
+// TestNewInTx_ManyConsecutiveRejections_LeaveTheTransactionCommittable
+// guards the leak the unit test can only pin at the statement level: every
+// rejection is unwound with ROLLBACK TO SAVEPOINT, which leaves the
+// savepoint ESTABLISHED, so a missing RELEASE would accumulate one live
+// savepoint per rejected file. That costs memory on the server and, past
+// Postgres's 64-subtransaction-per-backend cache, forces every later
+// snapshot onto the slow suboverflowed path -- both invisible to a
+// two-file test.
+//
+// 80 rejections is chosen to cross that 64 threshold rather than to be a
+// round number.
+func TestNewInTx_ManyConsecutiveRejections_LeaveTheTransactionCommittable(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newRegisteredPool(t, sharedDSN)
+	repoID := insertRepo(ctx, t, pool, "group/savepoint-many-repo")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	s := NewInTx(tx, logger)
+
+	for i := range 80 {
+		_, err := s.ReplaceFileChunks(ctx, repoID, "main", fmt.Sprintf("bad/%d.go", i), []ChunkInput{
+			{StartLine: 1, EndLine: 1, Content: badUTF8(fmt.Sprintf("func Bad%d() {}", i)), Embedding: unit(0)},
+		})
+		require.Error(t, err, "rejection %d must be reported", i)
+		require.NotErrorIs(t, err, ErrTransactionUnusable, "rejection %d must still leave the transaction usable", i)
+	}
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "good.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func Good() {}", Embedding: unit(0)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	assert.Equal(t, map[string][]string{"good.go": {"func Good() {}"}}, chunkContents(ctx, t, pool, repoID))
+}
+
+// TestNewInTx_DeadConnection_ReportsTheTransactionUnusable is the other
+// half of the classification loam-c94.24 folds in. Killing the backend
+// from a SECOND connection leaves the store's transaction with a socket
+// that is simply gone: the resulting error carries no *pgconn.PgError and
+// matches none of pgx's named sentinels, so internal/ingest/vectors would
+// have classified it as a per-file REJECTION and retried it once per
+// remaining file -- turning one infrastructure failure into N, precisely
+// because savepoints made rejections survivable.
+//
+// ErrTransactionUnusable is not a guess about the error's shape: it is
+// what this store OBSERVES when its own savepoint statement cannot reach
+// the server.
+func TestNewInTx_DeadConnection_ReportsTheTransactionUnusable(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newRegisteredPool(t, sharedDSN)
+	repoID := insertRepo(ctx, t, pool, "group/savepoint-dead-repo")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	s := NewInTx(tx, logger)
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "alive.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func Alive() {}", Embedding: unit(0)},
+	})
+	require.NoError(t, err)
+
+	var backendPID int
+	require.NoError(t, tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&backendPID))
+	killer := newRegisteredPool(t, sharedDSN)
+	_, err = killer.Exec(ctx, `SELECT pg_terminate_backend($1)`, backendPID)
+	require.NoError(t, err)
+
+	_, err = s.ReplaceFileChunks(ctx, repoID, "main", "after-death.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func AfterDeath() {}", Embedding: unit(1)},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransactionUnusable,
+		"a connection that is simply gone must be reported as an unusable transaction, not as a per-file rejection a batch loop would keep retrying")
+}
+
+// BenchmarkReplaceFileChunks_SavepointOverhead is acceptance criterion 4:
+// the savepoint's cost measured on a realistic batch instead of assumed
+// free. The "savepoint" and "none" arms run the SAME ReplaceFileChunks code
+// against the same server on the same connection, differing only in the
+// transactor, so the delta between them is the two extra round trips
+// (SAVEPOINT, RELEASE SAVEPOINT) and nothing else.
+//
+// The batch shape (500 files x 4 chunks) is drawn from what an incremental
+// ingest of a medium repository actually looks like, not from what makes
+// the number flattering: the savepoint cost is per FILE while the write
+// cost is per CHUNK, so the ratio is worst at a low chunks-per-file count.
+//
+// The third arm, "savepointstatementsonly", exists because the first two
+// turned out to be the wrong instrument on their own: run repeatedly, the
+// container's own I/O variance is LARGER than the effect, and the arms
+// swap places between runs. That is itself a finding worth keeping -- the
+// overhead is below this setup's noise floor -- but it is not a number.
+// The third arm measures the two statements in isolation over the same
+// 500 iterations on the same connection, which is low-variance and gives
+// the absolute per-file cost the other two can then be read against.
+//
+// Numbers from -benchtime 10x -count=3 on an M4 against the
+// testcontainers Postgres this package already starts (loam-c94.24):
+//
+//	savepoint                1797 / 1766 / 1841 ms per 500-file batch
+//	none                     1633 / 1639 / 1531 ms
+//	savepointstatementsonly   228 /  229 /  223 ms  (~453us per file)
+//
+// so ~+12% on the batch, and the isolated arm (227ms) accounts for the
+// paired delta (200ms) within noise. The decisive comparison is against a
+// bare round trip: 1000 "SELECT 1" statements on the same connection ran
+// 234 / 231 / 229 ms -- indistinguishable from the same count of
+// SAVEPOINT/RELEASE. The savepoint statements do no measurable server-side
+// work; the entire cost is round-trip latency, which is a property of
+// where Postgres sits relative to the process, not of this change.
+//
+// This is also why the narrower alternative the bead offers -- a savepoint
+// around only the statements that can be rejected -- is not actually
+// narrower here. ReplaceFileChunks issues a DELETE and then the INSERTs,
+// every one of them can be rejected, and the DELETE must unwind WITH the
+// INSERTs or a rejected file commits emptied instead of stale (see
+// TestNewInTx_RejectedReplace_LeavesThePriorChunksIntactThroughTheCommit).
+// The narrowest savepoint that preserves that guarantee starts before the
+// DELETE and ends after the last INSERT, which is exactly the one that is
+// there.
+//
+// Run it with:
+//
+//	go test -tags=integration ./internal/chunkstore/ -run '^$' -bench SavepointOverhead -benchtime 10x
+func BenchmarkReplaceFileChunks_SavepointOverhead(b *testing.B) {
+	const (
+		files          = 500
+		chunksPerFile  = 4
+		benchmarkFiles = files
+	)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ctx := context.Background()
+	pool, err := db.NewPool(ctx, db.Config{DatabaseURL: sharedDSN}, logger)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer pool.Close()
+	var repoID uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO repos (id, name, upstream_url, forge_host, indexed_branch)
+		 VALUES (gen_random_uuid(), $1, 'https://example.com/repo.git', 'example.com', 'main')
+		 RETURNING id`, "group/bench-savepoint-repo").Scan(&repoID); err != nil {
+		b.Fatal(err)
+	}
+	inputs := make([]ChunkInput, chunksPerFile)
+	for i := range inputs {
+		inputs[i] = ChunkInput{StartLine: i*10 + 1, EndLine: i*10 + 9, Content: fmt.Sprintf("func Bench%d() { /* %s */ }", i, strings.Repeat("x", 200)), Embedding: unit(i)}
+	}
+	for _, tc := range []struct {
+		name string
+		with func(tx pgx.Tx, q queries) transactor
+	}{
+		{name: "savepoint", with: func(tx pgx.Tx, q queries) transactor { return &savepointTransactor{tx: tx, q: q} }},
+		{name: "none", with: func(_ pgx.Tx, q queries) transactor { return benchNoSavepoint{q: q} }},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			for b.Loop() {
+				b.StopTimer()
+				tx, err := pool.Begin(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				q := gen.New(tx)
+				s := newStore(q, tc.with(tx, q), logger)
+				b.StartTimer()
+				for f := range benchmarkFiles {
+					if _, err := s.ReplaceFileChunks(ctx, repoID, "main", fmt.Sprintf("pkg/bench/f%d.go", f), inputs); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.StopTimer()
+				if err := tx.Rollback(ctx); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+			}
+		})
+	}
+	b.Run("savepointstatementsonly", func(b *testing.B) {
+		for b.Loop() {
+			b.StopTimer()
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+			for range benchmarkFiles {
+				if _, err := tx.Exec(ctx, "SAVEPOINT "+fileSavepoint); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+fileSavepoint); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			if err := tx.Rollback(ctx); err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+		}
+	})
+}
+
+// benchNoSavepoint is the benchmark's baseline: exactly what NewInTx did
+// before loam-c94.24 -- run fn against the caller's transaction with no
+// savepoint around it. It lives in the test file rather than in the
+// package so the production code carries no unused, unsafe alternative
+// path that a future edit could reach for by accident.
+type benchNoSavepoint struct {
+	q queries
+}
+
+func (t benchNoSavepoint) withinTx(_ context.Context, fn func(q queries) error) error {
+	return fn(t.q)
 }

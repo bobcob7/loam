@@ -168,12 +168,17 @@ func (t *pgxTransactor) withinTx(ctx context.Context, fn func(q queries) error) 
 // rollback marker inside the one transaction the caller will commit.
 //
 // The success path costs two extra round trips per call (SAVEPOINT,
-// RELEASE SAVEPOINT) and the failure path three. Measured against a real
-// server on a 500-file batch that is a low-single-digit percentage of the
-// call's own cost, because a real ReplaceFileChunks call already issues
-// one DELETE plus one INSERT per chunk on the same connection; see
-// BenchmarkReplaceFileChunks_SavepointOverhead in integration_test.go for
-// the numbers rather than taking that on trust.
+// RELEASE SAVEPOINT) and the failure path three. Measured, not assumed
+// (BenchmarkReplaceFileChunks_SavepointOverhead, integration_test.go): on
+// a 500-file x 4-chunk batch against a real server the two statements cost
+// ~450us per file, ~12% on top of the batch's own ~1.6s -- and they cost
+// EXACTLY what a bare "SELECT 1" costs on the same connection, to within
+// the measurement's noise. That is the number that matters: SAVEPOINT and
+// RELEASE do no server-side work worth measuring, so the whole overhead is
+// client-server round-trip latency, which is a property of where Postgres
+// is deployed rather than of this change. There is no cheaper correct
+// version -- see the benchmark's doc comment for why a narrower savepoint
+// around "only the statements that can be rejected" is the same savepoint.
 type savepointTransactor struct {
 	tx savepointExecer
 	q  queries

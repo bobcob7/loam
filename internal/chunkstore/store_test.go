@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	pgvector "github.com/pgvector/pgvector-go"
 	"github.com/stretchr/testify/assert"
@@ -269,39 +270,149 @@ func TestSearch_RowWithInvalidRepoID_ReturnsErrInvalidUUID(t *testing.T) {
 	assert.Nil(t, result)
 }
 
-// TestPassthroughTransactor_RunsFnExactlyOnceAgainstBoundQueries proves
-// NewInTx's passthrough path does exactly one thing: hand fn the queries it
-// was built with and return. There is no Begin/Commit/Rollback call to
-// assert the absence of directly (passthroughTransactor has no reference to
-// any pgx.Tx at all), so this instead asserts the positive contract a
-// mistaken reintroduction of transaction-opening would violate: fn runs
-// exactly once, against exactly the bound queries, with nothing else
-// happening around it.
-func TestPassthroughTransactor_RunsFnExactlyOnceAgainstBoundQueries(t *testing.T) {
+// recordingExec returns a savepointExecer mock that records every statement
+// it is asked to run and fails the ones fail names, so a test can pin the
+// exact savepoint sequence rather than a count of calls.
+func recordingExec(fail map[string]error) (*savepointExecerMock, *[]string) {
+	var issued []string
+	return &savepointExecerMock{
+		ExecFunc: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+			issued = append(issued, sql)
+			return pgconn.CommandTag{}, fail[sql]
+		},
+	}, &issued
+}
+
+const (
+	sqlSavepoint  = "SAVEPOINT loam_chunkstore_file"
+	sqlRollbackTo = "ROLLBACK TO SAVEPOINT loam_chunkstore_file"
+	sqlRelease    = "RELEASE SAVEPOINT loam_chunkstore_file"
+)
+
+// TestSavepointTransactor_Success_EstablishesThenReleasesAroundFn pins the
+// happy-path statement sequence exactly, in order: nothing before the
+// SAVEPOINT, nothing between it and fn, and a RELEASE after. Asserting the
+// statements rather than a call count is what makes this test able to
+// notice a savepoint that is established but never released -- which would
+// leak one per file across a batch and is otherwise completely silent.
+//
+// It also keeps the contract its predecessor
+// (TestPassthroughTransactor_RunsFnExactlyOnceAgainstBoundQueries) covered:
+// fn runs exactly once, against exactly the bound queries. A savepoint is
+// not a nested transaction, so fn must still see the caller's own
+// transaction, not some fresh connection.
+func TestSavepointTransactor_Success_EstablishesThenReleasesAroundFn(t *testing.T) {
 	t.Parallel()
 	q := &queriesMock{}
-	pt := &passthroughTransactor{q: q}
+	ex, issued := recordingExec(nil)
+	st := &savepointTransactor{tx: ex, q: q}
 	calls := 0
 	var got queries
-	err := pt.withinTx(t.Context(), func(q queries) error {
+	var atFn []string
+	err := st.withinTx(t.Context(), func(q queries) error {
 		calls++
 		got = q
+		atFn = append([]string(nil), *issued...)
 		return nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, calls, "withinTx must invoke fn exactly once -- no retry, no nested call")
 	assert.Same(t, queries(q), got, "withinTx must hand fn the exact queries it was constructed with, not a fresh one")
+	assert.Equal(t, []string{sqlSavepoint}, atFn, "the savepoint must be established BEFORE fn runs, or it protects nothing")
+	assert.Equal(t, []string{sqlSavepoint, sqlRelease}, *issued)
 }
 
-// TestPassthroughTransactor_PropagatesFnError proves withinTx does not
-// swallow or wrap fn's error -- there is no commit/rollback step here that
-// could otherwise mask it.
-func TestPassthroughTransactor_PropagatesFnError(t *testing.T) {
+// TestSavepointTransactor_FnError_UnwindsToTheSavepointAndReturnsTheErrorBare
+// is the whole point of loam-c94.24 in miniature. Two things must be true
+// together: the failed call's statements are unwound (ROLLBACK TO), and the
+// savepoint is then destroyed (RELEASE) so a batch of rejections cannot
+// accumulate savepoints on the server -- ROLLBACK TO leaves the savepoint
+// established, it does not remove it.
+//
+// The returned error must be fn's own, UNWRAPPED by any
+// ErrTransactionUnusable: that is the signal a batch loop reads as "only
+// this file failed, keep going" (internal/ingest/vectors.Persist), so
+// wrapping it here would silently turn every rejection back into a
+// whole-batch abort.
+func TestSavepointTransactor_FnError_UnwindsToTheSavepointAndReturnsTheErrorBare(t *testing.T) {
 	t.Parallel()
 	fnErr := errors.New("boom")
-	pt := &passthroughTransactor{q: &queriesMock{}}
-	err := pt.withinTx(t.Context(), func(_ queries) error { return fnErr })
+	ex, issued := recordingExec(nil)
+	st := &savepointTransactor{tx: ex, q: &queriesMock{}}
+	err := st.withinTx(t.Context(), func(_ queries) error { return fnErr })
 	assert.ErrorIs(t, err, fnErr)
+	assert.NotErrorIs(t, err, ErrTransactionUnusable,
+		"a rejection this store successfully unwound leaves the transaction usable, and must not be reported as if it did not")
+	assert.Equal(t, []string{sqlSavepoint, sqlRollbackTo, sqlRelease}, *issued)
+}
+
+// The three savepoint statements are themselves statements that must reach
+// the server, so each one failing is proof the transaction (or the
+// connection under it) is gone -- the one classification that cannot be
+// made by inspecting an error's shape, and the reason
+// ErrTransactionUnusable exists (loam-c94.24). Table-driven over all three
+// positions because it is the position most likely to be missed in a later
+// edit, not the sentinel, that this guards.
+func TestSavepointTransactor_SavepointStatementFails_ReportsTheTransactionUnusable(t *testing.T) {
+	t.Parallel()
+	execErr := errors.New("write tcp 127.0.0.1:5432: broken pipe")
+	fnErr := errors.New("invalid byte sequence for encoding \"UTF8\"")
+	for _, tc := range []struct {
+		name     string
+		failing  string
+		fnErr    error
+		wantRan  bool
+		wantSQL  []string
+		wantText string
+	}{
+		{
+			name:    "establishing",
+			failing: sqlSavepoint,
+			wantSQL: []string{sqlSavepoint},
+		},
+		{
+			name:     "releasing after a successful fn",
+			failing:  sqlRelease,
+			wantRan:  true,
+			wantSQL:  []string{sqlSavepoint, sqlRelease},
+			wantText: "releasing savepoint",
+		},
+		{
+			name:     "rolling back after a failed fn",
+			failing:  sqlRollbackTo,
+			fnErr:    fnErr,
+			wantRan:  true,
+			wantSQL:  []string{sqlSavepoint, sqlRollbackTo},
+			wantText: fnErr.Error(),
+		},
+		{
+			name:     "releasing after a rolled-back fn",
+			failing:  sqlRelease,
+			fnErr:    fnErr,
+			wantRan:  true,
+			wantSQL:  []string{sqlSavepoint, sqlRollbackTo, sqlRelease},
+			wantText: fnErr.Error(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ex, issued := recordingExec(map[string]error{tc.failing: execErr})
+			st := &savepointTransactor{tx: ex, q: &queriesMock{}}
+			ran := false
+			err := st.withinTx(t.Context(), func(_ queries) error {
+				ran = true
+				return tc.fnErr
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrTransactionUnusable, "a savepoint statement that could not be driven means the transaction is gone, not that one file was rejected")
+			assert.ErrorIs(t, err, execErr, "the driver's own error must stay in the chain for the operator")
+			assert.Equal(t, tc.wantRan, ran, "fn must run if and only if the savepoint was established first")
+			assert.Equal(t, tc.wantSQL, *issued, "the sequence must stop at the statement that failed -- continuing to issue statements on a dead transaction is exactly the cascade this sentinel exists to prevent")
+			if tc.wantText != "" {
+				assert.Contains(t, err.Error(), tc.wantText, "the message must still name what was being unwound, or an operator sees only the symptom")
+			}
+		})
+	}
 }
 
 func chunkRow(repoID uuid.UUID, file string, embedding []float32) gen.Chunk {
