@@ -158,9 +158,9 @@ cheap enough to keep simple.
   which commit they reflect. The previous index stays live until a retry succeeds.
 - **There is exactly one partial-degrade mode, and it is per file on the chunk track**
   (`loam-c94.21`, `loam-c94.24`). If the chunks store rejects one file's write — a type
-  error, a constraint, a size limit — that file is skipped, counted in the ingest's
-  rejected-file count, and logged at ERROR naming the file; the rest of the batch is
-  written and the transaction commits. This is implemented with a `SAVEPOINT` around each
+  error, a constraint, a size limit — that file is skipped and logged at ERROR naming the
+  file; the rest of the batch is written and the transaction commits. This is implemented
+  with a `SAVEPOINT` around each
   `chunkstore.ReplaceFileChunks` call, because Postgres aborts an entire transaction the
   instant any statement in it errors: without the savepoint the skip happened in Go and
   the commit discarded the batch anyway, which is what the reported production failure
@@ -174,8 +174,17 @@ cheap enough to keep simple.
     issued after its savepoint. So the degrade is one-sided: the file stays in the graph
     and drops out of RAG search, rather than disappearing from both.
   - The **ingested ref still advances**, so the job is a success and search answers
-    correctly report which commit they reflect. A rejected file is visible as the rejected
-    count and the ERROR log line, not as a failed job.
+    correctly report which commit they reflect. A rejected file is not a failed job.
+- **The only signal a rejected file emits today is one ERROR log line per file**, from
+  `internal/ingest/vectors.Persist`, naming the file and the store's error. Nothing
+  counts it anywhere an operator can query. `vectors.Stats.FilesRejected` exists and is
+  populated, but the swap orchestrator keeps it in a local `writeResult` and never reads
+  it: `ingest.Stats` carries only `FilesParsed` and `ChunksEmbedded`, and the "ingest
+  committed" log line omits the rejection count. So a repo can be **partially indexed and
+  still report success**, and the only way to notice is to be reading ERROR logs. This is
+  a real observability gap, called out here rather than left for someone to discover by
+  trusting a count that is computed and discarded; surfacing it (`ingest_jobs.stats` is
+  the natural home) is follow-up work, not part of `loam-c94.24`.
 - **The graph track has no equivalent mode and takes no savepoint.** Its per-file
   tolerances — no grammar for the extension, an unparseable file, syntax errors — are all
   decided during extraction, before the transaction opens, and skip the store call

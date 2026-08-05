@@ -348,6 +348,19 @@ func (ix *Indexer) Prepare(ctx context.Context, repoID uuid.UUID, targetBranch s
 // threshold Persist enforced by returning an error would trigger the same
 // whole-transaction rollback as a single rejection would.
 //
+// As of loam-c94.24, NO caller does read it. The swap orchestrator keeps
+// this Stats in a local writeResult and takes only ChunksWritten out of it;
+// ingest.Stats has just FilesParsed and ChunksEmbedded, and the "ingest
+// committed" log line does not mention rejections. So FilesRejected is
+// computed here and discarded one frame up, and the per-file ERROR log
+// below is in practice the ONLY signal a rejection emits. That was a
+// latent gap while a rejection doomed the commit anyway -- the job failed,
+// loudly, whatever the counter said. Savepoints made the job SUCCEED, which
+// is what turns it into a real observability gap: a partially indexed repo
+// now reports success. Recorded here and in docs/ingestion-spec.md
+// "Consistency & Failure" rather than fixed here, because surfacing it is
+// the orchestrator's and loam-c94.13's work, not this package's.
+//
 // # What makes the skip actually pay off against a REAL store
 //
 // Everything above holds unconditionally against the store interface this
