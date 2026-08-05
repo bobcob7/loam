@@ -139,32 +139,47 @@ func jobStatsColumn(t *testing.T, stats ingest.Stats) map[string]any {
 //
 // # What the fixture is built to make DISTINGUISHABLE
 //
-// Two rejections out of four files, not one out of three, and the four
-// files are given different content and different symbol names. That is
-// what separates the outcomes a weaker fixture fuses together:
+// The counter's own value has to be UNIQUE among the quantities a wrong
+// implementation could plausibly return in its place, or the test passes
+// on a substitution and the comment claiming otherwise misleads the next
+// person into weakening it further. That is not hypothetical: an earlier
+// version of this test used two rejections of four files, where the
+// survivor count (FilesReplaced) and the chunk count were ALSO 2, and
+// substituting either for FilesRejected passed this test in full.
 //
-//   - Two rejections, so a count of 2 cannot be produced by a boolean
-//     ("any rejection") widened to an int, nor by a first-rejection-only
-//     latch. One rejection could not tell those apart from a correct sum.
-//   - Two SURVIVORS, so a count of 2 cannot be produced by miscounting the
-//     batch size (4) or the number of files that succeeded -- which happen
-//     to be equal here, so the survivor-count reading is separately ruled
-//     out by asserting FilesParsed is 4 in the same breath.
-//   - Distinct files with distinct symbol names, and a per-file chunk-count
-//     assertion on all four, so the test shows the count identified the
-//     RIGHT two. Identical files could show that two were rejected and
-//     never that the two rejected were the two poisoned.
-//   - An exact equality, never assert.Positive: "non-zero" cannot tell one
-//     rejection from five, which is precisely the discrimination an
-//     operator needs from this number.
+// So: THREE rejections of FIVE files, one survivor carrying three symbols
+// and the other one, which separates every neighbouring quantity --
+//
+//	FilesRejected      3  <- the value under test
+//	FilesReplaced      2  (survivors)
+//	ChunksWritten      4  (1 + 3 across the two survivors)
+//	FilesWithoutChunks 0
+//	EmbedCalls         0  (Persist makes none; Prepare's copy is discarded)
+//	batch size         5
+//
+// -- and rules out, by arithmetic rather than by assertion text, a
+// boolean "any rejection" widened to an int, a first-rejection-only latch,
+// the survivor count, the chunk count, and the batch size. FilesParsed is
+// asserted too, but note what it does and does not buy: it comes off the
+// GRAPH track's Stats, so it can only catch a substitution from that
+// struct and is no defence at all against the chunk-track neighbours
+// above. The arithmetic is what does that work.
+//
+// The five files also carry different content and different symbol names,
+// with a per-file chunk-count assertion on every one, so the test shows
+// the count identified the RIGHT three rather than any three; identical
+// files could only ever show that three were rejected. And every
+// assertion is an exact equality, never assert.Positive, because
+// "non-zero" cannot tell one rejection from five.
 func TestIngest_RejectedFiles_AreCountedAndReachEveryChosenSurface(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.commit(t, "two poisoned of four", map[string]string{
+	f.commit(t, "three poisoned of five", map[string]string{
 		"clean_alpha.go": "package alpha\n\nfunc AlphaKeeps() {}\n",
 		"bad_one.go":     "package badone\n\nfunc RejectedFirst() {}\n",
 		"bad_two.go":     "package badtwo\n\nfunc RejectedSecond() {}\n",
-		"clean_omega.go": "package omega\n\nfunc OmegaKeeps() {}\n",
+		"bad_three.go":   "package badthree\n\nfunc RejectedThird() {}\n",
+		"clean_omega.go": "package omega\n\nfunc OmegaKeepsOne() {}\n\nfunc OmegaKeepsTwo() {}\n\nfunc OmegaKeepsThree() {}\n",
 	})
 	embedder := nanVectorEmbedder{Embedder: testembed.New(), marker: "Rejected"}
 	logger, capture := newCapturingLogger()
@@ -173,25 +188,26 @@ func TestIngest_RejectedFiles_AreCountedAndReachEveryChosenSurface(t *testing.T)
 	stats, err := newOrchestratorWithLogger(t, f, realTransactor(), embedder, logger).Run(t.Context(), job)
 	require.NoError(t, err, "rejected files must not fail the job -- loam-c94.24's whole trade, and the reason this counter is the only signal left")
 
-	assert.Equal(t, 2, stats.FilesRejected,
-		"exactly the two poisoned files were rejected: 0 is the pre-loam-2d44 behaviour, 1 would be a first-rejection latch, 4 would be the batch size")
-	assert.Equal(t, 4, stats.FilesParsed,
-		"the graph track is unaffected by a chunk rejection, so a rejection count that came from the survivor count would show up here as a shrunken FilesParsed")
+	assert.Equal(t, 3, stats.FilesRejected,
+		"exactly the three poisoned files were rejected: 0 is the pre-loam-2d44 behaviour, 1 a first-rejection latch, 2 the survivor count, 4 the chunk count, 5 the batch size -- see this test's doc comment for why each of those is a value FilesRejected must not be able to collide with")
+	assert.Equal(t, 5, stats.FilesParsed,
+		"the graph track is untouched by a chunk rejection, so all five files are parsed; this catches a substitution from graphStats and nothing more")
 
-	assert.Zero(t, chunkCountFor(t, f, "bad_one.go"), "the first poisoned file is one of the two the count refers to")
-	assert.Zero(t, chunkCountFor(t, f, "bad_two.go"), "the second poisoned file is the other")
-	assert.Positive(t, chunkCountFor(t, f, "clean_alpha.go"), "a clean file must still be indexed, or the count would be describing a different two files")
-	assert.Positive(t, chunkCountFor(t, f, "clean_omega.go"))
-	assert.Equal(t, chunkCountFor(t, f, "clean_alpha.go")+chunkCountFor(t, f, "clean_omega.go"), stats.ChunksEmbedded,
+	assert.Equal(t, 1, chunkCountFor(t, f, "clean_alpha.go"), "the one-symbol survivor")
+	assert.Equal(t, 3, chunkCountFor(t, f, "clean_omega.go"), "the three-symbol survivor: it is what makes ChunksWritten 4 rather than 2, so the chunk count cannot stand in for the survivor count either")
+	assert.Zero(t, chunkCountFor(t, f, "bad_one.go"), "each poisoned file is named individually, so the count is shown to refer to THESE three")
+	assert.Zero(t, chunkCountFor(t, f, "bad_two.go"))
+	assert.Zero(t, chunkCountFor(t, f, "bad_three.go"))
+	assert.Equal(t, 4, stats.ChunksEmbedded,
 		"ChunksEmbedded counts only chunks that actually landed, so a rejected file's chunks are absent from it as well as from the table")
 
 	column := jobStatsColumn(t, stats)
-	assert.Equal(t, float64(2), column["files_rejected"],
-		"ingest_jobs.stats is this bead's durable, queryable surface, and its key is the contract -- json.Number decodes as float64")
+	assert.Equal(t, float64(3), column["files_rejected"],
+		"ingest_jobs.stats is this bead's durable, queryable surface, and its key is the contract -- json numbers decode as float64")
 
 	committed := capture.withMessage("ingest committed")
 	require.Len(t, committed, 1)
-	assert.Equal(t, int64(2), committed[0].attrs["files_rejected"],
+	assert.Equal(t, int64(3), committed[0].attrs["files_rejected"],
 		"the commit line carries the count, so a log-only operator gets it without a query")
 	assert.Equal(t, slog.LevelInfo, committed[0].level,
 		"the commit line stays INFO and stays greppable for ALL completed ingests; moving the partial ones off it would hide them")
@@ -199,7 +215,7 @@ func TestIngest_RejectedFiles_AreCountedAndReachEveryChosenSurface(t *testing.T)
 	partial := capture.withMessage("ingest committed with rejected files; this repo is partially indexed until those files change again or a full rebuild runs")
 	require.Len(t, partial, 1, "the incompleteness needs a line of its own, because operators alert on level and a field on an INFO line is not reachable by an alert")
 	assert.Equal(t, slog.LevelWarn, partial[0].level)
-	assert.Equal(t, int64(2), partial[0].attrs["files_rejected"])
+	assert.Equal(t, int64(3), partial[0].attrs["files_rejected"])
 	assert.Equal(t, job.TargetBranch, partial[0].attrs["target_branch"])
 	assert.Equal(t, job.ID, partial[0].attrs["job_id"],
 		"the WARN must name THIS job, or it cannot be joined to the ingest_jobs row carrying the same count")
