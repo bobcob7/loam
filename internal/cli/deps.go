@@ -59,9 +59,11 @@ func NewErrorMapper() ErrorMapper { return newErrorMapper() }
 // variables. It used to, and the census read "every other command still
 // needs the full four-variable config loadConfig requires" -- true when it
 // was written, false the moment `instructions` became a second exception
-// (loam-hi5o.31), and false in the more damaging way: configForArgs itself
-// points back HERE as the authoritative account of itself, so the two
+// (loam-hi5o.31), and false in the more damaging way: configForArgs used to
+// point back HERE as the authoritative account of itself, so the two
 // cross-referenced each other and the stale one sounded like the summary.
+// That pointer is gone -- see configForArgs, which now owns its own rule
+// outright.
 // Naming the rule's home instead of its contents is what stops the next
 // command-specific relaxation from repeating that.
 //

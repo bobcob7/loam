@@ -363,8 +363,19 @@ func TestCreateRole_PassesNameOperationsAndInstructionsToTheStore(t *testing.T) 
 // moment migration 0009 seeded a third. Nothing caught it -- reverting the
 // message to that wording left this package's tests green (loam-hi5o.31
 // round 2 verified exactly that) -- because no assertion looked at the
-// prose at all. The substring below is chosen to fail on any future
-// rewrite that goes back to naming roles instead of naming the mechanism.
+// prose at all.
+//
+// The needle is the single word "migration", deliberately loose. It was
+// "seeded by migration" for one round, and loam-hi5o.31's round-3 review
+// reworded the message five ways to find that three CORRECT rewordings
+// failed it -- "only migrations mark a role built-in", "the builtin flag
+// is written by migrations alone", "only roles created by a migration are
+// built-in". A pin that rejects every reasonable rephrasing of the thing
+// it is protecting gets loosened or deleted by whoever hits it, taking the
+// protection with it; that is the same dynamic as an over-eager needle in
+// a match list, and it applies to assertions on prose too. One word still
+// fails the enumeration, which named no mechanism at all, and matches the
+// granularity of the "built in" pin further down this file.
 func TestCreateRole_BuiltinRequested_IsRejected(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
@@ -376,7 +387,7 @@ func TestCreateRole_BuiltinRequested_IsRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInvalidArgument, connectCode(t, err))
 	assert.Empty(t, d.store.CreateRoleCalls(), "a forged builtin request must not reach the store")
-	assert.Contains(t, err.Error(), "seeded by migration",
+	assert.Contains(t, err.Error(), "migration",
 		"the refusal must not name a fixed set of roles -- migrations decide which are built-in, and 0009 already added a third")
 }
 

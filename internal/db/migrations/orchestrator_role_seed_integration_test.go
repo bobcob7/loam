@@ -167,8 +167,11 @@ func TestOrchestratorRoleSeedMigration_GrantsExactlyGraphQueryAndSearch(t *testi
 // The bead requires the seeded text to name no PARTICULAR tracker while
 // being "phrased for a task arriving from a tracker, a one-off
 // instruction, or a paragraph the operator wrote" -- so the category noun
-// is sanctioned prose, and forbidding it would fail the seed for doing the
-// thing it was asked to do.
+// is sanctioned prose, and a needle for it could fail a future seed for
+// doing exactly what it was asked to do. It would not fire on today's
+// text, which reaches source-agnosticism without the word at all
+// ("whatever its source"); the phrase is left out because the requirement
+// permits it, not because nothing currently matches.
 var trackerNames = []*regexp.Regexp{
 	regexp.MustCompile(`\bbd\b`),
 	regexp.MustCompile(`\bbeads\b`),
