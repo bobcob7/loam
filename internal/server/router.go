@@ -62,6 +62,15 @@ type Router struct {
 // composition-root wiring failure in the same class as RegisterCLI's
 // wrong-prefix panic: it cannot depend on request data, so it fails at
 // process startup or never.
+//
+// That branch is currently UNREACHABLE and no test covers it, which a reader
+// should know rather than assume: rpcOptions can only fail if
+// otelconnect.NewInterceptor fails, which can only happen if instrument
+// creation fails on the meter it was given, and WithoutMetrics makes that
+// meter the no-op — whose instrument constructors cannot error. It becomes
+// genuinely fallible the moment a real MeterProvider is wired in (the
+// metrics bead). The panic stays because it is honest defence for that day,
+// not because it is exercised today.
 func New(auth *httpauth.Auth, tracerProvider trace.TracerProvider) *Router {
 	options, err := rpcOptions(tracerProvider)
 	if err != nil {

@@ -110,27 +110,39 @@ const (
 // # No RPC metrics this round
 //
 // otelconnect emits five instruments per RPC alongside its span, and this
-// call disables all of them with WithoutMetrics. Two independent reasons:
+// call disables all of them with WithoutMetrics.
 //
-//  1. Nothing would receive them. internal/telemetry deliberately installs
-//     no OpenTelemetry globals, and otelconnect defaults its meter to
-//     otel.GetMeterProvider() — the no-op. Metrics left enabled here would
-//     look wired and record nothing. Disabling them explicitly makes that
-//     visible instead of silent.
-//  2. Its metric attribute set is not safe as-is. otelconnect v0.9.0's
-//     addRequestAttributes puts net.peer.name AND net.peer.port into the
-//     set it records on every instrument, so on the server side each
-//     client's EPHEMERAL TCP PORT becomes its own time series — a
-//     cardinality explosion strictly worse than the agent name/id this
-//     file refuses to put on metrics. Enabling them would first require
-//     WithoutServerPeerAttributes. Those same peer attributes on the SPAN
-//     are fine, and are kept.
+// The load-bearing reason is CARDINALITY. otelconnect v0.9.0's
+// addRequestAttributes -> addAddressAttributes puts net.peer.name AND
+// net.peer.port into the attribute slice, and that same slice becomes the
+// attribute.NewSet passed to all five Record calls — so on the server side
+// each client's EPHEMERAL TCP PORT becomes its own time series, retained for
+// the whole retention window. That is a cardinality explosion strictly worse
+// than the agent name/id this file refuses to put on metrics, and it is
+// demonstrated, not inferred: with a global MeterProvider installed, one RPC
+// through this Router records five instruments carrying a live
+// net.peer.port.
 //
-// There is also no seam in otelconnect for ADDING an attribute to its
-// instruments (WithAttributeFilter can only remove), so recording the one
-// safe field — loam.agent.role — as a metric label is not possible through
-// this interceptor at all. RPC metrics, with role and without peer
-// attributes, belong to the metrics bead.
+// WHAT A LATER BEAD CANNOT DO, so it is not attempted here. The obvious
+// remedy — WithoutServerPeerAttributes, keeping the peer attributes on the
+// span — DOES NOT EXIST in v0.9.0. That option is implemented as
+// WithAttributeFilter, documented as applying to "all metrics and trace
+// attributes", and in the unary path the trace attribute set is derived from
+// the same filtered slice. There is no per-signal seam. So the real menu for
+// the metrics bead is: keep peer attributes on spans and accept a series per
+// client port, or drop them from BOTH signals. Nor can role be added back:
+// AttributeFilter is func(Spec, KeyValue) bool — keep or drop, never add —
+// so loam.agent.role cannot become a metric label through this interceptor
+// at any setting.
+//
+// A second, weaker reason: nothing would receive these instruments today.
+// otelconnect captures otel.GetMeterProvider() at construction and
+// internal/telemetry deliberately installs no OpenTelemetry global, so they
+// would look wired and record nothing. That is a CHOICE rather than an
+// absence — internal/telemetry does build a real MeterProvider and exposes
+// it; rpcOptions simply is not given one — which is exactly why it cannot
+// carry the argument on its own. If a later bead passes that provider in,
+// the cardinality reason above is what still stands.
 func rpcOptions(tracerProvider trace.TracerProvider) ([]connect.HandlerOption, error) {
 	if tracerProvider == nil {
 		tracerProvider = tracenoop.NewTracerProvider()
