@@ -263,7 +263,10 @@ func buildSyncScheduler(cfg config.Config, pool *pgxpool.Pool, ingestPool *inges
 	repos := reposstore.NewStore(gen.New(pool), cfg.Logger)
 	workBranches := workbranchstore.New(gen.New(pool), cfg.Logger)
 	credentials := credentialstore.New(pool, encryptor, cfg.Logger)
-	httpClient := &http.Client{}
+	// Instrumented (loam-9v9s): forgePRTracker below drives GetPRState and
+	// ClosePR on every sync tick for every open work branch, which makes
+	// this the highest-frequency forge traffic in the process.
+	httpClient := forge.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider)
 	// One host-agnostic *forge.Resolver for gitCredentialConverter,
 	// exactly as registerRepoAdminService builds it and for the reason
 	// documented there: GitCredentials' token-as-password convention is

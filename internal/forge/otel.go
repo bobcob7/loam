@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -58,12 +59,31 @@ const spanNamePrefix = "forge "
 // here by TestInstrumentHTTPClient_NeverRecordsCredentials rather than left
 // to survive a dependency bump on trust.
 //
-// A no-op MeterProvider is passed deliberately. otelhttp otherwise falls
-// back to otel.GetMeterProvider(), a process-wide global that
-// internal/telemetry pointedly never installs; naming the no-op keeps this
-// package's behaviour independent of whether some other package ever does,
-// and keeps HTTP metrics -- which are a different bead -- from appearing as
-// a side effect of adding spans.
+// # BOTH GLOBAL FALLBACKS ARE CLOSED, NOT JUST THE OBVIOUS ONE
+//
+// otelhttp reaches for a process-wide global in TWO places when the
+// corresponding option is omitted, and internal/telemetry installs neither:
+//
+//   - WithMeterProvider, or otel.GetMeterProvider(). A no-op is passed so
+//     HTTP metrics -- a different bead -- cannot appear as a side effect of
+//     adding spans.
+//   - WithPropagators, or otel.GetTextMapPropagator(). An EMPTY composite is
+//     passed, which injects nothing.
+//
+// The second is the one that is easy to miss and the more consequential of
+// the two. otelhttp's transport calls propagators.Inject on every outbound
+// request, writing headers into a request bound for a THIRD-PARTY forge --
+// git.example.com, api.github.com. Today the global default is a no-op, so
+// nothing is injected and the call is inert. But it is a global: a single
+// otel.SetTextMapPropagator anywhere in the process, in any future bead or
+// dependency, would silently begin leaking this deployment's internal trace
+// and span IDs to an external service that is not part of its trace domain,
+// with no diff to this file to explain it. Passing the propagator
+// explicitly makes that a decision someone has to come here and make.
+//
+// If loam ever runs against a forge inside its own trace domain and wants
+// end-to-end traces through it, this is the one line to change -- and it
+// should be changed here, per client, not by installing a global.
 func InstrumentHTTPClient(client *http.Client, tp trace.TracerProvider) *http.Client {
 	if tp == nil {
 		return client
@@ -72,6 +92,7 @@ func InstrumentHTTPClient(client *http.Client, tp trace.TracerProvider) *http.Cl
 	instrumented.Transport = otelhttp.NewTransport(client.Transport,
 		otelhttp.WithTracerProvider(tp),
 		otelhttp.WithMeterProvider(metricnoop.NewMeterProvider()),
+		otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()),
 		otelhttp.WithSpanNameFormatter(spanNameForRequest),
 	)
 	return &instrumented

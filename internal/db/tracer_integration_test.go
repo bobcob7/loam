@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -48,7 +50,7 @@ import (
 // tracedPool starts a migrated Postgres and returns a pool built through the
 // REAL NewPool with a recording tracer provider attached the way cmd/server
 // attaches one, plus the recorder to read spans back from.
-func tracedPool(ctx context.Context, t *testing.T) (*pgxpool.Pool, trace.TracerProvider, *tracetest.SpanRecorder) {
+func tracedPool(ctx context.Context, t *testing.T, dsnParams ...string) (*pgxpool.Pool, trace.TracerProvider, *tracetest.SpanRecorder) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	container, err := postgres.Run(ctx, testdb.PostgresImage,
@@ -61,7 +63,7 @@ func tracedPool(ctx context.Context, t *testing.T) (*pgxpool.Pool, trace.TracerP
 	t.Cleanup(func() {
 		assert.NoError(t, container.Terminate(context.Background()))
 	})
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	dsn, err := container.ConnectionString(ctx, append([]string{"sslmode=disable"}, dsnParams...)...)
 	require.NoError(t, err)
 	require.NoError(t, migrations.Migrate(ctx, dsn, logger))
 	recorder := tracetest.NewSpanRecorder()
@@ -355,4 +357,44 @@ func TestQueryTracer_AbsentWhenNoProviderConfigured(t *testing.T) {
 	_, err = gen.New(pool).ListRoles(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, recorder.Ended(), "a pool built without a TracerProvider must emit no spans at all")
+}
+
+// TestQueryTracer_AcquireSpanOnRealPoolExhaustion is the half of the acquire
+// story a unit test cannot tell: that pgxpool DISPATCHES to AcquireTracer at
+// all, discovering it by type-asserting the same ConnConfig.Tracer value
+// that carries the query and CopyFrom hooks, and that a real exhausted pool
+// really does reach TraceAcquireEnd with an error.
+//
+// This is the case the instrumentation exists for. An acquire timeout means
+// NO QUERY EVER RUNS, so before this hook the worst thing this pool can do
+// to a request produced no span at all and was invisible in a trace.
+//
+// The three branch decisions (fast, slow, failed) are pinned deterministically
+// in TestTraceAcquire_SpanOnlyWhenSlowOrFailed; this test deliberately does
+// not re-assert them against wall-clock timing on a shared container.
+func TestQueryTracer_AcquireSpanOnRealPoolExhaustion(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool, _, recorder := tracedPool(ctx, t, "pool_max_conns=1")
+	// Hold the pool's only connection, so the next acquire has to queue and
+	// then time out.
+	held, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer held.Release()
+	timeoutCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	_, err = pool.Exec(timeoutCtx, "SELECT 1")
+	require.Error(t, err, "the pool has exactly one connection and this test is holding it")
+	span := findSpan(t, recorder, "postgres.acquire")
+	assert.Equal(t, codes.Error, span.Status().Code)
+	assert.Equal(t, trace.SpanKindClient, span.SpanKind())
+	// Backdating proved against a REAL wait: a span constructed at
+	// TraceAcquireEnd without trace.WithTimestamp would be ~instantaneous,
+	// hiding the very queue time it exists to show.
+	assert.GreaterOrEqual(t, span.EndTime().Sub(span.StartTime()), acquireWaitThreshold,
+		"the acquire span must cover the real queue wait")
+	// The failed acquire must NOT also produce a query span -- no query ran.
+	for _, s := range recorder.Ended() {
+		assert.NotEqual(t, "postgres."+unnamedQuery, s.Name(), "no query span should exist for a query that never reached the server")
+	}
 }

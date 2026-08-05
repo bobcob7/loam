@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -39,10 +40,18 @@ const spanNamePrefix = "embedder "
 // What DOES need care is the span name, which is why the formatter below is
 // a fixed route rather than anything derived from the batch.
 //
-// The no-op MeterProvider is passed for the same reason as in
-// internal/forge's equivalent: otelhttp would otherwise fall back to the
-// process-wide otel.GetMeterProvider(), a global internal/telemetry
-// deliberately never installs.
+// Both of otelhttp's global fallbacks are closed here for the same reasons
+// internal/forge's equivalent closes them, and that file carries the long
+// version. In short: an explicit no-op MeterProvider instead of
+// otel.GetMeterProvider(), so HTTP metrics cannot appear as a side effect of
+// adding spans; and an explicit EMPTY propagator instead of
+// otel.GetTextMapPropagator(), so a future otel.SetTextMapPropagator
+// anywhere in the process cannot silently start injecting trace headers into
+// requests. The embedder's case for the second is weaker than the forge's --
+// Ollama is a local service, not a third party, and does not understand
+// traceparent -- but the asymmetry would be the surprising thing, and an
+// LOAM_EMBEDDER_URL pointing at a shared or hosted inference endpoint is a
+// perfectly ordinary deployment.
 func InstrumentHTTPClient(client *http.Client, tp trace.TracerProvider) *http.Client {
 	if tp == nil {
 		return client
@@ -51,6 +60,7 @@ func InstrumentHTTPClient(client *http.Client, tp trace.TracerProvider) *http.Cl
 	instrumented.Transport = otelhttp.NewTransport(client.Transport,
 		otelhttp.WithTracerProvider(tp),
 		otelhttp.WithMeterProvider(metricnoop.NewMeterProvider()),
+		otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()),
 		otelhttp.WithSpanNameFormatter(spanNameForRequest),
 	)
 	return &instrumented

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -85,5 +86,10 @@ func TestNewPoolConfig_TracerOnlyWhenProviderSupplied(t *testing.T) {
 	traced, err := newPoolConfig(Config{DatabaseURL: dsn, TracerProvider: tracenoop.NewTracerProvider()})
 	require.NoError(t, err)
 	require.NotNil(t, traced.ConnConfig.Tracer, "a Config carrying a TracerProvider must attach the query tracer")
+	// pgx and pgxpool both discover the extra tracing surfaces by type
+	// assertion on this ONE value, so satisfying the interfaces is the whole
+	// wiring -- there is no second field to set and no error if a method is
+	// missing, just silence.
 	assert.Implements(t, (*pgx.CopyFromTracer)(nil), traced.ConnConfig.Tracer, "pgx discovers CopyFrom tracing by type assertion, so the attached value must satisfy CopyFromTracer too")
+	assert.Implements(t, (*pgxpool.AcquireTracer)(nil), traced.ConnConfig.Tracer, "pgxpool discovers acquire tracing the same way; without it a pool-exhaustion timeout produces no span at all")
 }

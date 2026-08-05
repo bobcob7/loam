@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
@@ -37,11 +39,29 @@ const unnamedQuery = "unnamed"
 // construction (newPoolConfig), implementing pgx.QueryTracer for
 // Query/QueryRow/Exec and pgx.CopyFromTracer for CopyFrom. pgx discovers the
 // second by type-asserting the value in ConnConfig.Tracer, so one value
-// covers both; CopyFrom is included deliberately rather than for
-// completeness, because it is how internal/chunkstore writes chunks and
-// internal/codegraph writes graph edges -- the two bulk paths of an ingest
-// run, and exactly the wall-clock a QueryTracer-only implementation would
-// leave as an unexplained gap under the ingest span.
+// covers both.
+//
+// CopyFrom is included deliberately rather than for completeness: it is a
+// SEPARATE dispatch path that pgx.QueryTracer never sees, so omitting it
+// would leave the work as an unexplained gap under the ingest span rather
+// than as a slow span. Its users are internal/codegraph's four `:copyfrom`
+// queries -- InsertSymbols, InsertSymbolReferences, InsertGraphEdges and
+// InsertSymbolHistory.
+//
+// # THE CHUNK PATH IS NOT A CopyFrom, AND IS THE SPAN-VOLUME PROBLEM
+//
+// internal/chunkstore does NOT bulk-write. ReplaceFileChunks issues one
+// InsertChunk per chunk inside its transaction, so chunk writing produces
+// ONE SPAN PER CHUNK -- a 10k-chunk batch is 10k spans, not one bulk span.
+// That makes it comfortably the highest span-count path in the system, and
+// it is a sampling question rather than a naming one: internal/telemetry's
+// sampler is ParentBased, so once an ingest job's root span is sampled every
+// one of those child spans is kept. Whoever instruments the ingest pipeline
+// next should decide what to do about that volume ON PURPOSE -- the honest
+// options are a lower root ratio for ingest, a span per file batch with the
+// per-chunk inserts left untraced, or moving the write to CopyFrom -- rather
+// than discovering it from a collector bill. Do not read the CopyFrom
+// support above as evidence that the chunk path is already bulk; it is not.
 //
 // # THIS TRACER NEVER RECORDS A BOUND QUERY ARGUMENT. DO NOT ADD ONE.
 //
@@ -107,9 +127,9 @@ func (t *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.T
 }
 
 // TraceCopyFromStart opens the span for one CopyFrom. The table and column
-// names are schema, fixed at compile time by sqlc's generated copyfrom.go
-// and by internal/chunkstore -- they are not user input and cannot carry a
-// row value, which is why they are safe to record when an argument is not.
+// names are schema, fixed at compile time by sqlc's generated copyfrom.go --
+// they are not user input and cannot carry a row value, which is why they
+// are safe to record when an argument is not.
 func (t *queryTracer) TraceCopyFromStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceCopyFromStartData) context.Context {
 	table := data.TableName.Sanitize()
 	ctx, _ = t.tracer.Start(ctx, spanNamePrefix+"copyfrom."+table,
@@ -130,6 +150,74 @@ func (t *queryTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pg
 	span := trace.SpanFromContext(ctx)
 	recordOutcome(span, data.CommandTag, data.Err)
 	span.End()
+}
+
+// acquireWaitThreshold is how long a pool acquire has to take before it is
+// worth a span of its own. A pool with a free connection hands one over in
+// microseconds; anything past this bound means the caller QUEUED, which is a
+// different performance story from a slow query and is invisible in the
+// query span, since pgxpool finishes acquiring before pgx starts tracing the
+// query.
+const acquireWaitThreshold = 50 * time.Millisecond
+
+// acquireStartKey is the private context key carrying an acquire's start
+// time from TraceAcquireStart to TraceAcquireEnd.
+type acquireStartKey struct{}
+
+// TraceAcquireStart records when a pgxpool.Acquire began. It starts no span
+// -- see TraceAcquireEnd for why.
+func (t *queryTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pgxpool.TraceAcquireStartData) context.Context {
+	return context.WithValue(ctx, acquireStartKey{}, time.Now())
+}
+
+// TraceAcquireEnd emits a span for a pool acquire ONLY when the acquire
+// failed or took longer than acquireWaitThreshold. pgxpool discovers this
+// method by type-asserting the same value in ConnConfig.Tracer that carries
+// the query and CopyFrom hooks.
+//
+// # WHY CONDITIONAL, WHEN EVERYTHING ELSE HERE IS UNCONDITIONAL
+//
+// Acquire is what closes a real observability hole: a pool exhaustion
+// timeout means NO QUERY EVER RUNS, so today the worst case this pool has
+// produces no span at all and is invisible in a trace. That case must be
+// visible.
+//
+// But pgxpool acquires a connection for EVERY Query/Exec, so tracing all of
+// them unconditionally would emit a second span per query and double the
+// span count of the whole process -- against the path this file already
+// documents as the span-volume problem, where one file batch is one span per
+// chunk. Paying double on every successful sub-millisecond acquire to make
+// the rare slow one visible is the wrong trade, so the span is built
+// RETROSPECTIVELY with explicit start and end timestamps once the duration
+// is known. The timings are exact, not approximated: trace.WithTimestamp
+// backdates the start to when the acquire actually began.
+//
+// The cost of this design is that a fast acquire leaves NO evidence it was
+// traced, so "no acquire span" means "fast or not instrumented" rather than
+// "fast". TestQueryTracer_AcquireSpanOnlyWhenSlowOrFailed pins both halves
+// so the distinction is at least asserted somewhere.
+func (t *queryTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, data pgxpool.TraceAcquireEndData) {
+	started, ok := ctx.Value(acquireStartKey{}).(time.Time)
+	if !ok {
+		return
+	}
+	ended := time.Now()
+	if data.Err == nil && ended.Sub(started) < acquireWaitThreshold {
+		return
+	}
+	_, span := t.tracer.Start(ctx, spanNamePrefix+"acquire",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(started),
+		trace.WithAttributes(
+			semconv.DBSystemNamePostgreSQL,
+			semconv.DBOperationName("acquire"),
+		),
+	)
+	if data.Err != nil {
+		span.SetStatus(codes.Error, "")
+		span.SetAttributes(semconv.DBResponseStatusCode(sqlState(data.Err)))
+	}
+	span.End(trace.WithTimestamp(ended))
 }
 
 // recordOutcome is the shared end-of-operation bookkeeping for both tracer

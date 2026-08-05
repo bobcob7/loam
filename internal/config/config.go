@@ -70,13 +70,31 @@ type Config struct {
 	// telemetry.New has run, which cannot happen inside Load because
 	// constructing the provider needs a context and can fail.
 	//
-	// It rides on Config for the same reason Logger does -- every
-	// buildRouter/register* function in cmd/server already takes a Config,
-	// and this is the observability handle they all need. A nil value means
-	// "not instrumented", which is what the composition-root tests that
-	// build a bare Config literal get, and is a no-op rather than a panic
-	// at every consumer (internal/db's Config.TracerProvider,
-	// forge.InstrumentHTTPClient, ollama.InstrumentHTTPClient).
+	// A nil value means "not instrumented", which is what the
+	// composition-root tests that build a bare Config literal get, and is a
+	// no-op rather than a panic at every consumer (internal/db's
+	// Config.TracerProvider, forge.InstrumentHTTPClient,
+	// ollama.InstrumentHTTPClient).
+	//
+	// # THE RULE FOR ADDING A THIRD NON-ENV FIELD
+	//
+	// Logger and TracerProvider are both OBSERVABILITY SINKS: the process
+	// writes to them and never reads a value back out to make a decision
+	// with. That is what makes carrying them here a pattern rather than a
+	// service locator, and it is the test a third field has to pass. Two
+	// properties follow from it and are what keep this honest:
+	//
+	//   - Removing the field can change what an operator SEES, never what
+	//     the server DOES. Nothing branches on it. If a proposed field would
+	//     be read in an `if`, it is an input, and it belongs in a parameter
+	//     on the constructor that needs it -- not here.
+	//   - Its zero value is inert, so a Config literal in a test is
+	//     automatically correct without knowing the field exists.
+	//
+	// A MeterProvider would qualify. A database pool, an *http.Client, a
+	// feature flag or a clock would NOT -- each is an input to behaviour,
+	// and putting one here would turn Config into the bag of dependencies
+	// this comment exists to prevent.
 	TracerProvider trace.TracerProvider
 }
 

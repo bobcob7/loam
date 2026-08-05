@@ -1,11 +1,19 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // TestQueryName_UsesSqlcHeaderNotStatementText is the property the span
@@ -108,6 +116,69 @@ func TestQueryName_UnheaderedSQLNeverReturnsTheStatement(t *testing.T) {
 			assert.NotContains(t, got, "credentials", "the fallback must never be the statement text")
 		})
 	}
+}
+
+// TestTraceAcquire_SpanOnlyWhenSlowOrFailed pins all three branches of the
+// conditional acquire span deterministically -- no database, and no sleep.
+// The start time travels in the context, so backdating it is exact where a
+// real slow acquire would be a timing race.
+//
+// The negative case is the one that matters most: pgxpool acquires a
+// connection for EVERY query, so a regression that made this unconditional
+// would silently double the process's span count.
+func TestTraceAcquire_SpanOnlyWhenSlowOrFailed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		elapsed  time.Duration
+		err      error
+		wantSpan bool
+	}{
+		{name: "fast and successful emits nothing", elapsed: 0, err: nil, wantSpan: false},
+		{name: "just under the threshold emits nothing", elapsed: acquireWaitThreshold - time.Millisecond, err: nil, wantSpan: false},
+		{name: "past the threshold emits a span", elapsed: acquireWaitThreshold + time.Second, err: nil, wantSpan: true},
+		{name: "a fast FAILURE still emits a span", elapsed: 0, err: context.DeadlineExceeded, wantSpan: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+			tracer := newQueryTracer(tp)
+			ctx := context.WithValue(t.Context(), acquireStartKey{}, time.Now().Add(-tt.elapsed))
+			tracer.TraceAcquireEnd(ctx, nil, pgxpool.TraceAcquireEndData{Err: tt.err})
+			spans := recorder.Ended()
+			if !tt.wantSpan {
+				assert.Empty(t, spans, "no span should have been emitted")
+				return
+			}
+			require.Len(t, spans, 1)
+			assert.Equal(t, spanNamePrefix+"acquire", spans[0].Name())
+			// The span must be BACKDATED to when the acquire began. Built
+			// naively at TraceAcquireEnd it would have ~zero duration, and
+			// the wait -- the entire point of the span -- would be invisible.
+			assert.GreaterOrEqual(t, spans[0].EndTime().Sub(spans[0].StartTime()), tt.elapsed,
+				"the span must cover the real wait, not the instant it was constructed")
+			if tt.err != nil {
+				assert.Equal(t, codes.Error, spans[0].Status().Code)
+			}
+		})
+	}
+}
+
+// TestTraceAcquireStart_CarriesTheStartTime pins the half of the pair that
+// TestTraceAcquire_SpanOnlyWhenSlowOrFailed fakes, so the two together cover
+// the real path rather than leaving a gap where the key is written with one
+// type and read with another.
+func TestTraceAcquireStart_CarriesTheStartTime(t *testing.T) {
+	t.Parallel()
+	tracer := newQueryTracer(tracenoop.NewTracerProvider())
+	before := time.Now()
+	ctx := tracer.TraceAcquireStart(t.Context(), nil, pgxpool.TraceAcquireStartData{})
+	started, ok := ctx.Value(acquireStartKey{}).(time.Time)
+	require.True(t, ok, "TraceAcquireEnd reads this key and silently does nothing if it is missing or the wrong type")
+	assert.False(t, started.Before(before))
 }
 
 // TestSQLState_ReportsCodeNeverMessage is the unit-level half of the
