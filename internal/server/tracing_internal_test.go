@@ -25,7 +25,14 @@ import (
 func TestAnnotateSpanWithCaller_Anonymous(t *testing.T) {
 	t.Parallel()
 	recorded := annotate(t, t.Context())
-	assert.Equal(t, callerKindAnonymous, recorded[attrCallerKind])
+	// The literal, not callerKindAnonymous. This is the same discipline
+	// tracing_test.go applies to the attribute KEYS and for the same reason:
+	// the value is a wire contract with a trace backend, and a test that
+	// compares a constant against itself cannot notice a rename. "agent" and
+	// "admin" are pinned by the httptest round trips; this is the only case
+	// with no round-trip coverage, so it is the only one that needs pinning
+	// here.
+	assert.Equal(t, "anonymous", recorded[attrCallerKind])
 	// Absent, not "": an empty-string attribute is indistinguishable from
 	// an agent whose name genuinely is empty.
 	assert.NotContains(t, recorded, attrAgentName)
