@@ -75,9 +75,11 @@ func (c *connectClients) Meta() MetaClient { return c.meta }
 // for every loam.v1 service, with identityInterceptor attaching the agent
 // identity headers to every outbound request. It fails closed — before any
 // request is ever sent — if any LOAM_AGENT_* identity field is empty:
-// loadConfig already guarantees this for the values it produces, but this
-// is a second, defensive check at the one other place a Config could reach
-// here (e.g. a hand-built test double), because the alternative is a
+// every config loader in config.go already guarantees this for the values
+// it produces -- loadOrchestratorConfig by construction, since its identity
+// is compile-time constants -- but this is a second, defensive check at the
+// one other place a Config could reach here (e.g. a hand-built test
+// double), because the alternative is a
 // request with an incomplete header set silently reaching the server and
 // coming back as a confusing 401 (see docs/cli-spec.md's fail-closed note
 // for loam-gcg) instead of a clear local usage error. Unexported: only
