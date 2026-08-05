@@ -188,28 +188,37 @@ cheap enough to keep simple.
 - **`repos.sync_state` stays `idle` after a partial ingest, deliberately.** A repo whose
   last ingest rejected files shows green in the admin console, and the incompleteness is
   visible only in the job's stats and logs. The alternatives were weighed and rejected:
-  - Reusing `error` would break the invariant `loam-c94.13` built the column around. That
-    bead writes `repos.sync_state` and `ingest_jobs.status` **in one transaction** so the
-    two can never disagree; `sync_state='error'` beside `status='succeeded'` is exactly
-    that disagreement, and it re-conflates "the index build blew up" with "this build
-    worked but skipped three files" — the conflation `ingest.SyncErrorPrefix` exists to
-    prevent. Nothing would clear it either, since no retry is scheduled for a job that
-    succeeded.
-  - A distinct state (`degraded`) is the honest-looking option and is **wrong for a
-    subtler reason worth writing down**: `sync_state` is a property of the REPO, and
-    `FilesRejected` is a property of one JOB. The next incremental ingest re-plans from
-    `git diff ingested_ref..tip`, and the ingested ref advanced past the rejection
-    (see above), so a file that was rejected and never touched again is **never in a
-    later reparse set**. Its chunks stay missing indefinitely — until that file changes
-    or a full rebuild runs — while the next clean ingest would write `idle` and clear the
-    degraded flag. That state would therefore announce "fixed" with nothing fixed, which
-    is a worse failure than the green badge it replaced, because it would be trusted.
-  - Making `sync_state` honest needs a **durable record of which files are missing
-    chunks** — a per-repo rejection ledger written in the same transaction as the swap,
-    cleared per path when that path's chunks are successfully written, with `sync_state`
-    derived from whether the ledger is empty. That also fixes the underlying defect (a
-    rejected file is never retried), which the state flag alone would not. It is real
-    work, not a rename, and is not part of `loam-2d44`.
+  - Reusing `error` is the one option the transactional invariant itself forbids.
+    `loam-c94.13` writes `repos.sync_state` and `ingest_jobs.status` **in one
+    transaction** so the two can never disagree, and `sync_state='error'` beside
+    `status='succeeded'` is exactly that disagreement. It also re-conflates "the index
+    build blew up" with "this build worked but skipped three files" — the conflation
+    `ingest.SyncErrorPrefix` exists to prevent — and nothing would ever clear it, since
+    no retry is scheduled for a job that succeeded.
+  - A distinct state (`degraded`) is **not** ruled out by that invariant, and being
+    precise about this matters because the reasoning is inherited by `loam-qj21`.
+    `Pool.succeed` could write `sync_state='degraded'` in the same transaction as
+    `ingest_jobs.status='succeeded'` and the two columns would still agree. What rules
+    it out is the **clearing rule**. `sync_state` is a property of the REPO;
+    `FilesRejected` is a property of one JOB. A rejected file is never re-planned: the
+    ingested ref advanced past it (see above), so `git diff ingested_ref..tip` cannot
+    name a path nobody touched, and nothing else re-plans it either (`loam-qj21`). So
+    the next unrelated incremental ingest, which rejects nothing, writes `idle` and
+    clears the flag while that file's chunks are still not the ones the repo's ingested
+    ref claims — announcing "fixed" with nothing fixed, which is worse than the green
+    badge it replaces because it would be trusted.
+  - **Clearing `degraded` only on a `KindFull` ingest** dodges the false-clearing
+    problem without any ledger, since a full rebuild genuinely does re-chunk every file.
+    It is the cheapest honest option and was weighed rather than overlooked. It is not
+    taken here because it makes the STATE honest while leaving the underlying defect —
+    a rejected file is never retried — exactly where it is, and because it costs a
+    migration plus console work in territory this change does not own. It belongs with
+    `loam-qj21`.
+  - The fuller fix, which makes the state honest *and* closes the defect, is a **durable
+    record of which files are missing current chunks** — a per-repo rejection ledger
+    written in the same transaction as the swap, cleared per path when that path's
+    chunks are successfully written, with `sync_state` derived from whether the ledger
+    is empty. Real work, not a rename; tracked as `loam-qj21`, not part of `loam-2d44`.
 - **The graph track has no equivalent mode and takes no savepoint.** Its per-file
   tolerances — no grammar for the extension, an unparseable file, syntax errors — are all
   decided during extraction, before the transaction opens, and skip the store call
