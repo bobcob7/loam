@@ -96,7 +96,7 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 // booted binary.
 func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	router := buildRouter(testConfigForRouter(), nil, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -132,7 +132,7 @@ func TestBuildRouter_NilPool_RepoServiceStillHitsGroupFallback(t *testing.T) {
 func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool, nil, "")
+	router := buildRouter(testConfigForRouter(), pool, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewRepoServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -154,7 +154,7 @@ func TestBuildRouter_WithPool_RepoServiceIsGenuinelyRegistered(t *testing.T) {
 func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool, nil, "")
+	router := buildRouter(testConfigForRouter(), pool, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewMetaServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -185,7 +185,7 @@ func TestBuildRouter_WithPool_MetaServiceIsGenuinelyRegistered(t *testing.T) {
 func TestBuildRouter_WithPool_WorkBranchServiceIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool, nil, "")
+	router := buildRouter(testConfigForRouter(), pool, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := loamv1connect.NewWorkBranchServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -235,7 +235,7 @@ func gitInfoRefsRequest(t *testing.T, srv *httptest.Server) (status int, body st
 // against.
 func TestBuildRouter_NilPool_GitStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	router := buildRouter(testConfigForRouter(), nil, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	status, body := gitInfoRefsRequest(t, srv)
@@ -260,7 +260,7 @@ func TestBuildRouter_NilPool_GitStillHitsGroupFallback(t *testing.T) {
 func TestBuildRouter_WithPool_GitIsGenuinelyRegistered(t *testing.T) {
 	t.Parallel()
 	pool := unreachablePool(t)
-	router := buildRouter(testConfigForRouter(), pool, nil, "")
+	router := buildRouter(testConfigForRouter(), pool, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	status, body := gitInfoRefsRequest(t, srv)
@@ -293,7 +293,7 @@ func (rt adminRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // fallback, exactly as it did before this bead's handler existed.
 func TestBuildRouter_NilPool_RepoAdminServiceStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	router := buildRouter(testConfigForRouter(), nil, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
@@ -327,7 +327,7 @@ func TestBuildRouter_WithPool_RepoAdminServiceIsGenuinelyRegistered(t *testing.T
 	t.Parallel()
 	pool := unreachablePool(t)
 	ingestPool := ingest.NewPool(testConfigForRouter().Logger, pool, nil, 1)
-	router := buildRouter(testConfigForRouter(), pool, ingestPool, "")
+	router := buildRouter(testConfigForRouter(), pool, ingestPool, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
@@ -351,7 +351,7 @@ func TestBuildRouter_WithPool_RepoAdminServiceIsGenuinelyRegistered(t *testing.T
 // ever reached.
 func TestBuildRouter_NilPool_RepoAdminServiceRejectsAgentIdentity(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	router := buildRouter(testConfigForRouter(), nil, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := adminv1connect.NewRepoAdminServiceClient(&http.Client{Transport: identityRoundTripper{role: "author", base: newIsolatedTransport(t)}}, srv.URL)
@@ -377,7 +377,7 @@ func TestBuildRouter_NilPool_RepoAdminServiceRejectsAgentIdentity(t *testing.T) 
 // Service's nil-pool guard, the case run() itself never hits.
 func TestBuildRouter_NilPool_CredentialServiceStillHitsGroupFallback(t *testing.T) {
 	t.Parallel()
-	router := buildRouter(testConfigForRouter(), nil, nil, "")
+	router := buildRouter(testConfigForRouter(), nil, nil, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := adminv1connect.NewCredentialServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)
@@ -405,7 +405,7 @@ func TestBuildRouter_WithPool_CredentialServiceIsGenuinelyRegistered(t *testing.
 	t.Parallel()
 	pool := unreachablePool(t)
 	ingestPool := ingest.NewPool(testConfigForRouter().Logger, pool, nil, 1)
-	router := buildRouter(testConfigForRouter(), pool, ingestPool, "")
+	router := buildRouter(testConfigForRouter(), pool, ingestPool, "", nil)
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
 	client := adminv1connect.NewCredentialServiceClient(&http.Client{Transport: adminRoundTripper{user: "admin", password: "s3cret-pass", base: newIsolatedTransport(t)}}, srv.URL)

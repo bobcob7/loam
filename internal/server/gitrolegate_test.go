@@ -13,6 +13,7 @@ import (
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // stubRoleStore backs handler.NewCapabilityChecker with a fixed
@@ -57,7 +58,7 @@ func newGitTestRouter(t *testing.T, ran *bool) *server.Router {
 	auth := httpauth.New(testAdminUser, testAdminPassword)
 	checker := handler.NewCapabilityChecker(stubRoleStore{})
 	gate := handler.NewGitRoleGate(checker, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	router := server.New(auth)
+	router := server.New(auth, noop.NewTracerProvider())
 	router.RegisterGit(gitPrefix, gate.Middleware(gitProcessStub(ran)))
 	return router
 }

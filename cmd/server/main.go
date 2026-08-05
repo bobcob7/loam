@@ -128,6 +128,7 @@ import (
 	"github.com/bobcob7/loam/internal/telemetry"
 	"github.com/bobcob7/loam/internal/workbranchstore"
 	loamweb "github.com/bobcob7/loam/web"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // buildIngestOrchestrator constructs loam-c94.12's real ingest pipeline
@@ -363,7 +364,7 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 		pool.Close()
 		return fmt.Errorf("starting http listener: %w", err)
 	}
-	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath)
+	router := buildRouter(cfg, pool, ingestPool, hookBinaryPath, telemetryProvider.TracerProvider())
 	httpServer := server.NewHTTPServer(cfg.HTTPAddr, router.Handler())
 	// policyServer is deliberately NOT a member of this multiRunner: serve
 	// (serve.go) closes it separately, strictly after httpServer.Shutdown
@@ -446,9 +447,20 @@ func loamhookBinaryPath(executable func() (string, error), stat func(string) (os
 // ingestPool is loam-ofg.21's worker pool (constructed in run() before this
 // is called), threaded through for registerRepoAdminService's EnrollRepo/
 // ReindexRepo/ListIngestJobs; it may be nil for the same reason pool may.
-func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string) *server.Router {
+//
+// tracerProvider is telemetry.Provider.TracerProvider() (loam-7d3o), the
+// source of every RPC span this process emits. run() always passes the real
+// one -- which is upstream's no-op when LOAM_OTEL_ENDPOINT is unset, so
+// there is no enabled/disabled branch here -- and buildRouter's own tests
+// pass nil, which server.New degrades to the same no-op. EVERY generated
+// service constructor below takes router.RPCOptions()...; one that does not
+// still routes and still authenticates, but goes untraced, and no test
+// outside internal/server would notice. The two RegisterUnauthenticated
+// health handlers deliberately take nothing -- see internal/server's
+// rpcOptions for why the liveness exemption is structural.
+func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string, tracerProvider trace.TracerProvider) *server.Router {
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
-	router := server.New(auth)
+	router := server.New(auth, tracerProvider)
 	router.RegisterSPA(loamweb.Dist())
 	registerHealth(router, cfg, pool)
 	registerMetadataServices(router, cfg, pool)
@@ -486,8 +498,8 @@ func registerMetadataServices(router *server.Router, cfg config.Config, pool *pg
 	roles := roleStoreAdapter{store: rolestore.NewStore(pool, cfg.Logger)}
 	capabilities := handler.NewCapabilityChecker(roles)
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
-	router.RegisterCLI(loamv1connect.NewRepoServiceHandler(repo.New(repos, capabilities, errorMapper, cfg.Logger)))
-	router.RegisterCLI(loamv1connect.NewMetaServiceHandler(meta.New(roles, errorMapper, cfg.Logger)))
+	router.RegisterCLI(loamv1connect.NewRepoServiceHandler(repo.New(repos, capabilities, errorMapper, cfg.Logger), router.RPCOptions()...))
+	router.RegisterCLI(loamv1connect.NewMetaServiceHandler(meta.New(roles, errorMapper, cfg.Logger), router.RPCOptions()...))
 }
 
 // registerWorkBranchService wires loam.v1.WorkBranchService in full over
@@ -531,6 +543,7 @@ func registerWorkBranchService(router *server.Router, cfg config.Config, pool *p
 	refs := gitref.New(cfg.DataDir)
 	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(
 		workbranch.New(workBranches, repos, rounds, diff, refs, threads, verdicts, publisher, capabilities, errorMapper, cfg.Logger),
+		router.RPCOptions()...,
 	))
 }
 
@@ -617,6 +630,7 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewRepoAdminServiceHandler(
 		repoadmin.New(cfg.DataDir, repos, workBranches, credentials, checker, transport, bindHookBinary(hookBinaryPath), ingestPool, ingestPool, reporemove.New(cfg.DataDir, repos, cfg.Logger), errorMapper, cfg.Logger),
+		router.RPCOptions()...,
 	))
 }
 
@@ -662,6 +676,7 @@ func registerCredentialService(router *server.Router, cfg config.Config, pool *p
 	validator := forge.NewResolver(&http.Client{}, cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewCredentialServiceHandler(
 		credential.New(credentials, validator, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
+		router.RPCOptions()...,
 	))
 }
 
@@ -709,6 +724,7 @@ func registerProposalService(router *server.Router, cfg config.Config, pool *pgx
 	tips := gitref.New(cfg.DataDir)
 	router.RegisterAdmin(adminv1connect.NewProposalServiceHandler(
 		proposal.New(workBranches, repos, verdicts, accepter, prCloser, tips, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
+		router.RPCOptions()...,
 	))
 }
 
@@ -734,6 +750,7 @@ func registerRoleService(router *server.Router, cfg config.Config, pool *pgxpool
 	}
 	router.RegisterAdmin(adminv1connect.NewRoleServiceHandler(
 		role.New(rolestore.NewStore(pool, cfg.Logger), handler.NewErrorMapper(cfg.Logger), cfg.Logger),
+		router.RPCOptions()...,
 	))
 }
 
@@ -758,7 +775,7 @@ func registerGraphService(router *server.Router, cfg config.Config, pool *pgxpoo
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	scope := handler.NewScopeResolver(repos)
 	symbols := codegraph.New(gen.New(pool), cfg.Logger)
-	router.RegisterCLI(loamv1connect.NewGraphServiceHandler(graph.New(symbols, scope, capabilities, errorMapper, cfg.Logger)))
+	router.RegisterCLI(loamv1connect.NewGraphServiceHandler(graph.New(symbols, scope, capabilities, errorMapper, cfg.Logger), router.RPCOptions()...))
 }
 
 // registerSearchService wires loam.v1.SearchService (loam-ofg.10) over pool
@@ -787,7 +804,7 @@ func registerSearchService(router *server.Router, cfg config.Config, pool *pgxpo
 	errorMapper := handler.NewErrorMapper(cfg.Logger)
 	scope := handler.NewScopeResolver(repos)
 	chunks := chunkstore.New(pool, cfg.Logger)
-	router.RegisterCLI(loamv1connect.NewSearchServiceHandler(search.New(chunks, embedder, scope, capabilities, errorMapper, cfg.Logger)))
+	router.RegisterCLI(loamv1connect.NewSearchServiceHandler(search.New(chunks, embedder, scope, capabilities, errorMapper, cfg.Logger), router.RPCOptions()...))
 }
 
 // roleStoreAdapter adapts internal/rolestore.Store's plain-string

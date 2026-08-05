@@ -14,6 +14,7 @@ import (
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // assetRefPattern extracts the root-absolute src=/href= targets Vite writes
@@ -98,7 +99,7 @@ func TestSPA_EmbeddedBuild_UnknownRouteFallsBackToIndex(t *testing.T) {
 // httpauth middleware -- no fake stands in for either.
 func spaOnlyRouter(t *testing.T, distFS fs.FS) http.Handler {
 	t.Helper()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	router.RegisterSPA(distFS)
 	return router.Handler()
 }

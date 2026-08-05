@@ -35,7 +35,7 @@ func getHealth(t *testing.T, srv *httptest.Server, path string) (int, string) {
 // wrapped around it would be a wide, quiet breakage.
 func TestBuildRouter_HealthzIsRegisteredEvenWithNoPool(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(buildRouter(testConfigForRouter(), nil, nil, "").Handler())
+	srv := httptest.NewServer(buildRouter(testConfigForRouter(), nil, nil, "", nil).Handler())
 	t.Cleanup(srv.Close)
 	status, body := getHealth(t, srv, "/healthz")
 	assert.Equal(t, http.StatusOK, status)
@@ -53,7 +53,7 @@ func TestBuildRouter_HealthzIsRegisteredEvenWithNoPool(t *testing.T) {
 // cannot prove cmd/server handed it the process's live pool.
 func TestBuildRouter_WithPool_ReadyzIsGenuinelyWiredToThatPool(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(buildRouter(testConfigForRouter(), unreachablePool(t), nil, "").Handler())
+	srv := httptest.NewServer(buildRouter(testConfigForRouter(), unreachablePool(t), nil, "", nil).Handler())
 	t.Cleanup(srv.Close)
 	status, body := getHealth(t, srv, "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, status)

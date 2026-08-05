@@ -12,6 +12,7 @@ import (
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // authInjectingTransport wraps a RoundTripper, adding valid admin basic
@@ -197,7 +198,7 @@ func TestRouter_SPACatchAll_UnaffectedByGroupFallback(t *testing.T) {
 func TestRouter_UnregisteredServicePrefix_NoSPARegistered(t *testing.T) {
 	t.Parallel()
 	auth := httpauth.New(testAdminUser, testAdminPassword)
-	router := server.New(auth)
+	router := server.New(auth, noop.NewTracerProvider())
 	router.RegisterCLI(cliPrefix, pingStub(cliPingPath, "cli-ok"))
 	req := httptest.NewRequest(http.MethodGet, "/loam.v1.NoSuchService/DoThing", nil)
 	withValidAdminAuth(req)

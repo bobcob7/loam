@@ -25,6 +25,7 @@ import (
 	"github.com/bobcob7/loam/internal/reposstore"
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/bobcob7/loam/internal/workbranchstore"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // repoName is the one enrolled repo every test in this package pushes
@@ -262,7 +263,7 @@ func newStackWithAccept(t *testing.T, branches map[string]workbranchstore.WorkBr
 	// registerGitService runs, not merely code that looks equivalent by
 	// inspection: a future wrapper added inside RegisterGit is picked up
 	// here automatically.
-	router := server.New(auth)
+	router := server.New(auth, noop.NewTracerProvider())
 	router.RegisterGit("/git/", gate.Middleware(gitHandler))
 	srv := httptest.NewServer(router.Handler())
 	t.Cleanup(srv.Close)
