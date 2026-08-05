@@ -538,15 +538,37 @@ func TestIngestFileChunks_DeadPool_AbortsAtThatFileWithoutTouchingLaterOnes(t *t
 // (...RejectionInASharedTransactionSparesTheRestOfTheBatch) proves it
 // against a real server.
 //
-// What survives is a genuinely different and still-reachable claim: 25P02
-// remains the code Postgres returns for ANY statement issued on a
-// transaction some OTHER participant already aborted -- the caller's
-// transaction is shared with the graph track and with AdvanceIngestedRef,
-// none of which are savepoint-protected -- and if Persist ever sees it, it
-// must stop rather than count N more rejections and report a batch that
-// nothing will commit. This is now defence in depth on the classifier
-// rather than a description of the common path, which is exactly why it
-// keeps its assertions and loses its old framing.
+// What survives is a claim about the CLASSIFIER, not about the wiring.
+// Persist takes a store INTERFACE, never *chunkstore.Store: any
+// implementation may hand it a bare 25P02, and when one does, that must be
+// fatal rather than counted as rejection N+1 on a transaction nothing will
+// commit. Most of this test's assertions -- the loop stopping, the earlier
+// rejection being named in the returned error, the cascade symptom not
+// being counted -- are mechanics that any fatal classification triggers,
+// and are independent of which SQLSTATE provoked them.
+//
+// Two earlier framings of this comment are worth recording as WRONG, since
+// both are the kind of confident claim about an absent code path that reads
+// as design rationale (this branch's own ERGONOMICS notes flag the pattern,
+// and then it happened here):
+//
+//   - "25P02 is the expected sequel to a rejection" -- true before
+//     loam-c94.24, false after it.
+//   - "the shared transaction has participants that are not
+//     savepoint-protected (the graph track, AdvanceIngestedRef), so they
+//     can hand Persist a 25P02" -- false. writeSwap returns on EVERY step's
+//     error, so graph.Persist's failure returns before vectors.Persist
+//     runs, and AdvanceIngestedRef runs strictly after it. Neither can
+//     poison a transaction Persist is still using.
+//
+// And through chunkstore.NewInTx specifically, a bare 25P02 is not merely
+// unlikely but unreachable: SAVEPOINT is itself a statement, so on an
+// already-aborted transaction the savepoint fails with 25P02 first and the
+// error arrives wrapped in chunkstore.ErrTransactionUnusable, which
+// isFatalStoreError matches EARLIER. That is pinned against a real server
+// by chunkstore's
+// TestNewInTx_AlreadyAbortedTransaction_ReportsUnusableRatherThanABare25P02,
+// so this comment does not have to be believed either.
 func TestIngestFileChunks_TransactionAlreadyAborted_AbortsAndNamesTheEarlierRejection(t *testing.T) {
 	t.Parallel()
 	firstRejectErr := errors.New("invalid byte sequence for encoding \"UTF8\": 0xa5 (SQLSTATE 22021)")

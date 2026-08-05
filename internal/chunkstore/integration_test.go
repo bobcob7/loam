@@ -23,7 +23,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
@@ -682,6 +684,52 @@ func TestNewInTx_DeadConnection_ReportsTheTransactionUnusable(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTransactionUnusable,
 		"a connection that is simply gone must be reported as an unusable transaction, not as a per-file rejection a batch loop would keep retrying")
+}
+
+// TestNewInTx_AlreadyAbortedTransaction_ReportsUnusableRatherThanABare25P02
+// pins the server behaviour that makes a bare SQLSTATE 25P02 unreachable
+// through this constructor, which is a claim
+// internal/ingest/vectors.Persist's error classification now rests on and
+// should not have to take on trust.
+//
+// SAVEPOINT is itself a statement, so on a transaction some other
+// participant already aborted it fails exactly like any other statement
+// would -- with 25P02, in_failed_sql_transaction. Because
+// savepointTransactor establishes the savepoint BEFORE running fn, that
+// failure is reported as ErrTransactionUnusable and fn's queries never
+// run. So a Store built with NewInTx cannot hand its caller a bare 25P02:
+// the sentinel is always there too, and vectors' classifier matches it
+// first.
+//
+// The transaction is poisoned here by a statement this package did not
+// issue (a division by zero on the caller's own tx), which is the only
+// honest way to model the case: a participant other than this store
+// breaking the transaction is the entire premise.
+func TestNewInTx_AlreadyAbortedTransaction_ReportsUnusableRatherThanABare25P02(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := newRegisteredPool(t, sharedDSN)
+	repoID := insertRepo(ctx, t, pool, "group/savepoint-poisoned-repo")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `SELECT 1/0`)
+	require.Error(t, err, "the transaction must actually be poisoned by a statement this store did not issue")
+
+	_, err = NewInTx(tx, logger).ReplaceFileChunks(ctx, repoID, "main", "after-poison.go", []ChunkInput{
+		{StartLine: 1, EndLine: 1, Content: "func AfterPoison() {}", Embedding: unit(0)},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransactionUnusable,
+		"a transaction another participant already aborted is not a per-file rejection, and the savepoint statement is what discovers that")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the server's own error must stay in the chain")
+	assert.Equal(t, pgerrcode.InFailedSQLTransaction, pgErr.Code,
+		"the underlying code is 25P02 -- but it arrives WRAPPED in the sentinel, which is the whole point: internal/ingest/vectors matches the sentinel first and never has to reason about a bare 25P02 from this store")
+	assert.Contains(t, err.Error(), "establishing savepoint",
+		"the failure must be the SAVEPOINT itself, before any of the file's own statements ran")
 }
 
 // BenchmarkReplaceFileChunks_SavepointOverhead is acceptance criterion 4:
