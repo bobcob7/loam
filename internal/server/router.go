@@ -83,7 +83,10 @@ func New(auth *httpauth.Auth, tracerProvider trace.TracerProvider) *Router {
 // cannot apply it for the caller — connect interceptors are handler
 // CONSTRUCTION options and there is no seam for attaching one to a built
 // http.Handler — so a constructor called without them routes and
-// authenticates correctly but produces no span.
+// authenticates correctly but produces no span. That gap is guarded where
+// the call sites live rather than here:
+// cmd/server's TestBuildRouter_EveryDeclaredServiceIsTraced walks the
+// protobuf registry and asserts a span for every declared service.
 //
 // It panics if path does not start with "/loam.v1." — a programming error
 // caught at composition-root wiring time, not a runtime condition.

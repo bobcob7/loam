@@ -452,12 +452,22 @@ func loamhookBinaryPath(executable func() (string, error), stat func(string) (os
 // source of every RPC span this process emits. run() always passes the real
 // one -- which is upstream's no-op when LOAM_OTEL_ENDPOINT is unset, so
 // there is no enabled/disabled branch here -- and buildRouter's own tests
-// pass nil, which server.New degrades to the same no-op. EVERY generated
-// service constructor below takes router.RPCOptions()...; one that does not
-// still routes and still authenticates, but goes untraced, and no test
-// outside internal/server would notice. The two RegisterUnauthenticated
-// health handlers deliberately take nothing -- see internal/server's
-// rpcOptions for why the liveness exemption is structural.
+// pass nil, which server.New degrades to the same no-op.
+//
+// EVERY generated service constructor below must take router.RPCOptions()...
+// One that does not still routes and still authenticates, but goes untraced.
+// internal/server cannot catch that -- connect interceptors are handler
+// construction options, so the Router has no way to apply them for the caller
+// the way it applies the auth wrappers -- but this package can, and does:
+// TestBuildRouter_EveryDeclaredServiceIsTraced walks protoregistry.GlobalFiles
+// for every declared loam.v1 / loam.admin.v1 service and asserts a span per
+// procedure through this very function, so a forgotten RPCOptions() fails by
+// name. Add a service, add its constructor here, and that test covers it with
+// no edit of its own.
+//
+// The two RegisterUnauthenticated health handlers deliberately take nothing
+// -- see internal/server's rpcOptions for why the liveness exemption is
+// structural.
 func buildRouter(cfg config.Config, pool *pgxpool.Pool, ingestPool *ingest.Pool, hookBinaryPath string, tracerProvider trace.TracerProvider) *server.Router {
 	auth := httpauth.New(cfg.AdminUser, cfg.AdminPassword)
 	router := server.New(auth, tracerProvider)
