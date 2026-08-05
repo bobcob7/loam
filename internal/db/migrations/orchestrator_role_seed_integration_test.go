@@ -136,31 +136,46 @@ func TestOrchestratorRoleSeedMigration_GrantsExactlyGraphQueryAndSearch(t *testi
 }
 
 // trackerNames are the issue-tracker names the seeded text must not
-// contain, as WORD-BOUNDARY patterns rather than bare substrings. The
-// boundary is load-bearing, and it is load-bearing for precisely the one
-// name that matters most here -- the tracker this repository itself
-// mandates.
+// contain. Requirement F: that text ships to every deployment on first
+// migration, and most of them will not use this repository's tracker or
+// any other.
 //
-// "bd" is two characters, which puts it in the gap between two wrong
-// answers. This test originally used the needle " bd ", spaces on both
-// sides; loam-hi5o.31's round-1 review mutated the seeded text to "Track
-// the task in bd, and file follow-ups with bd." and the test PASSED, exit
-// 0 -- "bd," and "bd." never match " bd ". A bare strings.Contains(…,
-// "bd") fails the other way, matching "verified" or "forbidden" and
-// failing on prose that names no tracker at all. \bbd\b is the only form
-// that catches the realistic violation without inventing one.
+// WORD-BOUNDARY patterns rather than bare substrings, and the boundary is
+// load-bearing for exactly the name that matters most here -- "bd", the
+// tracker this repository mandates and the one a copy-paste from CLAUDE.md
+// would introduce. Two characters is short enough to go wrong in both
+// directions. This test first used the needle " bd ", spaces on both
+// sides; loam-hi5o.31's round-1 review mutated the seed to "Track the task
+// in bd, and file follow-ups with bd." and it PASSED at exit 0, because
+// "bd," and "bd." never match " bd ". A bare substring goes wrong the
+// other way -- "subdirectory" contains "bd" -- so prose naming no tracker
+// at all could fail it. \bbd\b is the form that catches the realistic
+// violation without inventing one.
 //
-// The list is deliberately short and made of names that are not also
-// ordinary English: "linear" and "shortcut" are real trackers but also
-// words this text could legitimately use, and a needle that fires on
-// correct prose would be removed by the next person to hit it, taking the
-// whole check with it.
+// THE LIST CANNOT BE COMPLETE and does not try to be: notion, clickup,
+// youtrack, redmine and others are absent. Read it as a guard against the
+// likely mistake, not as proof of absence. Adding a name is free; removing
+// one is not, and round 2 of this bead's own review is why that warning is
+// here rather than in a commit message nobody will read. Round 2 dropped
+// "linear.app" on a rationale that did not describe it -- the claim was
+// that the needle risked matching ordinary English, which "linear.app"
+// cannot, and which was true only of a bare "linear" that had never been
+// in the list -- and the review demonstrated the cost by mutating the seed
+// to "Record every task at linear.app" and watching this check pass.
+//
+// It deliberately does NOT contain a generic phrase like "issue tracker".
+// The bead requires the seeded text to name no PARTICULAR tracker while
+// being "phrased for a task arriving from a tracker, a one-off
+// instruction, or a paragraph the operator wrote" -- so the category noun
+// is sanctioned prose, and forbidding it would fail the seed for doing the
+// thing it was asked to do.
 var trackerNames = []*regexp.Regexp{
 	regexp.MustCompile(`\bbd\b`),
 	regexp.MustCompile(`\bbeads\b`),
 	regexp.MustCompile(`\bjira\b`),
 	regexp.MustCompile(`\btrello\b`),
 	regexp.MustCompile(`\basana\b`),
+	regexp.MustCompile(`\blinear\.app\b`),
 	regexp.MustCompile(`\b(github|gitlab) issues?\b`),
 	regexp.MustCompile(`\bclaude\.md\b`),
 }
