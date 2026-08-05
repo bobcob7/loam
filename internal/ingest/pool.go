@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
@@ -306,16 +307,55 @@ func (p *Pool) recoverWorkerPanic(ctx context.Context, workerIndex int) {
 }
 
 // claimQuery selects the oldest queued job whose repo is not already
-// running in this process, locking the row FOR UPDATE SKIP LOCKED so
-// concurrent claimers (in this process or, defensively, another) never
+// running -- neither in this process ($1, the caller's exclusion set: the
+// busy map plus any repo this claim call has already lost to the
+// constraint below) nor, per this statement's own snapshot, anywhere else
+// -- locking the row FOR UPDATE SKIP LOCKED so concurrent claimers never
 // double-claim the same row.
+//
+// NEITHER FILTER IS THE SOURCE OF "at most one running job per repo".
+// That is ingest_jobs_one_running_per_repo (migration
+// 0008_ingest_jobs_running_guard), a partial unique index on (repo_id)
+// WHERE status = 'running', which Postgres enforces at write time against
+// committed state rather than against any transaction's read snapshot.
+// Both filters here are best-effort collision AVOIDANCE, and they avoid
+// different collisions:
+//
+//   - $1 covers this process. It is exact for repos this Pool is running,
+//     because claim holds mu across the whole snapshot-query-write
+//     sequence, so no second goroutine here can see the same repo free.
+//   - NOT EXISTS (... 'running' ...) covers every OTHER writer: a second
+//     server replica, internal/ingestjobs.Store.Claim, an operator's
+//     manual UPDATE, or a row this process itself stranded in 'running'
+//     by a recovered panic in run's outcome recording (which releases the
+//     busy slot but leaves the row). Without it, this statement would
+//     happily pick a job whose repo is demonstrably, committedly busy and
+//     then eat a unique violation on the write -- turning a fact already
+//     visible in the snapshot into an avoidable round trip. It cannot be
+//     more than best-effort: under READ COMMITTED it reads a snapshot
+//     that may not yet have observed a concurrent claim's uncommitted
+//     write, which is exactly the window the index exists to close and
+//     the reason claim retries (see maxClaimAttempts).
+//
+// ORDER BY queued_at, id: the id tiebreak matches ClaimIngestJob's and
+// ListIngestJobs' own (queued_at, id) convention (internal/db/queries/
+// ingest_jobs.sql) and closes the repo-wide gap loam-c94.18 tracks --
+// queued_at's stored precision is microseconds, so two rows CAN land on
+// the same value, and a bare ORDER BY queued_at leaves Postgres free to
+// break that tie however it likes, making "oldest queued job first"
+// untrue for exactly the rows a burst of triggers produces.
 const claimQuery = `
-SELECT id, repo_id, target_branch, kind, attempts
-FROM ingest_jobs
-WHERE status = 'queued' AND NOT (repo_id = ANY($1::uuid[]))
-ORDER BY queued_at
+SELECT j.id, j.repo_id, j.target_branch, j.kind, j.attempts
+FROM ingest_jobs j
+WHERE j.status = 'queued'
+  AND NOT (j.repo_id = ANY($1::uuid[]))
+  AND NOT EXISTS (
+      SELECT 1 FROM ingest_jobs running
+      WHERE running.repo_id = j.repo_id AND running.status = 'running'
+  )
+ORDER BY j.queued_at, j.id
 LIMIT 1
-FOR UPDATE SKIP LOCKED
+FOR UPDATE OF j SKIP LOCKED
 `
 
 // This package is the SECOND writer of repos.sync_state; the first is
@@ -372,6 +412,76 @@ const (
 // apart (see acceptance_steps_test.go's assertSyncNotErrored).
 const SyncErrorPrefix = "ingest: "
 
+// uniqueViolation is the Postgres SQLSTATE for a unique-constraint hit,
+// matching the identical constants in internal/ingestjobs,
+// internal/workbranchstore, and internal/rolestore.
+const uniqueViolation = "23505"
+
+// runningPerRepoConstraint is the partial unique index on (repo_id) WHERE
+// status = 'running' (migration 0008_ingest_jobs_running_guard) that is
+// the actual, database-enforced source of "at most one running job per
+// repo" -- see claimQuery's doc comment for why neither of that
+// statement's own filters can be.
+const runningPerRepoConstraint = "ingest_jobs_one_running_per_repo"
+
+// isRunningPerRepoViolation reports whether err is the unique violation
+// runningPerRepoConstraint raises: the candidate this claim attempt
+// picked belongs to a repo that, per the committed state Postgres checked
+// at write time rather than this transaction's own read snapshot, already
+// has a running job. claim treats that as an ordinary "someone beat me to
+// it", never as a failure to report.
+//
+// The match is on the constraint NAME, not the bare SQLSTATE, and that
+// distinction is the whole point. ingest_jobs carries other unique
+// constraints (its primary key, for one), and a 23505 from any of them --
+// a duplicated job id from a broken uuid generator, say -- is a real
+// defect that must keep surfacing as an error rather than being silently
+// swallowed as contention. This codebase already classifies unique
+// violations by name elsewhere for exactly that reason (roles_name_key in
+// internal/rolestore, repos_name_key in internal/reposstore); a bare
+// `pgErr.Code == "23505"` here would be the one place that does not, and
+// it would turn every future unique constraint on this table into a
+// silent no-op at claim time.
+func isRunningPerRepoViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == uniqueViolation && pgErr.ConstraintName == runningPerRepoConstraint
+}
+
+// maxClaimAttempts bounds how many candidates one claim call will try
+// before giving up and reporting "nothing to claim". Each attempt that
+// loses to ingest_jobs_one_running_per_repo adds that candidate's repo to
+// the exclusion set for the next attempt, so the loop is strictly
+// monotone -- attempt N+1 chooses from strictly fewer repos than attempt
+// N -- and cannot livelock on the repo that just rejected it. That
+// exclusion is what makes retrying correct here at all, and it is the
+// substantive difference from internal/ingestjobs.Store.Claim's
+// superficially similar retry: Store.Claim re-runs an IDENTICAL statement
+// and relies on the fresh snapshot seeing the now-committed running row,
+// which works because ClaimIngestJob's NOT EXISTS is a hard filter on
+// every candidate. This statement has that filter too, but a claim can
+// also lose to a row that is STILL uncommitted at the moment of the
+// retry's snapshot (the loser blocks on the winner's transactionid, so it
+// resumes the instant the winner commits -- but a third writer's claim
+// for the same repo need not have committed by then). Excluding the repo
+// outright makes the retry independent of that timing instead of
+// hostage to it.
+//
+// 5, not internal/ingestjobs' 25, because this loop holds mu for its
+// whole duration: every retry blocks every other worker in this process
+// from claiming anything at all, which Store.Claim's retry does not.
+// Losing this race requires a genuinely concurrent claim for the SAME
+// repo from another writer inside the microseconds between this
+// statement's snapshot and its write, so needing even two attempts is
+// already unusual; needing five distinct repos to reject one worker in
+// one call means sustained fleet-wide contention, and the right response
+// to that is to stop holding the lock and let this worker fall back to
+// the wake/poll path (at most pollInterval away) with a fresh snapshot,
+// not to keep spinning.
+const maxClaimAttempts = 5
+
 // claim attempts to claim one queued job. It holds mu for the whole
 // operation -- snapshotting the busy-repo set, querying, marking the row
 // running (and its repo syncing, in the same transaction: see the
@@ -383,20 +493,88 @@ const SyncErrorPrefix = "ingest: "
 // from being claimed twice, not two different queued rows for the same
 // repo). The DB round trip happens while holding mu; claiming is cheap
 // relative to running a job, so this does not become a bottleneck.
+//
+// Losing to ingest_jobs_one_running_per_repo is NOT an error and is not
+// reported as one (loam-54o.17). It means another writer -- a second
+// replica, internal/ingestjobs.Store.Claim, a stranded 'running' row --
+// already has that repo, which is precisely the outcome the constraint
+// exists to produce; before the constraint existed the same race silently
+// double-ran the repo. So the response is neither "fail the claim" (the
+// job is untouched and perfectly claimable later; the transaction rolled
+// back, so sync_state was never moved to 'syncing' either -- the
+// ingest_jobs write is deliberately issued BEFORE the repos write so a
+// rejected claim cannot leave a repo stuck 'syncing') nor "give up and
+// idle" (other repos' jobs are still claimable and this worker is
+// otherwise free). It is: exclude that repo and try the next candidate,
+// up to maxClaimAttempts.
+//
+// SHOULD Pool KEEP ITS OWN CLAIM SQL? No -- but not in this bead, and the
+// reason is worth writing down rather than rediscovering. Two writers of
+// one table with independent concurrency handling is how the original
+// double-run survived unnoticed, and this bead is that cost being paid a
+// second time. Consolidating onto internal/ingestjobs.Store, though, is
+// blocked on three things that store does not have: (1) the claim must
+// commit in the SAME transaction as syncStateSyncingQuery, or repos.
+// sync_state and ingest_jobs.status become observable in disagreement
+// (see the syncStateSyncingQuery block's ownership contract), and Store
+// exposes no transaction a caller can join; (2) it must accept this
+// process's busy-repo exclusion set, which ClaimIngestJob has no
+// parameter for; (3) Job here is internal/ingest's own type, and
+// ingestjobs.Job is a different shape. Each is small; together they are a
+// cross-package refactor with its own test surface, not a paragraph in a
+// bug fix. The right sequencing is: land the correct behaviour here first
+// (so production is not exposed while the refactor is designed), then
+// move Pool onto a tx-scoped ingestjobs.Store that takes an exclusion
+// set, and delete claimQuery.
 func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	busy := make([]uuid.UUID, 0, len(p.busy))
+	excluded := make([]uuid.UUID, 0, len(p.busy)+maxClaimAttempts)
 	for id := range p.busy {
-		busy = append(busy, id)
+		excluded = append(excluded, id)
 	}
+	for attempt := 1; attempt <= maxClaimAttempts; attempt++ {
+		job, claimed, err := p.claimOnce(ctx, excluded)
+		if err == nil {
+			if claimed {
+				p.busy[job.RepoID] = struct{}{}
+			}
+			return job, claimed, nil
+		}
+		if !isRunningPerRepoViolation(err) {
+			return Job{}, false, err
+		}
+		p.logger.DebugContext(ctx, "ingest job claim lost a race for a repo that is already running elsewhere; trying another repo",
+			"job_id", job.ID, "repo_id", job.RepoID, "claim_attempt", attempt, "max_claim_attempts", maxClaimAttempts)
+		excluded = append(excluded, job.RepoID)
+	}
+	p.logger.WarnContext(ctx, "ingest job claim gave up after every candidate repo was already running elsewhere; will retry on the next wake or poll",
+		"max_claim_attempts", maxClaimAttempts)
+	return Job{}, false, nil
+}
+
+// claimOnce is one attempt of claim's loop: select a candidate not in
+// excluded, flip it to running, and mark its repo syncing, all in one
+// transaction. It returns the candidate it selected even when the write
+// then fails, so claim can add that repo to excluded -- without which a
+// retry would re-select the identical row and spin.
+//
+// Callers must hold mu (claim does). The write can BLOCK rather than fail
+// outright: if a concurrent transaction has an uncommitted 'running' row
+// for the same repo, ingest_jobs_one_running_per_repo makes this UPDATE
+// wait on that transaction's id, then either raise a unique violation
+// (it committed) or succeed (it rolled back). That wait happens under mu,
+// which is a real cost, but it is bounded by the other claim's own
+// transaction -- a claim, not a job run, since the job runs long after
+// its claim commits.
+func (p *Pool) claimOnce(ctx context.Context, excluded []uuid.UUID) (Job, bool, error) {
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("beginning claim transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var job Job
-	err = tx.QueryRow(ctx, claimQuery, busy).Scan(&job.ID, &job.RepoID, &job.TargetBranch, &job.Kind, &job.Attempts)
+	err = tx.QueryRow(ctx, claimQuery, excluded).Scan(&job.ID, &job.RepoID, &job.TargetBranch, &job.Kind, &job.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Job{}, false, nil
 	}
@@ -404,15 +582,14 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 		return Job{}, false, fmt.Errorf("selecting a queued ingest job: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE ingest_jobs SET status = 'running', started_at = now() WHERE id = $1`, job.ID); err != nil {
-		return Job{}, false, fmt.Errorf("marking ingest job %s running: %w", job.ID, err)
+		return job, false, fmt.Errorf("marking ingest job %s running: %w", job.ID, err)
 	}
 	if _, err := tx.Exec(ctx, syncStateSyncingQuery, job.RepoID); err != nil {
-		return Job{}, false, fmt.Errorf("marking repo %s syncing for ingest job %s: %w", job.RepoID, job.ID, err)
+		return job, false, fmt.Errorf("marking repo %s syncing for ingest job %s: %w", job.RepoID, job.ID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Job{}, false, fmt.Errorf("committing ingest job claim: %w", err)
+		return job, false, fmt.Errorf("committing ingest job claim: %w", err)
 	}
-	p.busy[job.RepoID] = struct{}{}
 	return job, true, nil
 }
 
