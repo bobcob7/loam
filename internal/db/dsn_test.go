@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -8,6 +10,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// poolMaxConns is the pool size every test in this package configures, and
+// the number is load-bearing rather than arbitrary: pgxpool's default
+// MaxConns is max(4, runtime.NumCPU()), so asserting a value a default could
+// also produce makes the assertion pass whether or not the parameter
+// survived. 17 would be a live example -- a 17-core runner would green the
+// test with the parameter silently discarded. 97 is not a plausible core
+// count on any machine this suite meets.
+//
+// Shared from this file, which carries no build tag and is therefore
+// compiled into the integration build too, so the reason lives at one site
+// instead of being restated (or forgotten) next door.
+const poolMaxConns = 97
 
 // poolOnlyParams is every parameter pgxpool.ParseConfig consumes for itself
 // in the pgx version currently pinned in go.mod. It exists ONLY to give the
@@ -129,6 +144,50 @@ func TestMigrationDSNKeywordValueForm(t *testing.T) {
 	assert.NotContains(t, cfg.RuntimeParams, "pool_max_conns")
 }
 
+// TestMigrationDSNPostgresqlScheme covers the second URL scheme. pgconn
+// dispatches on `postgres://` OR `postgresql://` (config.go:331) and
+// internal/config/env.go:274 accepts both, so stripParams mirrors that test
+// -- but a mirror of a two-armed condition with only one arm exercised is a
+// claim, not a proof: dropping the postgresql:// arm sends the DSN to the
+// keyword/value tokenizer, which produces a string that no longer parses to
+// the same connection.
+func TestMigrationDSNPostgresqlScheme(t *testing.T) {
+	t.Parallel()
+	dsn := fmt.Sprintf("postgresql://loam:secret@db.example.com:5432/loam?sslmode=disable&application_name=loam&pool_max_conns=%d", poolMaxConns)
+	stripped, err := MigrationDSN(dsn)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(stripped, "postgresql://"), "the scheme the operator wrote must survive: %s", stripped)
+	cfg, err := pgx.ParseConfig(stripped)
+	require.NoError(t, err)
+	assert.NotContains(t, cfg.RuntimeParams, "pool_max_conns")
+	assert.Equal(t, "loam", cfg.RuntimeParams["application_name"])
+	assert.Equal(t, "db.example.com", cfg.Host)
+	assert.Equal(t, "secret", cfg.Password)
+}
+
+// TestMigrationDSNKeywordValueWhitespaceAroundEquals is the other untested
+// parity claim. pgconn trims asciiSpace off both sides of the `=`
+// (config.go:699-700), so `pool_max_conns = 8` is the same parameter as
+// `pool_max_conns=8` -- a tokenizer that only recognized the tight form
+// would leave the parameter in place and the boot would still fail, with the
+// operator's DSN looking, to them, exactly like the one in the docs.
+func TestMigrationDSNKeywordValueWhitespaceAroundEquals(t *testing.T) {
+	t.Parallel()
+	dsn := fmt.Sprintf("host = db.example.com  port = 6543  user = loam  pool_max_conns = %d  dbname = loam  sslmode = disable", poolMaxConns)
+	stripped, err := MigrationDSN(dsn)
+	require.NoError(t, err)
+	cfg, err := pgx.ParseConfig(stripped)
+	require.NoError(t, err)
+	assert.NotContains(t, cfg.RuntimeParams, "pool_max_conns")
+	assert.Equal(t, "db.example.com", cfg.Host)
+	assert.Equal(t, uint16(6543), cfg.Port)
+	assert.Equal(t, "loam", cfg.User)
+	assert.Equal(t, "loam", cfg.Database)
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	require.NoError(t, err)
+	assert.Equal(t, int32(poolMaxConns), poolCfg.MaxConns, "the spaced form must still be the parameter pgxpool consumes")
+}
+
 // TestMigrationDSNKeywordValueBackslashEscapes covers the OTHER escaping
 // rule in libpq's keyword/value form: an UNQUOTED value may carry a
 // backslash-escaped space, and a tokenizer that stopped at the first space
@@ -165,14 +224,19 @@ func TestMigrationDSNKeywordValueBackslashEscapes(t *testing.T) {
 // mutating the string the pool gets. The operator's pool sizing must survive
 // on the pgxpool side, or "the server boots" would have been bought by
 // silently ignoring their configuration.
+//
+// poolMaxConns rather than a round number, for the reason given at its
+// declaration: any value pgxpool's max(4, NumCPU) default could also produce
+// would make this assertion pass on a machine of that size even if the
+// parameter had been thrown away.
 func TestMigrationDSNDoesNotChangeWhatThePoolSees(t *testing.T) {
 	t.Parallel()
-	dsn := "postgres://loam:secret@db.example.com:5432/loam?sslmode=disable&pool_max_conns=17"
+	dsn := fmt.Sprintf("postgres://loam:secret@db.example.com:5432/loam?sslmode=disable&pool_max_conns=%d", poolMaxConns)
 	_, err := MigrationDSN(dsn)
 	require.NoError(t, err)
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	require.NoError(t, err)
-	assert.Equal(t, int32(17), poolCfg.MaxConns)
+	assert.Equal(t, int32(poolMaxConns), poolCfg.MaxConns)
 }
 
 // TestMigrationDSNRejectsUnusableDSN checks the failure surfaces here, at

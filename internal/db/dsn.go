@@ -63,6 +63,14 @@ const asciiSpace = " \t\n\r\v\f"
 // than asserting an answer. A new pool parameter is picked up by upgrading
 // pgx and nothing else.
 //
+// That deletion is not an implementation detail this function got lucky
+// coupling to: it is LOAD-BEARING FOR PGXPOOL ITSELF. A pgxpool that stopped
+// deleting its own keys would leave them in RuntimeParams and send them to
+// the server in its own startup packet, so every connection pgxpool opened
+// would be refused with the very error above. The behaviour this function
+// reads is one pgx must maintain to keep working at all, which is a stronger
+// guarantee than "true in the version we tested against".
+//
 // A DSN with no such parameters is returned byte-for-byte unchanged, so the
 // common case never depends on the rewriting below being faithful.
 func MigrationDSN(dsn string) (string, error) {

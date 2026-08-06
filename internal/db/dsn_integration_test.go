@@ -25,11 +25,12 @@ import (
 	"github.com/bobcob7/loam/internal/testdb"
 )
 
-// poolMaxConns is deliberately a value no default could produce: pgxpool's
-// default MaxConns is max(4, runtime.NumCPU()), so a machine with 17 CPUs
-// would make "MaxConns == 17" pass for the wrong reason. 97 is not a
-// plausible core count on any runner this suite meets.
-const poolMaxConns = 97
+// poolMaxConns is declared in dsn_test.go, which carries no build tag and is
+// therefore compiled into this build too. Deliberately shared rather than
+// restated: the value has to be one pgxpool's max(4, NumCPU) default could
+// not also produce, and a copy of the number without a copy of that reason
+// is how the next edit picks a plausible-looking core count and quietly
+// stops testing anything.
 
 // TestMigrationDSNAgainstRealPostgres is the proof loam-lhc9 asked for, and
 // it cannot be a unit test: the rejection that breaks the boot comes from
