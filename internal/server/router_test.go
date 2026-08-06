@@ -10,6 +10,7 @@ import (
 	"github.com/bobcob7/loam/internal/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -60,7 +61,7 @@ func pingStub(okPath, body string) http.Handler {
 func newTestRouter(t *testing.T) *server.Router {
 	t.Helper()
 	auth := httpauth.New(testAdminUser, testAdminPassword)
-	router := server.New(auth)
+	router := server.New(auth, noop.NewTracerProvider())
 	router.RegisterCLI(cliPrefix, pingStub(cliPingPath, "cli-ok"))
 	router.RegisterAdmin(adminPrefix, pingStub(adminPingPath, "admin-ok"))
 	router.RegisterGit(gitPrefix, pingStub(gitPushPath, "git-ok"))
@@ -227,7 +228,7 @@ func TestRouter_Handler_IsNotAssertableToServeMux(t *testing.T) {
 // wrong group fails at startup, not in production traffic.
 func TestRouter_RegisterCLI_WrongPathPrefixPanics(t *testing.T) {
 	t.Parallel()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	assert.Panics(t, func() {
 		router.RegisterCLI("/loam.admin.v1.RepoAdminService/", pingStub("x", "y"))
 	})
@@ -237,7 +238,7 @@ func TestRouter_RegisterCLI_WrongPathPrefixPanics(t *testing.T) {
 // test, mirrored for RegisterAdmin.
 func TestRouter_RegisterAdmin_WrongPathPrefixPanics(t *testing.T) {
 	t.Parallel()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	assert.Panics(t, func() {
 		router.RegisterAdmin(cliPrefix, pingStub("x", "y"))
 	})
@@ -247,7 +248,7 @@ func TestRouter_RegisterAdmin_WrongPathPrefixPanics(t *testing.T) {
 // test, mirrored for RegisterGit.
 func TestRouter_RegisterGit_WrongPathPrefixPanics(t *testing.T) {
 	t.Parallel()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	assert.Panics(t, func() {
 		router.RegisterGit(cliPrefix, pingStub("x", "y"))
 	})
@@ -260,7 +261,7 @@ func TestRouter_RegisterGit_WrongPathPrefixPanics(t *testing.T) {
 // the exemption.
 func TestRouter_RegisterUnauthenticated_RejectsNonHealthPattern(t *testing.T) {
 	t.Parallel()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	assert.Panics(t, func() {
 		router.RegisterUnauthenticated("/loam.v1.WorkBranchService/", pingStub("x", "y"))
 	})
@@ -271,7 +272,7 @@ func TestRouter_RegisterUnauthenticated_RejectsNonHealthPattern(t *testing.T) {
 // 404s the SPA fallback on every request.
 func TestRouter_RegisterSPA_MissingIndexPanics(t *testing.T) {
 	t.Parallel()
-	router := server.New(httpauth.New(testAdminUser, testAdminPassword))
+	router := server.New(httpauth.New(testAdminUser, testAdminPassword), noop.NewTracerProvider())
 	assert.Panics(t, func() {
 		router.RegisterSPA(fstest.MapFS{"assets/app.js": &fstest.MapFile{Data: []byte("x")}})
 	})

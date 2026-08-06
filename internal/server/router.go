@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"strings"
 
+	"connectrpc.com/connect"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // cliPathPrefix, adminPathPrefix and gitPathPrefix are the three
@@ -39,15 +41,42 @@ func isHealthPath(pattern string) bool {
 // Routing. It holds no package-level state; a process constructs exactly
 // one from New in its composition root (cmd/server/main.go).
 type Router struct {
-	mux  *http.ServeMux
-	auth *httpauth.Auth
+	mux        *http.ServeMux
+	auth       *httpauth.Auth
+	rpcOptions []connect.HandlerOption
 }
 
 // New builds an empty Router wrapping every registered handler with the
 // auth regime for its path group, per auth. Callers add handlers with the
 // RegisterXxx methods, then take the assembled http.Handler via Handler.
-func New(auth *httpauth.Auth) *Router {
-	return &Router{mux: http.NewServeMux(), auth: auth}
+//
+// tracerProvider is the OpenTelemetry provider the RPC spans described in
+// tracing.go are created from — internal/telemetry hands one out, and it is
+// never nil there even when telemetry is disabled (it is upstream's no-op).
+// A nil provider is accepted anyway and degrades to the no-op, so a test
+// that only cares about routing need not thread telemetry through. It is a
+// parameter rather than a global because internal/telemetry deliberately
+// installs no OpenTelemetry global; see that package's doc comment.
+//
+// It panics if the instrumentation cannot be constructed. That is a
+// composition-root wiring failure in the same class as RegisterCLI's
+// wrong-prefix panic: it cannot depend on request data, so it fails at
+// process startup or never.
+//
+// That branch is currently UNREACHABLE and no test covers it, which a reader
+// should know rather than assume: rpcOptions can only fail if
+// otelconnect.NewInterceptor fails, which can only happen if instrument
+// creation fails on the meter it was given, and WithoutMetrics makes that
+// meter the no-op — whose instrument constructors cannot error. It becomes
+// genuinely fallible the moment a real MeterProvider is wired in (the
+// metrics bead). The panic stays because it is honest defence for that day,
+// not because it is exercised today.
+func New(auth *httpauth.Auth, tracerProvider trace.TracerProvider) *Router {
+	options, err := rpcOptions(tracerProvider)
+	if err != nil {
+		panic(fmt.Sprintf("server: New: building RPC instrumentation: %v", err))
+	}
+	return &Router{mux: http.NewServeMux(), auth: auth, rpcOptions: options}
 }
 
 // RegisterCLI mounts handler at path behind httpauth.Auth.CLI, for the
@@ -56,7 +85,17 @@ func New(auth *httpauth.Auth) *Router {
 // constructor returns, e.g. "/loam.v1.WorkBranchService/" — callers pass
 // that pair straight through:
 //
-//	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(impl))
+//	router.RegisterCLI(loamv1connect.NewWorkBranchServiceHandler(impl, router.RPCOptions()...))
+//
+// RPCOptions() carries this process's RPC tracing (tracing.go); pass it to
+// every constructor registered here. Unlike the auth wrapper, this method
+// cannot apply it for the caller — connect interceptors are handler
+// CONSTRUCTION options and there is no seam for attaching one to a built
+// http.Handler — so a constructor called without them routes and
+// authenticates correctly but produces no span. That gap is guarded where
+// the call sites live rather than here:
+// cmd/server's TestBuildRouter_EveryDeclaredServiceIsTraced walks the
+// protobuf registry and asserts a span for every declared service.
 //
 // It panics if path does not start with "/loam.v1." — a programming error
 // caught at composition-root wiring time, not a runtime condition.
@@ -71,8 +110,9 @@ func (rt *Router) RegisterCLI(path string, handler http.Handler) {
 // the /loam.admin.v1.* Connect service group (docs/web-spec.md -> Hosting
 // & Routing). path is the value a generated
 // adminv1connect.NewXxxServiceHandler constructor returns, e.g.
-// "/loam.admin.v1.RepoAdminService/". It panics if path does not start
-// with "/loam.admin.v1." (see RegisterCLI).
+// "/loam.admin.v1.RepoAdminService/". Pass router.RPCOptions()... to the
+// constructor, for the reason spelled out on RegisterCLI. It panics if path
+// does not start with "/loam.admin.v1." (see RegisterCLI).
 func (rt *Router) RegisterAdmin(path string, handler http.Handler) {
 	if !strings.HasPrefix(path, adminPathPrefix) {
 		panic(fmt.Sprintf("server: RegisterAdmin: path %q must start with %q", path, adminPathPrefix))
@@ -103,6 +143,16 @@ func (rt *Router) RegisterGit(prefix string, handler http.Handler) {
 // attacker-influenced string. RegisterUnauthenticated panics for any other
 // pattern, so a future mistaken call cannot open an unintended
 // unauthenticated route.
+//
+// Handlers mounted here are also deliberately NOT TRACED, and the natural
+// instinct — wrap Handler()'s mux in otelhttp so nothing can be missed — is
+// exactly what would break it. /healthz and /readyz are polled on a tight
+// liveness interval; a span each would drown real traffic and spend
+// collector budget on the two requests carrying the least information in
+// the system. Because the RPC instrumentation lives at the connect layer
+// (see rpcOptions in tracing.go) and these are plain http.Handlers, the
+// exemption is structural: there is no options set they could receive and
+// no path string anywhere that excludes them.
 func (rt *Router) RegisterUnauthenticated(pattern string, handler http.Handler) {
 	if !isHealthPath(pattern) {
 		panic(fmt.Sprintf("server: RegisterUnauthenticated: %q is not a recognized health path (docs/server-spec.md: /healthz and /readyz are the only exemption)", pattern))
