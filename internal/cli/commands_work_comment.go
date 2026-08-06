@@ -20,11 +20,13 @@ type commentFlags struct {
 	resolve *string
 	edit    *string
 	discard *string
+	list    *bool
 }
 
 // newWorkCommentFlags builds the pflag.FlagSet for `loam work comment
 // [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>]
-// [--edit <staged-id>] [--discard <staged-id>]`, plus the parsed values.
+// [--edit <staged-id>] [--discard <staged-id>] [--list]`, plus the parsed
+// values.
 func newWorkCommentFlags() (*pflag.FlagSet, *commentFlags) {
 	fs := newFlagSet("work comment")
 	f := &commentFlags{
@@ -33,6 +35,7 @@ func newWorkCommentFlags() (*pflag.FlagSet, *commentFlags) {
 		resolve: fs.String("resolve", "", "mark this thread id resolved"),
 		edit:    fs.String("edit", "", "replace the body of this staged comment id"),
 		discard: fs.String("discard", "", "remove this staged comment id"),
+		list:    fs.Bool("list", false, "report the staged comments and the staging directory holding them"),
 	}
 	return fs, f
 }
@@ -47,6 +50,7 @@ const (
 	commentModeNew commentMode = iota
 	commentModeEdit
 	commentModeDiscard
+	commentModeList
 )
 
 // stagedCommentOutput is `work comment`'s success shape (docs/cli-spec.md ->
@@ -137,6 +141,8 @@ func runWorkComment(ctx context.Context, deps *Deps, args []string) error {
 // grow to cover them.
 func commentModeSkipsBody(f *commentFlags) bool {
 	switch {
+	case *f.list:
+		return true
 	case *f.discard != "":
 		return true
 	case *f.edit != "":
@@ -157,6 +163,11 @@ func commentModeSkipsBody(f *commentFlags) bool {
 // staged.
 func resolveCommentMode(f *commentFlags, body string) (commentMode, error) {
 	switch {
+	case *f.list:
+		if *f.edit != "" || *f.discard != "" || *f.file != "" || *f.line != 0 || *f.resolve != "" {
+			return commentModeNew, newUsageCLIError("work comment: --list only reports the staging area; it cannot be combined with --file, --line, --resolve, --edit, or --discard", nil)
+		}
+		return commentModeList, nil
 	case *f.edit != "" && *f.discard != "":
 		return commentModeNew, newUsageCLIError("work comment: --edit and --discard are mutually exclusive", nil)
 	case *f.edit != "":
@@ -290,6 +301,9 @@ func stageComment(deps *Deps, repo, workBranch string, mode commentMode, f *comm
 		return err
 	}
 	defer func() { _ = store.Close() }()
+	if mode == commentModeList {
+		return encodeStagedListing(deps, store)
+	}
 	item, staged, err := applyCommentMode(store, mode, f, body)
 	if err != nil {
 		return err
@@ -302,6 +316,36 @@ func stageComment(deps *Deps, repo, workBranch string, mode commentMode, f *comm
 		Body:    item.Body,
 		Resolve: item.Resolve,
 	})
+}
+
+// stagedListingOutput is `work comment --list`'s success shape: the staged
+// items, how many there are, and — the part that is not merely convenient —
+// the directory they were read from.
+//
+// StagingDir is the field this command exists for (loam-rgyg). `comments
+// --staged` already returns a bare array, which answers "what is staged"
+// but not "staged WHERE", and those were the two questions a reviewer
+// could not tell apart when a verdict published none of their ten
+// comments: an empty array from the wrong staging area is byte-identical
+// to an empty array from the right one. Count is redundant with
+// len(items), deliberately: it is the number a reviewer compares against
+// `published` in the verdict response, and making them read it off a list
+// they have to count themselves is how a mismatch stays unnoticed.
+type stagedListingOutput struct {
+	StagingDir string                `json:"staging_dir"`
+	Count      int                   `json:"count"`
+	Items      []stagedCommentOutput `json:"items"`
+}
+
+// encodeStagedListing reports the caller's staged items and where they
+// live — the inspectable step before the irreversible one.
+func encodeStagedListing(deps *Deps, store *stagingStore) error {
+	items, err := store.list()
+	if err != nil {
+		return err
+	}
+	rows := stagedCommentOutputsFrom(items)
+	return deps.encoder.Encode(stagedListingOutput{StagingDir: store.location(), Count: len(rows), Items: rows})
 }
 
 // applyCommentMode performs the selected mode's single staging mutation.

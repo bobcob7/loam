@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -66,6 +67,19 @@ func rejectingVerdictServer(code connect.Code, message string) *verdictServer {
 	return s
 }
 
+// undercountingVerdictServer accepts the batch but reports having
+// published only `published` of it — the shape of a server that dropped
+// part of a reviewer's findings while still recording the verdict that was
+// supposed to carry them.
+func undercountingVerdictServer(published uint32) *verdictServer {
+	s := newVerdictServer()
+	s.client.SubmitVerdictFunc = func(_ context.Context, req *connect.Request[loamv1.SubmitVerdictRequest]) (*connect.Response[loamv1.SubmitVerdictResponse], error) {
+		s.requests = append(s.requests, req.Msg)
+		return connect.NewResponse(&loamv1.SubmitVerdictResponse{Outcome: req.Msg.GetOutcome(), Published: published}), nil
+	}
+	return s
+}
+
 // verdictDeps wires a Deps for `work verdict` against a REAL workspace
 // rooted at workspaceRoot — the staging area and its clearing are the thing
 // under test, so it is a real contained directory rather than a mock.
@@ -114,6 +128,17 @@ func stageItems(t *testing.T, workspaceRoot string, items ...stagedItem) {
 	require.Len(t, staged, len(items), "precondition: the batch must really be staged before publishing it")
 }
 
+// stagingDirOf is the staging directory `work verdict` reports back, so a
+// test can assert the reported location is the one it actually staged into
+// rather than merely asserting some non-empty string (loam-rgyg: a staging
+// directory nobody checks is how two of them went unnoticed).
+func stagingDirOf(t *testing.T, workspaceRoot string) string {
+	t.Helper()
+	dir, err := stagingWorkspace(workspaceRoot, testReviewer).stagingPath(testRepo, testWorkBranch)
+	require.NoError(t, err)
+	return dir
+}
+
 // remainingStaged reads the reviewer's staging area the way a later CLI
 // invocation would.
 func remainingStaged(t *testing.T, workspaceRoot string) []stagedItem {
@@ -152,7 +177,7 @@ func TestRunWorkVerdict_PublishesTheStagedBatchAtomicallyAndClearsStaging(t *tes
 	assert.Equal(t, "a general remark", req.GetComments()[1].GetBody())
 	assert.Nil(t, req.GetComments()[1].GetAnchor(), "a top-level comment must carry no anchor")
 	assert.Empty(t, srv.other, "verdict must make no rpc other than SubmitVerdict")
-	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "disapprove", Published: 2}, encoded)
+	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "disapprove", Published: 2, PublishedIDs: []string{"s1", "s2"}, ResolvedThreadIDs: []string{}, StagingDir: stagingDirOf(t, workspaceRoot)}, encoded)
 	assert.Empty(t, remainingStaged(t, workspaceRoot), "a published batch must no longer be staged")
 }
 
@@ -166,7 +191,7 @@ func TestRunWorkVerdict_OutputShape(t *testing.T) {
 	require.NoError(t, err)
 	raw, err := json.Marshal(encoded)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","work_branch":"wb-9c2f1a","outcome":"approve","published":3}`, string(raw))
+	assert.JSONEq(t, `{"repo":"bobcob7/doc-server","work_branch":"wb-9c2f1a","outcome":"approve","published":3,"published_ids":["s1","s2","s3"],"resolved_thread_ids":[],"staging_dir":"`+stagingDirOf(t, workspaceRoot)+`"}`, string(raw))
 }
 
 // TestRunWorkVerdict_ResolveOnlyItem_TravelsAsAResolutionNotAComment: a
@@ -234,7 +259,7 @@ func TestRunWorkVerdict_OutcomeOnly_IsAllowed(t *testing.T) {
 	assert.Empty(t, srv.requests[0].GetComments())
 	assert.Empty(t, srv.requests[0].GetResolveThreadIds())
 	assert.Equal(t, loamv1.VerdictOutcome_VERDICT_OUTCOME_NEUTRAL, srv.requests[0].GetOutcome())
-	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "neutral", Published: 0}, encoded)
+	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "neutral", Published: 0, PublishedIDs: []string{}, ResolvedThreadIDs: []string{}, StagingDir: stagingDirOf(t, workspaceRoot)}, encoded)
 }
 
 // TestRunWorkVerdict_ReSubmitting_DoesNotRepublishTheClearedBatch is the
@@ -359,6 +384,89 @@ func TestRunWorkVerdict_ResolvingAnotherAgentsThread_ExitsTwoAsUnauthorized(t *t
 	assert.Len(t, remainingStaged(t, workspaceRoot), 1, "a refused verdict must leave the batch staged")
 }
 
+// --- reporting what actually published (loam-rgyg) ---
+
+// TestRunWorkVerdict_ReportsEveryStagedIDItPublished is the reporting half
+// of loam-rgyg: the response must say WHICH staged comments went out, not
+// merely how many.
+//
+// The fixture stages FOUR items of three different kinds — two plain
+// comments, a resolve-only item, and one that carries both a body and a
+// resolve — precisely so the assertions can distinguish outcomes a
+// single-item fixture cannot. With one staged comment, "reported every id"
+// and "reported the first id" and "reported an id" are the same
+// observation; here they are three different ones, and the resolve-only
+// item additionally pins that ids are attributed to the right list rather
+// than to whichever is longer.
+func TestRunWorkVerdict_ReportsEveryStagedIDItPublished(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageItems(t, workspaceRoot,
+		stagedItem{Body: "first finding"},
+		stagedItem{Resolve: "t1"},
+		stagedItem{File: "auth.go", Line: 42, Body: "second finding"},
+		stagedItem{Body: "third finding", Resolve: "t2"},
+	)
+	srv := newVerdictServer()
+	encoded, err := runVerdict(t, workspaceRoot, srv, verdictArgs("disapprove")...)
+	require.NoError(t, err)
+	out, ok := encoded.(verdictOutput)
+	require.True(t, ok)
+	assert.Equal(t, []string{"s1", "s3", "s4"}, out.PublishedIDs, "every staged comment that carried a body must be named, in staging order; the resolve-only s2 published no comment")
+	assert.Equal(t, []string{"t1", "t2"}, out.ResolvedThreadIDs, "the resolve targets are thread ids, reported separately from the comments — s2 contributes only here, s4 to both")
+	assert.Equal(t, uint32(3), out.Published)
+	assert.Equal(t, stagingDirOf(t, workspaceRoot), out.StagingDir, "the response must name the staging area it published from")
+	require.Len(t, srv.requests, 1)
+	assert.Len(t, srv.requests[0].GetComments(), len(out.PublishedIDs), "the ids reported must be exactly the comments sent, not a recount of them")
+}
+
+// TestRunWorkVerdict_ServerPublishedFewerThanStaged_FailsInsteadOfReportingSuccess
+// is the guard loam-rgyg exists for. `work verdict` is irreversible: if the
+// server accepted the verdict but published fewer comments than the batch
+// carried, the reviewer's findings are partly gone and the verdict saying
+// they exist is not. That must be an error, never a success-shaped
+// response with a smaller number in it.
+//
+// Three staged comments against a server reporting one, so the failure is
+// "some published" rather than the degenerate "none published" — a guard
+// written only for zero would pass this test's weaker sibling and still
+// let a partial loss through.
+func TestRunWorkVerdict_ServerPublishedFewerThanStaged_FailsInsteadOfReportingSuccess(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageItems(t, workspaceRoot,
+		stagedItem{Body: "first finding"},
+		stagedItem{Body: "second finding"},
+		stagedItem{Body: "third finding"},
+	)
+	srv := undercountingVerdictServer(1)
+	encoded, err := runVerdict(t, workspaceRoot, srv, verdictArgs("approve")...)
+	require.Error(t, err)
+	assert.Nil(t, encoded, "a batch that did not fully publish must not encode as a successful verdict")
+	assert.Contains(t, err.Error(), "the verdict was published", "the message must not imply a rollback the server never offers")
+	assert.Contains(t, err.Error(), "s1, s2, s3", "the message must name the staged ids so the reviewer can check them against what published")
+	assert.Contains(t, err.Error(), stagingDirOf(t, workspaceRoot), "the message must name the staging area, the fact that was missing when the count was wrong")
+	assert.Len(t, remainingStaged(t, workspaceRoot), 3, "the batch must stay staged: a reviewer with nothing left to read has nothing to compare against")
+}
+
+// TestRunWorkVerdict_ServerPublishedNone_FailsWhenCommentsWereStaged pins
+// the exact number from the original incident report: ten staged, and a
+// response that said `"published": 0` and looked like a success. Zero is
+// legitimate only when nothing was staged.
+func TestRunWorkVerdict_ServerPublishedNone_FailsWhenCommentsWereStaged(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	items := make([]stagedItem, 0, 10)
+	for i := range 10 {
+		items = append(items, stagedItem{Body: fmt.Sprintf("finding %d", i)})
+	}
+	stageItems(t, workspaceRoot, items...)
+	encoded, err := runVerdict(t, workspaceRoot, undercountingVerdictServer(0), verdictArgs("approve")...)
+	require.Error(t, err)
+	assert.Nil(t, encoded)
+	assert.Len(t, remainingStaged(t, workspaceRoot), 10, "nothing published, so nothing may be cleared")
+}
+
 // --- the publish/clear failure ordering ---
 
 // TestRunWorkVerdict_ClearFailsAfterPublish_ReportsThePublishedState is the
@@ -373,6 +481,7 @@ func TestRunWorkVerdict_ClearFailsAfterPublish_ReportsThePublishedState(t *testi
 	area := &StagingAreaMock{
 		ReadFileFunc:  func(string) ([]byte, error) { return staged, nil },
 		WriteFileFunc: func(string, []byte) error { return errStagingArea },
+		LocationFunc:  func() string { return "/workspace/.loam/staging/bobcob7/doc-server/wb-9c2f1a/ada-lovelace-7-reviewer" },
 		CloseFunc:     func() error { return nil },
 	}
 	ws := &WorkspaceResolverMock{OpenStagingFunc: func(string, string) (StagingArea, error) { return area, nil }}
@@ -434,7 +543,7 @@ func TestRouterDispatch_WorkVerdict_ReachesRealHandler(t *testing.T) {
 	deps := verdictDeps(workspaceRoot, newVerdictServer(), &encoded)
 	err := NewRouter(deps).Dispatch(t.Context(), []string{"work", "verdict", testRepo, testWorkBranch, "--outcome", "approve"})
 	require.NoError(t, err)
-	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "approve", Published: 1}, encoded)
+	assert.Equal(t, verdictOutput{Repo: testRepo, WorkBranch: testWorkBranch, Outcome: "approve", Published: 1, PublishedIDs: []string{"s1"}, ResolvedThreadIDs: []string{}, StagingDir: stagingDirOf(t, workspaceRoot)}, encoded)
 	assert.Empty(t, remainingStaged(t, workspaceRoot))
 }
 

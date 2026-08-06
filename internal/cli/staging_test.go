@@ -23,13 +23,15 @@ func realTempDir(t *testing.T) string {
 	return dir
 }
 
-// stagingWorkspace builds a workspace rooted at workspaceRoot, by pointing
-// inference at a clone directory nested directly inside it (newWorkspace
-// always takes the clone's parent as the workspace root).
+// stagingWorkspace builds a workspace whose staging tree lives under
+// workspaceRoot, with inference pointed at a clone nested inside it. The
+// root is passed explicitly because that is now how it is decided
+// everywhere (loam-rgyg): it is configuration, not a function of where the
+// caller happens to be standing.
 func stagingWorkspace(workspaceRoot, agentIdentifier string) *workspace {
 	cloneRoot := filepath.Join(workspaceRoot, "doc-server")
 	lookup := fixedLookup(cloneRoot, "https://loam.example/git/bobcob7/doc-server.git", "wb-9c2f1a")
-	return newWorkspace(cloneRoot, agentIdentifier, lookup)
+	return newWorkspace(cloneRoot, agentIdentifier, workspaceRoot, lookup)
 }
 
 // mkdirAllUnderStaging creates rel under <workspaceRoot>/.loam/staging and
@@ -264,4 +266,114 @@ func TestStagingArea_RejectsInvalidKeysBeforeTouchingTheFilesystem(t *testing.T)
 	assert.NotErrorIs(t, err, errStagingArea)
 	assert.Nil(t, area)
 	assert.NoDirExists(t, filepath.Join(workspaceRoot, loamDirName), "a rejected key must not even create the staging root")
+}
+
+// --- carrying staged comments over from the old, cwd-derived location (loam-rgyg) ---
+
+// legacyStagingWorkspace builds a workspace whose staging tree lives under
+// root, with inference pointed at a clone nested inside legacyRoot — the
+// two directories the fix separates. Before it, the second one WAS the
+// staging root; after it, the first one is, and the second is only where a
+// pre-upgrade staged.json may still be sitting.
+func legacyStagingWorkspace(root, legacyRoot, agentIdentifier string) *workspace {
+	cloneRoot := filepath.Join(legacyRoot, "doc-server")
+	lookup := fixedLookup(cloneRoot, "https://loam.example/git/bobcob7/doc-server.git", "wb-9c2f1a")
+	return newWorkspace(cloneRoot, agentIdentifier, root, lookup)
+}
+
+// writeLegacyStaged plants a staged.json where the pre-fix, cwd-derived
+// staging root would have put it.
+func writeLegacyStaged(t *testing.T, legacyRoot, agent, contents string) {
+	t.Helper()
+	dir := filepath.Join(legacyRoot, loamDirName, stagingDirName, testRepo, testWorkBranch, agent)
+	require.NoError(t, os.MkdirAll(dir, stagingDirPerm))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, stagedFileName), []byte(contents), stagingFilePerm))
+}
+
+// TestOpenStaging_AdoptsStagedCommentsLeftAtThePreviousLocation proves the
+// fix does not itself do what the bug does. Moving where staged comments
+// live would otherwise strand every comment staged before the upgrade: the
+// reviewer's next `work verdict` would find an empty area and publish an
+// outcome with none of their findings attached — the precise failure this
+// bead is about, reintroduced by its own fix.
+//
+// THREE items, with distinct ids and bodies, and next_id carried across:
+// with one item a test cannot distinguish "adopted the batch" from
+// "adopted an item", and a counter that silently rewound to s1 is the
+// symptom by which a second reviewer detected this class of loss at all.
+func TestOpenStaging_AdoptsStagedCommentsLeftAtThePreviousLocation(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":9,"items":[
+		{"id":"s6","body":"first finding"},
+		{"id":"s7","file":"auth.go","line":42,"body":"second finding"},
+		{"id":"s8","body":"third finding"}]}`)
+	ws := legacyStagingWorkspace(root, legacyRoot, testReviewer)
+	store, err := openStagingStore(ws, testRepo, testWorkBranch)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	items, err := store.list()
+	require.NoError(t, err)
+	require.Len(t, items, 3, "the whole batch must come across, not the first of it")
+	assert.Equal(t, []string{"s6", "s7", "s8"}, stagedIDs(items))
+	assert.Equal(t, "first finding", items[0].Body)
+	assert.Equal(t, "auth.go", items[1].File)
+	assert.Equal(t, uint32(42), items[1].Line)
+	assert.Equal(t, "third finding", items[2].Body)
+	next, err := store.add(stagedItem{Body: "a fourth, staged after the upgrade"})
+	require.NoError(t, err)
+	assert.Equal(t, "s9", next.ID, "the id counter must come across too: a reused id renames a comment the reviewer already recorded")
+	dir, err := ws.stagingPath(testRepo, testWorkBranch)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dir, stagedFileName), "the adopted batch must live at the new location from now on")
+}
+
+// TestOpenStaging_ExistingStagedComments_AreNotOverwrittenByTheLegacyOnes
+// pins the guard that keeps adoption from becoming its own data-loss path.
+// A reviewer with live staged comments at the new location must never have
+// them replaced by a stale document left at the old one.
+func TestOpenStaging_ExistingStagedComments_AreNotOverwrittenByTheLegacyOnes(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	live := openTestStoreFor(t, legacyStagingWorkspace(root, root, testReviewer))
+	_, err := live.add(stagedItem{Body: "live finding"})
+	require.NoError(t, err)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":3,"items":[{"id":"s2","body":"stale"}]}`)
+	reopened := openTestStoreFor(t, legacyStagingWorkspace(root, legacyRoot, testReviewer))
+	items, err := reopened.list()
+	require.NoError(t, err)
+	require.Len(t, items, 1, "a stale legacy document must not be merged into, or over, a live staging area")
+	assert.Equal(t, "live finding", items[0].Body, "adoption must never clobber staged comments that are already here")
+}
+
+// TestOpenStaging_UnreadableLegacyDocument_FailsRatherThanReportingEmpty
+// is the reason adoption reports its failures. A legacy staged.json that
+// exists but cannot be read is exactly the case where carrying on would
+// present an empty staging area as the answer — and an empty staging area
+// presented as the answer is this whole bead.
+func TestOpenStaging_UnreadableLegacyDocument_FailsRatherThanReportingEmpty(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":2,"items":[{"id":"s1","body":"unreachable"}]}`)
+	legacyFile := filepath.Join(legacyRoot, loamDirName, stagingDirName, testRepo, testWorkBranch, testReviewer, stagedFileName)
+	require.NoError(t, os.Chmod(legacyFile, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(legacyFile, stagingFilePerm) })
+	_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errStagingArea)
+	assert.Contains(t, err.Error(), legacyFile, "the failure must name the document it could not carry over")
+}
+
+// TestOpenStaging_NoLegacyDocument_IsAnOrdinaryEmptyStagingArea is the
+// control: adoption must be invisible when there is nothing to adopt,
+// which is every invocation after the first.
+func TestOpenStaging_NoLegacyDocument_IsAnOrdinaryEmptyStagingArea(t *testing.T) {
+	t.Parallel()
+	store := openTestStoreFor(t, legacyStagingWorkspace(realTempDir(t), realTempDir(t), testReviewer))
+	items, err := store.list()
+	require.NoError(t, err)
+	assert.Empty(t, items)
 }

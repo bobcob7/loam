@@ -79,7 +79,55 @@ func (w *workspace) OpenStaging(repo, workBranch string) (StagingArea, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: creating %s under staging root %s: %w", errStagingArea, rel, stagingRoot.Name(), err)
 	}
-	return &stagingArea{root: areaRoot}, nil
+	area := &stagingArea{root: areaRoot}
+	if err := w.adoptLegacyStaging(area, rel); err != nil {
+		_ = area.Close()
+		return nil, err
+	}
+	return area, nil
+}
+
+// adoptLegacyStaging moves a staged.json left behind at the OLD,
+// cwd-derived staging location into the area just opened at the configured
+// one, when the new location has none of its own.
+//
+// It exists because the fix for loam-rgyg MOVES where staged comments
+// live. Without this, deploying that fix would itself do the thing the bug
+// does: a reviewer who staged comments before the upgrade and published
+// after it would find an empty staging area and publish a verdict with
+// none of their findings attached. A migration that silently strands data
+// is not an acceptable fix for silently stranding data.
+//
+// It is deliberately conservative in three ways. It never runs when the
+// new location already holds a staged.json, so it cannot overwrite live
+// staged state. It never DELETES the legacy file — a copy that leaves the
+// original readable is recoverable by hand if anything about this is
+// wrong, and the legacy file is inert once the new one exists. And it
+// reports its failures instead of swallowing them: a legacy document that
+// exists but cannot be read or re-written is precisely the case where
+// carrying on would lose comments, so it fails the command loudly rather
+// than presenting an empty staging area as the answer.
+func (w *workspace) adoptLegacyStaging(area *stagingArea, rel string) error {
+	if w.legacyRoot == "" || w.legacyRoot == w.root {
+		return nil
+	}
+	if _, err := area.ReadFile(stagedFileName); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	legacy := filepath.Join(w.legacyRoot, loamDirName, stagingDirName, rel, stagedFileName)
+	data, err := os.ReadFile(legacy)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: reading staged comments left at the previous staging location %s: %w", errStagingArea, legacy, err)
+	}
+	if err := area.WriteFile(stagedFileName, data); err != nil {
+		return fmt.Errorf("%w: carrying staged comments over from the previous staging location %s: %w", errStagingArea, legacy, err)
+	}
+	return nil
 }
 
 // makeContainedDir creates name (and any missing parents) under parent and
@@ -159,6 +207,9 @@ func (a *stagingArea) Remove(name string) error {
 	}
 	return nil
 }
+
+// Location implements StagingArea.
+func (a *stagingArea) Location() string { return a.root.Name() }
 
 // Close implements StagingArea.
 func (a *stagingArea) Close() error { return a.root.Close() }
