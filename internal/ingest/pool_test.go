@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -543,6 +546,29 @@ func (h *capturingHandler) find(msg string) (slog.Record, bool) {
 	return slog.Record{}, false
 }
 
+// findLevel reports whether any captured record has BOTH the given
+// message and the given level.
+//
+// find (above) matches on message alone, which cannot express the
+// assertion loam-54o.17 needs. That bead's whole subject is a behaviour
+// that was already "logged" before the fix and is still "logged" after it
+// -- what changed is the LEVEL, from work()'s ERROR (ordinary contention
+// reported as a fault, the symptom operators learn to ignore) to DEBUG.
+// A message-only assertion passes identically either way, so the
+// deliberate decision would have been documented in a doc comment and
+// guarded by nothing. Asserting the true case AND the false case at the
+// wrong level pins it in both directions.
+func (h *capturingHandler) findLevel(msg string, level slog.Level) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message == msg && r.Level == level {
+			return true
+		}
+	}
+	return false
+}
+
 // attrString returns the string form of key's value on r, or "" if key was
 // never set -- good enough for these tests, which only assert non-empty /
 // Contains, never an exact numeric or structured comparison.
@@ -613,4 +639,126 @@ func TestScheduleRetry_SurvivesAndLogsAPanicRequeueing(t *testing.T) {
 	assert.Equal(t, jobID.String(), attrString(rec, "job_id"), "the log must identify WHICH job's retry died")
 	assert.NotEmpty(t, attrString(rec, "panic"), "the log must carry the recovered value")
 	assert.NotEmpty(t, attrString(rec, "stack"), "the log must carry a stack trace -- a recovered panic that loses its stack is harder to diagnose than a crash")
+}
+
+// TestIsRunningPerRepoViolation_MatchesTheGuardConstraintByName is the
+// classification loam-54o.17 turns on: claim treats one specific unique
+// violation as ordinary contention and every other error as a failure, so
+// this function deciding wrongly in either direction is the whole bug.
+// A false negative puts a normal concurrent claim back on work()'s ERROR
+// path (the production symptom the bead exists to prevent); a false
+// positive silently swallows a genuine duplicate-key defect as "someone
+// beat me", which is strictly worse than the error it replaced.
+//
+// The bare-SQLSTATE case is the one that matters most: 23505 with any
+// OTHER constraint name must NOT match. ingest_jobs already has a primary
+// key, and this repo classifies unique violations by name everywhere else
+// (roles_name_key, repos_name_key), so "any 23505 during a claim is
+// contention" would be both inconsistent and wrong.
+func TestIsRunningPerRepoViolation_MatchesTheGuardConstraintByName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "the guard constraint's own unique violation",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "ingest_jobs_one_running_per_repo"},
+			want: true,
+		},
+		{
+			name: "wrapped in claimOnce's own error context, as claim actually receives it",
+			err:  fmt.Errorf("marking ingest job %s running: %w", uuid.New(), &pgconn.PgError{Code: "23505", ConstraintName: "ingest_jobs_one_running_per_repo"}),
+			want: true,
+		},
+		{
+			name: "a unique violation on ingest_jobs' primary key is a real defect, not contention",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "ingest_jobs_pkey"},
+			want: false,
+		},
+		{
+			name: "a unique violation on an unrelated table's constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "roles_name_key"},
+			want: false,
+		},
+		{
+			name: "a 23505 carrying no constraint name at all",
+			err:  &pgconn.PgError{Code: "23505"},
+			want: false,
+		},
+		{
+			name: "the right constraint name under a different SQLSTATE",
+			err:  &pgconn.PgError{Code: "23503", ConstraintName: "ingest_jobs_one_running_per_repo"},
+			want: false,
+		},
+		{
+			name: "a check-constraint violation on the same table",
+			err:  &pgconn.PgError{Code: "23514", ConstraintName: "ingest_jobs_status_check"},
+			want: false,
+		},
+		{
+			name: "an ordinary non-pg error",
+			err:  errors.New("connection reset by peer"),
+			want: false,
+		},
+		{
+			name: "pgx.ErrNoRows, which claim handles on a different path entirely",
+			err:  pgx.ErrNoRows,
+			want: false,
+		},
+		{
+			name: "no error at all",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isRunningPerRepoViolation(tt.err))
+		})
+	}
+}
+
+// TestClaimQuery_CarriesTheQueuedAtIDTiebreak pins loam-c94.18's fix into
+// the statement text. A bare ORDER BY queued_at is not wrong in a way any
+// single-row test can observe -- it only misbehaves when two rows share a
+// queued_at, and then only by picking an arbitrary one -- so the
+// integration test that forces a tie (TestClaim_QueuedAtTie_BreaksOnID)
+// can pass by luck on a Postgres that happens to return them in id order.
+// This assertion cannot.
+func TestClaimQuery_CarriesTheQueuedAtIDTiebreak(t *testing.T) {
+	t.Parallel()
+	assert.Contains(t, claimQuery, "ORDER BY j.queued_at, j.id",
+		"claimQuery must break a queued_at tie on id, matching ClaimIngestJob and ListIngestJobs")
+}
+
+// TestClaimQuery_FiltersReposWithARunningJob pins the cross-process
+// avoidance filter, for the same reason as the test above: its absence is
+// invisible to any test that does not race two writers, because the
+// constraint would catch the collision anyway -- just one wasted round
+// trip and one DEBUG line later.
+func TestClaimQuery_FiltersReposWithARunningJob(t *testing.T) {
+	t.Parallel()
+	assert.Contains(t, claimQuery, "NOT EXISTS",
+		"claimQuery must skip repos that already have a committed running job, whoever started it")
+	assert.Contains(t, claimQuery, "running.status = 'running'",
+		"the NOT EXISTS must key on status = 'running', the same predicate ingest_jobs_one_running_per_repo indexes")
+}
+
+// TestMaxClaimAttempts_IsBoundedAndSmall guards the two properties
+// maxClaimAttempts' doc comment argues for: the retry is bounded at all
+// (an unbounded loop against a constraint that keeps rejecting is a
+// livelock, and this one holds mu while it spins), and the bound stays
+// small enough that holding mu through it is not itself the outage. It is
+// deliberately a range, not an equality: the exact number is a judgement
+// call this test should not freeze, but "someone raised it to 500" and
+// "someone set it to 0" both need to fail here.
+func TestMaxClaimAttempts_IsBoundedAndSmall(t *testing.T) {
+	t.Parallel()
+	assert.GreaterOrEqual(t, maxClaimAttempts, 2,
+		"one attempt is not a retry -- a single lost race would report nothing to claim while other repos' jobs sit queued")
+	assert.LessOrEqual(t, maxClaimAttempts, 10,
+		"claim holds mu for every attempt, blocking every other worker in this process from claiming anything")
 }
