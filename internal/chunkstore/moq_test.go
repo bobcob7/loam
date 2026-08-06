@@ -20,6 +20,9 @@ var _ queries = &queriesMock{}
 //
 //		// make and configure a mocked queries
 //		mockedqueries := &queriesMock{
+//			CountChunksByFileFunc: func(ctx context.Context, arg gen.CountChunksByFileParams) (int64, error) {
+//				panic("mock out the CountChunksByFile method")
+//			},
 //			DeleteChunksByFileFunc: func(ctx context.Context, arg gen.DeleteChunksByFileParams) error {
 //				panic("mock out the DeleteChunksByFile method")
 //			},
@@ -39,6 +42,9 @@ var _ queries = &queriesMock{}
 //
 //	}
 type queriesMock struct {
+	// CountChunksByFileFunc mocks the CountChunksByFile method.
+	CountChunksByFileFunc func(ctx context.Context, arg gen.CountChunksByFileParams) (int64, error)
+
 	// DeleteChunksByFileFunc mocks the DeleteChunksByFile method.
 	DeleteChunksByFileFunc func(ctx context.Context, arg gen.DeleteChunksByFileParams) error
 
@@ -53,6 +59,13 @@ type queriesMock struct {
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// CountChunksByFile holds details about calls to the CountChunksByFile method.
+		CountChunksByFile []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.CountChunksByFileParams
+		}
 		// DeleteChunksByFile holds details about calls to the DeleteChunksByFile method.
 		DeleteChunksByFile []struct {
 			// Ctx is the ctx argument value.
@@ -82,10 +95,47 @@ type queriesMock struct {
 			Arg gen.SearchChunksByEmbeddingScopedParams
 		}
 	}
+	lockCountChunksByFile             sync.RWMutex
 	lockDeleteChunksByFile            sync.RWMutex
 	lockDeleteChunksForRepoBranch     sync.RWMutex
 	lockInsertChunk                   sync.RWMutex
 	lockSearchChunksByEmbeddingScoped sync.RWMutex
+}
+
+// CountChunksByFile calls CountChunksByFileFunc.
+func (mock *queriesMock) CountChunksByFile(ctx context.Context, arg gen.CountChunksByFileParams) (int64, error) {
+	if mock.CountChunksByFileFunc == nil {
+		panic("queriesMock.CountChunksByFileFunc: method is nil but queries.CountChunksByFile was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.CountChunksByFileParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockCountChunksByFile.Lock()
+	mock.calls.CountChunksByFile = append(mock.calls.CountChunksByFile, callInfo)
+	mock.lockCountChunksByFile.Unlock()
+	return mock.CountChunksByFileFunc(ctx, arg)
+}
+
+// CountChunksByFileCalls gets all the calls that were made to CountChunksByFile.
+// Check the length with:
+//
+//	len(mockedqueries.CountChunksByFileCalls())
+func (mock *queriesMock) CountChunksByFileCalls() []struct {
+	Ctx context.Context
+	Arg gen.CountChunksByFileParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.CountChunksByFileParams
+	}
+	mock.lockCountChunksByFile.RLock()
+	calls = mock.calls.CountChunksByFile
+	mock.lockCountChunksByFile.RUnlock()
+	return calls
 }
 
 // DeleteChunksByFile calls DeleteChunksByFileFunc.
@@ -379,5 +429,227 @@ func (mock *savepointExecerMock) ExecCalls() []struct {
 	mock.lockExec.RLock()
 	calls = mock.calls.Exec
 	mock.lockExec.RUnlock()
+	return calls
+}
+
+// Ensure, that rejectionQueriesMock does implement rejectionQueries.
+// If this is not the case, regenerate this file with moq.
+var _ rejectionQueries = &rejectionQueriesMock{}
+
+// rejectionQueriesMock is a mock implementation of rejectionQueries.
+//
+//	func TestSomethingThatUsesrejectionQueries(t *testing.T) {
+//
+//		// make and configure a mocked rejectionQueries
+//		mockedrejectionQueries := &rejectionQueriesMock{
+//			DeleteChunkRejectionsFunc: func(ctx context.Context, arg gen.DeleteChunkRejectionsParams) error {
+//				panic("mock out the DeleteChunkRejections method")
+//			},
+//			DeleteChunkRejectionsForRepoBranchFunc: func(ctx context.Context, arg gen.DeleteChunkRejectionsForRepoBranchParams) error {
+//				panic("mock out the DeleteChunkRejectionsForRepoBranch method")
+//			},
+//			ListChunkRejectionsFunc: func(ctx context.Context, arg gen.ListChunkRejectionsParams) ([]gen.ChunkRejection, error) {
+//				panic("mock out the ListChunkRejections method")
+//			},
+//			RecordChunkRejectionFunc: func(ctx context.Context, arg gen.RecordChunkRejectionParams) error {
+//				panic("mock out the RecordChunkRejection method")
+//			},
+//		}
+//
+//		// use mockedrejectionQueries in code that requires rejectionQueries
+//		// and then make assertions.
+//
+//	}
+type rejectionQueriesMock struct {
+	// DeleteChunkRejectionsFunc mocks the DeleteChunkRejections method.
+	DeleteChunkRejectionsFunc func(ctx context.Context, arg gen.DeleteChunkRejectionsParams) error
+
+	// DeleteChunkRejectionsForRepoBranchFunc mocks the DeleteChunkRejectionsForRepoBranch method.
+	DeleteChunkRejectionsForRepoBranchFunc func(ctx context.Context, arg gen.DeleteChunkRejectionsForRepoBranchParams) error
+
+	// ListChunkRejectionsFunc mocks the ListChunkRejections method.
+	ListChunkRejectionsFunc func(ctx context.Context, arg gen.ListChunkRejectionsParams) ([]gen.ChunkRejection, error)
+
+	// RecordChunkRejectionFunc mocks the RecordChunkRejection method.
+	RecordChunkRejectionFunc func(ctx context.Context, arg gen.RecordChunkRejectionParams) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// DeleteChunkRejections holds details about calls to the DeleteChunkRejections method.
+		DeleteChunkRejections []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.DeleteChunkRejectionsParams
+		}
+		// DeleteChunkRejectionsForRepoBranch holds details about calls to the DeleteChunkRejectionsForRepoBranch method.
+		DeleteChunkRejectionsForRepoBranch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.DeleteChunkRejectionsForRepoBranchParams
+		}
+		// ListChunkRejections holds details about calls to the ListChunkRejections method.
+		ListChunkRejections []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.ListChunkRejectionsParams
+		}
+		// RecordChunkRejection holds details about calls to the RecordChunkRejection method.
+		RecordChunkRejection []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Arg is the arg argument value.
+			Arg gen.RecordChunkRejectionParams
+		}
+	}
+	lockDeleteChunkRejections              sync.RWMutex
+	lockDeleteChunkRejectionsForRepoBranch sync.RWMutex
+	lockListChunkRejections                sync.RWMutex
+	lockRecordChunkRejection               sync.RWMutex
+}
+
+// DeleteChunkRejections calls DeleteChunkRejectionsFunc.
+func (mock *rejectionQueriesMock) DeleteChunkRejections(ctx context.Context, arg gen.DeleteChunkRejectionsParams) error {
+	if mock.DeleteChunkRejectionsFunc == nil {
+		panic("rejectionQueriesMock.DeleteChunkRejectionsFunc: method is nil but rejectionQueries.DeleteChunkRejections was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.DeleteChunkRejectionsParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockDeleteChunkRejections.Lock()
+	mock.calls.DeleteChunkRejections = append(mock.calls.DeleteChunkRejections, callInfo)
+	mock.lockDeleteChunkRejections.Unlock()
+	return mock.DeleteChunkRejectionsFunc(ctx, arg)
+}
+
+// DeleteChunkRejectionsCalls gets all the calls that were made to DeleteChunkRejections.
+// Check the length with:
+//
+//	len(mockedrejectionQueries.DeleteChunkRejectionsCalls())
+func (mock *rejectionQueriesMock) DeleteChunkRejectionsCalls() []struct {
+	Ctx context.Context
+	Arg gen.DeleteChunkRejectionsParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.DeleteChunkRejectionsParams
+	}
+	mock.lockDeleteChunkRejections.RLock()
+	calls = mock.calls.DeleteChunkRejections
+	mock.lockDeleteChunkRejections.RUnlock()
+	return calls
+}
+
+// DeleteChunkRejectionsForRepoBranch calls DeleteChunkRejectionsForRepoBranchFunc.
+func (mock *rejectionQueriesMock) DeleteChunkRejectionsForRepoBranch(ctx context.Context, arg gen.DeleteChunkRejectionsForRepoBranchParams) error {
+	if mock.DeleteChunkRejectionsForRepoBranchFunc == nil {
+		panic("rejectionQueriesMock.DeleteChunkRejectionsForRepoBranchFunc: method is nil but rejectionQueries.DeleteChunkRejectionsForRepoBranch was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.DeleteChunkRejectionsForRepoBranchParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockDeleteChunkRejectionsForRepoBranch.Lock()
+	mock.calls.DeleteChunkRejectionsForRepoBranch = append(mock.calls.DeleteChunkRejectionsForRepoBranch, callInfo)
+	mock.lockDeleteChunkRejectionsForRepoBranch.Unlock()
+	return mock.DeleteChunkRejectionsForRepoBranchFunc(ctx, arg)
+}
+
+// DeleteChunkRejectionsForRepoBranchCalls gets all the calls that were made to DeleteChunkRejectionsForRepoBranch.
+// Check the length with:
+//
+//	len(mockedrejectionQueries.DeleteChunkRejectionsForRepoBranchCalls())
+func (mock *rejectionQueriesMock) DeleteChunkRejectionsForRepoBranchCalls() []struct {
+	Ctx context.Context
+	Arg gen.DeleteChunkRejectionsForRepoBranchParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.DeleteChunkRejectionsForRepoBranchParams
+	}
+	mock.lockDeleteChunkRejectionsForRepoBranch.RLock()
+	calls = mock.calls.DeleteChunkRejectionsForRepoBranch
+	mock.lockDeleteChunkRejectionsForRepoBranch.RUnlock()
+	return calls
+}
+
+// ListChunkRejections calls ListChunkRejectionsFunc.
+func (mock *rejectionQueriesMock) ListChunkRejections(ctx context.Context, arg gen.ListChunkRejectionsParams) ([]gen.ChunkRejection, error) {
+	if mock.ListChunkRejectionsFunc == nil {
+		panic("rejectionQueriesMock.ListChunkRejectionsFunc: method is nil but rejectionQueries.ListChunkRejections was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.ListChunkRejectionsParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockListChunkRejections.Lock()
+	mock.calls.ListChunkRejections = append(mock.calls.ListChunkRejections, callInfo)
+	mock.lockListChunkRejections.Unlock()
+	return mock.ListChunkRejectionsFunc(ctx, arg)
+}
+
+// ListChunkRejectionsCalls gets all the calls that were made to ListChunkRejections.
+// Check the length with:
+//
+//	len(mockedrejectionQueries.ListChunkRejectionsCalls())
+func (mock *rejectionQueriesMock) ListChunkRejectionsCalls() []struct {
+	Ctx context.Context
+	Arg gen.ListChunkRejectionsParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.ListChunkRejectionsParams
+	}
+	mock.lockListChunkRejections.RLock()
+	calls = mock.calls.ListChunkRejections
+	mock.lockListChunkRejections.RUnlock()
+	return calls
+}
+
+// RecordChunkRejection calls RecordChunkRejectionFunc.
+func (mock *rejectionQueriesMock) RecordChunkRejection(ctx context.Context, arg gen.RecordChunkRejectionParams) error {
+	if mock.RecordChunkRejectionFunc == nil {
+		panic("rejectionQueriesMock.RecordChunkRejectionFunc: method is nil but rejectionQueries.RecordChunkRejection was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Arg gen.RecordChunkRejectionParams
+	}{
+		Ctx: ctx,
+		Arg: arg,
+	}
+	mock.lockRecordChunkRejection.Lock()
+	mock.calls.RecordChunkRejection = append(mock.calls.RecordChunkRejection, callInfo)
+	mock.lockRecordChunkRejection.Unlock()
+	return mock.RecordChunkRejectionFunc(ctx, arg)
+}
+
+// RecordChunkRejectionCalls gets all the calls that were made to RecordChunkRejection.
+// Check the length with:
+//
+//	len(mockedrejectionQueries.RecordChunkRejectionCalls())
+func (mock *rejectionQueriesMock) RecordChunkRejectionCalls() []struct {
+	Ctx context.Context
+	Arg gen.RecordChunkRejectionParams
+} {
+	var calls []struct {
+		Ctx context.Context
+		Arg gen.RecordChunkRejectionParams
+	}
+	mock.lockRecordChunkRejection.RLock()
+	calls = mock.calls.RecordChunkRejection
+	mock.lockRecordChunkRejection.RUnlock()
 	return calls
 }

@@ -449,7 +449,10 @@ func TestIngestFileChunks_StoreRejectsOneFile_SkipsItAndWritesTheRest(t *testing
 	assert.Equal(t, "func Alpha() {}", (*calls)[0].inputs[0].Content, "the surviving files must carry THEIR OWN content, not the rejected file's")
 	assert.Equal(t, "pkg/c/c.go", (*calls)[1].file)
 	assert.Equal(t, "func Gamma() {}", (*calls)[1].inputs[0].Content)
-	assert.Equal(t, Stats{FilesReplaced: 2, FilesRejected: 1, ChunksWritten: 2, EmbedCalls: 1}, stats, "the casualty must be counted separately from the files that landed")
+	assert.Equal(t, Stats{
+		FilesReplaced: 2, FilesRejected: 1, ChunksWritten: 2, EmbedCalls: 1,
+		Rejected: []Rejection{{Path: testFileB, ChunksState: chunkstore.ChunksAbsent, Err: rejectErr}},
+	}, stats, "the casualty must be counted separately from the files that landed, AND named: a count cannot be unioned into the next ingest's plan, so loam-qj21's retry needs the path")
 
 	var rejectionLog *slog.Record
 	for i, r := range *records {
@@ -487,7 +490,10 @@ func TestPersist_StoreRejectsOneFile_SkipsItAndWritesTheRest(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, *calls, 1, "newFakeStore only records a call that reaches the base function, i.e. one that was actually attempted and succeeded -- the rejected file's own attempt is proven by Stats.FilesRejected below, not by this slice")
 	assert.Equal(t, testFileB, (*calls)[0].file, "the first file's rejection must not stop the second from being attempted")
-	assert.Equal(t, Stats{FilesReplaced: 1, FilesRejected: 1, ChunksWritten: 1}, stats)
+	assert.Equal(t, Stats{
+		FilesReplaced: 1, FilesRejected: 1, ChunksWritten: 1,
+		Rejected: []Rejection{{Path: testFileA, ChunksState: chunkstore.ChunksAbsent, Err: rejectErr}},
+	}, stats)
 }
 
 // A dead connection pool is exactly the class of failure this bead's own

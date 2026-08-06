@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/diffplan"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
 	"github.com/bobcob7/loam/internal/ingest/graph"
@@ -1145,5 +1146,281 @@ func (mock *embedderInfoMock) ModelIDCalls() []struct {
 	mock.lockModelID.RLock()
 	calls = mock.calls.ModelID
 	mock.lockModelID.RUnlock()
+	return calls
+}
+
+// Ensure, that rejectionLedgerMock does implement rejectionLedger.
+// If this is not the case, regenerate this file with moq.
+var _ rejectionLedger = &rejectionLedgerMock{}
+
+// rejectionLedgerMock is a mock implementation of rejectionLedger.
+//
+//	func TestSomethingThatUsesrejectionLedger(t *testing.T) {
+//
+//		// make and configure a mocked rejectionLedger
+//		mockedrejectionLedger := &rejectionLedgerMock{
+//			ClearFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error {
+//				panic("mock out the Clear method")
+//			},
+//			ClearAllFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error {
+//				panic("mock out the ClearAll method")
+//			},
+//			ListFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error) {
+//				panic("mock out the List method")
+//			},
+//			RecordFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error {
+//				panic("mock out the Record method")
+//			},
+//		}
+//
+//		// use mockedrejectionLedger in code that requires rejectionLedger
+//		// and then make assertions.
+//
+//	}
+type rejectionLedgerMock struct {
+	// ClearFunc mocks the Clear method.
+	ClearFunc func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error
+
+	// ClearAllFunc mocks the ClearAll method.
+	ClearAllFunc func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error
+
+	// ListFunc mocks the List method.
+	ListFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error)
+
+	// RecordFunc mocks the Record method.
+	RecordFunc func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Clear holds details about calls to the Clear method.
+		Clear []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Tx is the tx argument value.
+			Tx pgx.Tx
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+			// Paths is the paths argument value.
+			Paths []string
+		}
+		// ClearAll holds details about calls to the ClearAll method.
+		ClearAll []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Tx is the tx argument value.
+			Tx pgx.Tx
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+		}
+		// List holds details about calls to the List method.
+		List []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+		}
+		// Record holds details about calls to the Record method.
+		Record []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Tx is the tx argument value.
+			Tx pgx.Tx
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+			// In is the in argument value.
+			In chunkstore.RejectionInput
+		}
+	}
+	lockClear    sync.RWMutex
+	lockClearAll sync.RWMutex
+	lockList     sync.RWMutex
+	lockRecord   sync.RWMutex
+}
+
+// Clear calls ClearFunc.
+func (mock *rejectionLedgerMock) Clear(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error {
+	if mock.ClearFunc == nil {
+		panic("rejectionLedgerMock.ClearFunc: method is nil but rejectionLedger.Clear was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+		Paths        []string
+	}{
+		Ctx:          ctx,
+		Tx:           tx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+		Paths:        paths,
+	}
+	mock.lockClear.Lock()
+	mock.calls.Clear = append(mock.calls.Clear, callInfo)
+	mock.lockClear.Unlock()
+	return mock.ClearFunc(ctx, tx, repoID, targetBranch, paths)
+}
+
+// ClearCalls gets all the calls that were made to Clear.
+// Check the length with:
+//
+//	len(mockedrejectionLedger.ClearCalls())
+func (mock *rejectionLedgerMock) ClearCalls() []struct {
+	Ctx          context.Context
+	Tx           pgx.Tx
+	RepoID       uuid.UUID
+	TargetBranch string
+	Paths        []string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+		Paths        []string
+	}
+	mock.lockClear.RLock()
+	calls = mock.calls.Clear
+	mock.lockClear.RUnlock()
+	return calls
+}
+
+// ClearAll calls ClearAllFunc.
+func (mock *rejectionLedgerMock) ClearAll(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error {
+	if mock.ClearAllFunc == nil {
+		panic("rejectionLedgerMock.ClearAllFunc: method is nil but rejectionLedger.ClearAll was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+	}{
+		Ctx:          ctx,
+		Tx:           tx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+	}
+	mock.lockClearAll.Lock()
+	mock.calls.ClearAll = append(mock.calls.ClearAll, callInfo)
+	mock.lockClearAll.Unlock()
+	return mock.ClearAllFunc(ctx, tx, repoID, targetBranch)
+}
+
+// ClearAllCalls gets all the calls that were made to ClearAll.
+// Check the length with:
+//
+//	len(mockedrejectionLedger.ClearAllCalls())
+func (mock *rejectionLedgerMock) ClearAllCalls() []struct {
+	Ctx          context.Context
+	Tx           pgx.Tx
+	RepoID       uuid.UUID
+	TargetBranch string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+	}
+	mock.lockClearAll.RLock()
+	calls = mock.calls.ClearAll
+	mock.lockClearAll.RUnlock()
+	return calls
+}
+
+// List calls ListFunc.
+func (mock *rejectionLedgerMock) List(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error) {
+	if mock.ListFunc == nil {
+		panic("rejectionLedgerMock.ListFunc: method is nil but rejectionLedger.List was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+	}{
+		Ctx:          ctx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+	}
+	mock.lockList.Lock()
+	mock.calls.List = append(mock.calls.List, callInfo)
+	mock.lockList.Unlock()
+	return mock.ListFunc(ctx, repoID, targetBranch)
+}
+
+// ListCalls gets all the calls that were made to List.
+// Check the length with:
+//
+//	len(mockedrejectionLedger.ListCalls())
+func (mock *rejectionLedgerMock) ListCalls() []struct {
+	Ctx          context.Context
+	RepoID       uuid.UUID
+	TargetBranch string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+	}
+	mock.lockList.RLock()
+	calls = mock.calls.List
+	mock.lockList.RUnlock()
+	return calls
+}
+
+// Record calls RecordFunc.
+func (mock *rejectionLedgerMock) Record(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error {
+	if mock.RecordFunc == nil {
+		panic("rejectionLedgerMock.RecordFunc: method is nil but rejectionLedger.Record was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+		In           chunkstore.RejectionInput
+	}{
+		Ctx:          ctx,
+		Tx:           tx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+		In:           in,
+	}
+	mock.lockRecord.Lock()
+	mock.calls.Record = append(mock.calls.Record, callInfo)
+	mock.lockRecord.Unlock()
+	return mock.RecordFunc(ctx, tx, repoID, targetBranch, in)
+}
+
+// RecordCalls gets all the calls that were made to Record.
+// Check the length with:
+//
+//	len(mockedrejectionLedger.RecordCalls())
+func (mock *rejectionLedgerMock) RecordCalls() []struct {
+	Ctx          context.Context
+	Tx           pgx.Tx
+	RepoID       uuid.UUID
+	TargetBranch string
+	In           chunkstore.RejectionInput
+} {
+	var calls []struct {
+		Ctx          context.Context
+		Tx           pgx.Tx
+		RepoID       uuid.UUID
+		TargetBranch string
+		In           chunkstore.RejectionInput
+	}
+	mock.lockRecord.RLock()
+	calls = mock.calls.Record
+	mock.lockRecord.RUnlock()
 	return calls
 }

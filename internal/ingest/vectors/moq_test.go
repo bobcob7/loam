@@ -129,6 +129,9 @@ var _ store = &storeMock{}
 //
 //		// make and configure a mocked store
 //		mockedstore := &storeMock{
+//			CountFileChunksFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string) (int, error) {
+//				panic("mock out the CountFileChunks method")
+//			},
 //			ReplaceFileChunksFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error) {
 //				panic("mock out the ReplaceFileChunks method")
 //			},
@@ -139,11 +142,25 @@ var _ store = &storeMock{}
 //
 //	}
 type storeMock struct {
+	// CountFileChunksFunc mocks the CountFileChunks method.
+	CountFileChunksFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string) (int, error)
+
 	// ReplaceFileChunksFunc mocks the ReplaceFileChunks method.
 	ReplaceFileChunksFunc func(ctx context.Context, repoID uuid.UUID, targetBranch string, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error)
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// CountFileChunks holds details about calls to the CountFileChunks method.
+		CountFileChunks []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// RepoID is the repoID argument value.
+			RepoID uuid.UUID
+			// TargetBranch is the targetBranch argument value.
+			TargetBranch string
+			// File is the file argument value.
+			File string
+		}
 		// ReplaceFileChunks holds details about calls to the ReplaceFileChunks method.
 		ReplaceFileChunks []struct {
 			// Ctx is the ctx argument value.
@@ -158,7 +175,52 @@ type storeMock struct {
 			Inputs []chunkstore.ChunkInput
 		}
 	}
+	lockCountFileChunks   sync.RWMutex
 	lockReplaceFileChunks sync.RWMutex
+}
+
+// CountFileChunks calls CountFileChunksFunc.
+func (mock *storeMock) CountFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch string, file string) (int, error) {
+	if mock.CountFileChunksFunc == nil {
+		panic("storeMock.CountFileChunksFunc: method is nil but store.CountFileChunks was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+		File         string
+	}{
+		Ctx:          ctx,
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+		File:         file,
+	}
+	mock.lockCountFileChunks.Lock()
+	mock.calls.CountFileChunks = append(mock.calls.CountFileChunks, callInfo)
+	mock.lockCountFileChunks.Unlock()
+	return mock.CountFileChunksFunc(ctx, repoID, targetBranch, file)
+}
+
+// CountFileChunksCalls gets all the calls that were made to CountFileChunks.
+// Check the length with:
+//
+//	len(mockedstore.CountFileChunksCalls())
+func (mock *storeMock) CountFileChunksCalls() []struct {
+	Ctx          context.Context
+	RepoID       uuid.UUID
+	TargetBranch string
+	File         string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		RepoID       uuid.UUID
+		TargetBranch string
+		File         string
+	}
+	mock.lockCountFileChunks.RLock()
+	calls = mock.calls.CountFileChunks
+	mock.lockCountFileChunks.RUnlock()
+	return calls
 }
 
 // ReplaceFileChunks calls ReplaceFileChunksFunc.
