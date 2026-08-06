@@ -5,8 +5,11 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 func testLogger() *slog.Logger {
@@ -63,7 +66,30 @@ func TestNewPoolUnreachableDSN(t *testing.T) {
 // database by assertVectorTypeRegistered in pool_integration_test.go.
 func TestNewPoolConfigSetsAfterConnect(t *testing.T) {
 	t.Parallel()
-	poolCfg, err := newPoolConfig("postgres://localhost:1/nonexistent?sslmode=disable")
+	poolCfg, err := newPoolConfig(Config{DatabaseURL: "postgres://localhost:1/nonexistent?sslmode=disable"})
 	require.NoError(t, err)
 	require.NotNil(t, poolCfg.AfterConnect, "NewPool must set AfterConnect so pgvector types are registered once migrations have created the extension")
+}
+
+// TestNewPoolConfig_TracerOnlyWhenProviderSupplied pins the nil-means-off
+// contract Config.TracerProvider documents. The negative half matters more
+// than the positive one: every integration test in this tree builds its
+// pool from a bare db.Config{DatabaseURL: dsn}, and if that quietly grew a
+// tracer those suites would start allocating a span per query against a
+// provider nobody configured.
+func TestNewPoolConfig_TracerOnlyWhenProviderSupplied(t *testing.T) {
+	t.Parallel()
+	const dsn = "postgres://localhost:1/nonexistent?sslmode=disable"
+	untraced, err := newPoolConfig(Config{DatabaseURL: dsn})
+	require.NoError(t, err)
+	assert.Nil(t, untraced.ConnConfig.Tracer, "a Config with no TracerProvider must leave pgx untraced")
+	traced, err := newPoolConfig(Config{DatabaseURL: dsn, TracerProvider: tracenoop.NewTracerProvider()})
+	require.NoError(t, err)
+	require.NotNil(t, traced.ConnConfig.Tracer, "a Config carrying a TracerProvider must attach the query tracer")
+	// pgx and pgxpool both discover the extra tracing surfaces by type
+	// assertion on this ONE value, so satisfying the interfaces is the whole
+	// wiring -- there is no second field to set and no error if a method is
+	// missing, just silence.
+	assert.Implements(t, (*pgx.CopyFromTracer)(nil), traced.ConnConfig.Tracer, "pgx discovers CopyFrom tracing by type assertion, so the attached value must satisfy CopyFromTracer too")
+	assert.Implements(t, (*pgxpool.AcquireTracer)(nil), traced.ConnConfig.Tracer, "pgxpool discovers acquire tracing the same way; without it a pool-exhaustion timeout produces no span at all")
 }

@@ -36,7 +36,7 @@ func NewPool(ctx context.Context, cfg Config, logger *slog.Logger) (*pgxpool.Poo
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("creating pool: %w", ErrMissingDatabaseURL)
 	}
-	poolCfg, err := newPoolConfig(cfg.DatabaseURL)
+	poolCfg, err := newPoolConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parsing database url: %w", err)
 	}
@@ -52,15 +52,24 @@ func NewPool(ctx context.Context, cfg Config, logger *slog.Logger) (*pgxpool.Poo
 	return pool, nil
 }
 
-// newPoolConfig parses dsn into a pgxpool.Config with pgvector type
-// registration wired into AfterConnect. Split out from NewPool so the
-// AfterConnect wiring itself is unit-testable without a live database
+// newPoolConfig parses cfg.DatabaseURL into a pgxpool.Config with pgvector
+// type registration wired into AfterConnect and, when cfg.TracerProvider is
+// set, this package's pgx tracing hook wired into ConnConfig.Tracer. Split
+// out from NewPool so both are unit-testable without a live database
 // connection (pgxpool.ParseConfig and NewWithConfig do not dial network).
-func newPoolConfig(dsn string) (*pgxpool.Config, error) {
-	poolCfg, err := pgxpool.ParseConfig(dsn)
+//
+// ConnConfig.Tracer is the ONE seam for query tracing: pgx consults it on
+// every Query/QueryRow/Exec/CopyFrom on every connection the pool opens, so
+// no call site anywhere in the tree has to know that tracing exists. Do not
+// reintroduce per-query instrumentation at the store layer.
+func newPoolConfig(cfg Config) (*pgxpool.Config, error) {
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		return nil, err
 	}
 	poolCfg.AfterConnect = pgxvec.RegisterTypes
+	if cfg.TracerProvider != nil {
+		poolCfg.ConnConfig.Tracer = newQueryTracer(cfg.TracerProvider, cfg.AcquireSpanThreshold)
+	}
 	return poolCfg, nil
 }

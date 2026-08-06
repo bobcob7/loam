@@ -38,7 +38,7 @@ func connectDatabase(ctx context.Context, cfg config.Config, migrate migrateFunc
 	if err := migrate(ctx, cfg.DatabaseURL, cfg.Logger); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
-	pool, err := newPool(ctx, db.Config{DatabaseURL: cfg.DatabaseURL, EncryptionKey: string(cfg.EncryptionKey)}, cfg.Logger)
+	pool, err := newPool(ctx, db.Config{DatabaseURL: cfg.DatabaseURL, EncryptionKey: string(cfg.EncryptionKey), TracerProvider: cfg.TracerProvider, AcquireSpanThreshold: cfg.OTelDBAcquireThreshold}, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}

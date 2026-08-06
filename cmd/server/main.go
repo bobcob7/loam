@@ -152,7 +152,7 @@ import (
 // while quietly reporting the repo as enrolled and syncing. Refusing to
 // boot is the honest signal.
 func buildIngestOrchestrator(cfg config.Config, pool *pgxpool.Pool, repoStore *reposstore.Store) (ingest.Orchestrator, func(), error) {
-	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, &http.Client{}, cfg.Logger)
+	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, ollama.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider), cfg.Logger)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("building embedder: %w", err)
 	}
@@ -278,6 +278,13 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	if err != nil {
 		return fmt.Errorf("initializing telemetry: %w", err)
 	}
+	// cfg is a VALUE parameter, so this hands the tracer provider to every
+	// buildRouter/register*/buildIngestOrchestrator call below without
+	// widening a single signature, and without escaping this function
+	// (loam-9v9s). It is never nil -- telemetry.New returns upstream's
+	// no-op provider when telemetry is disabled -- so no consumer needs a
+	// disabled check.
+	cfg.TracerProvider = telemetryProvider.TracerProvider()
 	// This defer covers only the STARTUP-FAILURE paths below -- every
 	// `pool.Close(); return err` between here and serve -- so a boot that
 	// dies at, say, mirror reconciliation still stops the exporter's
@@ -625,7 +632,7 @@ func registerRepoAdminService(router *server.Router, cfg config.Config, pool *pg
 		return
 	}
 	credentials := credentialstore.New(pool, enc, cfg.Logger)
-	httpClient := &http.Client{}
+	httpClient := forge.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider)
 	// A single, host-agnostic *forge.Resolver is deliberately reused for
 	// gitCredentialConverter here, mirroring internal/mirrorsync's own
 	// tests and internal/gittransport's doc comment on GitCredentials:
@@ -683,7 +690,7 @@ func registerCredentialService(router *server.Router, cfg config.Config, pool *p
 		return
 	}
 	credentials := credentialstore.New(pool, enc, cfg.Logger)
-	validator := forge.NewResolver(&http.Client{}, cfg.Logger)
+	validator := forge.NewResolver(forge.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider), cfg.Logger)
 	router.RegisterAdmin(adminv1connect.NewCredentialServiceHandler(
 		credential.New(credentials, validator, handler.NewErrorMapper(cfg.Logger), cfg.Logger),
 		router.RPCOptions()...,
@@ -713,7 +720,7 @@ func registerProposalService(router *server.Router, cfg config.Config, pool *pgx
 	if pool == nil {
 		return
 	}
-	httpClient := &http.Client{}
+	httpClient := forge.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider)
 	accepter, err := buildProposalAccepter(cfg, pool, httpClient)
 	if err != nil {
 		cfg.Logger.Error("proposal service: building the acceptance engine, not registering", "error", err)
@@ -803,7 +810,7 @@ func registerSearchService(router *server.Router, cfg config.Config, pool *pgxpo
 	if pool == nil {
 		return
 	}
-	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, &http.Client{}, cfg.Logger)
+	embedder, err := ollama.New(cfg.EmbedderURL, cfg.EmbedderModel, ollama.InstrumentHTTPClient(&http.Client{}, cfg.TracerProvider), cfg.Logger)
 	if err != nil {
 		cfg.Logger.Error("search service: building embedder, not registering", "error", err)
 		return
