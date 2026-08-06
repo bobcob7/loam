@@ -11,13 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// poolMaxConns is the pool size every test in this package configures, and
-// the number is load-bearing rather than arbitrary: pgxpool's default
-// MaxConns is max(4, runtime.NumCPU()), so asserting a value a default could
-// also produce makes the assertion pass whether or not the parameter
-// survived. 17 would be a live example -- a 17-core runner would green the
-// test with the parameter silently discarded. 97 is not a plausible core
-// count on any machine this suite meets.
+// poolMaxConns is the pool size used by every test that asserts the setting
+// SURVIVED (as opposed to the ones that only assert a pool key is absent,
+// where any value will do). The number is load-bearing rather than
+// arbitrary: pgxpool's default MaxConns is max(4, runtime.NumCPU()), so
+// asserting a value a default could also produce makes the assertion pass
+// whether or not the parameter survived. 17 would be a live example -- a
+// 17-core runner would green the test with the parameter silently
+// discarded. 97 is not a plausible core count on any machine this suite
+// meets.
 //
 // Shared from this file, which carries no build tag and is therefore
 // compiled into the integration build too, so the reason lives at one site
