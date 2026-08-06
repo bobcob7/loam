@@ -87,16 +87,30 @@ Two things worth knowing before turning it on:
   grace period is 30s and the telemetry flush gets its own 5s on top of it
   (`cmd/server/serve.go`: `defaultShutdownGrace`, `telemetryFlushGrace`), so
   the worst case is **35s** — and it is reached in exactly the slow-shutdown
-  case this bullet is about. The deployment must therefore set
-  `terminationGracePeriodSeconds` to **at least 35**; Kubernetes' default of
-  30 SIGKILLs the pod five seconds short, discarding the drain rather than
-  the telemetry. Note the margin was already zero before telemetry existed (a
-  30s drain against a 30s default), so this is a chart value to set, not a
-  regression to absorb — tracked on `loam-uwus`.
+  case this bullet is about. Kubernetes' default `terminationGracePeriodSeconds`
+  of 30 SIGKILLs the pod five seconds short, and what that costs is **the
+  telemetry, never the drain**: the flush runs strictly *after* the drain, so
+  in both worst-case timelines the drain has already had its full 30s by the
+  time the overrun happens. Size the grace period to protect the flush.
+  **35 is the floor, not a safe value** — setting exactly 35 restores
+  precisely the zero margin this bullet is about, with the SIGKILL racing the
+  process exit, so the number has to be floor-plus-margin. Note the margin
+  was already zero before telemetry existed (a 30s drain against a 30s
+  default), so this is a deployment value to set, not a regression to absorb.
 
-Deployment wiring for these variables — Helm values, compose, and
-`docs/observability-spec.md` — is tracked separately as `loam-uwus`; this
-table documents the configuration surface itself.
+Both deployment artifacts now set it, at **45s**, with the arithmetic derived
+in place rather than asserted: `helm/loam/values.yaml`'s
+`terminationGracePeriodSeconds` comment shows the full floor-plus-margin
+working, and `deploy/docker-compose.yml`'s `stop_grace_period` matches it
+(compose's own default is 10s, worse than Kubernetes'). Neither is trusted:
+`internal/deploycheck` reads `defaultShutdownGrace` and `telemetryFlushGrace`
+out of `cmd/server`'s source and fails if either artifact — or
+`helm/loam/values.schema.json`'s enforced floor — stops clearing their sum
+with margin, so tuning a timeout here cannot leave a stale number there.
+
+Helm values and compose wiring for these variables landed with `loam-uwus`;
+`docs/observability-spec.md` is still outstanding on that bead. This table
+documents the configuration surface itself.
 
 **Fail fast.** The server validates configuration at startup and exits on the first
 problem: missing required variables, a key that isn't 32 bytes after decoding, an

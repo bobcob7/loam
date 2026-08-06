@@ -188,6 +188,33 @@ services:
       LOAM_LOG_LEVEL: ${LOAM_LOG_LEVEL:-info}
       LOAM_PR_ATTRIBUTION: ${LOAM_PR_ATTRIBUTION:-true}
       LOAM_SYNC_INTERVAL: ${LOAM_SYNC_INTERVAL:-60s}
+      # ---- OpenTelemetry, off by default -------------------------------
+      # All three default to EMPTY, and empty is genuinely "unset" here:
+      # internal/config's lookupDefault and parseFloatEnv treat a variable
+      # that is present-but-empty exactly as one that is absent
+      # (internal/config/env.go), so these three lines change nothing at
+      # all until you fill one in. That is why they are set unconditionally
+      # rather than commented out -- a name that appears in this file is a
+      # name internal/deploycheck's TestComposeSetsOnlyRealConfigVariables
+      # checks against internal/config's source, so a rename on the Go side
+      # becomes a red test instead of a variable that quietly stops being
+      # read. A commented-out line buys the documentation and none of that.
+      #
+      # LOAM_OTEL_ENDPOINT is the ONLY enable switch; there is deliberately
+      # no LOAM_OTEL_ENABLED (internal/config's loadTelemetry explains the
+      # four-states-three-of-which-mean-off argument). Set it to an
+      # absolute http:// or https:// URL -- a bare host:port is rejected at
+      # startup -- and note the port is 4318, the OTLP/HTTP one, because
+      # loam's exporters are HTTP; 4317 is gRPC and would accept the
+      # connection while rejecting every payload. With the commented-out
+      # collector at the bottom of this file, that is
+      # http://otel-collector:4318. See deploy/.env.example.
+      LOAM_OTEL_ENDPOINT: ${LOAM_OTEL_ENDPOINT:-}
+      LOAM_OTEL_SERVICE_NAME: ${LOAM_OTEL_SERVICE_NAME:-}
+      # 0..1. NOT an off switch at 0 -- sampling is a trace concept, so 0
+      # silences traces while metrics keep being pushed (see
+      # ../docs/server-spec.md). To stop both, clear the endpoint above.
+      LOAM_OTEL_SAMPLE_RATIO: ${LOAM_OTEL_SAMPLE_RATIO:-}
     ports:
       # Bound to LOOPBACK by default, and that is a security decision, not
       # a convenience one: loam's MVP has NO agent authentication. Identity
@@ -244,6 +271,28 @@ services:
       # against `retries` (and, on compose implementations that honour it,
       # from marking the container unhealthy early).
       start_period: 60s
+    # Compose's default here is TEN SECONDS -- worse than Kubernetes' 30s
+    # default, and this exposure is real, not theoretical: `docker compose
+    # down`, `stop`, or `restart` sends SIGTERM and SIGKILLs the container
+    # 10s later, cutting loam's shutdown off a quarter of the way through
+    # its own 30s drain. In-flight git smart-HTTP pushes and running ingest
+    # work are lost, and on a slow shutdown the OTLP flush never runs at
+    # all.
+    #
+    # 45s, matching helm/loam/values.yaml's terminationGracePeriodSeconds
+    # for the same reason and by the same arithmetic -- 30s
+    # defaultShutdownGrace + 5s telemetryFlushGrace = a 35s floor (a floor,
+    # not a safe value: 35 restores exactly the zero margin the default
+    # creates), plus 10s for SIGTERM delivery, Go signal handling and the
+    # deferred pgxpool close that runs after the flush. That derivation
+    # lives in full in helm/loam/values.yaml, and internal/deploycheck's
+    # TestComposeGracePeriodExceedsGoShutdownBudget reads the Go constants
+    # out of cmd/server/serve.go and fails if this value stops clearing
+    # them, so tuning a timeout in Go cannot leave this stale.
+    #
+    # Costs nothing in the normal case: compose stops waiting the moment
+    # the process exits.
+    stop_grace_period: 45s
     restart: unless-stopped
 
   # --------------------------------------------------------------------
@@ -302,6 +351,79 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     restart: "no"
+
+  # --------------------------------------------------------------------
+  # OTEL COLLECTOR -- DELIBERATELY NOT A SERVICE HERE, not even an opt-in
+  # profile. This is a decision, so here is the argument (loam-uwus).
+  #
+  # The case FOR shipping one: telemetry you have to assemble yourself is
+  # telemetry most operators never turn on, and the ollama profile above
+  # proves this file is willing to carry an optional dependency.
+  #
+  # THE CASE AGAINST, AND IT RESTS ON ONE ARGUMENT RATHER THAN THREE:
+  #
+  #   A COLLECTOR IS NOT USEFUL BY ITSELF. It is a pipe, and a pipe needs
+  #   somewhere to empty into -- Tempo, Jaeger, Prometheus, a vendor
+  #   endpoint. The only version we could ship without also shipping a
+  #   tracing backend is one whose exporter is `debug`, i.e. a container
+  #   that burns memory to write your spans to its own stdout and discard
+  #   them. That is worse than shipping nothing, because it LOOKS like
+  #   observability: `docker compose ps` shows a healthy collector, loam
+  #   reports a reachable endpoint, and nothing is being retained. Shipping
+  #   a real backend instead makes the quickstart several services heavier
+  #   for a reader who wanted to try loam, and picks their tracing stack
+  #   for them.
+  #
+  # Two weaker arguments, recorded because they came up and should not be
+  # leaned on:
+  #
+  #   - "It makes the quickstart heavier." On its own this proves nothing:
+  #     `profiles:` already answers it, which is exactly what the ollama
+  #     services above demonstrate. Weight is a solved problem here.
+  #   - "loam works without it, unlike ollama." True, and it is why this is
+  #     not simply a third profile -- but optional-ness alone would still
+  #     be an argument for a profile rather than against one. It only bites
+  #     in combination with the point above: an opt-in profile whose opted-
+  #     in state is fake observability is not worth offering.
+  #
+  # And anyone who already runs a collector runs it somewhere else, for
+  # whom the entire integration is one line in deploy/.env.
+  #
+  # So: pointer, not service. If you want one INSIDE this project's
+  # network, paste the following back in and set
+  # LOAM_OTEL_ENDPOINT=http://otel-collector:4318 in deploy/.env. Note
+  # `4318`, the OTLP/HTTP port -- 4317 is gRPC and loam does not speak it.
+  #
+  #   otel-collector:
+  #     profiles: ["otel"]
+  #     image: otel/opentelemetry-collector-contrib:0.115.1
+  #     command: ["--config=/etc/otelcol/config.yaml"]
+  #     volumes:
+  #       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+  #     restart: unless-stopped
+  #
+  # and create deploy/otel-collector.yaml. The smallest one that does
+  # something you can actually read is:
+  #
+  #   receivers:
+  #     otlp:
+  #       protocols:
+  #         http:
+  #           endpoint: 0.0.0.0:4318
+  #   exporters:
+  #     debug:
+  #       verbosity: detailed
+  #   service:
+  #     pipelines:
+  #       traces:  {receivers: [otlp], exporters: [debug]}
+  #       metrics: {receivers: [otlp], exporters: [debug]}
+  #
+  # Replace the `debug` exporter with a real one (otlphttp to your Tempo /
+  # Grafana Cloud / vendor endpoint) before treating any of it as
+  # retention. That file is NOT in this repository, on purpose: a
+  # committed collector config would be a fourth artifact for
+  # internal/deploycheck to keep honest and nothing in loam reads it.
+  # --------------------------------------------------------------------
 
 volumes:
   # Both named, both survive `down` and are reused by the next `up`. Only

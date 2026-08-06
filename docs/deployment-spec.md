@@ -51,8 +51,30 @@ This table adds the deployment angle: where each value comes from in
 | `LOAM_EMBEDDER_MODEL` | no | no | `nomic-embed-text` | `config.embedderModel` (values.yaml) |
 | `LOAM_INGEST_WORKERS` | no | no | `2` | `config.ingestWorkers` (values.yaml) |
 | `LOAM_LOG_LEVEL` | no | no | `info` | `config.logLevel` (values.yaml) |
+| `LOAM_OTEL_ENDPOINT` | no | no | — (telemetry off) | `config.otelEndpoint` (values.yaml), **empty by default** — empty means the key is not emitted into the ConfigMap at all and the server creates no exporter. There is no `LOAM_OTEL_ENABLED`; this is the switch |
+| `LOAM_OTEL_SERVICE_NAME` | no | no | `loam` | `config.otelServiceName` (values.yaml), empty by default |
+| `LOAM_OTEL_SAMPLE_RATIO` | no | no | `0.1` | `config.otelSampleRatio` (values.yaml), empty by default. `0` is a legitimate value and **not** an off switch — it silences traces while metrics keep being pushed |
 
-Two things worth being explicit about, since the chart's comments only hint at them:
+Three things worth being explicit about, since the chart's comments only hint at them:
+
+- **Unknown values keys are now a render failure, not a silent no-op.**
+  Every object in `helm/loam/values.schema.json` *declares* whether it accepts
+  unknown keys, and all but five are closed. The exceptions —
+  `ingress.annotations`, `nodeSelector`, `affinity`, and both `resources`
+  blocks — are verbatim passthroughs of slices of the Kubernetes API, or of
+  arbitrary user-chosen keys, where a partial restatement in the schema would
+  reject valid input (`resources.limits.ephemeral-storage`, `nvidia.com/gpu`,
+  `resources.claims`); each says so in its own description, and
+  `internal/deploycheck` requires the declaration rather than any particular
+  answer. Before the schema existed, Helm accepted and discarded any key it did
+  not recognise: rendering this chart with `--set config.otelEndpoint=...
+  --set terminationGracePeriodSeconds=45` produced a **zero-byte diff**
+  against the default render, so a plausible-looking wiring in an ArgoCD
+  Application would have synced green and configured nothing (`loam-uwus`).
+  The cost of the schema is that adding a values key means adding it there
+  too, or the chart stops rendering — which is the trade being made
+  deliberately: a forgotten schema entry fails loudly on the author's
+  machine, an unvalidated typo fails silently in someone else's cluster.
 
 - **All three loam secrets, plus the Postgres password, live in one Secret object**,
   not four, referenced by `secret.name` (values.yaml, default `loam-secrets`) — but
@@ -67,6 +89,52 @@ Two things worth being explicit about, since the chart's comments only hint at t
 - **`LOAM_DATA_DIR` is set twice** (image `ENV` default, ConfigMap override) and both
   currently agree on `/var/lib/loam`. If you ever need to change it, change both, plus
   the PVC mount path — nothing checks these three stay in sync.
+
+## Shutdown Grace
+
+`terminationGracePeriodSeconds` is **45**, and it is derived rather than
+picked. `cmd/server/serve.go` budgets `defaultShutdownGrace` (30s) for the
+HTTP drain, the policy-socket close and the background drain — which *share*
+that one context, so they are 30s in total, not each — and then
+`telemetryFlushGrace` (5s) for the OTLP flush, on its own context, running
+strictly after them. That is a 35s floor.
+
+35 is a floor and not a safe value: setting it exactly reproduces the zero
+margin that made Kubernetes' 30s default wrong to begin with, with the
+SIGKILL racing the process exit. So `values.schema.json` enforces a minimum of
+**45, not 35** — it is the only guard a consumer's own `valuesObject` passes
+through, and a floor there would admit exactly the value this section calls
+unsafe.
+
+The extra 10s is sized for one step, not three: `db.Close` runs strictly
+*after* the flush (it is `serve`'s top-of-function defer) and is the only
+participant in the sequence with **no bound of its own** — `pgxpool.Close`
+blocks until every in-flight connection is returned. SIGTERM delivery, Go
+signal handling and process teardown are real and belong in the accounting,
+but they are milliseconds. If anyone ever asks whether 10s is still enough,
+the question is about the pool.
+
+Two things follow that are easy to get backwards:
+
+- **An overrun costs the telemetry, never the drain.** The flush is last, so
+  the drain has always had its full 30s before an overrun is even possible.
+- **The margin was already zero before telemetry existed** — a 30s drain
+  against a 30s default. The flush made an existing zero margin negative; it
+  did not create the problem.
+
+`deploy/docker-compose.yml` sets the same 45s as `stop_grace_period` on the
+loam service, and that exposure is *worse* than Kubernetes': compose's
+default is **10 seconds**, so an unset value SIGKILLs loam a third of the way
+into its own drain on every `docker compose down`.
+
+None of this is left to prose. `internal/deploycheck`'s
+`TestChartGracePeriodExceedsGoShutdownBudget`,
+`TestComposeGracePeriodExceedsGoShutdownBudget` and
+`TestValuesSchemaGracePeriodFloorMatchesGoConstants` parse those two
+constants out of `cmd/server`'s source and fail if the chart default, the
+compose value, or `values.schema.json`'s enforced minimum stops clearing
+their sum with margin. Tuning a Go timeout turns them red rather than leaving
+three stale copies of an arithmetic behind.
 
 ## The Stateful Surface
 

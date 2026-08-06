@@ -1,0 +1,177 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "loam chart values",
+  "description": "Helm validates the COALESCED values (this chart's values.yaml merged with every -f/--set the consumer supplies) against this file before rendering a single template, on `helm template`, `install`, `upgrade` and `lint` alike. Its job here is one specific failure mode, recorded on loam-uwus: without a schema, Helm accepts and silently DISCARDS any key it does not recognise. `--set config.otelEndpoint=... --set terminationGracePeriodSeconds=45` against this chart before those keys existed produced a zero-byte diff against the default render -- a wiring that looked correct, synced green in ArgoCD, exported nothing, and errored nowhere. Every object below therefore DECLARES whether it is closed, which converts an unrecognised key into a render-time failure naming it. Note `declares`, not `closes`: five are deliberately OPEN -- ingress.annotations, nodeSelector, affinity, and both resource shapes -- because each is a verbatim passthrough of a slice of the Kubernetes API (or of arbitrary user-chosen keys) that a partial restatement here would reject valid input for. Each says so in its own description, and internal/deploycheck's TestHelmValuesSchemaExists requires the declaration rather than the answer, so openness is always a recorded decision and never an omission. The cost of the rest is real and accepted: adding a values key means adding it here too, or the chart will not render. That is the trade -- a forgotten schema entry fails loudly on the author's machine, an unvalidated typo fails silently in someone else's cluster.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "config", "terminationGracePeriodSeconds"],
+  "properties": {
+    "replicaCount": {
+      "description": "Must be 1. Deliberately NOT bounded above here: templates/_helpers.tpl's loam.validateReplicaCount already fails the render above 1, and schema validation runs BEFORE template execution -- a `maximum: 1` would shadow that helper and replace its full argument (ReadWriteOnce data PVC that a second pod cannot mount, and single-writer ownership of repos.sync_state per sync tick, loam-fp7) with a bare \"must be <= 1\". The typed check is still worth having, so a string here is caught early.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": {
+          "description": "An immutable commit-sha manifest list, never :latest -- see values.yaml.",
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "secret": {
+      "description": "Referenced, never created by this chart. See NOTES.txt for what an operator must provision first.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "adminPassword": { "type": "string", "minLength": 1 },
+            "databaseUrl": { "type": "string", "minLength": 1 },
+            "encryptionKey": { "type": "string", "minLength": 1 },
+            "postgresPassword": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "description": "Must carry the pgvector extension; loam's migrations create vector columns. Pinned in lockstep with both deploy/docker-compose*.yml, enforced by internal/deploycheck's TestPostgresImageAgrees.",
+          "type": "string",
+          "minLength": 1
+        },
+        "storageClassName": { "type": "string" },
+        "storage": { "type": "string", "minLength": 1 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "config": {
+      "description": "The non-secret LOAM_* surface, rendered into the loam-config ConfigMap (templates/configmap.yaml). internal/deploycheck asserts this chart can carry every variable internal/config actually reads, and that it names no variable internal/config does not -- both discovered from the Go source, neither written down.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adminUser": { "type": "string", "minLength": 1 },
+        "dataDir": {
+          "description": "Must stay in agreement with the volumeMount path in templates/deployment.yaml and the image's own ENV default.",
+          "type": "string",
+          "minLength": 1
+        },
+        "syncInterval": {
+          "description": "A Go duration string. The pattern catches the common shape error -- a bare \"60\" with no unit, which time.ParseDuration rejects -- and deliberately stops there: it does NOT try to exclude \"0s\", because expressing \"positive\" in a regex compiled by Go's RE2 (no lookahead) costs more than it buys when internal/config already rejects a non-positive interval at startup with a legible message.",
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+        },
+        "prAttribution": { "type": "boolean" },
+        "embedderUrl": {
+          "description": "Absolute http:// or https:// URL of the ollama the embedder talks to. Never deployed by this chart.",
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "embedderModel": {
+          "description": "NOT a free knob: the ingest chunker's byte-per-token bound is specific to nomic-embed-text (loam-c94.16), and vectors already stored were produced by whatever this used to be.",
+          "type": "string",
+          "minLength": 1
+        },
+        "ingestWorkers": {
+          "description": "Bounded above by internal/config's maxIngestWorkers, which exists to catch an operator's typo (an extra zero, a pasted port number) rather than to protect a hard OS limit.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "logLevel": {
+          "description": "debug | info | warn | error, matched case-insensitively by internal/config's parseLogLevel. Left as a plain string rather than an enum precisely because of that case-insensitivity: an enum here would reject \"INFO\", which the server accepts.",
+          "type": "string",
+          "minLength": 1
+        },
+        "postgresUser": { "type": "string", "minLength": 1 },
+        "postgresDb": { "type": "string", "minLength": 1 },
+        "otelEndpoint": {
+          "description": "LOAM_OTEL_ENDPOINT, and the ONLY switch that turns telemetry on -- there is deliberately no LOAM_OTEL_ENABLED (internal/config's loadTelemetry). Empty (the default) means no exporter is created at all. The pattern mirrors internal/config's validateOTelEndpoint and catches exactly one mistake: a missing scheme. A bare host:port is worth refusing at render time rather than at container start. THE PORT IS NOT VALIDATED, and http://otel:4317 renders cleanly -- say so rather than implying otherwise, because 4317 is the mistake an operator is most likely to make. loam's exporters speak OTLP over HTTP, whose port is 4318; 4317 is the gRPC port, and a collector listening there accepts the TCP connection and then rejects every payload, which is an unpleasant failure to trace back to a port number. It is left unvalidated because a collector may legitimately be fronted on any port -- refusing 4317 outright would reject a valid reverse-proxied deployment to catch a guess. Example, cross-namespace on the vega cluster: http://otel-gateway.observability.svc.cluster.local:4318",
+          "type": "string",
+          "pattern": "^$|^https?://[^/\\s]+"
+        },
+        "otelServiceName": {
+          "description": "LOAM_OTEL_SERVICE_NAME. Empty (the default) means internal/config's own default, \"loam\".",
+          "type": "string"
+        },
+        "otelSampleRatio": {
+          "description": "LOAM_OTEL_SAMPLE_RATIO, 0..1 inclusive. Empty (the default) means internal/config's own 0.1. Accepts a YAML number or a quoted string, because a valuesObject author writing 0.25 and one writing \"0.25\" mean the same thing and neither should get a render error. 0 is a legitimate setting and is NOT an off switch -- it silences traces while metrics keep being pushed (docs/server-spec.md); templates/configmap.yaml is written with that in mind.",
+          "oneOf": [
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "string", "pattern": "^$|^(0(\\.[0-9]+)?|1(\\.0+)?)$" }
+          ]
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "storageClassName": { "type": "string" },
+        "size": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string", "minLength": 1 },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "terminationGracePeriodSeconds": {
+      "description": "DERIVED, not chosen, and the minimum below is the REQUIRED value, not the bare floor. cmd/server/serve.go's defaultShutdownGrace (30s, covering the HTTP drain, the policy-socket close and the background drain, which share one context) plus telemetryFlushGrace (5s, on its own context, strictly after them) gives a 35s floor -- but 35 is exactly the zero margin that made Kubernetes' 30s default wrong in the first place, so requiring it would be requiring the unsafe value. The minimum is floor + 10s of margin for the steps no constant bounds, principally the deferred pgxpool close that runs after the flush; values.yaml shows the arithmetic in full. An earlier version of this file set the minimum to the bare 35 while every other artifact demanded 45, which left the ONE guard a consumer's own valuesObject passes through admitting the value three paragraphs elsewhere call unsafe. This number is not a hand-maintained copy of the Go constants: internal/deploycheck's TestValuesSchemaGracePeriodFloorMatchesGoConstants re-derives floor-plus-margin from cmd/server/serve.go and asserts THIS minimum equals it, so tuning a Go timeout without updating this file is a red test rather than a silently stale bound.",
+      "type": "integer",
+      "minimum": 45
+    },
+    "resources": { "$ref": "#/definitions/resources" },
+    "nodeSelector": {
+      "description": "Free-form by nature -- the keys are arbitrary node labels -- so this is open by DECISION, not by omission: values.schema.json closes every other object to unknown keys and internal/deploycheck's TestHelmValuesSchemaExists requires each one to say which it is.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": {
+      "description": "Passed through verbatim to the Pod spec. Open by DECISION: this is a large, deeply nested slice of the Kubernetes API, and a partial restatement of it here would reject valid affinity rules -- a worse failure than accepting an invalid one, which the API server rejects at apply time anyway.",
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "resources": {
+      "description": "A verbatim `toYaml` passthrough into the container's resources block, so this is OPEN by decision -- the same call already made for affinity and nodeSelector above, and it was got wrong here first. An earlier version of this file closed it, which turned `resources.claims` (Dynamic Resource Allocation, Kubernetes 1.26+) into a hard render failure against a chart change that was supposed to be purely additive. requests/limits are named for documentation, not to exclude anything else: a partial restatement of the Kubernetes API rejects valid input, which is worse than accepting input the API server will reject anyway.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "requests": { "$ref": "#/definitions/resourceQuantities" },
+        "limits": { "$ref": "#/definitions/resourceQuantities" }
+      }
+    },
+    "resourceQuantities": {
+      "description": "The KEYS here are open, and that is the specific bug this comment exists to prevent recurring: `cpu` and `memory` are merely the common two, and enumerating them made `resources.limits.ephemeral-storage: 1Gi` -- and every extended resource, e.g. `nvidia.com/gpu` -- fail at render against a chart that accepted them the day before. What IS worth constraining is the value SHAPE, since a quantity is always a string or a number and a map or list there is a genuine mistake.",
+      "type": "object",
+      "additionalProperties": { "type": ["string", "number"] }
+    }
+  }
+}

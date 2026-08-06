@@ -330,6 +330,49 @@ docker compose -f deploy/docker-compose.yml down -v   # DESTROYS both volumes
 `down -v` destroys every mirror, which includes every work branch that was
 never accepted upstream.
 
+The loam service sets `stop_grace_period: 45s`, and that is not a knob to
+trim. Compose's default is **10 seconds**, and loam's own shutdown budget is
+30s of draining in-flight git pushes and running ingest work followed by a 5s
+telemetry flush — so with the default, `down` and `restart` SIGKILL the
+server a third of the way through, every time. It costs nothing in the normal
+case: compose stops waiting the moment the process exits. The derivation is
+in `helm/loam/values.yaml`, and `internal/deploycheck` reads the Go constants
+and fails if the two ever drift apart.
+
+### Sending traces and metrics somewhere (optional)
+
+Off by default and free to leave off: with no endpoint configured the server
+creates no exporter, opens no connection, and starts no telemetry goroutine.
+
+To turn it on, set one variable in `deploy/.env`:
+
+```sh
+LOAM_OTEL_ENDPOINT=http://host.docker.internal:4318
+```
+
+That is the whole switch — there is deliberately no `LOAM_OTEL_ENABLED`.
+Three things about the value are worth getting right the first time:
+
+- **It must be an absolute `http://` or `https://` URL.** A bare `host:port`
+  is rejected at startup rather than silently exporting nowhere.
+- **The port is 4318, not 4317.** loam's exporters speak OTLP over HTTP. 4317
+  is the gRPC port: a collector listening there accepts the TCP connection
+  and rejects every payload, which is an unpleasant thing to debug.
+- **`LOAM_OTEL_SAMPLE_RATIO=0` is not an off switch.** Sampling is a trace
+  concept, so 0 silences traces while metrics keep being pushed. To stop
+  both, clear the endpoint.
+
+There is no collector in this stack, on purpose, and the reason is not that
+it would make the quickstart heavier — `profiles:` already answers that, as
+the bundled ollama demonstrates. It is that a collector is a *pipe*, and the
+only one we could ship without also picking your tracing backend is one whose
+exporter writes your spans to its own stdout and throws them away. That is
+worse than shipping nothing, because it looks like observability: a healthy
+container, a reachable endpoint, and nothing retained. If you want one inside
+this project's network anyway, the bottom of `deploy/docker-compose.yml` has
+a ready-to-paste service definition and a minimal collector config to go with
+it.
+
 ---
 
 ## Troubleshooting

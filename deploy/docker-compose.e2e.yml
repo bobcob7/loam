@@ -40,6 +40,16 @@
 # files (and helm/loam/values.yaml) and compares what it finds -- so
 # bumping the tag here alone is a red test, not a silent divergence.
 #
+# NO LOAM_OTEL_* HERE, AND NO stop_grace_period FOR loam, because there is
+# no loam service in this file to carry either (see the previous paragraph;
+# internal/deploycheck's TestE2EStackRunsNoLoamServer pins that). loam-uwus
+# wired both into deploy/docker-compose.yml and asked the same of this file;
+# the honest answer is that the request does not apply. `task test:e2e` runs
+# the server as a HOST process, so telemetry for an e2e run is configured in
+# that process's environment and its shutdown grace is the Taskfile's
+# business, not compose's. Adding empty LOAM_OTEL_* keys to a service that
+# does not exist would be decoration.
+#
 # Bring up by hand for manual poking (task test:e2e does this itself, plus
 # seeding -- see Taskfile.yml):
 #   docker compose -p loam-e2e -f deploy/docker-compose.e2e.yml up -d
