@@ -81,6 +81,10 @@ func openStagingStore(ws WorkspaceResolver, repo, workBranch string) (*stagingSt
 // Close releases the underlying staging area handle.
 func (s *stagingStore) Close() error { return s.area.Close() }
 
+// location reports where this store's staged.json lives, for inclusion in
+// command output. See StagingArea.Location for why it is reporting-only.
+func (s *stagingStore) location() string { return s.area.Location() }
+
 // load reads staged.json. A staging area with no staged.json yet is an
 // empty set, not an error: the first `work comment` in a work branch always
 // finds one.

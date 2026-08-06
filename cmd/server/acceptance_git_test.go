@@ -45,6 +45,13 @@ func (h *acceptanceHarness) runLoamCLIIn(world *acceptanceWorld, dir string, arg
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"LOAM_SERVER_URL=" + h.server.baseURL,
+		// Staged comments live under a CONFIGURED root now, not under the
+		// working directory (loam-rgyg), and dir here is deliberately not
+		// the workspace -- it is a clone, for the scope-inference steps. So
+		// the root is stated rather than implied, matching runLoamAs, and
+		// the env is otherwise scrubbed (no HOME) so there is nothing to
+		// fall back to.
+		"LOAM_HOME=" + world.workspace,
 		"LOAM_AGENT_NAME=" + world.agentName,
 		"LOAM_AGENT_ID=" + world.agentID,
 		"LOAM_AGENT_ROLE=" + world.agentRole,

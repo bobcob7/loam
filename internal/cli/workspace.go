@@ -86,16 +86,32 @@ type workspace struct {
 	workBranch      string
 	workBranchErr   error
 	agentIdentifier string
+	legacyRoot      string
+	rootErr         error
 }
 
 // newWorkspace builds a workspace by locating dir's enclosing clone (if
 // any) via lookup. agentIdentifier keys the staging path (see
-// StagingPath) — normally cfg.Identifier().
-func newWorkspace(dir, agentIdentifier string, lookup gitLookup) *workspace {
+// stagingRel) — normally cfg.Identifier().
+//
+// root — the directory holding .loam/ — is passed IN rather than derived
+// from dir, and that is the whole point (loam-rgyg). It used to be
+// computed here as the enclosing clone's parent, falling back to dir
+// itself when there was no enclosing clone, which made the staging area a
+// function of the caller's working directory: two invocations one `cd`
+// apart could address two disjoint staging areas under the same repo /
+// work-branch / agent key, each seeing only its own staged comments. That
+// is a data-loss shape on a workflow whose final step (`work verdict`) is
+// irreversible — a verdict issued from the wrong directory published none
+// of the reviewer's findings and reported `"published": 0` as a success.
+// Repo and work-branch INFERENCE still depends on dir, correctly: it
+// answers "which branch am I looking at", a question about where you are.
+// Where the staged bytes live is not.
+func newWorkspace(dir, agentIdentifier, root string, lookup gitLookup) *workspace {
 	cloneRoot, err := lookup.CloneRoot(dir)
 	if err != nil {
 		unresolved := fmt.Errorf("%s: %w: %w", dir, errNotInClone, err)
-		return &workspace{root: dir, repoErr: unresolved, workBranchErr: unresolved, agentIdentifier: agentIdentifier}
+		return &workspace{root: root, legacyRoot: dir, repoErr: unresolved, workBranchErr: unresolved, agentIdentifier: agentIdentifier}
 	}
 	repo, repoErr := inferRepo(cloneRoot, lookup)
 	branch, branchErr := lookup.CurrentBranch(cloneRoot)
@@ -103,7 +119,8 @@ func newWorkspace(dir, agentIdentifier string, lookup gitLookup) *workspace {
 		branchErr = fmt.Errorf("resolving work branch in %s: %w", cloneRoot, branchErr)
 	}
 	return &workspace{
-		root:            filepath.Dir(cloneRoot),
+		root:            root,
+		legacyRoot:      filepath.Dir(cloneRoot),
 		repo:            repo,
 		repoErr:         repoErr,
 		workBranch:      branch,
@@ -153,17 +170,72 @@ func repoFromOriginURL(origin string) (repo string, ok bool) {
 	return repo, true
 }
 
+// envLoamHome names the directory that holds the CLI's .loam/ state
+// directory — staged comments above all. It defaults to the user's home
+// directory (see resolveWorkspaceRoot) and exists so an operator can put
+// staged review comments somewhere else deliberately, by configuration,
+// rather than by accident of which directory a command happened to run in.
+const envLoamHome = "LOAM_HOME"
+
+// resolveWorkspaceRoot returns the directory under which .loam/ lives:
+// $LOAM_HOME when set, otherwise the user's home directory.
+//
+// It deliberately does NOT consult the working directory. A cwd-derived
+// root is what let one reviewer's staged comments split across two
+// directories addressed by the same command (loam-rgyg); a root that
+// depends only on the environment is the same for every invocation of
+// every command in a session, which is the property staged comments need
+// between `work comment` and the irreversible `work verdict` that
+// publishes them.
+//
+// A relative $LOAM_HOME is made absolute here, against the working
+// directory of the process that resolves it. Leaving it relative would
+// reintroduce exactly the defect this function exists to remove.
+func resolveWorkspaceRoot() (string, error) {
+	if dir := os.Getenv(envLoamHome); dir != "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return "", fmt.Errorf("resolving %s=%q to an absolute path: %w", envLoamHome, dir, err)
+		}
+		return abs, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		message := fmt.Sprintf("cannot locate the %s/ state directory: no home directory (%s); set %s to choose one explicitly", loamDirName, err, envLoamHome)
+		return "", newUsageCLIError(message, err)
+	}
+	return home, nil
+}
+
 // newWorkspaceResolver builds the real WorkspaceResolver from the process's
-// current working directory and cfg's resolved agent identifier (see
-// docs/cli-spec.md -> Workspace; Identifier keys the staging path).
-// Unexported: only deps.go's NewProductionDeps and this package's own tests
-// call it.
+// current working directory (for repo and work-branch inference), cfg's
+// resolved agent identifier, and the configured workspace root (for
+// staging). See docs/cli-spec.md -> Workspace. Unexported: only deps.go's
+// NewProductionDeps and this package's own tests call it.
+// The root is resolved eagerly but its failure is DEFERRED to OpenStaging,
+// which is the only thing that needs it. Deps is constructed for every
+// command that gets this far, `whoami` and an unrecognized command
+// included — neither touches staged comments, and neither should stop
+// working because the process has no home directory and no $LOAM_HOME.
+// Failing here instead would turn a staging-specific configuration gap
+// into an outage of every command, reported under whatever the caller was
+// actually trying to do.
+//
+// `help` is NOT in that set and never was: cmd/loam/main.go answers it
+// from args alone via cli.TryHelp, before NewProductionDeps reads an
+// environment variable at all (loam-dc2v, loam-q0ek). It is worth naming
+// the exclusion rather than leaving it implied, because "help must work
+// with no configuration" is exactly the kind of guarantee something here
+// would otherwise look responsible for maintaining.
 func newWorkspaceResolver(cfg Config) (WorkspaceResolver, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("determining working directory: %w", err)
 	}
-	return newWorkspace(dir, cfg.Identifier(), execGitLookup{}), nil
+	root, rootErr := resolveWorkspaceRoot()
+	ws := newWorkspace(dir, cfg.Identifier(), root, execGitLookup{})
+	ws.rootErr = rootErr
+	return ws, nil
 }
 
 // ResolveRepo returns the repo inferred from the enclosing clone's origin

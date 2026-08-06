@@ -545,6 +545,9 @@ var _ StagingArea = &StagingAreaMock{}
 //			CloseFunc: func() error {
 //				panic("mock out the Close method")
 //			},
+//			LocationFunc: func() string {
+//				panic("mock out the Location method")
+//			},
 //			ReadFileFunc: func(name string) ([]byte, error) {
 //				panic("mock out the ReadFile method")
 //			},
@@ -564,6 +567,9 @@ type StagingAreaMock struct {
 	// CloseFunc mocks the Close method.
 	CloseFunc func() error
 
+	// LocationFunc mocks the Location method.
+	LocationFunc func() string
+
 	// ReadFileFunc mocks the ReadFile method.
 	ReadFileFunc func(name string) ([]byte, error)
 
@@ -577,6 +583,9 @@ type StagingAreaMock struct {
 	calls struct {
 		// Close holds details about calls to the Close method.
 		Close []struct {
+		}
+		// Location holds details about calls to the Location method.
+		Location []struct {
 		}
 		// ReadFile holds details about calls to the ReadFile method.
 		ReadFile []struct {
@@ -597,6 +606,7 @@ type StagingAreaMock struct {
 		}
 	}
 	lockClose     sync.RWMutex
+	lockLocation  sync.RWMutex
 	lockReadFile  sync.RWMutex
 	lockRemove    sync.RWMutex
 	lockWriteFile sync.RWMutex
@@ -626,6 +636,33 @@ func (mock *StagingAreaMock) CloseCalls() []struct {
 	mock.lockClose.RLock()
 	calls = mock.calls.Close
 	mock.lockClose.RUnlock()
+	return calls
+}
+
+// Location calls LocationFunc.
+func (mock *StagingAreaMock) Location() string {
+	if mock.LocationFunc == nil {
+		panic("StagingAreaMock.LocationFunc: method is nil but StagingArea.Location was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockLocation.Lock()
+	mock.calls.Location = append(mock.calls.Location, callInfo)
+	mock.lockLocation.Unlock()
+	return mock.LocationFunc()
+}
+
+// LocationCalls gets all the calls that were made to Location.
+// Check the length with:
+//
+//	len(mockedStagingArea.LocationCalls())
+func (mock *StagingAreaMock) LocationCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockLocation.RLock()
+	calls = mock.calls.Location
+	mock.lockLocation.RUnlock()
 	return calls
 }
 

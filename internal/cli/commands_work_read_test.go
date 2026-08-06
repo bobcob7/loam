@@ -852,9 +852,9 @@ func TestRunWorkComments_Staged_ReturnsTheLocalItemsAndNeverListsPublished(t *te
 	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, testReviewer), "", &encoded)
 	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
 
-	assert.JSONEq(t, `[
+	assert.JSONEq(t, `{"staging_dir":"`+stagingDirOf(t, workspaceRoot)+`","count":2,"items":[
 		{"staged":true,"id":"s1","file":"auth.go","line":42,"body":"unpublished thought"},
-		{"staged":true,"id":"s2","resolve":"t1"}]`, jsonOf(t, encoded))
+		{"staged":true,"id":"s2","resolve":"t1"}]}`, jsonOf(t, encoded))
 	assert.Equal(t, 0, srv.listCalls, "--staged must not fetch published threads")
 	assert.NotContains(t, jsonOf(t, encoded), "this leaks a token", "a published comment must never appear in the staged listing")
 }
@@ -867,18 +867,29 @@ func TestRunWorkComments_Staged_OnlyTheCallersOwnItems(t *testing.T) {
 	stageTwoItems(t, workspaceRoot)
 	srv := newCommentServer()
 	var encoded any
-	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, "alan-turing-4-reviewer"), "", &encoded)
+	other := stagingWorkspace(workspaceRoot, "alan-turing-4-reviewer")
+	deps := workTestDeps(srv.client, other, "", &encoded)
 	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
-	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+	otherDir, err := other.stagingPath(testRepo, testWorkBranch)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"staging_dir":"`+otherDir+`","count":0,"items":[]}`, jsonOf(t, encoded))
+	assert.NotEqual(t, stagingDirOf(t, workspaceRoot), otherDir, "and the reported directory must be the other agent's own, which is why the two never collide")
 }
 
-func TestRunWorkComments_Staged_NothingStaged_EncodesEmptyArray(t *testing.T) {
+// TestRunWorkComments_Staged_NothingStaged_StillNamesTheStagingDirectory
+// is the habitual command's half of loam-rgyg's visibility fix. `comments
+// --staged` is the command reviewers already know, so it is the one they
+// reach for; an empty listing that cannot say WHICH staging area was empty
+// is the original blind spot, and fixing it only on the new `comment
+// --list` would have fixed the door nobody uses.
+func TestRunWorkComments_Staged_NothingStaged_StillNamesTheStagingDirectory(t *testing.T) {
 	t.Parallel()
+	workspaceRoot := realTempDir(t)
 	srv := newCommentServer()
 	var encoded any
-	deps := workTestDeps(srv.client, stagingWorkspace(realTempDir(t), testReviewer), "", &encoded)
+	deps := workTestDeps(srv.client, stagingWorkspace(workspaceRoot, testReviewer), "", &encoded)
 	require.NoError(t, runWorkComments(t.Context(), deps, []string{testRepo, testWorkBranch, "--staged"}))
-	assert.JSONEq(t, `[]`, jsonOf(t, encoded))
+	assert.JSONEq(t, `{"staging_dir":"`+stagingDirOf(t, workspaceRoot)+`","count":0,"items":[]}`, jsonOf(t, encoded))
 }
 
 // TestRunWorkComments_Staged_UnknownWorkBranch_ExitsThree proves --staged

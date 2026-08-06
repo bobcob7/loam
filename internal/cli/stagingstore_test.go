@@ -249,3 +249,14 @@ func TestOpenStagingStore_InvalidKey_IsAUsageError(t *testing.T) {
 	assert.ErrorIs(t, err, errInvalidStagingKey)
 	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
 }
+
+// openTestStoreFor opens a staging store against an already-built
+// workspace, for the tests that need to control the staging root and the
+// legacy root independently.
+func openTestStoreFor(t *testing.T, ws *workspace) *stagingStore {
+	t.Helper()
+	store, err := openStagingStore(ws, testRepo, testWorkBranch)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	return store
+}

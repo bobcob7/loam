@@ -33,7 +33,7 @@ func TestWorkspace_AtCloneRoot_InfersRepoFromOriginAndWorkBranchFromHEAD(t *test
 	t.Parallel()
 	cloneRoot := filepath.FromSlash("/workspace/doc-server")
 	lookup := fixedLookup(cloneRoot, "https://loam.example/git/bobcob7/doc-server.git", "wb-9c2f1a")
-	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", filepath.Dir(cloneRoot), lookup)
 	repo, err := ws.ResolveRepo()
 	require.NoError(t, err)
 	assert.Equal(t, "bobcob7/doc-server", repo, "repo must be the enrolled <group>/<repo_name> identifier, not the bare directory name")
@@ -53,7 +53,7 @@ func TestWorkspace_InsideCloneSubdirectory_StillInfersAndStagesOutsideClone(t *t
 	cloneRoot := filepath.FromSlash("/workspace/doc-server")
 	nested := filepath.FromSlash("/workspace/doc-server/internal/foo")
 	lookup := fixedLookup(cloneRoot, "https://loam.example/git/bobcob7/doc-server.git", "wb-9c2f1a")
-	ws := newWorkspace(nested, "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(nested, "ada-lovelace-7-reviewer", filepath.Dir(cloneRoot), lookup)
 	repo, err := ws.ResolveRepo()
 	require.NoError(t, err)
 	assert.Equal(t, "bobcob7/doc-server", repo)
@@ -73,7 +73,7 @@ func TestWorkspace_InsideCloneSubdirectory_StillInfersAndStagesOutsideClone(t *t
 func TestWorkspace_OutsideAnyClone_ResolveFails(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("not a git repository") }}
-	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", filepath.FromSlash("/workspace"), lookup)
 	_, err := ws.ResolveRepo()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNotInClone)
@@ -91,7 +91,7 @@ func TestWorkspace_UnparseableOriginRemote_RepoFailsButWorkBranchStillResolves(t
 	t.Parallel()
 	cloneRoot := filepath.FromSlash("/workspace/doc-server")
 	lookup := fixedLookup(cloneRoot, "https://github.com/bobcob7/doc-server", "wb-9c2f1a")
-	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", filepath.Dir(cloneRoot), lookup)
 	_, err := ws.ResolveRepo()
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errNotInClone, "this is a parse failure inside a real clone, not 'not inside a clone'")
@@ -111,7 +111,7 @@ func TestWorkspace_NoOriginRemote_RepoFails(t *testing.T) {
 		OriginURLFunc:     func(string) (string, error) { return "", errors.New("no such remote 'origin'") },
 		CurrentBranchFunc: func(string) (string, error) { return "wb-9c2f1a", nil },
 	}
-	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(cloneRoot, "ada-lovelace-7-reviewer", filepath.Dir(cloneRoot), lookup)
 	_, err := ws.ResolveRepo()
 	assert.Error(t, err)
 }
@@ -149,8 +149,8 @@ func TestRepoFromOriginURL(t *testing.T) {
 func TestWorkspace_StagingPath_DiffersPerRepoWorkBranchAndAgent(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
-	base := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
-	other := newWorkspace(filepath.FromSlash("/workspace"), "grace-hopper-3-author", lookup)
+	base := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", filepath.FromSlash("/workspace"), lookup)
+	other := newWorkspace(filepath.FromSlash("/workspace"), "grace-hopper-3-author", filepath.FromSlash("/workspace"), lookup)
 	mustStagingPath := func(t *testing.T, ws *workspace, repo, workBranch string) string {
 		t.Helper()
 		path, err := ws.stagingPath(repo, workBranch)
@@ -171,6 +171,95 @@ func TestWorkspace_StagingPath_DiffersPerRepoWorkBranchAndAgent(t *testing.T) {
 	assert.True(t, filepath.IsAbs(paths["repo-a"]))
 }
 
+// TestWorkspace_StagingPath_IsIndependentOfTheWorkingDirectory is the
+// loam-rgyg regression test: the reproduction, at the level where the bug
+// actually lived.
+//
+// Every case below is one plausible place an agent's next command lands —
+// and they are not hypothetical, they are the observed ones. A fresh shell
+// per command means the reviewer workflow `mkdir /tmp/rev && cd /tmp/rev &&
+// loam clone …` followed by `cd loam` leaves two candidate directories one
+// call apart; an agent that forgets the `cd` runs in whatever directory its
+// harness starts in, which is typically a DIFFERENT clone of the same repo;
+// and a reviewer who re-clones for round 2 (which they must — `loam clone`
+// takes no base ref) gets a third.
+//
+// Before the fix, the staging root was the enclosing clone's parent, or the
+// working directory itself when there was no enclosing clone. Every case
+// below therefore resolved to a DIFFERENT staging area under the same repo /
+// work-branch / agent key — each with its own staged.json and its own id
+// counter. That is how one reviewer staged `s11`-`s16` in one area and
+// `s1`-`s5` in another, and how a verdict published none of ten comments and
+// called it `"published": 0`.
+//
+// Note which case this pins that "root .loam at the git toplevel" would not
+// have fixed: a SECOND CLONE of the same repo at a different path has a
+// different toplevel, so a toplevel-rooted staging area would still reset to
+// s1 on every re-clone. The key is (repo, work branch, agent) and nothing
+// else; where the caller stands is not part of it.
+func TestWorkspace_StagingPath_IsIndependentOfTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	root := filepath.FromSlash("/home/agent")
+	outside := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
+	inClone := func(cloneRoot string) *gitLookupMock {
+		return fixedLookup(cloneRoot, "https://loam.example/git/bobcob7/doc-server.git", "wb-9c2f1a")
+	}
+	cases := map[string]*workspace{
+		"first clone root":      newWorkspace(filepath.FromSlash("/tmp/rev-1/doc-server"), testReviewer, root, inClone(filepath.FromSlash("/tmp/rev-1/doc-server"))),
+		"first clone subdir":    newWorkspace(filepath.FromSlash("/tmp/rev-1/doc-server/internal/cli"), testReviewer, root, inClone(filepath.FromSlash("/tmp/rev-1/doc-server"))),
+		"first clone parent":    newWorkspace(filepath.FromSlash("/tmp/rev-1"), testReviewer, root, outside),
+		"re-clone for round 2":  newWorkspace(filepath.FromSlash("/tmp/rev-2/doc-server"), testReviewer, root, inClone(filepath.FromSlash("/tmp/rev-2/doc-server"))),
+		"an unrelated clone":    newWorkspace(filepath.FromSlash("/src/loam"), testReviewer, root, inClone(filepath.FromSlash("/src/loam"))),
+		"nowhere in particular": newWorkspace(filepath.FromSlash("/tmp"), testReviewer, root, outside),
+	}
+	want := filepath.Join(root, loamDirName, stagingDirName, testRepo, testWorkBranch, testReviewer)
+	for name, ws := range cases {
+		got, err := ws.stagingPath(testRepo, testWorkBranch)
+		require.NoError(t, err, name)
+		assert.Equal(t, want, got, "staged comments must live in one place per (repo, work branch, agent); %q resolved somewhere else, which is how a verdict publishes an empty batch", name)
+	}
+}
+
+// TestResolveWorkspaceRoot_PrefersLoamHomeOverTheHomeDirectory pins where
+// the root comes from: configuration, never the working directory.
+//
+// Deliberately not t.Parallel(): t.Setenv mutates process-global state.
+func TestResolveWorkspaceRoot_PrefersLoamHomeOverTheHomeDirectory(t *testing.T) {
+	configured := realTempDir(t)
+	t.Setenv(envLoamHome, configured)
+	root, err := resolveWorkspaceRoot()
+	require.NoError(t, err)
+	assert.Equal(t, configured, root)
+}
+
+// TestResolveWorkspaceRoot_UnsetLoamHome_FallsBackToTheHomeDirectory pins
+// the default. The home directory is the one location a session's every
+// command agrees on without being told, which is the property staged
+// comments need between `work comment` and `work verdict`.
+//
+// Deliberately not t.Parallel(): t.Setenv.
+func TestResolveWorkspaceRoot_UnsetLoamHome_FallsBackToTheHomeDirectory(t *testing.T) {
+	t.Setenv(envLoamHome, "")
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	root, err := resolveWorkspaceRoot()
+	require.NoError(t, err)
+	assert.Equal(t, home, root)
+}
+
+// TestResolveWorkspaceRoot_RelativeLoamHome_IsMadeAbsolute proves the
+// escape hatch cannot reintroduce the bug it exists to avoid: a relative
+// $LOAM_HOME would be re-resolved against each command's working directory,
+// which is exactly the cwd dependence being removed.
+//
+// Deliberately not t.Parallel(): t.Setenv.
+func TestResolveWorkspaceRoot_RelativeLoamHome_IsMadeAbsolute(t *testing.T) {
+	t.Setenv(envLoamHome, filepath.Join("some", "relative", "dir"))
+	root, err := resolveWorkspaceRoot()
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(root), "a relative LOAM_HOME must be resolved once, not per command: got %q", root)
+}
+
 // TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained
 // proves the positive case the guard must not break: a repo identifier
 // legitimately shaped "<group>/<repo_name>" (docs/cli-spec.md -> clone)
@@ -179,7 +268,7 @@ func TestWorkspace_StagingPath_DiffersPerRepoWorkBranchAndAgent(t *testing.T) {
 func TestWorkspace_StagingPath_AcceptsLegitimateNestedRepoAndStaysContained(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
-	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", filepath.FromSlash("/workspace"), lookup)
 	root := filepath.Join(filepath.FromSlash("/workspace"), ".loam", "staging")
 	path, err := ws.stagingPath("bobcob7/doc-server", "wb-9c2f1a")
 	require.NoError(t, err)
@@ -239,7 +328,7 @@ var stagingPathAttacks = []stagingPathAttack{
 func TestWorkspace_StagingPath_RejectsTraversalInRepoKey(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
-	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", filepath.FromSlash("/workspace"), lookup)
 	for _, tt := range stagingPathAttacks {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -261,7 +350,7 @@ func TestWorkspace_StagingPath_RejectsTraversalInRepoKey(t *testing.T) {
 func TestWorkspace_StagingPath_RejectsTraversalInWorkBranchKey(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
-	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", lookup)
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "ada-lovelace-7-reviewer", filepath.FromSlash("/workspace"), lookup)
 	attacks := append([]stagingPathAttack{{"legitimate-looking-nested-slash", "bobcob7/doc-server"}}, stagingPathAttacks...)
 	for _, tt := range attacks {
 		t.Run(tt.name, func(t *testing.T) {
@@ -327,7 +416,7 @@ func TestValidateStagingKey_TableOfAttacks(t *testing.T) {
 func TestWorkspace_StagingPath_ContainmentCheckCatchesTraversalNotCoveredByAllowlist(t *testing.T) {
 	t.Parallel()
 	lookup := &gitLookupMock{CloneRootFunc: func(string) (string, error) { return "", errors.New("outside a clone") }}
-	ws := newWorkspace(filepath.FromSlash("/workspace"), "../../../../etc", lookup)
+	ws := newWorkspace(filepath.FromSlash("/workspace"), "../../../../etc", filepath.FromSlash("/workspace"), lookup)
 	path, err := ws.stagingPath("bobcob7/doc-server", "wb-9c2f1a")
 	require.Error(t, err, "an agent identifier that would escape the staging root must be rejected even though it bypassed key validation")
 	assert.ErrorIs(t, err, errInvalidStagingKey)
@@ -533,4 +622,31 @@ func TestNewWorkspaceResolver_InfersFromNestedWorkingDirectory(t *testing.T) {
 		t.Skipf("ambient checkout has no resolvable branch (e.g. detached HEAD): %v", branchErr)
 	}
 	assert.NotEmpty(t, branch, "go test's working directory is nested inside this repo's clone; branch inference must work from any depth")
+}
+
+// TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging proves
+// an unresolvable workspace root does not take every other command down
+// with it. Deps is built for every command that reaches it — `whoami` and
+// an unrecognized command included — and none of those touch staged
+// comments, so a staging-specific configuration gap must surface when
+// staging is attempted, reported as the usage error it is, and not before.
+//
+// `help` is not among them: main.go answers it before Deps exists (see
+// newWorkspaceResolver), so it is covered by cmd/loam's own tests, not by
+// this one.
+//
+// Deliberately not t.Parallel(): t.Setenv.
+func TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging(t *testing.T) {
+	t.Setenv(envLoamHome, "")
+	t.Setenv("HOME", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform still resolves a home directory with HOME unset")
+	}
+	ws, err := newWorkspaceResolver(&ConfigMock{IdentifierFunc: func() string { return testReviewer }})
+	require.NoError(t, err, "constructing the resolver must not fail: every command builds one")
+	area, err := ws.OpenStaging(testRepo, testWorkBranch)
+	require.Error(t, err, "staging is the operation that actually needs the root")
+	assert.Nil(t, area)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err), "an unset LOAM_HOME with no home directory is a configuration problem, not an internal error")
+	assert.Contains(t, err.Error(), envLoamHome, "the message must name the variable that fixes it")
 }

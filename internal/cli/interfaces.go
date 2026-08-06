@@ -78,10 +78,15 @@ type WorkspaceResolver interface {
 	// to the calling agent's identifier so distinct agents sharing a
 	// workspace never collide (see docs/cli-spec.md -> "Staging location"),
 	// creating the directory and any missing parents. It always lives under
-	// the workspace root's .loam/ directory — the clone's parent, never
-	// inside the clone itself, so it stays the same regardless of how deep
-	// inside (or outside) a clone the caller is, and a reviewer who never
-	// clones can still stage comments. Callers must Close the returned area.
+	// the workspace root's .loam/ directory, and that root is CONFIGURED
+	// ($LOAM_HOME, defaulting to the user's home directory) rather than
+	// derived from the working directory — so the same repo / work-branch /
+	// agent key names the same staging area from anywhere, inside a clone
+	// or outside one, and a reviewer who never clones can still stage
+	// comments. Deriving it from the working directory is what let a
+	// reviewer's staged comments split across two disjoint areas and a
+	// verdict publish none of them (loam-rgyg). Callers must Close the
+	// returned area.
 	//
 	// repo and workBranch come from CLI positionals (explicit, or inferred
 	// from local git state — see resolveWorkBranchIdentity) and are never
@@ -125,6 +130,16 @@ type StagingArea interface {
 	// Remove deletes the staged file name. A missing file reports an error
 	// satisfying errors.Is(err, os.ErrNotExist).
 	Remove(name string) error
+	// Location returns the filesystem path of this staging directory, for
+	// REPORTING ONLY — commands include it in their output so an agent can
+	// see which staging area answered them (loam-rgyg: the whole failure
+	// was that "nothing is staged" and "you are asking the wrong staging
+	// area" were indistinguishable). It does not widen the seam the way an
+	// OpenStaging-returns-a-path design would: the caller must already
+	// hold an opened, contained area to call it, so there is still no way
+	// to obtain a staging path and then write to it with plain os
+	// functions.
+	Location() string
 	// Close releases the underlying directory handle.
 	Close() error
 }

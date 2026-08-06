@@ -171,7 +171,7 @@ func TestCommandFlagSets_NamesAndDefaults(t *testing.T) {
 		{"work set", func() *pflag.FlagSet { fs, _ := newWorkSetFlags(); return fs }, []flagExpectation{{"title", ""}}},
 		{"work comments", func() *pflag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }, []flagExpectation{{"staged", "false"}}},
 		{"work comment", func() *pflag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }, []flagExpectation{
-			{"file", ""}, {"line", "0"}, {"resolve", ""}, {"edit", ""}, {"discard", ""},
+			{"file", ""}, {"line", "0"}, {"resolve", ""}, {"edit", ""}, {"discard", ""}, {"list", "false"},
 		}},
 		{"work reply", func() *pflag.FlagSet { fs, _ := newWorkReplyFlags(); return fs }, []flagExpectation{{"thread", ""}}},
 		{"work verdict", func() *pflag.FlagSet { fs, _ := newWorkVerdictFlags(); return fs }, []flagExpectation{{"outcome", ""}}},

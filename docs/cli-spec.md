@@ -30,21 +30,33 @@ flag parsing: every token after it is a literal positional, even one that starts
 
 ### Workspace
 
-The CLI operates within a **workspace** — the directory it is run from. The workspace holds
-a `.loam/` directory for staged comments, config, and cache, and it is where `clone` places
-repos (each at `./<repo_name>`). A typical layout:
+The CLI operates within a **workspace** — the directory holding its `.loam/` directory for
+staged comments, config, and cache. Its location is **configured, not inferred**:
+`$LOAM_HOME` when set, otherwise the user's home directory. `clone` places repos at
+`./<repo_name>` relative to wherever it is run, which need not be the workspace. A typical
+layout:
 
 ```
-<workspace>/
+$LOAM_HOME (default: ~)/
   .loam/          # staged comments, config, cache
-  doc-server/     # a clone; repo_name inferred as "doc-server"
-  other-repo/
 ```
 
-Commands are normally run from the workspace root. When run from inside a repo directory
-(`<workspace>/<repo_name>`), the `repo` and work-branch arguments are inferred — repo from
-the directory name, work branch from the current git branch — so they may be omitted from
-**any** command that takes them.
+The working directory determines **inference only**. When a command is run from inside a
+repo directory (at any depth), the `repo` and work-branch arguments are inferred — repo from
+the clone's origin remote, work branch from the current git branch — so they may be omitted
+from **any** command that takes them.
+
+The working directory deliberately does **not** determine where staged comments live. It
+used to, and that was a data-loss defect (`loam-rgyg`): the staging root was the enclosing
+clone's parent, or the working directory itself when there was no enclosing clone, so two
+invocations run from different directories addressed two disjoint staging areas under the
+same repo / work-branch / agent key — each with its own `staged.json` and its own id
+counter. Reviewers lost staged findings to it three ways: forgetting a `cd` between two
+commands, running from a different clone of the same repo, and re-cloning for a new review
+round (which resets a clone-relative staging area to `s1`). The final step of a review,
+`verdict`, is irreversible, so a staging area that depends on where the caller is standing
+silently narrows what an irreversible operation publishes. The key is `(repo, work branch,
+agent)` and nothing else.
 
 ### Output
 
@@ -93,7 +105,7 @@ usage guidance, not a data payload for an agent to parse in a chosen structured 
 ### Environment Variables
 
 The complete set of environment variables the CLI reads. All are **required except
-`LOAM_OUTPUT_FORMAT`**, with two further exceptions, one per direction: `whoami` without
+`LOAM_OUTPUT_FORMAT` and `LOAM_HOME`**, with two further exceptions, one per direction: `whoami` without
 `--verify` does not require `LOAM_SERVER_URL` (see `whoami` below — "Local only, no server
 call" means exactly that), and `instructions` does not require the three `LOAM_AGENT_*`
 variables, which have a built-in default value — the well-known orchestrator identity — used
@@ -107,6 +119,7 @@ README → Agent Identity & Roles. Names are provisional.
 | `LOAM_AGENT_ID` | Agent ID; combined into the identifier `<name>-<id>-<role>`. | yes, except `instructions` | `0` — applied only when all three `LOAM_AGENT_*` are unset |
 | `LOAM_AGENT_ROLE` | Agent role; determines allowed operations and `instructions` output. | yes, except `instructions` | `orchestrator` — applied only when all three `LOAM_AGENT_*` are unset |
 | `LOAM_OUTPUT_FORMAT` | Output format: `json`, `yaml`, `xml`, or `human`. Unknown values fall back to `json`. | no | `json` |
+| `LOAM_HOME` | Directory holding the CLI's `.loam/` state directory — staged comments above all (see Workspace). A relative value is resolved to an absolute path once, not per command. | no | the user's home directory |
 
 On the wire, the `LOAM_AGENT_*` values travel as the request headers `Loam-Agent-Name`,
 `Loam-Agent-Id`, and `Loam-Agent-Role` — attached by the CLI to every RPC, and written
@@ -546,8 +559,8 @@ Fetch the comment threads on a work branch, or the caller's own staged comments.
 **Behavior:** By default returns the work branch's published threads — each with its resolved
 state, optional file/line anchor, and the comments within it. Published threads only; the
 caller's staged comments are excluded until submitted. With `--staged`, returns those staged
-items instead (the shape produced by `comment`), so an agent can review what it is about to
-submit.
+items instead — identically to `comment --list`, staging directory included — so an agent can
+review what it is about to submit.
 
 **Output** (JSON array) — published threads by default:
 
@@ -555,6 +568,19 @@ submit.
 [ { "id": "t1", "resolved": false, "file": "auth.go", "line": 42, "round": 1,
     "comments": [ { "author": "ada-lovelace-7-reviewer", "body": "…", "round": 1 } ] } ]
 ```
+
+**Output** (JSON object) with `--staged` — the same shape `comment --list` returns:
+
+```json
+{ "staging_dir": "/home/agent/.loam/staging/bobcob7/doc-server/wb-9c2f1a/ada-lovelace-7-reviewer",
+  "count": 1,
+  "items": [ { "staged": true, "id": "s1", "file": "auth.go", "line": 42, "body": "…" } ] }
+```
+
+`staging_dir` is reported even when `items` is `[]`. This is the habitual command, so it is
+the one that must not leave the `loam-rgyg` blind spot in place: an empty listing from a
+staging area that never held the caller's comments is otherwise indistinguishable from an
+empty listing from the right one.
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved.
@@ -585,7 +611,7 @@ Stage a review comment on a work branch locally. Nothing is published until `ver
 submits. Reviewer tooling — comments open *new* threads; replying to an existing thread is
 immediate, via `reply`.
 
-**Synopsis:** `loam work comment [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>]` (body read from stdin)
+**Synopsis:** `loam work comment [repo] [work-branch] [--file <path> --line <n>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>] [--list]` (body read from stdin)
 
 **Input:**
 
@@ -604,10 +630,15 @@ immediate, via `reply`.
   body from stdin), before it is submitted.
 - `--discard <staged-id>` *(optional)* — remove a staged comment from the staging area. Never
   reads stdin; any body piped alongside it is silently ignored, not rejected.
+- `--list` *(optional)* — report the staged batch and the staging directory holding it,
+  without modifying either. Never reads stdin. Cannot be combined with any other flag: a
+  listing that also mutated would no longer describe what it reported. This is the
+  inspectable step before the irreversible one — `verdict` publishes exactly these items,
+  and its `published_ids` are these ids.
 
 The modes are mutually exclusive: a single invocation either opens a new thread (top-level or
-`--file`/`--line`-anchored), `--edit`s a staged comment, or `--discard`s one. `--resolve` may
-accompany a new anchored comment or stand alone.
+`--file`/`--line`-anchored), `--edit`s a staged comment, `--discard`s one, or `--list`s them
+all. `--resolve` may accompany a new anchored comment or stand alone.
 
 **Behavior:** Operates on the caller's **local staging area** for this work branch (in
 `.loam`). New-thread comments and resolves append to it; `--edit` and `--discard` modify or
@@ -616,7 +647,20 @@ to everyone else until `verdict` publishes them.
 
 **Staging location:** the workspace's `.loam/` directory (see Workspace above), keyed by
 repo, work branch, and agent — outside any clone, so reviewers who never clone can still
-stage.
+stage, and independent of the working directory, so the same key always names the same
+staging area. `--list` reports that directory alongside the items in it.
+
+A `staged.json` left at the pre-`loam-rgyg` location (the enclosing clone's parent) is
+carried over on first use if it **holds staged items** and the configured location has none
+of its own, so an upgrade mid-review does not strand a staged batch. It is copied, never
+moved, and never overwrites staged comments already present.
+
+An **empty** legacy document is deliberately not adopted. Adoption happens at most once per
+destination, so adopting an empty one would permanently close the door on a populated one
+elsewhere — and the realistic pre-upgrade layout is exactly that: an empty area at whichever
+directory commands were habitually run from, and the populated area in the reviewer's clone.
+The cost is that an emptied legacy area's id counter is not carried forward either; a reused
+id is a smaller harm than a lost batch.
 
 Every staging read, write, and directory creation is confined to that directory at the
 syscall level (`os.Root`), so a symlinked component anywhere in `.loam/staging/…` — planted
@@ -648,6 +692,18 @@ later invocation always addresses the same comment the agent read earlier.
 ```
 
 `staged` is `false` for a `--discard`, which reports the item it removed.
+
+**Output** (JSON) for `--list` — the whole staged batch, and where it lives:
+
+```json
+{ "staging_dir": "/home/agent/.loam/staging/bobcob7/doc-server/wb-9c2f1a/ada-lovelace-7-reviewer",
+  "count": 2,
+  "items": [ { "staged": true, "id": "s1", "body": "…" },
+             { "staged": true, "id": "s2", "file": "auth.go", "line": 42, "body": "…" } ] }
+```
+
+`items` is `[]` when nothing is staged, and `staging_dir` is reported either way — an empty
+listing must still say *which* staging area was empty.
 
 **Errors:** exit `2` on conflicting modes, a missing body when one is required, or attempting
 to resolve a thread the caller did not author; exit `3` if the work branch, referenced
@@ -699,8 +755,25 @@ agent's verdict for the round.
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "outcome": "approve", "published": 3 }
+{ "repo": "bobcob7/doc-server", "work_branch": "wb-9c2f1a", "outcome": "approve", "published": 3,
+  "published_ids": ["s1", "s2", "s4"], "resolved_thread_ids": ["t7"],
+  "staging_dir": "/home/agent/.loam/staging/bobcob7/doc-server/wb-9c2f1a/ada-lovelace-7-reviewer" }
 ```
+
+`published_ids` names the local staging ids that published, in staging order — the same ids
+`comment` handed back and `--list` shows, so the batch is checkable against what the reviewer
+staged without a second call. A count alone is unfalsifiable; a list is self-checking. A
+resolve-only staged item publishes no comment, so it appears in `resolved_thread_ids` (as the
+thread id it resolves) and not in `published_ids`; an item carrying both a body and a
+`--resolve` appears in both. `staging_dir` names the staging area the batch came from, which
+is what distinguishes "the server published nothing" from "this invocation was addressing a
+staging area that never held the comments".
+
+If the server reports a different number of published comments than the batch carried, this
+**fails** rather than reporting a smaller number as success: the verdict is irreversible, so
+it must never silently narrow its own scope. The failure names the staged ids and the staging
+directory, and the staging area is **not** cleared, so the reviewer still has the batch to
+compare against. `"published": 0` is legitimate only when nothing was staged.
 
 **Errors:** exit `2` on a missing or invalid outcome, if the work branch is not open
 for review (`draft` or a terminal state — see State gates), or if any staged comment's

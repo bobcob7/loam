@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"connectrpc.com/connect"
@@ -658,7 +659,13 @@ func TestRunWorkComment_UnopenableStagingArea_PropagatesTheClassification(t *tes
 // table-driven test can construct one per case without depending on
 // newWorkCommentFlags' pflag defaults.
 func flagsFor(file string, line int, resolve, edit, discard string) *commentFlags {
-	return &commentFlags{file: &file, line: &line, resolve: &resolve, edit: &edit, discard: &discard}
+	return flagsForListing(file, line, resolve, edit, discard, false)
+}
+
+// flagsForListing is flagsFor with --list too, for the cases that exercise
+// the read-only listing mode against the mutating ones.
+func flagsForListing(file string, line int, resolve, edit, discard string, list bool) *commentFlags {
+	return &commentFlags{file: &file, line: &line, resolve: &resolve, edit: &edit, discard: &discard, list: &list}
 }
 
 // TestResolveCommentMode_TruthTable pins resolveCommentMode's full decision
@@ -750,6 +757,130 @@ func TestCommentModeSkipsBody_MatchesTheNarrowedContract(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, commentModeSkipsBody(tt.flags))
+		})
+	}
+}
+
+// --- --list: inspecting the staging area before the irreversible step (loam-rgyg) ---
+
+// TestRunWorkComment_List_ReportsEveryStagedItemAndWhereItLives is what
+// three reviewers asked for independently: a way to see the staged batch
+// before `work verdict` publishes it irreversibly.
+//
+// The fixture stages FOUR items so the assertions can tell "listed all of
+// them" apart from "listed one" and from "listed them in some other order",
+// and includes a resolve-only item and an anchored one so the listing is
+// shown to preserve each item's shape rather than just its body.
+//
+// staging_dir is asserted against the directory the test actually staged
+// into, not merely for being non-empty. That field is the reason this
+// command exists: an empty listing from the wrong staging area and an empty
+// listing from the right one are otherwise the same output, and telling
+// them apart is exactly what nobody could do when a verdict published none
+// of ten comments.
+func TestRunWorkComment_List_ReportsEveryStagedItemAndWhereItLives(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	stageItems(t, workspaceRoot,
+		stagedItem{Body: "first finding"},
+		stagedItem{File: "auth.go", Line: 42, Body: "second finding"},
+		stagedItem{Resolve: "t1"},
+		stagedItem{Body: "fourth finding"},
+	)
+	srv := newCommentServer()
+	encoded, err := runComment(t, workspaceRoot, testReviewer, srv, "", explicitArgs("--list")...)
+	require.NoError(t, err)
+	out, ok := encoded.(stagedListingOutput)
+	require.True(t, ok)
+	assert.Equal(t, 4, out.Count)
+	require.Len(t, out.Items, 4)
+	assert.Equal(t, []string{"s1", "s2", "s3", "s4"}, []string{out.Items[0].ID, out.Items[1].ID, out.Items[2].ID, out.Items[3].ID})
+	assert.Equal(t, "first finding", out.Items[0].Body)
+	assert.Equal(t, "auth.go", out.Items[1].File)
+	assert.Equal(t, uint32(42), out.Items[1].Line)
+	assert.Equal(t, "t1", out.Items[2].Resolve)
+	assert.Empty(t, out.Items[2].Body, "a resolve-only item has no body and must not acquire one in the listing")
+	assert.Equal(t, "fourth finding", out.Items[3].Body)
+	assert.Equal(t, stagingDirOf(t, workspaceRoot), out.StagingDir)
+	assert.Empty(t, srv.published, "listing must publish nothing")
+	assert.Len(t, remainingStaged(t, workspaceRoot), 4, "listing must not consume the batch it reports")
+}
+
+// TestRunWorkComment_List_EmptyStagingArea_StillNamesTheDirectory is the
+// case the whole feature turns on. "Nothing is staged" and "you are asking
+// a staging area that never held your comments" produced identical output
+// before this; the directory is what distinguishes them, so it must be
+// present precisely when the list is empty.
+func TestRunWorkComment_List_EmptyStagingArea_StillNamesTheDirectory(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	encoded, err := runComment(t, workspaceRoot, testReviewer, newCommentServer(), "", explicitArgs("--list")...)
+	require.NoError(t, err)
+	out, ok := encoded.(stagedListingOutput)
+	require.True(t, ok)
+	assert.Equal(t, 0, out.Count)
+	assert.Empty(t, out.Items)
+	assert.Equal(t, stagingDirOf(t, workspaceRoot), out.StagingDir, "an empty listing must still say which staging area was empty")
+}
+
+// TestRunWorkComment_List_OutputShape pins the JSON, including items as an
+// empty array rather than null: the one output whose job is to be checked
+// against a verdict's published_ids must not render "nothing staged" as a
+// missing field.
+func TestRunWorkComment_List_OutputShape(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	encoded, err := runComment(t, workspaceRoot, testReviewer, newCommentServer(), "", explicitArgs("--list")...)
+	require.NoError(t, err)
+	raw, err := json.Marshal(encoded)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"staging_dir":"`+stagingDirOf(t, workspaceRoot)+`","count":0,"items":[]}`, string(raw))
+}
+
+// TestRunWorkComment_List_NeverReadsStdin proves --list joins --discard and
+// a lone --resolve in the set of modes that cannot hang on an un-redirected
+// stdin (loam-hi5o.6). A read-only inspection command that blocks waiting
+// for EOF is useless in exactly the situation it is reached for.
+func TestRunWorkComment_List_NeverReadsStdin(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := realTempDir(t)
+	assert.True(t, commentModeSkipsBody(flagsForListing("", 0, "", "", "", true)))
+	var encoded any
+	deps := NewDeps(testLogger(),
+		&ConfigMock{IdentifierFunc: func() string { return testReviewer }},
+		&OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }},
+		newErrorMapper(),
+		stagingWorkspace(workspaceRoot, testReviewer),
+		&ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return newCommentServer().client }},
+		nil,
+		iotest.ErrReader(errors.New("stdin must not be read by --list")),
+	)
+	require.NoError(t, runWorkComment(t.Context(), deps, explicitArgs("--list")))
+	assert.NotNil(t, encoded)
+}
+
+// TestRunWorkComment_List_CombinedWithAnyMutatingFlag_IsUsageError keeps
+// --list read-only. Silently ignoring a --discard alongside it would report
+// a listing that no longer describes the staging area by the time the agent
+// reads it.
+func TestRunWorkComment_List_CombinedWithAnyMutatingFlag_IsUsageError(t *testing.T) {
+	t.Parallel()
+	conflicts := map[string][]string{
+		"--discard": {"--list", "--discard", "s1"},
+		"--edit":    {"--list", "--edit", "s1"},
+		"--file":    {"--list", "--file", "auth.go"},
+		"--line":    {"--list", "--file", "auth.go", "--line", "4"},
+		"--resolve": {"--list", "--resolve", "t1"},
+	}
+	for name, rest := range conflicts {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			workspaceRoot := realTempDir(t)
+			encoded, err := runComment(t, workspaceRoot, testReviewer, newCommentServer(), "", explicitArgs(rest...)...)
+			require.Error(t, err)
+			assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+			assert.Nil(t, encoded)
+			assert.Empty(t, remainingStaged(t, workspaceRoot), "a rejected invocation must not have mutated the staging area")
 		})
 	}
 }

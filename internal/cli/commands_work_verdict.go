@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/pflag"
@@ -23,11 +24,31 @@ func newWorkVerdictFlags() (*pflag.FlagSet, *string) {
 // verdict). Published is the count the SERVER reports, not the number of
 // items this process sent: the two differ by design, because a resolve-only
 // staged item publishes no comment.
+//
+// PublishedIDs, ResolvedThreadIDs and StagingDir exist because a bare
+// count is unfalsifiable (loam-rgyg). A reviewer who staged ten comments
+// and read `"published": 0` had no way to tell "the server rejected them"
+// from "this invocation was looking at a different staging area" — and no
+// way, across three rounds and eighteen comments, to confirm that what
+// went out was what they wrote. The staged ids are the reviewer's OWN
+// names for the items (`s1`, `s2`, …, the same ids `work comment` handed
+// back and `--list` shows), so the list can be checked against their notes
+// without a second call; StagingDir names the directory those ids came
+// from, which is the fact that was missing when the count was wrong.
+//
+// The ids are local staging ids, not server thread ids: SubmitVerdict
+// returns only an outcome and a count, so server ids are not available to
+// report here. Local ids are the more useful half anyway — they answer
+// "did everything I staged go out", which is the question that was
+// silently answered wrong.
 type verdictOutput struct {
-	Repo       string `json:"repo"`
-	WorkBranch string `json:"work_branch"`
-	Outcome    string `json:"outcome"`
-	Published  uint32 `json:"published"`
+	Repo              string   `json:"repo"`
+	WorkBranch        string   `json:"work_branch"`
+	Outcome           string   `json:"outcome"`
+	Published         uint32   `json:"published"`
+	PublishedIDs      []string `json:"published_ids"`
+	ResolvedThreadIDs []string `json:"resolved_thread_ids"`
+	StagingDir        string   `json:"staging_dir"`
 }
 
 // runWorkVerdict implements `loam work verdict [repo] [work-branch]
@@ -126,16 +147,90 @@ func publishVerdict(ctx context.Context, deps *Deps, repo, workBranch string, ou
 		return fmt.Errorf("submitting a verdict on work branch %s/%s: %w", repo, workBranch, err)
 	}
 	published := resp.Msg.GetPublished()
+	publishedIDs := publishedStagedIDs(items)
+	if err := requirePublishedAll(publishedIDs, published, store.location()); err != nil {
+		return err
+	}
 	if err := store.clear(); err != nil {
 		deps.logger.Error("verdict published but the staging area could not be cleared", "repo", repo, "work_branch", workBranch, "published", published, "error", err)
 		return fmt.Errorf("the verdict was published on %s/%s (%d comment(s) are now visible) but the local staging area could not be cleared; re-running `loam work verdict` would publish them a second time — discard them with `loam work comment --discard` first: %w", repo, workBranch, published, err)
 	}
 	return deps.encoder.Encode(verdictOutput{
-		Repo:       repo,
-		WorkBranch: workBranch,
-		Outcome:    verdictOutcomeString(resp.Msg.GetOutcome()),
-		Published:  published,
+		Repo:              repo,
+		WorkBranch:        workBranch,
+		Outcome:           verdictOutcomeString(resp.Msg.GetOutcome()),
+		Published:         published,
+		PublishedIDs:      publishedIDs,
+		ResolvedThreadIDs: resolveThreadIDs(items),
+		StagingDir:        store.location(),
 	})
+}
+
+// publishedStagedIDs lists the local staging ids of the items that carried
+// a body, in staging order — exactly the items verdictComments turned into
+// published threads, so the two are two views of one list and cannot drift.
+// A resolve-only item is absent by the same rule that keeps it out of
+// verdictComments: it publishes no comment, and reporting its id under
+// "published" would overstate what the reviewer's findings amount to. Its
+// id still travels, as a thread id, via resolveThreadIDs.
+//
+// The slice is non-nil so an outcome-only verdict reports `[]`, not
+// `null` — "nothing was staged" must not render as "this field is absent"
+// in the one output whose job is to be checkable.
+func publishedStagedIDs(items []stagedItem) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Body == "" {
+			continue
+		}
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+// requirePublishedAll refuses to report success when the server published
+// a different number of comments than this invocation sent.
+//
+// This is the guard loam-rgyg asks for: `work verdict` is irreversible by
+// design, so it must never silently narrow its own scope. A count that
+// disagrees with the batch means some of the reviewer's findings are not
+// on the work branch while the verdict that was supposed to carry them
+// is — and the reviewer, reading a success-shaped response, would never
+// look again.
+//
+// Two things follow from WHEN this runs, and both are deliberate. It runs
+// after the RPC, because only the server can report what it accepted, so
+// the verdict really is published by the time this fires; the message
+// therefore leads with that fact rather than implying a rollback the
+// server never offers. And it runs BEFORE store.clear(), so a failure here
+// leaves every staged item exactly where it was: the reviewer can read
+// them back with `work comment --list`, compare against the ids below, and
+// decide, rather than being left with nothing to compare.
+//
+// Note what this cannot catch, and why the staging directory is in the
+// message anyway. When a verdict is issued against a staging area that
+// never held the comments — the original loam-rgyg failure — sent and
+// published are both zero, they agree, and no guard on counts alone can
+// see it. Naming the directory that answered is what makes that case
+// visible, which is why it appears here and in every success response too.
+//
+// AGAINST THE CURRENT SERVER THIS CANNOT FIRE. SubmitVerdict's handler
+// reports Published as len(req.Comments) — the count it was sent — so the
+// two agree by construction and this is a CONTRACT ASSERTION, not a live
+// guard on observed behaviour. It is worth keeping as one: the count is
+// the only thing the response carries about the batch, "published" is
+// documented as what the server accepted rather than what it was handed,
+// and the day that stops being an identity is the day an irreversible
+// operation starts under-reporting silently. Do not read a passing test
+// here as evidence that a real partial publish was survived.
+func requirePublishedAll(publishedIDs []string, published uint32, stagingDir string) error {
+	if uint32(len(publishedIDs)) == published {
+		return nil
+	}
+	return fmt.Errorf(
+		"the verdict was published, but the server reports %d comment(s) published from the %d staged in %s (%s); those staged comments are still staged locally — read them with `loam work comment --list` and compare before re-submitting, since re-submitting publishes the whole batch again",
+		published, len(publishedIDs), stagingDir, strings.Join(publishedIDs, ", "),
+	)
 }
 
 // verdictComments converts the staged items that carry a body into the
