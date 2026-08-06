@@ -466,7 +466,11 @@ func redactTransportError(err error, extra []string) error {
 	if err == nil {
 		return nil
 	}
-	secrets := extra
+	// extra is COPIED rather than appended to in place: a caller's slice
+	// with spare capacity would otherwise have its backing array written
+	// through by the append below, which is a silent action-at-a-distance
+	// bug waiting for the first caller that reuses one.
+	secrets := append([]string(nil), extra...)
 	var uerr *url.Error
 	if errors.As(err, &uerr) {
 		u, parseErr := url.Parse(uerr.URL)
