@@ -400,3 +400,104 @@ func TestOpenStaging_WorkspaceRootDoesNotExistYet_IsCreated(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(stagingDirPerm), info.Mode().Perm(), "a directory holding unpublished review notes is owner-only")
 }
+
+// TestOpenStaging_EmptyLegacyDocument_IsNotAdoptedAndDoesNotCloseTheDoor is
+// the blocking regression from this bead's first review round, and it is
+// modelled on the configuration this machine was actually in.
+//
+// Adoption happens at most once per destination. So adopting an EMPTY
+// legacy document — which carries nothing — would permanently prevent a
+// POPULATED one elsewhere from ever being adopted. The live shape was an
+// empty legacy area at the agent harness's default directory (six of them,
+// items 0, next_id 15-26) and each reviewer's populated area in their own
+// /tmp clone. One post-upgrade command run without a `cd` was enough.
+//
+// The sequence below is that exact story: the no-cd command runs FIRST and
+// must leave no trace, then the command from the reviewer's clone must
+// still find its batch.
+func TestOpenStaging_EmptyLegacyDocument_IsNotAdoptedAndDoesNotCloseTheDoor(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	harnessDefault := realTempDir(t)
+	reviewersClone := realTempDir(t)
+	writeLegacyStaged(t, harnessDefault, testReviewer, `{"version":1,"next_id":23,"items":[]}`)
+	writeLegacyStaged(t, reviewersClone, testReviewer, `{"version":1,"next_id":4,"items":[
+		{"id":"s1","body":"first finding"},
+		{"id":"s2","body":"second finding"},
+		{"id":"s3","body":"third finding"}]}`)
+	fromHarnessDefault := openTestStoreFor(t, legacyStagingWorkspace(root, harnessDefault, testReviewer))
+	items, err := fromHarnessDefault.list()
+	require.NoError(t, err)
+	assert.Empty(t, items, "the empty legacy area really is empty; that is the point")
+	dir, err := legacyStagingWorkspace(root, harnessDefault, testReviewer).stagingPath(testRepo, testWorkBranch)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(dir, stagedFileName), "adopting nothing must WRITE nothing: a staged.json here is the closed door")
+	fromReviewersClone := openTestStoreFor(t, legacyStagingWorkspace(root, reviewersClone, testReviewer))
+	items, err = fromReviewersClone.list()
+	require.NoError(t, err)
+	require.Len(t, items, 3, "the populated batch must still be adoptable after the no-cd command ran first")
+	assert.Equal(t, []string{"s1", "s2", "s3"}, stagedIDs(items))
+	assert.Equal(t, "first finding", items[0].Body)
+	assert.Equal(t, "third finding", items[2].Body)
+}
+
+// TestOpenStaging_UnwritableDestination_FailsRatherThanDroppingTheBatch is
+// the write half of adoption's "reports its failures" claim. A legacy batch
+// that is read successfully and then cannot be written to the new location
+// is the one path in adoption that would silently drop comments, so it must
+// be the loudest.
+func TestOpenStaging_UnwritableDestination_FailsRatherThanDroppingTheBatch(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny writes")
+	}
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":3,"items":[
+		{"id":"s1","body":"first finding"},
+		{"id":"s2","body":"second finding"}]}`)
+	dest := filepath.Join(root, loamDirName, stagingDirName, testRepo, testWorkBranch, testReviewer)
+	require.NoError(t, os.MkdirAll(dest, stagingDirPerm))
+	require.NoError(t, os.Chmod(dest, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dest, stagingDirPerm) })
+	_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
+	require.Error(t, err, "a batch that could not be carried over must not be reported as an empty staging area")
+	assert.ErrorIs(t, err, errStagingArea)
+	assert.Contains(t, err.Error(), filepath.Join(legacyRoot, loamDirName), "the failure must name the document it could not carry over")
+}
+
+// TestOpenStaging_UnparseableLegacyDocument_FailsRatherThanReportingEmpty
+// covers the third way "does this hold comments" can go unanswered. A
+// document that does not parse might hold a whole review; treating it as
+// empty would discard it silently.
+func TestOpenStaging_UnparseableLegacyDocument_FailsRatherThanReportingEmpty(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":3,"items":[{"id":`)
+	_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errStagingArea)
+	assert.Contains(t, err.Error(), "parsing staged comments")
+}
+
+// TestOpenStaging_FutureVersionLegacyDocument_IsCarriedAcrossNotDiscarded
+// pins the deliberate non-check: a document this build cannot interpret may
+// still hold the reviewer's comments, so the bytes travel and the version
+// mismatch is reported by the ordinary load path at the new location —
+// rather than being quietly left behind at the old one.
+func TestOpenStaging_FutureVersionLegacyDocument_IsCarriedAcrossNotDiscarded(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	legacyRoot := realTempDir(t)
+	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":99,"next_id":2,"items":[{"id":"s1","body":"from a newer loam"}]}`)
+	store, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
+	dir, err := legacyStagingWorkspace(root, legacyRoot, testReviewer).stagingPath(testRepo, testWorkBranch)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dir, stagedFileName), "the bytes must be carried across, not stranded")
+	_, err = store.list()
+	require.Error(t, err, "and the version mismatch must then be reported normally")
+	assert.ErrorIs(t, err, errStagingArea)
+}

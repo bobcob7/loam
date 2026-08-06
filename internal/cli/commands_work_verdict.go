@@ -213,6 +213,16 @@ func publishedStagedIDs(items []stagedItem) []string {
 // published are both zero, they agree, and no guard on counts alone can
 // see it. Naming the directory that answered is what makes that case
 // visible, which is why it appears here and in every success response too.
+//
+// AGAINST THE CURRENT SERVER THIS CANNOT FIRE. SubmitVerdict's handler
+// reports Published as len(req.Comments) — the count it was sent — so the
+// two agree by construction and this is a CONTRACT ASSERTION, not a live
+// guard on observed behaviour. It is worth keeping as one: the count is
+// the only thing the response carries about the batch, "published" is
+// documented as what the server accepted rather than what it was handed,
+// and the day that stops being an identity is the day an irreversible
+// operation starts under-reporting silently. Do not read a passing test
+// here as evidence that a real partial publish was survived.
 func requirePublishedAll(publishedIDs []string, published uint32, stagingDir string) error {
 	if uint32(len(publishedIDs)) == published {
 		return nil

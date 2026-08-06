@@ -528,6 +528,16 @@ func listAllThreads(ctx context.Context, client WorkBranchClient, repo, workBran
 // promises. Nothing about the comments themselves is fetched: staged items
 // are not on the server (internal/handler/workbranch/review.go ->
 // ListComments) and asking for them there would be meaningless.
+//
+// It reports the same shape as `work comment --list`, staging directory
+// included, rather than the bare array it used to. That is deliberate and
+// is the point of loam-rgyg: this is the command reviewers already know,
+// so it is the one they reach for, and a listing that cannot say WHICH
+// staging area it read leaves the original blind spot exactly where it
+// was. An empty array from a staging area that never held the reviewer's
+// comments is byte-identical to an empty array from the right one. Putting
+// the directory on the new command only would have fixed the door nobody
+// uses.
 func encodeStagedComments(ctx context.Context, deps *Deps, repo, workBranch string) error {
 	req := &loamv1.GetWorkBranchRequest{Repo: repo, WorkBranch: workBranch}
 	if _, err := deps.connect.WorkBranch().GetWorkBranch(ctx, connect.NewRequest(req)); err != nil {
@@ -538,11 +548,7 @@ func encodeStagedComments(ctx context.Context, deps *Deps, repo, workBranch stri
 		return err
 	}
 	defer func() { _ = store.Close() }()
-	items, err := store.list()
-	if err != nil {
-		return err
-	}
-	return deps.encoder.Encode(stagedCommentOutputsFrom(items))
+	return encodeStagedListing(deps, store)
 }
 
 // stagedCommentOutputsFrom renders staged items in the shape `work comment`

@@ -559,8 +559,8 @@ Fetch the comment threads on a work branch, or the caller's own staged comments.
 **Behavior:** By default returns the work branch's published threads — each with its resolved
 state, optional file/line anchor, and the comments within it. Published threads only; the
 caller's staged comments are excluded until submitted. With `--staged`, returns those staged
-items instead (the shape produced by `comment`), so an agent can review what it is about to
-submit.
+items instead — identically to `comment --list`, staging directory included — so an agent can
+review what it is about to submit.
 
 **Output** (JSON array) — published threads by default:
 
@@ -568,6 +568,19 @@ submit.
 [ { "id": "t1", "resolved": false, "file": "auth.go", "line": 42, "round": 1,
     "comments": [ { "author": "ada-lovelace-7-reviewer", "body": "…", "round": 1 } ] } ]
 ```
+
+**Output** (JSON object) with `--staged` — the same shape `comment --list` returns:
+
+```json
+{ "staging_dir": "/home/agent/.loam/staging/bobcob7/doc-server/wb-9c2f1a/ada-lovelace-7-reviewer",
+  "count": 1,
+  "items": [ { "staged": true, "id": "s1", "file": "auth.go", "line": 42, "body": "…" } ] }
+```
+
+`staging_dir` is reported even when `items` is `[]`. This is the habitual command, so it is
+the one that must not leave the `loam-rgyg` blind spot in place: an empty listing from a
+staging area that never held the caller's comments is otherwise indistinguishable from an
+empty listing from the right one.
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
 resolved.
@@ -638,9 +651,16 @@ stage, and independent of the working directory, so the same key always names th
 staging area. `--list` reports that directory alongside the items in it.
 
 A `staged.json` left at the pre-`loam-rgyg` location (the enclosing clone's parent) is
-carried over on first use if the configured location has none of its own, so an upgrade
-mid-review does not strand a staged batch. It is copied, never moved, and never overwrites
-staged comments already present.
+carried over on first use if it **holds staged items** and the configured location has none
+of its own, so an upgrade mid-review does not strand a staged batch. It is copied, never
+moved, and never overwrites staged comments already present.
+
+An **empty** legacy document is deliberately not adopted. Adoption happens at most once per
+destination, so adopting an empty one would permanently close the door on a populated one
+elsewhere — and the realistic pre-upgrade layout is exactly that: an empty area at whichever
+directory commands were habitually run from, and the populated area in the reviewer's clone.
+The cost is that an emptied legacy area's id counter is not carried forward either; a reused
+id is a smaller harm than a lost batch.
 
 Every staging read, write, and directory creation is confined to that directory at the
 syscall level (`os.Root`), so a symlinked component anywhere in `.loam/staging/…` — planted

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -106,26 +107,47 @@ func (w *workspace) OpenStaging(repo, workBranch string) (StagingArea, error) {
 	return area, nil
 }
 
-// adoptLegacyStaging moves a staged.json left behind at the OLD,
+// adoptLegacyStaging COPIES a staged.json left behind at the OLD,
 // cwd-derived staging location into the area just opened at the configured
-// one, when the new location has none of its own.
+// one, when the legacy document actually holds staged comments and the new
+// location has none of its own.
 //
-// It exists because the fix for loam-rgyg MOVES where staged comments
+// It exists because the fix for loam-rgyg relocates where staged comments
 // live. Without this, deploying that fix would itself do the thing the bug
 // does: a reviewer who staged comments before the upgrade and published
 // after it would find an empty staging area and publish a verdict with
 // none of their findings attached. A migration that silently strands data
 // is not an acceptable fix for silently stranding data.
 //
-// It is deliberately conservative in three ways. It never runs when the
-// new location already holds a staged.json, so it cannot overwrite live
-// staged state. It never DELETES the legacy file — a copy that leaves the
-// original readable is recoverable by hand if anything about this is
-// wrong, and the legacy file is inert once the new one exists. And it
-// reports its failures instead of swallowing them: a legacy document that
-// exists but cannot be read or re-written is precisely the case where
-// carrying on would lose comments, so it fails the command loudly rather
-// than presenting an empty staging area as the answer.
+// THE EMPTY-DOCUMENT CHECK IS LOAD-BEARING, and it is the one thing about
+// this function that is not obvious. Adoption can happen only once per
+// destination — the moment a staged.json exists at the new location, no
+// later invocation will adopt again — so adopting an EMPTY legacy document
+// permanently closes the door on a populated one elsewhere. That is not
+// hypothetical: this machine right now has an empty legacy area at the
+// agent harness's default directory and each reviewer's populated area in
+// their own /tmp clone. One post-upgrade command run without a `cd` — the
+// exact habit that caused this bead — would adopt the empty one and lose
+// the populated batch for good, reporting `count: 0` while doing it. An
+// empty document is nothing to carry, so carrying it is all cost.
+//
+// The cost of skipping it is real but much smaller: an emptied legacy area
+// also holds the id counter (`clear` deliberately does not rewind it), so
+// declining to adopt one means the new area starts numbering at s1 while
+// the reviewer's notes may still say "s7" for something already published.
+// A reused id names the wrong comment; a lost batch loses the review. The
+// second is worse, so the counter is what gives way.
+//
+// It is otherwise deliberately conservative in three ways. It never runs
+// when the new location already holds a staged.json, so it cannot
+// overwrite live staged state. It never DELETES the legacy file — a copy
+// that leaves the original readable is recoverable by hand if anything
+// about this is wrong, and the legacy file is inert once the new one
+// exists. And it reports its failures instead of swallowing them: a legacy
+// document that exists but cannot be read, parsed, or re-written is
+// precisely the case where carrying on would lose comments, so it fails
+// the command loudly rather than presenting an empty staging area as the
+// answer.
 func (w *workspace) adoptLegacyStaging(area *stagingArea, rel string) error {
 	if w.legacyRoot == "" || w.legacyRoot == w.root {
 		return nil
@@ -143,10 +165,35 @@ func (w *workspace) adoptLegacyStaging(area *stagingArea, rel string) error {
 	if err != nil {
 		return fmt.Errorf("%w: reading staged comments left at the previous staging location %s: %w", errStagingArea, legacy, err)
 	}
+	empty, err := stagedDocumentIsEmpty(data)
+	if err != nil {
+		return fmt.Errorf("%w: parsing staged comments left at the previous staging location %s: %w", errStagingArea, legacy, err)
+	}
+	if empty {
+		return nil
+	}
 	if err := area.WriteFile(stagedFileName, data); err != nil {
 		return fmt.Errorf("%w: carrying staged comments over from the previous staging location %s: %w", errStagingArea, legacy, err)
 	}
 	return nil
+}
+
+// stagedDocumentIsEmpty reports whether a staged.json document carries no
+// items, without judging anything else about it.
+//
+// It deliberately does NOT check the format version. A legacy document
+// written by a future build is one this process cannot interpret, but it
+// may still hold the reviewer's comments — so the right move is to carry
+// the bytes across unchanged and let stagingStore.load report the version
+// mismatch against the new location, rather than to silently decline the
+// adoption here and strand them. Only a document that fails to parse at
+// all is an error, because then "does it hold comments" has no answer.
+func stagedDocumentIsEmpty(data []byte) (bool, error) {
+	var set stagedSet
+	if err := json.Unmarshal(data, &set); err != nil {
+		return false, err
+	}
+	return len(set.Items) == 0, nil
 }
 
 // makeContainedDir creates name (and any missing parents) under parent and
