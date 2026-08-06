@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -191,6 +192,14 @@ func TestCheckRepo_AuthChallenge_NeverEmitsUserinfoSentinel(t *testing.T) {
 	err = f.CheckRepo(t.Context(), u.String())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), u.Host, "positive control: the error must still name the host it failed against")
+	// The LOG control is as load-bearing here as it is in the two probe
+	// tests above, and this test shipped without it for one round: every
+	// line at issue is emitted with DebugContext, so a handler that dropped
+	// debug records would leave assertNoSentinel searching an empty string
+	// and reporting success. Confirmed by dropping recordingLogger to the
+	// default level -- with this line, this test fails alongside its
+	// siblings; without it, it passed alone.
+	assert.Contains(t, logs.String(), "ls-remote probe failed", "positive control: the failure log line must actually have been emitted")
 	assertNoSentinel(t, err, logs.String())
 }
 
@@ -322,17 +331,57 @@ func TestScrubUserinfoEmptySecretIsANoOp(t *testing.T) {
 
 // TestRedactTransportErrorKeepsTheChainWhenItSafelyCan pins the property
 // the structural rewrite exists for: redacting a *url.Error must not cost
-// callers errors.Is against what the transport actually reported, because
-// receivePackProbeOverGit's classification (and its callers') depends on
-// telling a cancelled context apart from a real failure.
+// callers errors.Is against what the transport actually reported.
+//
+// THE ONE DEPENDENT IN THIS PACKAGE, verified by reading it rather than
+// assumed: Forgejo.ValidateToken matches errors.Is(err, http.ErrSchemeMismatch)
+// on the error probeValidateToken returns -- now through a redacting wrap --
+// to decide whether to retry a scheme-less host over plain HTTP. If
+// redaction flattened that error, a self-hosted forge with no TLS in front
+// of it would silently stop validating. Nothing else here matches on a
+// transport error: receivePackProbeOverGit classifies purely by HTTP status,
+// and no caller of it matches context.Canceled. context.Canceled is used
+// below only as a convenient stand-in sentinel for "the inner error is still
+// reachable"; it is NOT itself a case any caller depends on.
+//
+// An earlier version of this comment cited receivePackProbeOverGit's
+// classification instead -- specific, verified-sounding, and never checked
+// against the function it named. That is the SAME defect this branch exists
+// to correct in loam-po8e's own test comment, written three files away from
+// the correction, which is worth recording rather than quietly fixing: the
+// shape is very hard to see from inside the change that introduces it. The
+// rule that catches it is to state the scope actually checked, not the
+// general claim that scope suggests.
 func TestRedactTransportErrorKeepsTheChainWhenItSafelyCan(t *testing.T) {
 	t.Parallel()
-	inner := context.Canceled
-	err := &url.Error{Op: "Get", URL: "https://" + sentinelToken + "@forge.example.invalid/acme/widgets", Err: inner}
+	err := &url.Error{Op: "Get", URL: "https://" + sentinelToken + "@forge.example.invalid/acme/widgets", Err: context.Canceled}
 	got := redactTransportError(err, nil)
 	assert.NotContains(t, got.Error(), sentinelToken)
 	assert.ErrorIs(t, got, context.Canceled, "the transport's own error must remain matchable after redaction")
 	assert.Contains(t, got.Error(), "forge.example.invalid", "positive control: the host must survive redaction")
+}
+
+// TestValidateTokenSchemeMismatchRetrySurvivesRedaction is the dependent
+// named above, driven end to end rather than asserted about: a scheme-less
+// host naming a PLAINTEXT-HTTP forge must still validate, which only works
+// if http.ErrSchemeMismatch survives probeValidateToken's redacting wrap.
+// This is what would actually break if the structural rewrite were dropped
+// in favour of flattening every redacted error to a string.
+func TestValidateTokenSchemeMismatchRetrySurvivesRedaction(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	u, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	logger, _ := recordingLogger()
+	f := NewForgejo("", "", server.Client(), logger)
+	// A BARE host (no scheme) for a server that speaks only plain HTTP:
+	// apiBaseURL defaults it to https, the TLS layer reports
+	// http.ErrSchemeMismatch, and ValidateToken retries over http:// only
+	// because that sentinel is still matchable through the wrap.
+	assert.NoError(t, f.ValidateToken(t.Context(), u.Host, "some-token"))
 }
 
 // TestRedactTransportErrorDropsTheChainRatherThanLeak pins the fallback:
@@ -359,6 +408,85 @@ func TestRedactTransportErrorLeavesACleanErrorAlone(t *testing.T) {
 	got := redactTransportError(err, nil)
 	assert.Equal(t, err.Error(), got.Error())
 	assert.ErrorIs(t, got, context.DeadlineExceeded)
+}
+
+// The four tests below cover the hardening that a mutation sweep found
+// untested. They are all on paths NOT reachable with userinfo today --
+// which is exactly why they are worth pinning rather than skipping: the
+// only thing between them and a live leak is validation in
+// internal/forgehost, a package internal/forge cannot see and does not
+// import. Hardening nobody tests is one refactor away from hardening nobody
+// has.
+
+// TestKindForHost_NeverEchoesUserinfo covers resolve.go's loudest branch:
+// a host that CONTAINS "github" but is neither exact alias fails naming the
+// host, and that message is %q-formatted straight into an error a handler
+// renders. It is the one error in this package that quotes a host on a
+// branch no status code guards.
+func TestKindForHost_NeverEchoesUserinfo(t *testing.T) {
+	t.Parallel()
+	host := "https://" + sentinelToken + "@github-mirror.internal.corp"
+	_, err := KindForHost(host)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errUnsupportedForgeKind)
+	assert.Contains(t, err.Error(), "github-mirror.internal.corp", "positive control: the host must still be named, that is the whole point of this branch")
+	assert.NotContains(t, err.Error(), sentinelToken)
+}
+
+// TestNewProvider_NeverEchoesUserinfo drives the same host through the
+// constructor every caller with a real host in hand actually uses, so the
+// guarantee is pinned where it is consumed and not only where it is
+// implemented.
+//
+// NewProvider's own `default:` arm is deliberately NOT covered: KindForHost
+// returns KindForgejo, KindGitHub, or an error and nothing else, so that arm
+// is unreachable without editing resolve.go. It is a compile-time
+// exhaustiveness guard, not a branch a test can reach.
+func TestNewProvider_NeverEchoesUserinfo(t *testing.T) {
+	t.Parallel()
+	host := "https://" + sentinelToken + "@github-mirror.internal.corp"
+	provider, err := NewProvider(host, "some-token", http.DefaultClient, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	require.Error(t, err)
+	assert.Nil(t, provider)
+	assert.Contains(t, err.Error(), "github-mirror.internal.corp", "positive control")
+	assert.NotContains(t, err.Error(), sentinelToken)
+}
+
+// TestLsRemoteProbe_UnparseableURL_NeverEmitsUserinfoSentinel covers the
+// guard this change added at the top of lsRemoteProbeOverGit. It fails
+// closed rather than handing the string to git for a reason specific to
+// this bead: scrubbing git's own output depends on knowing which substrings
+// ARE the credential, and a URL that did not parse is one whose embedded
+// credential cannot be identified -- so git's output would then be unsafe to
+// echo at all. Neither the raw string nor the *url.Error explaining why it
+// failed may be rendered, since the latter quotes the former whole.
+func TestLsRemoteProbe_UnparseableURL_NeverEmitsUserinfoSentinel(t *testing.T) {
+	t.Parallel()
+	raw := "https://" + sentinelToken + "@forge.example.invalid/acme/\x7f"
+	_, parseErr := url.Parse(raw)
+	require.Error(t, parseErr, "precondition: this URL must be one net/url rejects")
+	require.Contains(t, parseErr.Error(), sentinelToken, "precondition: it is the parse error itself that would leak, which is why it is never wrapped")
+	logger, logs := recordingLogger()
+	f := NewForgejo("forge.example.invalid", "bound-token", http.DefaultClient, logger)
+	err := f.lsRemoteProbe(t.Context(), raw)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoNotFound, "a URL that did not parse says nothing about whether the repo exists")
+	assertNoSentinel(t, err, logs.String())
+}
+
+// TestRedactTransportErrorDoesNotWriteThroughTheCallersSlice pins the
+// copy: appending in place would write the *url.Error's own userinfo into a
+// caller's spare capacity, which is silent action at a distance rather than
+// a visible bug. Asserted against the FULL backing array, not the caller's
+// view of it, because that is the only place the damage would be visible.
+func TestRedactTransportErrorDoesNotWriteThroughTheCallersSlice(t *testing.T) {
+	t.Parallel()
+	extra := make([]string, 1, 4)
+	extra[0] = "caller-supplied-secret"
+	_ = redactTransportError(&url.Error{Op: "Get", URL: "https://" + sentinelToken + "@forge.example.invalid/x", Err: errors.New("boom")}, extra)
+	require.Equal(t, 4, cap(extra), "precondition: the slice must have spare capacity for an in-place append to be able to use")
+	assert.Equal(t, []string{"caller-supplied-secret", "", "", ""}, extra[:cap(extra)],
+		"redactTransportError appended through the caller's backing array")
 }
 
 // TestRedactHostLeavesAUserinfoFreeHostByteIdentical is what makes it
