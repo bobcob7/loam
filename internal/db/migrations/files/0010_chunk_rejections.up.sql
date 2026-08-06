@@ -97,10 +97,17 @@ CREATE TABLE IF NOT EXISTS chunk_rejections (
                           CHECK (chunks_state IN ('stale', 'absent')),
 
     -- sqlstate is Postgres's own five-character code for the rejection
-    -- when the error carried one (e.g. '22P02', which is what pgvector
-    -- raises for a NaN vector coordinate). NULL when the failure was not a
+    -- when the error carried one. NULL when the failure was not a
     -- *pgconn.PgError at all, which is what a caller's own non-Postgres
     -- store produces.
+    --
+    -- The reference case, MEASURED against a real pgvector server rather
+    -- than assumed, is a NaN vector coordinate: it raises '22000'
+    -- (data_exception), NOT the '22P02' (invalid_text_representation)
+    -- loam-qj21's briefing and loam-c94.24's notes both name. 22P02 is
+    -- what pgvector's TEXT input function raises, and pgx sends vectors in
+    -- the binary format, so that function never runs. See
+    -- internal/ingest/vectors.sqlStateOf.
     sqlstate          text,
     error             text NOT NULL,
 

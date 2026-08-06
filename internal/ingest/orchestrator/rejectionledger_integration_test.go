@@ -10,7 +10,7 @@
 //
 // These are loam-qj21's tests, and they need a real Postgres for two
 // independent reasons. The rejection is pgvector refusing a NaN coordinate
-// at INSERT (SQLSTATE 22P02), a server-side per-statement error no mock
+// at INSERT (SQLSTATE 22000), a server-side per-statement error no mock
 // produces. And the RETRY is a property of what a real `git diff
 // ingested_ref..tip` reports -- specifically, that it reports NOTHING for
 // a file nobody touched, which is the whole defect. A fake planner would
@@ -126,7 +126,8 @@ func TestIngest_RejectedFilesAreLedgeredAndTheNextIngestRetriesThem(t *testing.T
 		assert.Equal(t, chunkstore.RejectionPending, row.State, "one attempt is well inside the budget, so the path must still be retried")
 		assert.Equal(t, chunkstore.ChunksAbsent, row.ChunksState,
 			"these files were never indexed, so there were no prior chunks to survive the rollback: they are ABSENT from search, not stale")
-		assert.Equal(t, "22P02", row.SQLState, "pgvector rejects a NaN coordinate with SQLSTATE 22P02, and the code must reach the ledger")
+		assert.Equal(t, "22000", row.SQLState,
+			"MEASURED: pgvector raises data_exception (22000) for a NaN coordinate, NOT the 22P02 (invalid_text_representation) this bead's briefing and loam-c94.24's notes both name -- 22P02 is the TEXT input function's code and pgx sends vectors in binary. The first version of this assertion said 22P02 and failed here")
 		assert.Equal(t, job.ID, row.JobID, "the row must name the job whose stats counted it -- this is the join the per-file ERROR lines never had")
 		assert.Equal(t, refAfterFirst, row.RejectedRef, "the row must name the ref the index now claims but this path does not reflect")
 		assert.Zero(t, chunkCountFor(t, f, path))
@@ -137,9 +138,9 @@ func TestIngest_RejectedFilesAreLedgeredAndTheNextIngestRetriesThem(t *testing.T
 	partial := capture.withMessage("ingest committed with rejected files; they are recorded in the rejection ledger and will be retried by the next ingest")
 	require.Len(t, partial, 1)
 	assert.Equal(t, slog.LevelWarn, partial[0].level)
-	assert.Equal(t, []string{"bad_one.go", "bad_two.go", "bad_three.go"}, partial[0].attrs["files"],
-		"the WARN must name the FILES, not only the count: before this bead the count was joinable to a job and the filenames were not")
-	assert.Equal(t, []string{"bad_one.go", "bad_two.go", "bad_three.go"}, partial[0].attrs["absent_chunks"])
+	assert.Equal(t, []string{"bad_one.go", "bad_three.go", "bad_two.go"}, partial[0].attrs["files"],
+		"the WARN must name the FILES, not only the count: before this bead the count was joinable to a job and the filenames were not. The order is the order they were ATTEMPTED, which is the plan's order, which is git diff --name-status's own path sort -- so bad_three precedes bad_two")
+	assert.Equal(t, []string{"bad_one.go", "bad_three.go", "bad_two.go"}, partial[0].attrs["absent_chunks"])
 	assert.Empty(t, partial[0].attrs["stale_chunks"])
 
 	// The retry. NOTHING is committed between the two runs -- the mirror

@@ -186,10 +186,20 @@ func rejectedChunksState(ctx context.Context, st store, repoID uuid.UUID, target
 // sqlStateOf extracts Postgres's five-character SQLSTATE from err, or ""
 // if err carries no *pgconn.PgError anywhere in its chain. Recording it
 // separately from the message is what lets an operator tell one CLASS of
-// rejection from another without parsing prose -- '22P02' (an invalid text
-// representation, which is what pgvector raises for a NaN coordinate) is a
-// bad value, while a 23xxx is a constraint and a 54xxx is a limit, and
-// they call for different responses.
+// rejection from another without parsing prose: a 22xxx is a bad value, a
+// 23xxx is a constraint, a 54xxx is a limit, and they call for different
+// responses.
+//
+// MEASURED, NOT ASSUMED, because the obvious guess is wrong. pgvector
+// rejects a NaN vector coordinate with SQLSTATE '22000' (data_exception,
+// its bare class code), NOT the '22P02' (invalid_text_representation) that
+// loam-qj21's own briefing and this repository's earlier notes both name.
+// 22P02 is what the TEXT input function would raise; pgx sends vectors in
+// the binary format, so the value never goes through it. Confirmed against
+// a real pgvector server by
+// TestIngest_RejectedFilesAreLedgeredAndTheNextIngestRetriesThem, which
+// asserts the exact code -- the first version of that assertion said
+// 22P02 and failed.
 func sqlStateOf(err error) string {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {

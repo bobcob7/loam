@@ -145,20 +145,29 @@ func TestPersist_RejectedFileWithNoPriorChunksIsAbsent(t *testing.T) {
 }
 
 // TestPersist_RecordsTheSQLStateWhenThereIsOne. The code is what lets an
-// operator classify a rejection without parsing prose -- 22P02 is a bad
-// value (pgvector's NaN), a 23xxx is a constraint, a 54xxx is a limit, and
-// they call for different responses.
+// operator classify a rejection without parsing prose: a 22xxx is a bad
+// value, a 23xxx is a constraint, a 54xxx is a limit, and they call for
+// different responses.
+//
+// The value used here is the one a REAL pgvector server raises for a NaN
+// coordinate -- '22000' (data_exception), measured, not the '22P02'
+// (invalid_text_representation) this bead's own briefing names. 22P02 is
+// what pgvector's TEXT input function would raise, and pgx sends vectors
+// in the binary format, so it never runs. The live-server assertion is in
+// rejectionledger_integration_test.go; this test only has to keep the code
+// intact through Persist, so an invented value would do -- but using the
+// wrong real one would teach the next reader something false.
 func TestPersist_RecordsTheSQLStateWhenThereIsOne(t *testing.T) {
 	t.Parallel()
-	pgErr := &pgconn.PgError{Code: pgerrcode.InvalidTextRepresentation, Message: "NaN not allowed in vector"}
+	pgErr := &pgconn.PgError{Code: pgerrcode.DataException, Message: "NaN not allowed in vector"}
 	st := rejectingStore(t, testFileA, pgErr, 0)
 
 	stats, err := persistOne(t, st, []chunker.FileChunks{unitsFor(testFileA, "one")})
 	require.NoError(t, err)
 
 	require.Len(t, stats.Rejected, 1)
-	assert.Equal(t, "22P02", stats.Rejected[0].SQLState,
-		"pgvector's NaN rejection is SQLSTATE 22P02, and it must survive into the ledger")
+	assert.Equal(t, "22000", stats.Rejected[0].SQLState,
+		"the store's own code must survive into the ledger unaltered")
 	assert.ErrorIs(t, stats.Rejected[0].Err, pgErr, "the original error must still be reachable, not flattened to its code")
 }
 

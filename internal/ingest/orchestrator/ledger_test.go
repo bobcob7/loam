@@ -25,7 +25,7 @@ import (
 // rejectionOf builds the vectors.Rejection a rejecting Persist would
 // report, so the tests below can drive updateLedger without a real store.
 func rejectionOf(path string, state chunkstore.ChunksState) vectors.Rejection {
-	return vectors.Rejection{Path: path, ChunksState: state, SQLState: "22P02", Err: errors.New("NaN not allowed in vector")}
+	return vectors.Rejection{Path: path, ChunksState: state, SQLState: "22000", Err: errors.New("NaN not allowed in vector")}
 }
 
 // rejectPersist makes the harness's vector track reject the named paths,
@@ -318,7 +318,7 @@ func TestRun_RecordCarriesTheJobAndTheRefItWasWriting(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, job.ID, records[0].In.JobID)
 	assert.Equal(t, testNewRef, records[0].In.RejectedRef, "the ref recorded must be the one this ingest advanced to")
-	assert.Equal(t, "22P02", records[0].In.SQLState)
+	assert.Equal(t, "22000", records[0].In.SQLState)
 	assert.Contains(t, records[0].In.Error, "NaN not allowed in vector")
 }
 

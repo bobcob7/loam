@@ -39,7 +39,7 @@ func TestRecord_PassesTheAttemptCeilingToTheStatement(t *testing.T) {
 	require.NoError(t, newRejections(q, rejectionsLogger()).Record(t.Context(), repoID, "main", RejectionInput{
 		File:        "poison.go",
 		ChunksState: ChunksStale,
-		SQLState:    "22P02",
+		SQLState:    "22000",
 		Error:       "NaN not allowed in vector",
 		JobID:       jobID,
 		RejectedRef: "cafebabe",
@@ -49,7 +49,7 @@ func TestRecord_PassesTheAttemptCeilingToTheStatement(t *testing.T) {
 		"the ceiling the statement applies must be the one MaxRejectionAttempts documents")
 	assert.Equal(t, "poison.go", got.File)
 	assert.Equal(t, string(ChunksStale), got.ChunksState)
-	assert.Equal(t, "22P02", got.Sqlstate.String)
+	assert.Equal(t, "22000", got.Sqlstate.String)
 	assert.True(t, got.Sqlstate.Valid, "a present SQLSTATE must be stored, not written as NULL")
 	assert.Equal(t, jobID[:], got.JobID.Bytes[:])
 	assert.True(t, got.JobID.Valid)
@@ -105,7 +105,7 @@ func TestList_DecodesEveryColumnIncludingTheNullableOnes(t *testing.T) {
 				{
 					File: "named.go", Attempts: 2, State: string(RejectionPending),
 					ChunksState: string(ChunksStale), Error: "boom", RejectedRef: "deadbeef",
-					Sqlstate: pgtype.Text{String: "22P02", Valid: true}, JobID: pgUUID(jobID),
+					Sqlstate: pgtype.Text{String: "22000", Valid: true}, JobID: pgUUID(jobID),
 				},
 				{
 					File: "anonymous.go", Attempts: 3, State: string(RejectionExhausted),
@@ -121,7 +121,7 @@ func TestList_DecodesEveryColumnIncludingTheNullableOnes(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, Rejection{
 		File: "named.go", Attempts: 2, State: RejectionPending, ChunksState: ChunksStale,
-		SQLState: "22P02", Error: "boom", JobID: jobID, RejectedRef: "deadbeef",
+		SQLState: "22000", Error: "boom", JobID: jobID, RejectedRef: "deadbeef",
 	}, got[0])
 	assert.Equal(t, uuid.Nil, got[1].JobID, "a NULL job_id decodes to the nil UUID, not an error")
 	assert.Empty(t, got[1].SQLState, "a NULL sqlstate decodes to the empty string")
