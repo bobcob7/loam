@@ -63,9 +63,19 @@ func tracedPool(ctx context.Context, t *testing.T, dsnParams ...string) (*pgxpoo
 	t.Cleanup(func() {
 		assert.NoError(t, container.Terminate(context.Background()))
 	})
+	// MIGRATE ON THE PLAIN DSN, POOL ON THE PARAMETERISED ONE. dsnParams
+	// carries pgxpool-only settings such as pool_max_conns, which
+	// pgxpool.ParseConfig consumes and strips. migrations.Migrate goes
+	// through database/sql instead, which does NOT recognise them and
+	// forwards them to the server as startup options -- where Postgres
+	// rejects the connection outright with FATAL: unrecognized
+	// configuration parameter "pool_max_conns" (SQLSTATE 42704). Handing
+	// one DSN to both is the obvious shortcut and it does not work.
+	baseDSN, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	require.NoError(t, migrations.Migrate(ctx, baseDSN, logger))
 	dsn, err := container.ConnectionString(ctx, append([]string{"sslmode=disable"}, dsnParams...)...)
 	require.NoError(t, err)
-	require.NoError(t, migrations.Migrate(ctx, dsn, logger))
 	recorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
