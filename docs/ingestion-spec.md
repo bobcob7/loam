@@ -166,25 +166,65 @@ cheap enough to keep simple.
   the commit discarded the batch anyway, which is what the reported production failure
   actually was. What a rejected file leaves behind is precise:
   - Its **previous chunks are kept, whole**, not emptied and not half-replaced — the
-    `DELETE` unwinds together with the `INSERT`s. On a file's first ingest there are no
-    previous chunks, so it is simply absent from vector search until a later ingest
-    succeeds.
+    `DELETE` unwinds together with the `INSERT`s. Two different things are true at once
+    here, and the rest of this section depends on both: the file's **prior** chunks
+    survive the rejection intact, and its **new** chunks never land. So a file that had
+    chunks before stays **searchable but stale**, matching the content of an earlier
+    commit, while a file whose very first ingest was rejected is **absent** from vector
+    search entirely. Neither is corrected until that file is chunked successfully by a
+    later ingest. Where text below says a rejected file's chunks are "missing", it means
+    this: not that the rows were deleted, but that no row reflects the commit the repo's
+    ingested ref now claims.
   - Its **symbols, references and edges are written normally.** The graph track runs
     earlier in the same transaction and `ROLLBACK TO SAVEPOINT` only unwinds statements
     issued after its savepoint. So the degrade is one-sided: the file stays in the graph
     and drops out of RAG search, rather than disappearing from both.
   - The **ingested ref still advances**, so the job is a success and search answers
     correctly report which commit they reflect. A rejected file is not a failed job.
-- **The only signal a rejected file emits today is one ERROR log line per file**, from
-  `internal/ingest/vectors.Persist`, naming the file and the store's error. Nothing
-  counts it anywhere an operator can query. `vectors.Stats.FilesRejected` exists and is
-  populated, but the swap orchestrator keeps it in a local `writeResult` and never reads
-  it: `ingest.Stats` carries only `FilesParsed` and `ChunksEmbedded`, and the "ingest
-  committed" log line omits the rejection count. So a repo can be **partially indexed and
-  still report success**, and the only way to notice is to be reading ERROR logs. This is
-  a real observability gap, called out here rather than left for someone to discover by
-  trusting a count that is computed and discarded; surfacing it (`ingest_jobs.stats` is
-  the natural home) is follow-up work, not part of `loam-c94.24`.
+- **A rejected file is counted on three surfaces** (`loam-2d44`): one ERROR log line per
+  file from `internal/ingest/vectors.Persist` naming the file and the store's error;
+  `ingest_jobs.stats.files_rejected`, which is `ingest.Stats` marshalled verbatim by
+  `internal/ingest.Pool.succeed` and is therefore durable and queryable per job; and the
+  swap orchestrator's own logging — `files_rejected` on the "ingest committed" line, plus
+  a separate WARN line naming the job whenever the count is non-zero, because operators
+  alert on level and a field on an INFO line that says the job worked is only findable by
+  someone already suspicious. The count reaches `ingest.Stats` from
+  `vectors.Stats.FilesRejected`, which before this was computed and discarded one frame
+  up, leaving the per-file ERROR log as the only trace a rejection left anywhere.
+- **`repos.sync_state` stays `idle` after a partial ingest, deliberately.** A repo whose
+  last ingest rejected files shows green in the admin console, and the incompleteness is
+  visible only in the job's stats and logs. The alternatives were weighed and rejected:
+  - Reusing `error` is the one option the transactional invariant itself forbids.
+    `loam-c94.13` writes `repos.sync_state` and `ingest_jobs.status` **in one
+    transaction** so the two can never disagree, and `sync_state='error'` beside
+    `status='succeeded'` is exactly that disagreement. It also re-conflates "the index
+    build blew up" with "this build worked but skipped three files" — the conflation
+    `ingest.SyncErrorPrefix` exists to prevent — and nothing would ever clear it, since
+    no retry is scheduled for a job that succeeded.
+  - A distinct state (`degraded`) is **not** ruled out by that invariant, and being
+    precise about this matters because the reasoning is inherited by `loam-qj21`.
+    `Pool.succeed` could write `sync_state='degraded'` in the same transaction as
+    `ingest_jobs.status='succeeded'` and the two columns would still agree. What rules
+    it out is the **clearing rule**. `sync_state` is a property of the REPO;
+    `FilesRejected` is a property of one JOB. A rejected file is never re-planned: the
+    ingested ref advanced past it (see above), so `git diff ingested_ref..tip` cannot
+    name a path nobody touched, and nothing else re-plans it either (`loam-qj21`). So
+    the next unrelated incremental ingest, which rejects nothing, writes `idle` and
+    clears the flag while that file's chunks are still not the ones the repo's ingested
+    ref claims — announcing "fixed" with nothing fixed, which is worse than the green
+    badge it replaces because it would be trusted.
+  - **Clearing `degraded` only on a `KindFull` ingest** dodges the false-clearing
+    problem without any ledger, since a full rebuild genuinely does re-chunk every file.
+    It is the cheapest honest option and was weighed rather than overlooked. It is not
+    taken here because it makes the STATE honest while leaving the underlying defect —
+    a rejected file is never retried — exactly where it is, and because it costs a
+    migration plus console work in territory this change does not own. It belongs with
+    `loam-qj21`.
+  - The fuller fix, which makes the state honest *and* closes the defect, is a **durable
+    record of which files are missing current chunks** — a per-repo rejection ledger
+    written in the same transaction as the swap, cleared per path when that path's
+    chunks are successfully written, with `sync_state` derived from whether the ledger
+    is empty. Real work, not a rename; tracked as `loam-qj21`, not part of `loam-2d44`.
 - **The graph track has no equivalent mode and takes no savepoint.** Its per-file
   tolerances — no grammar for the extension, an unparseable file, syntax errors — are all
   decided during extraction, before the transaction opens, and skip the store call
@@ -196,7 +236,8 @@ cheap enough to keep simple.
   branch tip and know exactly how stale an answer is.
 - On failure the job is marked `failed` with the error recorded, the previous index is left
   intact, and the job is retried with backoff.
-- `repos.sync_state` reflects the latest outcome (`idle` / `syncing` / `error`).
+- `repos.sync_state` reflects the latest outcome (`idle` / `syncing` / `error`). A
+  partially indexed repo is `idle` — see the rejected-file bullets above for why.
 
 ## Future Work
 

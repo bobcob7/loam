@@ -173,12 +173,44 @@ func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, e
 	}); err != nil {
 		return ingest.Stats{}, err
 	}
-	stats := ingest.Stats{FilesParsed: work.graphStats.FilesExtracted, ChunksEmbedded: written.chunkStats.ChunksWritten}
+	stats := ingest.Stats{
+		FilesParsed:    work.graphStats.FilesExtracted,
+		ChunksEmbedded: written.chunkStats.ChunksWritten,
+		FilesRejected:  written.chunkStats.FilesRejected,
+	}
 	o.logger.InfoContext(ctx, "ingest committed",
 		"repo", repo.Name, "target_branch", job.TargetBranch, "job_id", job.ID, "kind", plan.Kind,
 		"ingested_ref", newRef, "files_parsed", stats.FilesParsed, "chunks_embedded", stats.ChunksEmbedded,
+		"files_rejected", stats.FilesRejected,
 		"edges_recomputed", written.graphStats.EdgesRecomputed)
+	o.warnIfPartial(ctx, repo.Name, job, newRef, stats)
 	return stats, nil
+}
+
+// warnIfPartial emits the one line that says a SUCCESSFUL ingest was
+// incomplete. The count is already a field on "ingest committed" above, but
+// that line is logged at INFO and its message says the job worked, so a
+// non-zero field on it is only findable by someone who already suspects
+// something and knows which field to look at. Operators alert on LEVEL, so
+// the incompleteness needs a level of its own or it is not reachable by
+// anything except a query written after the fact.
+//
+// It is a separate line rather than a variable level on "ingest committed"
+// deliberately: that message is what an operator greps to enumerate
+// completed ingests, and moving the partial ones to WARN under the same
+// message would quietly drop them out of an INFO-level grep -- hiding
+// exactly the ingests this bead exists to surface.
+//
+// This is the loudest surface a rejection gets, and that is a decision, not
+// a limit reached: see internal/ingest.Stats.FilesRejected for why
+// repos.sync_state stays 'idle'.
+func (o *Orchestrator) warnIfPartial(ctx context.Context, repoName string, job ingest.Job, newRef string, stats ingest.Stats) {
+	if stats.FilesRejected == 0 {
+		return
+	}
+	o.logger.WarnContext(ctx, "ingest committed with rejected files; this repo is partially indexed until those files change again or a full rebuild runs",
+		"repo", repoName, "target_branch", job.TargetBranch, "job_id", job.ID,
+		"ingested_ref", newRef, "files_rejected", stats.FilesRejected, "files_parsed", stats.FilesParsed)
 }
 
 // targetBranch finds job.TargetBranch's repo_target_branches row, which
