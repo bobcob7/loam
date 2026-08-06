@@ -1,46 +1,47 @@
--- Reverses 0010_chunk_rejections.up.sql: intentionally a no-op.
+-- Reverses 0010_chunk_rejections.up.sql.
 --
--- The obvious down -- DROP TABLE chunk_rejections -- is wrong here, and
--- the reason is specific to what this table holds rather than borrowed
--- from 0006/0009 (whose no-op downs protect OPERATOR-WRITTEN text; nothing
--- in this table is operator-written).
+-- THIS DOWN WAS FIRST WRITTEN AS A DELIBERATE NO-OP, following 0006 and
+-- 0009, and that was WRONG. It is recorded here because the reasoning is
+-- easy to repeat: those two protect operator-written text that a
+-- destructive down would silently discard, and this ledger is likewise not
+-- re-derivable (see below), so the same shape looked right.
 --
--- THE ARGUMENT: this ledger is NOT re-derivable. Every other derived table
--- in this schema can be rebuilt by running an ingest, because the source
--- of truth is the git mirror. This one cannot: a ledger row records that a
--- path was rejected while the ingested ref advanced PAST it, and the only
--- way to rediscover that fact is to re-chunk and re-embed the file --
--- which is precisely what the row exists to make happen. Drop the rows and
--- the affected paths become unreachable again by exactly the mechanism
--- loam-qj21 fixed: they are not in `git diff ingested_ref..tip`, because
--- they did not change.
+-- It is not, and the reason is structural rather than a matter of taste.
+-- chunk_rejections carries `repo_id uuid REFERENCES repos (id)`, and
+-- golang-migrate applies downs in REVERSE order, so this file runs before
+-- 0001_init.down.sql -- which drops `repos` with a plain DROP TABLE and no
+-- CASCADE. Leaving this table in place therefore makes a full rollback
+-- fail outright:
 --
--- So a DROP-then-recreate cycle (migrate down to 0009, redeploy, migrate
--- up again) would be SILENTLY LOSSY rather than loudly broken. The table
--- would come back empty, every affected path would fall back out of every
--- future incremental plan, and nothing anywhere would report that it had
--- happened. A rollback that looks like it worked and quietly reintroduces
--- the defect is worse than a rollback that leaves a table behind.
+--   ERROR: cannot drop table repos because other objects depend on it
+--   (SQLSTATE 2BP01), constraint chunk_rejections_repo_id_fkey ...
 --
--- Leaving the table is not itself a hazard. A deployment rolled back to
--- 0009 runs code that never reads or writes chunk_rejections, so the table
--- is inert: it holds no foreign key any other table points at, it
--- constrains no write, and its only outbound reference (repo_id -> repos)
--- is ON DELETE CASCADE, so removing a repo still works exactly as it did.
--- The rows simply sit there until code that understands them runs again --
--- at which point they are still true, because the ingested refs they refer
--- to did not move while that code was not running.
+-- Not hypothetical, and not caught by reading: this file was a no-op on
+-- the first push and internal/db/migrations'
+-- TestMigrateAgainstRealPostgres and TestCodeIntelMigrationAgainstReal
+-- Postgres both went red on exactly that error. Any future migration that
+-- adds a foreign key into 0001's tables inherits the same rule -- its down
+-- MUST drop its own table.
 --
--- The up migration is CREATE TABLE IF NOT EXISTS for exactly this reason:
--- re-applying 0010 over a table this down deliberately left in place must
--- be a no-op, not a duplicate-table error.
+-- WHAT ROLLING BACK PAST 0010 ACTUALLY COSTS, which is the part the
+-- original no-op was trying (in the wrong way) to protect. Unlike every
+-- other derived table in this schema, this ledger is NOT re-derivable by
+-- re-running an ingest. Every other one has the git mirror as its source
+-- of truth; this one records that a path was rejected WHILE THE INGESTED
+-- REF ADVANCED PAST IT, and the only way to rediscover that is to re-chunk
+-- and re-embed the file -- which is precisely what the row exists to make
+-- happen. So dropping these rows is genuinely lossy: the affected paths
+-- fall back out of every future incremental plan, because they are not in
+-- `git diff ingested_ref..tip` (they did not change), which is the defect
+-- loam-qj21 exists to fix.
 --
--- WHAT AN OPERATOR DOES INSTEAD, if the table genuinely has to go: drop it
--- by hand, knowing what is being discarded, and then force a full rebuild
--- of every enrolled repo (a grammar/pipeline version bump does this, or a
--- manual reindex per repo). A KindFull ingest re-chunks every file, so it
--- reconstructs the ledger from scratch -- and it is the only operation
--- that can.
---
--- golang-migrate requires a down file to exist for every up file; this one
--- deliberately does nothing.
+-- THE REMEDY, for an operator who rolls back and later rolls forward
+-- again: force a FULL rebuild of every enrolled repo afterwards. A
+-- KindFull ingest re-reads and re-chunks every file in the tree, so it
+-- reconstructs the ledger from scratch, and it is the only operation that
+-- can. A grammar or pipeline version bump does this to every repo at once
+-- (internal/ingest/orchestrator's GrammarVersion / PipelineVersion); a
+-- manual reindex does it one repo at a time. Doing nothing is also
+-- survivable -- the index is merely incomplete for those paths, exactly as
+-- it was before this bead -- but nothing will report it.
+DROP TABLE IF EXISTS chunk_rejections;

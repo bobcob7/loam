@@ -59,11 +59,15 @@
 -- be empty on a healthy deployment and to hold a handful of rows on an
 -- unhealthy one; nothing here is sized for scans.
 --
--- CREATE TABLE IF NOT EXISTS IS THE GUARD, and it pairs deliberately with
--- the no-op down migration -- see 0010_chunk_rejections.down.sql for why
--- the down leaves this table in place, and therefore why the up has to
--- tolerate finding it already there.
-CREATE TABLE IF NOT EXISTS chunk_rejections (
+-- THE GUARD IS THE FOREIGN KEY'S OWN CASCADE, not a CREATE ... IF NOT
+-- EXISTS. An earlier draft used IF NOT EXISTS to pair with a no-op down
+-- migration; that down turned out to be structurally impossible here (the
+-- repos foreign key blocks 0001's own down -- see
+-- 0010_chunk_rejections.down.sql), so the down drops this table and a
+-- plain CREATE TABLE is the honest form. IF NOT EXISTS would now only
+-- serve to swallow a genuine "this table already exists" collision, which
+-- is a state an operator should hear about rather than have papered over.
+CREATE TABLE chunk_rejections (
     repo_id           uuid NOT NULL REFERENCES repos (id) ON DELETE CASCADE,
     target_branch     text NOT NULL,
     file              text NOT NULL,
