@@ -348,11 +348,16 @@ func TestForgejo_CheckRepo_RedactsCredential(t *testing.T) {
 
 // TestForgejo_LsRemoteProbe_RedactsCredential is the regression test for
 // loam-po8e covering lsRemoteProbe directly: a credential embedded in
-// upstreamURL must never reach the returned error or the debug log line,
-// even though git's own "unable to access"/"not found" message (the `out`
-// bytes this function also folds into its error) already redacts
-// userinfo on its own -- verified empirically against the git binary on
-// this machine.
+// upstreamURL must never reach the returned error or the debug log line.
+//
+// This test drives a 404, where git's own "repository ... not found"
+// message redacts userinfo before this package ever sees it. THAT IS NOT A
+// GENERAL PROPERTY OF GIT, and an earlier version of this comment said it
+// was: against a 401 challenge git emits `could not read Password for
+// 'https://<token>@host'` with the userinfo intact, which leaked through
+// this function's own `out` echo until loam-9h1e. The 401 case is covered
+// separately in userinfo_leak_test.go; this one stays as the not-found
+// regression it was written to be.
 func TestForgejo_LsRemoteProbe_RedactsCredential(t *testing.T) {
 	t.Parallel()
 	requireGit(t)
