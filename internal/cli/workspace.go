@@ -87,6 +87,7 @@ type workspace struct {
 	workBranchErr   error
 	agentIdentifier string
 	legacyRoot      string
+	rootErr         error
 }
 
 // newWorkspace builds a workspace by locating dir's enclosing clone (if
@@ -200,7 +201,8 @@ func resolveWorkspaceRoot() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("determining the home directory for the %s/ state directory (set %s to choose one explicitly): %w", loamDirName, envLoamHome, err)
+		message := fmt.Sprintf("cannot locate the %s/ state directory: no home directory (%s); set %s to choose one explicitly", loamDirName, err, envLoamHome)
+		return "", newUsageCLIError(message, err)
 	}
 	return home, nil
 }
@@ -210,16 +212,23 @@ func resolveWorkspaceRoot() (string, error) {
 // resolved agent identifier, and the configured workspace root (for
 // staging). See docs/cli-spec.md -> Workspace. Unexported: only deps.go's
 // NewProductionDeps and this package's own tests call it.
+// The root is resolved eagerly but its failure is DEFERRED to OpenStaging,
+// which is the only thing that needs it. Deps is constructed for every
+// command, including `help`, `whoami`, and a command that does not parse —
+// none of which touch staged comments, and none of which should stop
+// working because the process has no home directory and no $LOAM_HOME.
+// Failing here instead would turn a staging-specific configuration gap
+// into a total outage of the CLI, and would report it under whatever the
+// caller was actually trying to do.
 func newWorkspaceResolver(cfg Config) (WorkspaceResolver, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("determining working directory: %w", err)
 	}
-	root, err := resolveWorkspaceRoot()
-	if err != nil {
-		return nil, err
-	}
-	return newWorkspace(dir, cfg.Identifier(), root, execGitLookup{}), nil
+	root, rootErr := resolveWorkspaceRoot()
+	ws := newWorkspace(dir, cfg.Identifier(), root, execGitLookup{})
+	ws.rootErr = rootErr
+	return ws, nil
 }
 
 // ResolveRepo returns the repo inferred from the enclosing clone's origin

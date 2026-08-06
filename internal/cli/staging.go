@@ -61,6 +61,9 @@ var errStagingArea = errors.New("staging area unavailable")
 // way to obtain a path and then write to it with plain os.WriteFile,
 // bypassing containment. Callers must Close the area when done.
 func (w *workspace) OpenStaging(repo, workBranch string) (StagingArea, error) {
+	if w.rootErr != nil {
+		return nil, w.rootErr
+	}
 	rel, err := w.stagingRel(repo, workBranch)
 	if err != nil {
 		return nil, err

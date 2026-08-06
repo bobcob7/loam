@@ -623,3 +623,26 @@ func TestNewWorkspaceResolver_InfersFromNestedWorkingDirectory(t *testing.T) {
 	}
 	assert.NotEmpty(t, branch, "go test's working directory is nested inside this repo's clone; branch inference must work from any depth")
 }
+
+// TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging proves
+// an unresolvable workspace root does not take the whole CLI down with it.
+// Deps is built for every command, `help` and `whoami` included, and none
+// of those touch staged comments — so a staging-specific configuration gap
+// must surface when staging is attempted, reported as the usage error it
+// is, and not before.
+//
+// Deliberately not t.Parallel(): t.Setenv.
+func TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging(t *testing.T) {
+	t.Setenv(envLoamHome, "")
+	t.Setenv("HOME", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform still resolves a home directory with HOME unset")
+	}
+	ws, err := newWorkspaceResolver(&ConfigMock{IdentifierFunc: func() string { return testReviewer }})
+	require.NoError(t, err, "constructing the resolver must not fail: every command builds one")
+	area, err := ws.OpenStaging(testRepo, testWorkBranch)
+	require.Error(t, err, "staging is the operation that actually needs the root")
+	assert.Nil(t, area)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err), "an unset LOAM_HOME with no home directory is a configuration problem, not an internal error")
+	assert.Contains(t, err.Error(), envLoamHome, "the message must name the variable that fixes it")
+}

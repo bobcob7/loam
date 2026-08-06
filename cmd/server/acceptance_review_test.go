@@ -266,6 +266,16 @@ func (h *acceptanceHarness) registerReviewSteps(sc *godog.ScenarioContext) {
 // (internal/cli/workspace.go -> resolveWorkBranchIdentity: "an explicit
 // positional argument always wins"), and the staging area lands under
 // <workspace>/.loam/staging keyed by the acting agent's own identifier.
+//
+// That last part is now stated to the CLI rather than implied by cmd.Dir.
+// Staged comments used to land under the workspace because the staging
+// root was DERIVED from the working directory, which is the defect
+// loam-rgyg fixes: two commands run from two directories addressed two
+// staging areas, and a verdict published an empty batch. The root is
+// configuration now, so the harness passes LOAM_HOME — same directory,
+// same isolation per scenario, no longer contingent on cmd.Dir. The env is
+// otherwise deliberately scrubbed (no HOME), so without this the CLI would
+// correctly refuse to guess where staged comments belong.
 func (h *acceptanceHarness) runLoamAs(world *acceptanceWorld, actor acceptanceActor, stdin string, args ...string) loamCLIResult {
 	serverURL := h.server.baseURL
 	if world.unreachableServerURL != "" {
@@ -276,6 +286,7 @@ func (h *acceptanceHarness) runLoamAs(world *acceptanceWorld, actor acceptanceAc
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"LOAM_SERVER_URL=" + serverURL,
+		"LOAM_HOME=" + world.workspace,
 	}
 	// world.identityEnvMode decides which LOAM_AGENT_* entries are written
 	// at all (loam-hi5o.31, and see its doc comment on acceptanceWorld):
