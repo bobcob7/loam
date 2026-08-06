@@ -11,7 +11,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -303,6 +306,65 @@ func TestInstrumentHTTPClient_DistinctProviderCallsGetDistinctSpans(t *testing.T
 	assert.Len(t, names, 2, "CreatePR and GetPRState must not share a span name; otelhttp's default formatter would give them both 'HTTP POST'/'HTTP GET' and the list-vs-fetch distinction would be lost")
 	assert.Contains(t, names, "forge POST /api/v1/repos/{owner}/{repo}/pulls")
 	assert.Contains(t, names, "forge GET /api/v1/repos/{owner}/{repo}/pulls/{number}")
+}
+
+// TestInstrumentHTTPClient_NeverInjectsTraceHeadersEvenWithAGlobalInstalled
+// is the only assertion that can make the WithPropagators option
+// non-decorative, and it is the reason this one test does NOT call
+// t.Parallel().
+//
+// otelhttp calls propagators.Inject on every outbound request, falling back
+// to the process-wide otel.GetTextMapPropagator() when the option is
+// omitted. That global's DEFAULT is a no-op, so today no header is injected
+// either way -- meaning a test that merely asserts "no traceparent reaches
+// the server" would pass identically against a client that never passed the
+// option at all. The only way to tell the two apart is to install the
+// global this option exists to defend against, which is exactly what a
+// future bead or dependency might do.
+//
+// Mutating a process-wide global is why this test is sequential: Go pauses
+// every t.Parallel() test in the package until the sequential ones finish,
+// so the window in which the global is set cannot overlap them, and the
+// original is restored on cleanup regardless of outcome. Do not add
+// t.Parallel() here.
+func TestInstrumentHTTPClient_NeverInjectsTraceHeadersEvenWithAGlobalInstalled(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	original := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(original) })
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	// Sanity check the fixture itself: with the global installed, a
+	// transport that did NOT pass WithPropagators injects a traceparent. If
+	// this stops holding, the assertion below becomes vacuous and this test
+	// stops protecting anything.
+	tp, _ := recordingProvider(t)
+	unguarded := &http.Client{Transport: otelhttp.NewTransport(server.Client().Transport, otelhttp.WithTracerProvider(tp))}
+	ctx, span := tp.Tracer("test").Start(t.Context(), "parent")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	resp, err := unguarded.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.NotEmpty(t, gotHeaders.Get("Traceparent"),
+		"fixture check: with a global propagator installed, an unguarded otelhttp transport must inject traceparent")
+	// The real assertion: this package's client does not, because it passes
+	// an explicit empty propagator rather than inheriting the global.
+	gotHeaders = nil
+	guarded := InstrumentHTTPClient(server.Client(), tp)
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	resp, err = guarded.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	span.End()
+	require.NotNil(t, gotHeaders)
+	assert.Empty(t, gotHeaders.Get("Traceparent"),
+		"a forge request must carry no trace header: a global propagator installed elsewhere in the process must not leak this deployment's trace IDs to a third-party forge")
+	assert.Empty(t, gotHeaders.Get("Tracestate"))
 }
 
 // TestInstrumentHTTPClient_NilProviderIsAPassthrough covers the composition
