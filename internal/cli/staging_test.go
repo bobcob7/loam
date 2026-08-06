@@ -377,3 +377,26 @@ func TestOpenStaging_NoLegacyDocument_IsAnOrdinaryEmptyStagingArea(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, items)
 }
+
+// TestOpenStaging_WorkspaceRootDoesNotExistYet_IsCreated covers the case
+// that only appears once the root is configuration rather than a directory
+// the caller was already standing in: a freshly pointed $LOAM_HOME has
+// nothing at it yet. Refusing to stage there would answer "where should
+// staged comments live" with "nowhere", and it is the first thing a
+// reviewer setting LOAM_HOME hits.
+func TestOpenStaging_WorkspaceRootDoesNotExistYet_IsCreated(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(realTempDir(t), "not", "created", "yet")
+	require.NoDirExists(t, root, "precondition: the root must be missing")
+	store := openTestStoreFor(t, legacyStagingWorkspace(root, root, testReviewer))
+	item, err := store.add(stagedItem{Body: "a finding staged into a fresh LOAM_HOME"})
+	require.NoError(t, err)
+	assert.Equal(t, "s1", item.ID)
+	items, err := store.list()
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "a finding staged into a fresh LOAM_HOME", items[0].Body)
+	info, err := os.Stat(root)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(stagingDirPerm), info.Mode().Perm(), "a directory holding unpublished review notes is owner-only")
+}

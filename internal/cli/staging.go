@@ -68,6 +68,22 @@ func (w *workspace) OpenStaging(repo, workBranch string) (StagingArea, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The workspace root is created if missing, with plain os.MkdirAll
+	// rather than through a contained handle: there is nothing to contain
+	// it WITH — it is the outermost directory, the one every os.Root below
+	// is anchored to. That is safe precisely because it is not
+	// caller-supplied data: it comes from $LOAM_HOME or the home directory
+	// (workspace.go -> resolveWorkspaceRoot), never from a repo or
+	// work-branch key. Everything below it — every component built from
+	// those keys — still goes through os.Root.
+	//
+	// It has to be created because the root is now configuration rather
+	// than a directory the caller was already standing in. A freshly
+	// pointed $LOAM_HOME does not exist yet, and refusing to stage into it
+	// would be a poor answer to "where should staged comments live".
+	if err := os.MkdirAll(w.root, stagingDirPerm); err != nil {
+		return nil, fmt.Errorf("%w: creating workspace root %s: %w", errStagingArea, w.root, err)
+	}
 	workspaceRoot, err := os.OpenRoot(w.root)
 	if err != nil {
 		return nil, fmt.Errorf("%w: opening workspace root %s: %w", errStagingArea, w.root, err)
