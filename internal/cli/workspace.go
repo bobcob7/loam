@@ -214,12 +214,19 @@ func resolveWorkspaceRoot() (string, error) {
 // NewProductionDeps and this package's own tests call it.
 // The root is resolved eagerly but its failure is DEFERRED to OpenStaging,
 // which is the only thing that needs it. Deps is constructed for every
-// command, including `help`, `whoami`, and a command that does not parse —
-// none of which touch staged comments, and none of which should stop
+// command that gets this far, `whoami` and an unrecognized command
+// included — neither touches staged comments, and neither should stop
 // working because the process has no home directory and no $LOAM_HOME.
 // Failing here instead would turn a staging-specific configuration gap
-// into a total outage of the CLI, and would report it under whatever the
-// caller was actually trying to do.
+// into an outage of every command, reported under whatever the caller was
+// actually trying to do.
+//
+// `help` is NOT in that set and never was: cmd/loam/main.go answers it
+// from args alone via cli.TryHelp, before NewProductionDeps reads an
+// environment variable at all (loam-dc2v, loam-q0ek). It is worth naming
+// the exclusion rather than leaving it implied, because "help must work
+// with no configuration" is exactly the kind of guarantee something here
+// would otherwise look responsible for maintaining.
 func newWorkspaceResolver(cfg Config) (WorkspaceResolver, error) {
 	dir, err := os.Getwd()
 	if err != nil {

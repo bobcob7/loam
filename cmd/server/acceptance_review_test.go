@@ -122,6 +122,19 @@ type acceptanceStagedComment struct {
 	Resolve string `json:"resolve"`
 }
 
+// acceptanceStagedListing mirrors commands_work_comment.go's
+// stagedListingOutput -- the shape BOTH `work comment --list` and `work
+// comments --staged` return since loam-rgyg. The staging directory travels
+// with the items deliberately: an empty listing from a staging area that
+// never held the caller's comments is otherwise indistinguishable from an
+// empty listing from the right one, and that ambiguity is what made a
+// verdict publishing nothing look like a success.
+type acceptanceStagedListing struct {
+	StagingDir string                    `json:"staging_dir"`
+	Count      int                       `json:"count"`
+	Items      []acceptanceStagedComment `json:"items"`
+}
+
 // acceptanceComment and acceptanceThread mirror commands_work_read.go's
 // commentOutput/threadOutput -- `work comments`' published-thread shape.
 type acceptanceComment struct {
@@ -377,12 +390,30 @@ func (h *acceptanceHarness) listThreads(world *acceptanceWorld, actor acceptance
 	return threads, err
 }
 
-// listStaged reads actor's OWN local staging area for a work branch.
+// listStaged reads actor's OWN local staging area for a work branch, and
+// asserts the listing's self-consistency while it is here: `count` must
+// agree with the number of items, and `staging_dir` must be reported even
+// when there are none.
+//
+// Both are the point of loam-rgyg rather than decoration. The listing is
+// what a reviewer checks a verdict's `published_ids` against, so a count
+// that disagrees with its own items would make the comparison meaningless;
+// and an empty listing that cannot say WHICH staging area was empty is the
+// exact blind spot that let two reviewers lose their findings.
 func (h *acceptanceHarness) listStaged(world *acceptanceWorld, actor acceptanceActor, workBranch string) ([]acceptanceStagedComment, error) {
 	res := h.runLoamAs(world, actor, "", "work", "comments", world.repo(), workBranch, "--staged")
-	var staged []acceptanceStagedComment
-	err := decodeLoamJSON(res, fmt.Sprintf("loam work comments --staged (as %s)", actor.identifier()), &staged)
-	return staged, err
+	var listing acceptanceStagedListing
+	label := fmt.Sprintf("loam work comments --staged (as %s)", actor.identifier())
+	if err := decodeLoamJSON(res, label, &listing); err != nil {
+		return nil, err
+	}
+	if listing.StagingDir == "" {
+		return nil, fmt.Errorf("%s reported no staging_dir; an empty listing must still say which staging area was empty", label)
+	}
+	if listing.Count != len(listing.Items) {
+		return nil, fmt.Errorf("%s reported count %d for %d items", label, listing.Count, len(listing.Items))
+	}
+	return listing.Items, nil
 }
 
 // listVerdicts reads a work branch's verdicts as actor.

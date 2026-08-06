@@ -625,11 +625,15 @@ func TestNewWorkspaceResolver_InfersFromNestedWorkingDirectory(t *testing.T) {
 }
 
 // TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging proves
-// an unresolvable workspace root does not take the whole CLI down with it.
-// Deps is built for every command, `help` and `whoami` included, and none
-// of those touch staged comments — so a staging-specific configuration gap
-// must surface when staging is attempted, reported as the usage error it
-// is, and not before.
+// an unresolvable workspace root does not take every other command down
+// with it. Deps is built for every command that reaches it — `whoami` and
+// an unrecognized command included — and none of those touch staged
+// comments, so a staging-specific configuration gap must surface when
+// staging is attempted, reported as the usage error it is, and not before.
+//
+// `help` is not among them: main.go answers it before Deps exists (see
+// newWorkspaceResolver), so it is covered by cmd/loam's own tests, not by
+// this one.
 //
 // Deliberately not t.Parallel(): t.Setenv.
 func TestNewWorkspaceResolver_NoHomeDirectory_DefersTheFailureToStaging(t *testing.T) {
