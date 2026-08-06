@@ -51,6 +51,17 @@ spec:
         {{- include "loam.selectorLabels" . | nindent 8 }}
         {{- include "loam.partOfLabel" . | nindent 8 }}
     spec:
+      # Set EXPLICITLY, because Kubernetes' default of 30 is not merely
+      # conservative here -- it is shorter than loam's own bounded shutdown
+      # and SIGKILLs the pod mid-sequence. cmd/server/serve.go budgets 30s
+      # for the HTTP/policy-socket/background drain and then a further 5s,
+      # on its own context, for the OTLP flush that runs strictly after
+      # them: 35s worst case against a 30s default. The full derivation of
+      # the number below, including why 35 itself is a floor and not a safe
+      # value, is in values.yaml's terminationGracePeriodSeconds comment,
+      # and it is enforced against the Go constants by
+      # internal/deploycheck rather than trusted.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- range . }}

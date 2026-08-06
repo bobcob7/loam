@@ -2,6 +2,18 @@
 # spec.source.helm.valuesObject, following the exact precedent of this
 # cluster's argocd/apps/gastown-operator.yaml) override this file, never
 # edit it in place.
+#
+# EVERY KEY IN THIS FILE IS SCHEMA-CHECKED. values.schema.json sits beside
+# it with "additionalProperties": false at every level, so a key that is
+# not declared there -- a typo, a rename, a value invented against a newer
+# chart -- makes `helm template`/`install`/`upgrade` FAIL rather than be
+# silently ignored. That is not hardening for its own sake: loam-uwus was
+# filed because rendering this chart with `--set config.otelEndpoint=...
+# --set terminationGracePeriodSeconds=45` produced a ZERO-BYTE diff against
+# the default render back when neither key existed and no schema did. A
+# plausible-looking wiring would have synced green in ArgoCD, exported
+# nothing, and errored nowhere. Adding a values key here means adding it to
+# values.schema.json too, and the render fails loudly if you forget.
 
 # -----------------------------------------------------------------------
 # replicaCount is enforced to be exactly 1 by templates/_helpers.tpl's
@@ -149,6 +161,56 @@ config:
   postgresUser: loam
   postgresDb: loam
 
+  # ---- OpenTelemetry (loam-p56y shipped the reader, loam-uwus the wiring)
+  #
+  # All three are OPTIONAL and default to EMPTY, and empty here means the
+  # key is not emitted into the loam-config ConfigMap at all
+  # (templates/configmap.yaml wraps each in an `if`). So a release that
+  # sets none of them renders byte-for-byte what this chart rendered
+  # before these keys existed -- that equivalence is the point, and
+  # internal/deploycheck does not check it; `helm template` does.
+  #
+  # internal/config would tolerate the keys being emitted as empty strings
+  # anyway (its lookupDefault/parseFloatEnv treat set-but-empty exactly as
+  # unset, internal/config/env.go), so the `if` is about keeping the
+  # rendered manifest honest, not about correctness of the loader.
+
+  # LOAM_OTEL_ENDPOINT. The collector's OTLP base URL, and the ONLY enable
+  # switch loam has -- there is deliberately no LOAM_OTEL_ENABLED, see
+  # internal/config's loadTelemetry for the four-states-three-of-which-
+  # mean-off argument. Empty => the process creates no exporter, opens no
+  # connection, and starts no telemetry goroutine.
+  #
+  # Must be an absolute http:// or https:// URL; a bare host:port is
+  # REJECTED at startup rather than silently exporting nowhere. The scheme
+  # selects TLS. Port 4318, not 4317: loam's exporters are OTLP over HTTP,
+  # and 4317 is the gRPC port -- pointing at it yields a collector that
+  # accepts the connection and rejects every payload.
+  #
+  # On the vega cluster the value is cross-namespace (loam runs in `loam`,
+  # the collector in `observability`), so it needs the fully-qualified
+  # service name:
+  #
+  #   otelEndpoint: http://otel-gateway.observability.svc.cluster.local:4318
+  #
+  # That is documentation, not a default. A default endpoint would make
+  # every install of this chart start pushing at a host it cannot resolve.
+  otelEndpoint: ""
+  # LOAM_OTEL_SERVICE_NAME. Empty => internal/config's own default, "loam".
+  # Set this only when one collector receives from several loam
+  # deployments that need telling apart (e.g. "loam-staging").
+  otelServiceName: ""
+  # LOAM_OTEL_SAMPLE_RATIO, a float 0..1. Empty => internal/config's own
+  # default of 0.1. NOT an off switch at 0: sampling is a trace concept,
+  # sdkmetric has no sampler, so 0 silences traces while metrics keep
+  # being pushed on their normal interval (docs/server-spec.md). To stop
+  # both, clear otelEndpoint above.
+  #
+  # Quoted-string-or-number: the schema accepts either, because a
+  # valuesObject author writing 0.25 and one writing "0.25" both mean the
+  # same thing and neither should get a render error.
+  otelSampleRatio: ""
+
 persistence:
   # LOAM_DATA_DIR's backing volume. This is NOT a cache: it holds the git
   # mirrors that every enrolled repo's smart-HTTP endpoints serve from
@@ -199,6 +261,52 @@ ingress:
     # latency and local disk pressure proportional to push size for no
     # benefit here.
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+# -----------------------------------------------------------------------
+# terminationGracePeriodSeconds -- how long the kubelet waits between
+# SIGTERM and SIGKILL. THIS IS A DERIVED NUMBER, NOT A PREFERENCE, and the
+# derivation is here so it does not go stale silently the first time a Go
+# timeout is tuned. internal/deploycheck's
+# TestChartGracePeriodExceedsGoShutdownBudget reads the Go constants below
+# out of cmd/server/serve.go and fails if this value stops clearing them,
+# so the arithmetic is checked, not merely written down.
+#
+#   30s  cmd/server/serve.go defaultShutdownGrace -- the shutdownCtx
+#        budget. It bounds THREE steps that run inside it, not one:
+#        httpServer.Shutdown draining in-flight requests, the policy
+#        socket's drain, and the background (sync/ingest) drain. They
+#        share the one context, so they are 30s TOTAL, not 30s each.
+#  + 5s  cmd/server/serve.go telemetryFlushGrace -- the OTLP flush. This
+#        one is ADDITIVE: it deliberately gets its OWN context, because
+#        shutdownCtx may already be expired by the time control reaches
+#        it, which is exactly the slow shutdown whose traces matter most.
+#        It runs STRICTLY AFTER the drains above (see serve.go's comment
+#        at the call site for why that order is load-bearing).
+#  ----
+#   35s  floor -- the sum of the bounded steps, and NOT a safe value.
+#        Setting exactly 35 restores precisely the zero margin this whole
+#        comment exists to remove: the SIGKILL would race the process
+#        exit. (Note the margin was already zero BEFORE telemetry existed
+#        -- a 30s drain against Kubernetes' 30s default -- so this is not
+#        a cost telemetry introduced. It made an existing zero margin
+#        negative.)
+#  +10s  margin for the steps that are real but unbounded by any constant,
+#        all of which fall outside the two budgets above:
+#          - SIGTERM delivery and Go runtime signal handling: the kubelet
+#            starts this clock when it sends the signal, not when the
+#            process observes it.
+#          - db.Close (pgxpool), the top-of-function defer in serve, which
+#            therefore runs strictly AFTER the flush and waits for
+#            in-flight connections to be released.
+#          - process teardown and exit-status reporting after that.
+#  ====
+#   45s  what we set.
+#
+# Raising this is cheap; the pod only uses the time it needs, because the
+# kubelet moves on as soon as the process exits. Lowering it below 35 is
+# not a tuning knob -- it silently truncates the drain or the flush.
+# -----------------------------------------------------------------------
+terminationGracePeriodSeconds: 45
 
 # Starting point only, not a measured figure -- there is no production
 # workload to size against yet. Tune once real usage exists. (This is the

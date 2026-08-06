@@ -25,6 +25,37 @@ data:
   LOAM_EMBEDDER_MODEL: {{ .Values.config.embedderModel | quote }}
   LOAM_INGEST_WORKERS: {{ .Values.config.ingestWorkers | quote }}
   LOAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  {{- /*
+  OpenTelemetry (loam-uwus). Each key is emitted ONLY when its value is
+  non-empty, so a release that configures no telemetry renders exactly
+  the ConfigMap this chart produced before these keys existed -- no empty
+  strings, no new data entries. internal/config would treat an emitted
+  empty string as unset anyway (env.go's lookupDefault/parseFloatEnv), so
+  this `if` buys a clean manifest rather than correctness.
+  LOAM_OTEL_ENDPOINT is the only enable switch; with it absent the server
+  creates no exporter at all. See values.yaml's config.otel* comments.
+  */ -}}
+  {{- /*
+  `if ne (toString ...) ""` and NOT `with`, uniformly across all three.
+  `with` skips its body for ANY falsy value, and for
+  config.otelSampleRatio the number 0 is falsy while being a perfectly
+  meaningful setting ("silence traces, keep metrics" -- see
+  docs/server-spec.md). Under `with`, `otelSampleRatio: 0` would emit
+  nothing and internal/config would then apply its 0.1 default: an
+  operator's explicit setting silently replaced by a different one,
+  which is the exact class of failure loam-uwus was filed for. The other
+  two keys would be safe under `with`; they use the same form anyway so
+  that nobody "tidies" the odd one out back into the trap.
+  */ -}}
+  {{- if ne (toString .Values.config.otelEndpoint) "" }}
+  LOAM_OTEL_ENDPOINT: {{ .Values.config.otelEndpoint | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.config.otelServiceName) "" }}
+  LOAM_OTEL_SERVICE_NAME: {{ .Values.config.otelServiceName | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.config.otelSampleRatio) "" }}
+  LOAM_OTEL_SAMPLE_RATIO: {{ .Values.config.otelSampleRatio | quote }}
+  {{- end }}
   {{- if .Values.postgres.enabled }}
   # Discrete Postgres DSN parts (internal/config's resolveDatabaseURL,
   # loam-ytt2.11) for the in-cluster postgres StatefulSet
