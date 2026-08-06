@@ -173,4 +173,17 @@ func TestNewPoolFailsLoudlyWithoutExtension(t *testing.T) {
 	}
 	require.Error(t, err, "NewPool must fail loudly when the vector extension has not been created")
 	assert.Contains(t, err.Error(), "pinging database")
+
+	// pgvector-go's own text is the bare `vector type not found in the
+	// database`, which is never false but asserts a cause it has not
+	// established: AfterConnect runs on every connection this pool opens,
+	// so the same message surfaces when the extension is missing because
+	// migrations never ran, ran elsewhere, or failed -- and an operator
+	// reading it goes and inspects a pgvector install that is fine
+	// (loam-lhc9 was found exactly that way). NewPool wraps it so the
+	// message names the question worth asking first. Asserted here rather
+	// than left to the doc comment, so a later "simplification" back to the
+	// bare RegisterTypes hook fails instead of quietly removing the hint.
+	assert.Contains(t, err.Error(), "registering pgvector types")
+	assert.Contains(t, err.Error(), "migrations.Migrate")
 }
