@@ -59,13 +59,14 @@ Three things worth being explicit about, since the chart's comments only hint at
 
 - **Unknown values keys are now a render failure, not a silent no-op.**
   Every object in `helm/loam/values.schema.json` *declares* whether it accepts
-  unknown keys, and all but three are closed. The exceptions — `nodeSelector`,
-  `affinity`, and the `resources` blocks — are verbatim passthroughs of slices
-  of the Kubernetes API, where a partial restatement in the schema would
-  reject valid input (`resources.limits.ephemeral-storage`,
-  `nvidia.com/gpu`, `resources.claims`); each says so in its own description,
-  and `internal/deploycheck` requires the declaration rather than any
-  particular answer. Before the schema existed, Helm accepted and discarded any key it did
+  unknown keys, and all but five are closed. The exceptions —
+  `ingress.annotations`, `nodeSelector`, `affinity`, and both `resources`
+  blocks — are verbatim passthroughs of slices of the Kubernetes API, or of
+  arbitrary user-chosen keys, where a partial restatement in the schema would
+  reject valid input (`resources.limits.ephemeral-storage`, `nvidia.com/gpu`,
+  `resources.claims`); each says so in its own description, and
+  `internal/deploycheck` requires the declaration rather than any particular
+  answer. Before the schema existed, Helm accepted and discarded any key it did
   not recognise: rendering this chart with `--set config.otelEndpoint=...
   --set terminationGracePeriodSeconds=45` produced a **zero-byte diff**
   against the default render, so a plausible-looking wiring in an ArgoCD

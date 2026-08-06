@@ -7,9 +7,10 @@
 # it, and every object in it DECLARES whether it accepts unknown keys, so a
 # key that is not declared there -- a typo, a rename, a value invented
 # against a newer chart -- makes `helm template`/`install`/`upgrade` FAIL
-# rather than be silently ignored. (Declares, not closes: nodeSelector,
-# affinity and the resource blocks are deliberately open, because each is a
-# verbatim passthrough of a slice of the Kubernetes API that a partial
+# rather than be silently ignored. (Declares, not closes: five are
+# deliberately open -- ingress.annotations, nodeSelector, affinity, and
+# both resource blocks -- because each is a verbatim passthrough of a slice
+# of the Kubernetes API, or of arbitrary user-chosen keys, that a partial
 # restatement in the schema would reject valid input for. Each says so in
 # its own description.) That is not hardening for its own sake: loam-uwus was
 # filed because rendering this chart with `--set config.otelEndpoint=...
