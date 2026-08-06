@@ -34,8 +34,23 @@ type newPoolFunc func(ctx context.Context, cfg db.Config, logger *slog.Logger) (
 // directly, purely so TestConnectDatabase_* can prove the order and the
 // abort-on-migrate-failure property with recording spies instead of a
 // real Postgres; run always passes the real functions.
+//
+// THE TWO COLLABORATORS GET DIFFERENT DSNs, ON PURPOSE (loam-lhc9). One
+// operator-supplied LOAM_DATABASE_URL, two parsers: migrate reaches
+// Postgres through database/sql, which forwards any key it does not
+// recognize to the server as a startup option, so a DSN carrying pgxpool's
+// own pool_max_conns is rejected with `FATAL: unrecognized configuration
+// parameter` and the server never boots. newPool gets the URL intact --
+// those parameters are addressed to it and dropping them would silently
+// discard the operator's pool sizing. db.MigrationDSN produces migrate's
+// copy by removing exactly the keys pgxpool claims, asking pgx which those
+// are rather than keeping a list here that would go stale.
 func connectDatabase(ctx context.Context, cfg config.Config, migrate migrateFunc, newPool newPoolFunc) (*pgxpool.Pool, error) {
-	if err := migrate(ctx, cfg.DatabaseURL, cfg.Logger); err != nil {
+	migrationDSN, err := db.MigrationDSN(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("preparing migration database url: %w", err)
+	}
+	if err := migrate(ctx, migrationDSN, cfg.Logger); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 	pool, err := newPool(ctx, db.Config{DatabaseURL: cfg.DatabaseURL, EncryptionKey: string(cfg.EncryptionKey), TracerProvider: cfg.TracerProvider, AcquireSpanThreshold: cfg.OTelDBAcquireThreshold}, cfg.Logger)

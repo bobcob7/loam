@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,6 +90,62 @@ func TestConnectDatabase_MigrateFailureNeverCallsNewPool(t *testing.T) {
 	assert.ErrorIs(t, err, wantErr)
 	assert.Nil(t, pool)
 	assert.False(t, newPoolCalled, "newPool must never run against a database whose migrations failed")
+}
+
+// TestConnectDatabase_MigrateGetsDSNWithoutPoolParameters is the loam-lhc9
+// regression proof at the wiring level: the two collaborators must receive
+// DIFFERENT strings. migrate reaches Postgres through database/sql, which
+// forwards pgxpool's own pool_max_conns to the server as a startup option
+// and is refused with `FATAL: unrecognized configuration parameter`; newPool
+// must still get the operator's DSN intact, or the boot would have been
+// fixed by silently discarding their pool sizing. Both halves are asserted,
+// because a mutant that stripped the parameter from BOTH would pass a test
+// that only checked migrate.
+func TestConnectDatabase_MigrateGetsDSNWithoutPoolParameters(t *testing.T) {
+	t.Parallel()
+	const dsn = "postgres://example/loam?sslmode=disable&pool_max_conns=17"
+	var migrateDSN, poolDSN string
+	migrate := func(_ context.Context, got string, _ *slog.Logger) error {
+		migrateDSN = got
+		return nil
+	}
+	newPool := func(_ context.Context, cfg db.Config, _ *slog.Logger) (*pgxpool.Pool, error) {
+		poolDSN = cfg.DatabaseURL
+		return &pgxpool.Pool{}, nil
+	}
+	cfg := config.Config{DatabaseURL: dsn, EncryptionKey: []byte("key"), Logger: testLogger()}
+	_, err := connectDatabase(t.Context(), cfg, migrate, newPool)
+	require.NoError(t, err)
+	migrateCfg, err := pgx.ParseConfig(migrateDSN)
+	require.NoError(t, err)
+	assert.NotContains(t, migrateCfg.RuntimeParams, "pool_max_conns",
+		"migrate connects via database/sql, which would forward pool_max_conns to the server as a startup option")
+	assert.Equal(t, "example", migrateCfg.Host, "stripping the pool parameter must not disturb the connection target")
+	assert.Equal(t, dsn, poolDSN, "newPool must receive the operator's DSN intact -- the pool parameters are addressed to it")
+}
+
+// TestConnectDatabase_UnusableDSNNeverReachesMigrate proves the new failure
+// mode fails fast: a DSN whose pool parameters pgxpool itself rejects stops
+// the boot before either collaborator runs, rather than being passed on to
+// fail later somewhere with a worse message.
+func TestConnectDatabase_UnusableDSNNeverReachesMigrate(t *testing.T) {
+	t.Parallel()
+	var migrateCalled, newPoolCalled bool
+	migrate := func(context.Context, string, *slog.Logger) error {
+		migrateCalled = true
+		return nil
+	}
+	newPool := func(context.Context, db.Config, *slog.Logger) (*pgxpool.Pool, error) {
+		newPoolCalled = true
+		return &pgxpool.Pool{}, nil
+	}
+	cfg := config.Config{DatabaseURL: "postgres://example/loam?pool_max_conns=lots", Logger: testLogger()}
+	pool, err := connectDatabase(t.Context(), cfg, migrate, newPool)
+	require.Error(t, err)
+	assert.Nil(t, pool)
+	assert.Contains(t, err.Error(), "preparing migration database url")
+	assert.False(t, migrateCalled, "migrate must not run against a DSN that could not be prepared")
+	assert.False(t, newPoolCalled, "newPool must not run against a DSN that could not be prepared")
 }
 
 // TestConnectDatabase_NewPoolFailurePropagates proves the second half of
