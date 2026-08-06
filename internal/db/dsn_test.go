@@ -129,6 +129,37 @@ func TestMigrationDSNKeywordValueForm(t *testing.T) {
 	assert.NotContains(t, cfg.RuntimeParams, "pool_max_conns")
 }
 
+// TestMigrationDSNKeywordValueBackslashEscapes covers the OTHER escaping
+// rule in libpq's keyword/value form: an UNQUOTED value may carry a
+// backslash-escaped space, and a tokenizer that stopped at the first space
+// would cut the password in half and then read its own tail as the next
+// keyword. That mutant is not caught by the quoted-value case above, which
+// exercises a different branch.
+// The pool parameter sits IMMEDIATELY AFTER the escaped value on purpose. A
+// tokenizer that stopped at the escaped space would resume mid-value and
+// read `cret pool_max_conns` as one keyword -- which no longer matches
+// `pool_max_conns`, so the parameter would be kept and the boot would still
+// fail. Put the pool parameter anywhere else in the string and that mutant
+// survives, because every token is either kept or dropped as raw text and
+// the rejoined result comes out identical.
+func TestMigrationDSNKeywordValueBackslashEscapes(t *testing.T) {
+	t.Parallel()
+	dsn := `host=db.example.com user=loam password=se\ cret pool_max_conns=8 dbname=loam sslmode=disable`
+	stripped, err := MigrationDSN(dsn)
+	require.NoError(t, err)
+	cfg, err := pgx.ParseConfig(stripped)
+	require.NoError(t, err)
+	// `se\ cret`, backslash included, is what pgx itself yields here: its
+	// unquoted-value scanner consumes the escaped space so the token does
+	// not end there, but only unescapes \\ and \'. The expectation is
+	// therefore pgx's answer, not libpq's -- what MigrationDSN owes is that
+	// the stripped DSN parses to the SAME thing the original did, and
+	// preserving the token's raw bytes is how it gets there.
+	assert.Equal(t, `se\ cret`, cfg.Password)
+	assert.Equal(t, "loam", cfg.Database)
+	assert.NotContains(t, cfg.RuntimeParams, "pool_max_conns")
+}
+
 // TestMigrationDSNDoesNotChangeWhatThePoolSees is the other half of the
 // split this bead is about: MigrationDSN is not allowed to be implemented by
 // mutating the string the pool gets. The operator's pool sizing must survive
@@ -165,6 +196,72 @@ func TestMigrationDSNRejectsUnusableDSN(t *testing.T) {
 			require.Error(t, err)
 			assert.Empty(t, stripped)
 			assert.Contains(t, err.Error(), "parsing database url")
+		})
+	}
+}
+
+// TestVerifyStrippedRejectsARewriteThatMovedTheTarget exercises MigrationDSN's
+// last-line guard directly, since no input to MigrationDSN can currently
+// trigger it: the guard's whole job is to catch a future bug in the rewriter
+// above it, so if it were quietly inert nothing else in this file would
+// notice. Each case is a way string surgery could plausibly go wrong -- a
+// dropped password, a mangled host, a runtime parameter lost along with the
+// pool ones -- and each must be refused rather than returned.
+func TestVerifyStrippedRejectsARewriteThatMovedTheTarget(t *testing.T) {
+	t.Parallel()
+	const original = "postgres://loam:secret@db.example.com:5432/loam?sslmode=disable&application_name=loam&pool_max_conns=8"
+	want, err := pgxpool.ParseConfig(original)
+	require.NoError(t, err)
+	tests := []struct {
+		name      string
+		stripped  string
+		wantError bool
+	}{
+		{
+			name:     "faithful rewrite",
+			stripped: "postgres://loam:secret@db.example.com:5432/loam?application_name=loam&sslmode=disable",
+		},
+		{
+			name:      "password dropped",
+			stripped:  "postgres://loam@db.example.com:5432/loam?application_name=loam&sslmode=disable",
+			wantError: true,
+		},
+		{
+			name:      "host changed",
+			stripped:  "postgres://loam:secret@other.example.com:5432/loam?application_name=loam&sslmode=disable",
+			wantError: true,
+		},
+		{
+			name:      "database changed",
+			stripped:  "postgres://loam:secret@db.example.com:5432/other?application_name=loam&sslmode=disable",
+			wantError: true,
+		},
+		{
+			name:      "port changed",
+			stripped:  "postgres://loam:secret@db.example.com:6543/loam?application_name=loam&sslmode=disable",
+			wantError: true,
+		},
+		{
+			name:      "user changed",
+			stripped:  "postgres://other:secret@db.example.com:5432/loam?application_name=loam&sslmode=disable",
+			wantError: true,
+		},
+		{
+			name:      "non-pool runtime parameter lost",
+			stripped:  "postgres://loam:secret@db.example.com:5432/loam?sslmode=disable",
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := verifyStripped(tt.stripped, want.ConnConfig)
+			if !tt.wantError {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errDSNRewriteChangedTarget)
 		})
 	}
 }
