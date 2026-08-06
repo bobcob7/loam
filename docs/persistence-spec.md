@@ -202,6 +202,25 @@ over an HNSW index:
 CREATE INDEX chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
 ```
 
+### chunk_rejections
+`repo_id` (fk, cascade), `target_branch`, `file` — the primary key — plus `attempts`,
+`state` (`pending` / `exhausted`), `chunks_state` (`stale` / `absent`), `sqlstate`,
+`error`, `job_id`, `rejected_ref`, `first_rejected_at`, `last_rejected_at`.
+
+The per-path record of files the chunk store refused to write (`loam-qj21`,
+`0010_chunk_rejections`). It is not observability: it is what makes the retry possible.
+The next incremental ingest plans from `git diff ingested_ref..tip`, and a rejected file
+did not change between those refs — the rejecting ingest still advanced the ref, because
+every other file landed — so nothing in the diff can name it. `diffplan.Plan.WithRetryPaths`
+unions the outstanding paths back into the plan's reparse set.
+
+Written **inside the swap transaction**, one statement before `AdvanceIngestedRef`, so the
+ledger cannot disagree with what committed. Cleared when the path's chunks land or the plan
+drops the file; emptied wholesale by a full rebuild, which re-records whatever rejects
+during it. `job_id` deliberately carries no foreign key (it is correlation, and the
+orchestrator is legitimately run against synthetic job ids). See `docs/ingestion-spec.md`
+"Consistency & Failure" for the retry bound and the stale/absent distinction.
+
 ## Git mirrors
 
 Each enrolled repo is a bare mirror on the PersistentVolume (path derived from `repos.name`).

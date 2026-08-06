@@ -172,9 +172,16 @@ cheap enough to keep simple.
     chunks before stays **searchable but stale**, matching the content of an earlier
     commit, while a file whose very first ingest was rejected is **absent** from vector
     search entirely. Neither is corrected until that file is chunked successfully by a
-    later ingest. Where text below says a rejected file's chunks are "missing", it means
-    this: not that the rows were deleted, but that no row reflects the commit the repo's
-    ingested ref now claims.
+    later ingest — which, since `loam-qj21`, a later ingest reliably attempts (see the
+    rejection ledger below). Where text below says a rejected file's chunks are "missing",
+    it means this: not that the rows were deleted, but that no row reflects the commit the
+    repo's ingested ref now claims. There is one narrow exception, verified against real
+    git rather than reasoned about: a **mode-only change** is reported by
+    `git diff --name-status` as `M` with an *identical blob*, so such a file is reparsed
+    with unchanged content and its prior rows really do still reflect the claimed commit.
+    That errs toward alarm rather than silence — the ledger would name a file that is
+    actually fine — so it is not dangerous, but the sentence above is a near-absolute
+    rather than an absolute.
   - Its **symbols, references and edges are written normally.** The graph track runs
     earlier in the same transaction and `ROLLBACK TO SAVEPOINT` only unwinds statements
     issued after its savepoint. So the degrade is one-sided: the file stays in the graph
@@ -191,6 +198,52 @@ cheap enough to keep simple.
   someone already suspicious. The count reaches `ingest.Stats` from
   `vectors.Stats.FilesRejected`, which before this was computed and discarded one frame
   up, leaving the per-file ERROR log as the only trace a rejection left anywhere.
+- **A rejected file is RETRIED by the next ingest, via a durable per-path ledger**
+  (`loam-qj21`, table `chunk_rejections`). This closes the defect the counting above only
+  made visible. The three parts that produced it are each individually correct: per-file
+  savepoints let the batch commit past a rejection; `writeSwap` still calls
+  `AdvanceIngestedRef`, because every *other* file really did land; and the next
+  incremental ingest plans from `git diff ingested_ref..tip`, where a file that did not
+  change appears in neither `DropFiles` nor `ReparseFiles`. Nothing else re-planned it
+  either — `Pool.succeed` schedules no retry, and mirror-sync picks `KindFull` only when
+  there is no ingested ref at all. So the only thing that could bring the path back is a
+  list of paths from *outside* the diff.
+  - The ledger is written **in the swap's own transaction**, one statement before
+    `AdvanceIngestedRef`, so "the ref advanced past this path" and "this path is recorded
+    as owed" are a single atomic fact. A ledger written anywhere else could disagree with
+    what committed in either direction, and the disagreement would decide whether the file
+    is ever retried.
+  - Each row is **self-describing**: attempts, the `SQLSTATE`, the error, the job id
+    (which is the join the per-file ERROR lines never carried — before this the *count*
+    was joinable to a job and the *filenames* were not), the ref the index now claims, and
+    `chunks_state`, which records whether the file is **stale** or **absent** in the sense
+    distinguished above. `chunks_state` is *measured* inside the transaction by counting
+    the file's surviving chunks, not inferred from the plan's kind, which is what makes it
+    correct for a full rebuild without a special case.
+  - `diffplan.Plan.WithRetryPaths` **unions** the outstanding paths into the next
+    incremental plan's reparse set. A row is cleared when that path's chunks land, and
+    when the plan drops the file (deleted or renamed away). A **full rebuild empties the
+    whole ledger and re-records whatever rejects during it**, because a rebuild exists for
+    the cases with no usable diff and the ledger may hold paths the new tree does not
+    contain — the same argument that makes the chunks drop repo-scoped.
+  - Retrying is **bounded**: `chunkstore.MaxRejectionAttempts` (3) rejections and the row
+    is marked `exhausted` and no longer unioned in, since each attempt costs a re-read, a
+    re-chunk and an embedder round trip, and a file that is malformed for a reason no
+    retry can fix would tax every future commit forever. The row **stays** — it is the
+    only durable record that the path's chunks are missing — and a recurring WARN names
+    it on every ingest of that repo. Two things still reach an exhausted path with no
+    operator action: a real edit (it is then in the diff on its own merits) and a full
+    rebuild (which re-chunks everything and resets the budget). The operator remedy is to
+    read the row, fix the file upstream, or request a manual reindex.
+  - **A full rebuild turns a stale file into an absent one.** `applyDrops` issues
+    `DropRepoBranch` for `KindFull` *before* the write phase and *outside* every savepoint,
+    so nothing unwinds that delete; a file that rejects again during the rebuild loses the
+    prior chunks it had been serving and gains nothing. This is not exotic — a grammar or
+    pipeline version bump escalates every enrolled repo to `KindFull` — and it is why the
+    "`degraded`, cleared only by a full rebuild" option below was not taken: `KindFull` is
+    both the operation that would clear such a flag and the operation that makes the damage
+    worse, and a clearing mechanism whose failure mode is data loss is a poor clearing
+    mechanism.
 - **`repos.sync_state` stays `idle` after a partial ingest, deliberately.** A repo whose
   last ingest rejected files shows green in the admin console, and the incompleteness is
   visible only in the job's stats and logs. The alternatives were weighed and rejected:
@@ -206,30 +259,55 @@ cheap enough to keep simple.
     `Pool.succeed` could write `sync_state='degraded'` in the same transaction as
     `ingest_jobs.status='succeeded'` and the two columns would still agree. What rules
     it out is the **clearing rule**. `sync_state` is a property of the REPO;
-    `FilesRejected` is a property of one JOB. A rejected file is never re-planned: the
-    ingested ref advanced past it (see above), so `git diff ingested_ref..tip` cannot
-    name a path nobody touched, and nothing else re-plans it either (`loam-qj21`). So
-    the next unrelated incremental ingest, which rejects nothing, writes `idle` and
-    clears the flag while that file's chunks are still not the ones the repo's ingested
-    ref claims — announcing "fixed" with nothing fixed, which is worse than the green
-    badge it replaces because it would be trusted.
+    `FilesRejected` is a property of one JOB. *At the time `loam-2d44` argued this*, a
+    rejected file was never re-planned: the ingested ref advanced past it (see above), so
+    `git diff ingested_ref..tip` could not name a path nobody touched, and nothing else
+    re-planned it either. So the next unrelated incremental ingest, which rejects nothing,
+    would write `idle` and clear the flag while that file's chunks were still not the ones
+    the repo's ingested ref claimed — announcing "fixed" with nothing fixed, which is worse
+    than the green badge it replaces because it would be trusted. **That premise no longer
+    holds**: `loam-qj21`'s ledger both retries the file and supplies a clearing rule tied to
+    the file rather than to an unrelated job. See the last two bullets of this list for
+    where that leaves the state.
   - **Clearing `degraded` only on a `KindFull` ingest** dodges the false-clearing
     problem without any ledger, since a full rebuild genuinely does re-chunk every file.
-    It is the cheapest honest option and was weighed rather than overlooked. It is not
-    taken here because it makes the STATE honest while leaving the underlying defect —
-    a rejected file is never retried — exactly where it is, and because it costs a
-    migration plus console work in territory this change does not own. It belongs with
-    `loam-qj21`.
-  - The fuller fix, which makes the state honest *and* closes the defect, is a **durable
-    record of which files are missing current chunks** — a per-repo rejection ledger
-    written in the same transaction as the swap, cleared per path when that path's
-    chunks are successfully written, with `sync_state` derived from whether the ledger
-    is empty. Real work, not a rename; tracked as `loam-qj21`, not part of `loam-2d44`.
+    It is the cheapest honest option and was weighed rather than overlooked. `loam-qj21`
+    **rejected it on the merits**, not on cost: a full rebuild is the operation that would
+    clear the flag *and* the operation that converts a rejected file's damage from stale to
+    absent (see the `applyDrops` bullet above), so the clearing mechanism's own failure mode
+    is data loss. It also leaves the underlying defect — a rejected file is never retried —
+    exactly where it is.
+  - **The ledger `loam-qj21` built makes a `degraded` state honest for the first time**,
+    because it supplies the one thing that was missing: a clearing rule that fires when the
+    *problem* clears (the path's chunks land) rather than when an unrelated ingest succeeds.
+    `sync_state` is nonetheless **still `idle`**, and that is a scope decision with a named
+    blocker rather than a preference. The column's three values are mirrored by a proto
+    enum (`loam.admin.v1.SyncState`), a handler mapping, and a console label; a fourth value
+    written without them maps to `SYNC_STATE_UNSPECIFIED` and renders every partially
+    indexed repo as "Unspecified", which is a confusing signal rather than merely a missing
+    one. Adding the enum member requires regenerating the proto, which was explicitly out of
+    that change's territory. **The remaining work is exactly that**: widen
+    `repos_sync_state_check`, add `SYNC_STATE_DEGRADED`, map it in
+    `internal/handler/repoadmin`, label it in `web/src/components/statusIntent.ts`, and have
+    `Pool.succeed` derive the value from `SELECT EXISTS (SELECT 1 FROM chunk_rejections
+    WHERE repo_id = $1)` in the same transaction as `ingest_jobs.status`, which preserves
+    `loam-c94.13`'s invariant.
+  - Until then the ledger itself **is** the surface, and it is strictly more informative
+    than a repo-level enum: it names the paths, the failure mode, the attempts, and the job.
 - **The graph track has no equivalent mode and takes no savepoint.** Its per-file
   tolerances — no grammar for the extension, an unparseable file, syntax errors — are all
   decided during extraction, before the transaction opens, and skip the store call
   entirely. Once inside the transaction the first failed write aborts the ingest, so
-  nothing there continues past a failure that the commit would then discard.
+  nothing there continues past a failure that the commit would then discard. **It therefore needs no ledger either**, and the reason is
+  stronger than "no savepoint": the rollback IS its retry. A failed graph write rolls the
+  whole swap back, so `ingested_ref` does not advance, and the next ingest re-plans exactly
+  the same diff from exactly the same base. Nothing is skipped past for a later ingest to
+  fail to notice, which is the condition that makes a ledger necessary on the chunk side.
+  Its *extraction*-time skips are a different thing again and deliberately not ledgered:
+  "no grammar for this extension" is a deterministic property of the file, so re-attempting
+  it would produce the same skip forever and the ledger would fill with a row per non-Go
+  file in every repo. Those are counted in `graph.Stats`, which is the right surface for a
+  fact that will not change until the grammar set does.
 - The transaction also records the **ingested ref** — the commit the index now reflects —
   in `repo_target_branches.ingested_ref` (`docs/persistence-spec.md`). Graph and search
   responses surface it (`docs/cli-spec.md`) so a client can compare it against the
@@ -237,7 +315,9 @@ cheap enough to keep simple.
 - On failure the job is marked `failed` with the error recorded, the previous index is left
   intact, and the job is retried with backoff.
 - `repos.sync_state` reflects the latest outcome (`idle` / `syncing` / `error`). A
-  partially indexed repo is `idle` — see the rejected-file bullets above for why.
+  partially indexed repo is `idle` — see the rejected-file bullets above for why, and for
+  what it would take to change that honestly. The durable per-path record is
+  `chunk_rejections`.
 
 ## Future Work
 
