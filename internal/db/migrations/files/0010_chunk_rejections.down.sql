@@ -1,0 +1,46 @@
+-- Reverses 0010_chunk_rejections.up.sql: intentionally a no-op.
+--
+-- The obvious down -- DROP TABLE chunk_rejections -- is wrong here, and
+-- the reason is specific to what this table holds rather than borrowed
+-- from 0006/0009 (whose no-op downs protect OPERATOR-WRITTEN text; nothing
+-- in this table is operator-written).
+--
+-- THE ARGUMENT: this ledger is NOT re-derivable. Every other derived table
+-- in this schema can be rebuilt by running an ingest, because the source
+-- of truth is the git mirror. This one cannot: a ledger row records that a
+-- path was rejected while the ingested ref advanced PAST it, and the only
+-- way to rediscover that fact is to re-chunk and re-embed the file --
+-- which is precisely what the row exists to make happen. Drop the rows and
+-- the affected paths become unreachable again by exactly the mechanism
+-- loam-qj21 fixed: they are not in `git diff ingested_ref..tip`, because
+-- they did not change.
+--
+-- So a DROP-then-recreate cycle (migrate down to 0009, redeploy, migrate
+-- up again) would be SILENTLY LOSSY rather than loudly broken. The table
+-- would come back empty, every affected path would fall back out of every
+-- future incremental plan, and nothing anywhere would report that it had
+-- happened. A rollback that looks like it worked and quietly reintroduces
+-- the defect is worse than a rollback that leaves a table behind.
+--
+-- Leaving the table is not itself a hazard. A deployment rolled back to
+-- 0009 runs code that never reads or writes chunk_rejections, so the table
+-- is inert: it holds no foreign key any other table points at, it
+-- constrains no write, and its only outbound reference (repo_id -> repos)
+-- is ON DELETE CASCADE, so removing a repo still works exactly as it did.
+-- The rows simply sit there until code that understands them runs again --
+-- at which point they are still true, because the ingested refs they refer
+-- to did not move while that code was not running.
+--
+-- The up migration is CREATE TABLE IF NOT EXISTS for exactly this reason:
+-- re-applying 0010 over a table this down deliberately left in place must
+-- be a no-op, not a duplicate-table error.
+--
+-- WHAT AN OPERATOR DOES INSTEAD, if the table genuinely has to go: drop it
+-- by hand, knowing what is being discarded, and then force a full rebuild
+-- of every enrolled repo (a grammar/pipeline version bump does this, or a
+-- manual reindex per repo). A KindFull ingest re-chunks every file, so it
+-- reconstructs the ledger from scratch -- and it is the only operation
+-- that can.
+--
+-- golang-migrate requires a down file to exist for every up file; this one
+-- deliberately does nothing.

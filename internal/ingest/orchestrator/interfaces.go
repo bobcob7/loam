@@ -89,6 +89,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/diffplan"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
 	"github.com/bobcob7/loam/internal/ingest/graph"
@@ -96,7 +97,7 @@ import (
 	"github.com/bobcob7/loam/internal/reposstore"
 )
 
-//go:generate go tool moq -out moq_test.go . planner repoReader contentReader graphTrack fileChunker vectorTrack dropper refWriter transactor embedderInfo
+//go:generate go tool moq -out moq_test.go . planner repoReader contentReader graphTrack fileChunker vectorTrack dropper refWriter transactor embedderInfo rejectionLedger
 
 // planner is internal/diffplan.Planner's one method: the full-vs-
 // incremental decision, including every full-rebuild escalation trigger
@@ -189,6 +190,31 @@ type dropper interface {
 // bound and that one is not.
 type refWriter interface {
 	AdvanceIngestedRef(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, branch, ref string, ingestedAt time.Time, versions []byte) error
+}
+
+// rejectionLedger is the per-path rejection ledger (loam-qj21), split
+// across the transaction boundary the same way graphTrack and vectorTrack
+// are -- and for a stricter reason than either.
+//
+// List is a READ made before the transaction opens, because its result is
+// an input to the plan: without it, a file the chunk store rejected is
+// never re-planned at all. `git diff ingested_ref..tip` reports only paths
+// that DIFFER between the two refs, the rejected file did not change (the
+// rejecting ingest still advanced the ref, since every other file landed),
+// so it is in neither DropFiles nor ReparseFiles and nothing else brings
+// it back.
+//
+// Record/Clear/ClearAll are WRITES that take the transaction and must be
+// staged in it. A ledger written outside the swap could disagree with what
+// committed in both directions -- recording a rejection for an ingest that
+// then rolled back, or missing one for an ingest that committed -- and
+// either disagreement is worse than no ledger, because the ledger is what
+// decides whether the path is retried.
+type rejectionLedger interface {
+	List(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error)
+	Record(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error
+	Clear(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error
+	ClearAll(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error
 }
 
 // transactor runs fn inside one transaction, committing if and only if fn

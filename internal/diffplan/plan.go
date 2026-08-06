@@ -179,6 +179,67 @@ type Plan struct {
 	ReparseFiles []string
 }
 
+// WithRetryPaths returns p with paths added to its ReparseFiles: the
+// per-path rejection ledger's outstanding entries, unioned into the plan
+// so a file the chunk store previously refused is re-read, re-chunked and
+// re-embedded even though it did not change (loam-qj21).
+//
+// This is the whole of the retry mechanism, and it lives here because the
+// gap it closes is a property of what a diff can express. Plan is built
+// from `git diff old..new`, which by construction reports only paths that
+// DIFFER between the two refs. A rejected file did not change -- the
+// ingest that rejected it still advanced ingested_ref past it, because
+// every other file in that batch landed -- so it appears in neither
+// DropFiles nor ReparseFiles, and no amount of care inside the diff
+// classification can put it back. Only a source of paths from OUTSIDE the
+// diff can, which is what the ledger is.
+//
+// Three rules, each of which would be a defect if dropped:
+//
+//   - A KindFull plan is returned UNCHANGED. Its ReparseFiles is already
+//     every file in the tree at NewRef, so any ledgered path still in the
+//     tree is in it; and a ledgered path NOT in the tree must not be
+//     added, because it does not exist to be read. (The caller empties the
+//     ledger for a full rebuild in the same transaction, so those rows do
+//     not survive to be retried on a tree that no longer holds them.)
+//   - A path already in DropFiles is skipped. The plan says that file was
+//     deleted or renamed away; reparsing it would ask git for a blob that
+//     is not at NewRef. Its ledger row is cleared by the caller instead --
+//     nothing is missing once the file itself is gone.
+//   - Duplicates are skipped, in both directions: against ReparseFiles
+//     (the ordinary case where the ledgered file was ALSO edited, so the
+//     diff already names it) and against paths itself.
+//
+// The returned Plan's Kind and Reason are untouched. A retry is not an
+// escalation: it adds files to an incremental plan, it does not make the
+// plan a rebuild.
+func (p Plan) WithRetryPaths(paths []string) Plan {
+	if p.Kind == ingest.KindFull || len(paths) == 0 {
+		return p
+	}
+	seen := make(map[string]struct{}, len(p.ReparseFiles)+len(p.DropFiles)+len(paths))
+	for _, f := range p.ReparseFiles {
+		seen[f] = struct{}{}
+	}
+	for _, f := range p.DropFiles {
+		seen[f] = struct{}{}
+	}
+	var extra []string
+	for _, f := range paths {
+		if _, dup := seen[f]; dup {
+			continue
+		}
+		seen[f] = struct{}{}
+		extra = append(extra, f)
+	}
+	if len(extra) == 0 {
+		return p
+	}
+	out := p
+	out.ReparseFiles = append(append(make([]string, 0, len(p.ReparseFiles)+len(extra)), p.ReparseFiles...), extra...)
+	return out
+}
+
 // Planner builds Plans by shelling out to real git against a repo's bare
 // mirror. Construct with New; stateless beyond its logger, so a single
 // Planner is safe to reuse and share across repos and jobs.

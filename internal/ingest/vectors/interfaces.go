@@ -100,4 +100,12 @@ type embedder interface {
 // owns -- chunkstore.NewInTx -- so nothing here auto-commits.
 type store interface {
 	ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error)
+	// CountFileChunks reports how many chunks rows one file currently has
+	// ON THIS TRANSACTION, which Persist asks only after a rejection: a
+	// file that still has chunks is stale, one that has none is absent
+	// (loam-qj21). It is part of this seam rather than a separate one
+	// because it must be answered by the same store, on the same
+	// transaction, as the write that was just unwound -- a count taken
+	// anywhere else could not see a full rebuild's own uncommitted drop.
+	CountFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string) (int, error)
 }

@@ -103,8 +103,9 @@ type Stats struct {
 	// size limit, anything Postgres raised for that ONE file's statement
 	// rather than for the connection or transaction as a whole (see
 	// Persist's doc comment for exactly where that line is drawn). Each
-	// one is also logged at ERROR with the file's path, so this count is
-	// never the only record of which files are missing. It is deliberately
+	// one is also logged at ERROR with the file's path, and named in
+	// Rejected below, so this count is never the only record of which
+	// files are missing. It is deliberately
 	// NOT folded into FilesReplaced (a rejected file was NOT replaced --
 	// its prior chunks are what a reader still sees, per Persist's own doc
 	// comment) or treated as reason alone to fail the batch: see Persist's
@@ -117,6 +118,84 @@ type Stats struct {
 	// maxEmbedBatch. A batch whose files all chunked to zero units costs
 	// zero embed calls.
 	EmbedCalls int
+	// Rejected names the rejected files, one entry per FilesRejected, in
+	// the order they were attempted (loam-qj21). len(Rejected) ==
+	// FilesRejected always, and TestPersist_RejectedCountMatchesTheNamedPaths
+	// pins that rather than leaving it to this comment.
+	//
+	// The COUNT and the PATHS are separate fields because they have
+	// different consumers and different lifetimes. The count is what
+	// reaches ingest_jobs.stats, a per-job number an operator can query
+	// historically (loam-2d44). The paths are what reaches the per-path
+	// rejection ledger, which is per-REPO current state and is what makes
+	// the retry possible at all -- a count cannot be unioned into a plan.
+	Rejected []Rejection
+}
+
+// Rejection is one file the store refused to write, with enough context
+// for the caller to ledger it (loam-qj21). It carries no repo id or branch:
+// those are the Persist call's own arguments, so repeating them per entry
+// could only introduce a way for them to disagree.
+type Rejection struct {
+	// Path is the file, exactly as the plan and the chunks table name it.
+	Path string
+	// ChunksState is what a searcher sees for Path now that the write was
+	// unwound -- see chunkstore.ChunksStale / ChunksAbsent. It is READ
+	// from the database rather than inferred from the plan's kind, because
+	// the two cases that produce "absent" (a first ingest, and a full
+	// rebuild whose repo-scoped drop already ran inside this very
+	// transaction) look nothing alike from up here and identical from
+	// down there.
+	ChunksState chunkstore.ChunksState
+	// SQLState is Postgres's five-character code for the rejection, or ""
+	// when the error carried no *pgconn.PgError -- which is what a
+	// caller's own non-Postgres store produces, and is a legitimate value
+	// rather than a lookup failure.
+	SQLState string
+	// Err is the store's error, unwrapped exactly as ReplaceFileChunks
+	// returned it.
+	Err error
+}
+
+// rejectedChunksState asks the store whether a just-rejected file still
+// has chunks, which is the difference between "searchable but stale" and
+// "absent from search". See chunkstore.Store.CountFileChunks for why the
+// question can only be answered on the swap's own transaction.
+//
+// A failure here is NOT survivable the way the rejection itself is, and
+// that is a deliberate narrowing of Persist's tolerance. The point of
+// tolerating a rejection is that the ledger will bring the file back; if
+// the ledger cannot be written honestly -- and it cannot without knowing
+// which failure mode this is -- then committing would advance the ingested
+// ref past a file with no record of it, which is precisely the defect this
+// whole mechanism exists to remove. Failing the ingest instead leaves the
+// previous index and the previous ingested ref intact, so the next attempt
+// re-plans the same work. The extra statement only ever runs on the
+// rejection path, so a healthy batch pays nothing for it.
+func rejectedChunksState(ctx context.Context, st store, repoID uuid.UUID, targetBranch, path string) (chunkstore.ChunksState, error) {
+	count, err := st.CountFileChunks(ctx, repoID, targetBranch, path)
+	if err != nil {
+		return "", err
+	}
+	if count > 0 {
+		return chunkstore.ChunksStale, nil
+	}
+	return chunkstore.ChunksAbsent, nil
+}
+
+// sqlStateOf extracts Postgres's five-character SQLSTATE from err, or ""
+// if err carries no *pgconn.PgError anywhere in its chain. Recording it
+// separately from the message is what lets an operator tell one CLASS of
+// rejection from another without parsing prose -- '22P02' (an invalid text
+// representation, which is what pgvector raises for a NaN coordinate) is a
+// bad value, while a 23xxx is a constraint and a 54xxx is a limit, and
+// they call for different responses.
+func sqlStateOf(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
 }
 
 // Indexer embeds chunk units and persists them. e is the embedding backend
@@ -414,8 +493,19 @@ func (ix *Indexer) Persist(ctx context.Context, st store, repoID uuid.UUID, targ
 			if firstRejection == nil {
 				firstRejection = fmt.Errorf("file %s: %w", f.path, err)
 			}
+			chunksState, countErr := rejectedChunksState(ctx, st, repoID, targetBranch, f.path)
+			if countErr != nil {
+				return stats, fmt.Errorf("classifying rejected file %s (its chunks were rejected with: %v): %w", f.path, err, countErr)
+			}
+			stats.Rejected = append(stats.Rejected, Rejection{
+				Path:        f.path,
+				ChunksState: chunksState,
+				SQLState:    sqlStateOf(err),
+				Err:         err,
+			})
 			ix.logger.ErrorContext(ctx, "store rejected file's chunks; skipping and counting it so the rest of the batch still lands",
-				"file", f.path, "repo_id", repoID, "target_branch", targetBranch, "error", err)
+				"file", f.path, "repo_id", repoID, "target_branch", targetBranch,
+				"chunks_state", chunksState, "error", err)
 			continue
 		}
 		stats.FilesReplaced++
@@ -513,6 +603,7 @@ func (s *Stats) merge(other Stats) {
 	s.ChunksWritten += other.ChunksWritten
 	s.FilesRejected += other.FilesRejected
 	s.EmbedCalls += other.EmbedCalls
+	s.Rejected = append(s.Rejected, other.Rejected...)
 }
 
 // flatUnit is one chunk unit flattened out of its file, tagged with the

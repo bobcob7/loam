@@ -16,7 +16,7 @@ import (
 	"github.com/bobcob7/loam/internal/db/gen"
 )
 
-//go:generate go tool moq -out moq_test.go . queries transactor savepointExecer
+//go:generate go tool moq -out moq_test.go . queries transactor savepointExecer rejectionQueries
 
 // queries is the sqlc-generated surface Store calls, defined here at the
 // consumer so Store is unit-testable against a moq mock instead of a live
@@ -28,6 +28,22 @@ type queries interface {
 	DeleteChunksByFile(ctx context.Context, arg gen.DeleteChunksByFileParams) error
 	DeleteChunksForRepoBranch(ctx context.Context, arg gen.DeleteChunksForRepoBranchParams) error
 	SearchChunksByEmbeddingScoped(ctx context.Context, arg gen.SearchChunksByEmbeddingScopedParams) ([]gen.Chunk, error)
+	CountChunksByFile(ctx context.Context, arg gen.CountChunksByFileParams) (int64, error)
+}
+
+// rejectionQueries is the sqlc surface the per-path rejection ledger calls
+// (loam-qj21), separate from queries because Rejections is a separate type
+// with a separate lifecycle: it takes no transactor, since none of its
+// statements is a multi-statement unit needing atomicity of its own, and
+// wrapping the ledger writes in the same SAVEPOINT machinery the chunk
+// writes use would be actively wrong -- a ledger write that failed must
+// fail the whole swap, not be quietly unwound while the ingest commits
+// around it.
+type rejectionQueries interface {
+	ListChunkRejections(ctx context.Context, arg gen.ListChunkRejectionsParams) ([]gen.ChunkRejection, error)
+	RecordChunkRejection(ctx context.Context, arg gen.RecordChunkRejectionParams) error
+	DeleteChunkRejections(ctx context.Context, arg gen.DeleteChunkRejectionsParams) error
+	DeleteChunkRejectionsForRepoBranch(ctx context.Context, arg gen.DeleteChunkRejectionsForRepoBranchParams) error
 }
 
 // transactor runs fn inside a single database transaction, committing if fn

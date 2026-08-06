@@ -128,3 +128,18 @@ LIMIT $4;
 -- longer in the tree at the new ref.
 DELETE FROM chunks
 WHERE repo_id = $1 AND target_branch = $2;
+
+-- name: CountChunksByFile :one
+-- How many chunks rows one file currently has (loam-qj21). Called only on
+-- the rejection path, to decide whether a rejected file is STALE (its
+-- prior chunks survived the ROLLBACK TO SAVEPOINT, so it is still
+-- searchable at an older commit) or ABSENT (there were none to survive --
+-- a first ingest, or a full rebuild whose repo-scoped drop already removed
+-- them outside the savepoints).
+--
+-- It must run on the SAME transaction as the write it is describing: read
+-- through a separate connection it would not observe the full rebuild's
+-- own uncommitted DELETE, and would report 'stale' for a file whose chunks
+-- this very transaction has already thrown away.
+SELECT count(*) FROM chunks
+WHERE repo_id = $1 AND target_branch = $2 AND file = $3;
