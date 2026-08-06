@@ -76,7 +76,19 @@ func (f *Forgejo) lsRemoteProbe(ctx context.Context, upstreamURL string) error {
 // reported unclassified so callers don't mistake infrastructure trouble
 // for a missing repo.
 func lsRemoteProbeOverGit(ctx context.Context, upstreamURL, token string, logger *slog.Logger) error {
-	redacted := redactURLString(upstreamURL)
+	u, parseErr := url.Parse(upstreamURL)
+	if parseErr != nil {
+		// Same rule, for the same reason, as checkRepoOverGit's own parse
+		// branch above: neither upstreamURL nor parseErr may be rendered,
+		// because *url.Error's Error() quotes the raw string whole. Failing
+		// here rather than handing an unparseable string to git also means
+		// the credential-scrubbing below always has a complete list of the
+		// secrets it must remove -- a URL that did not parse is one whose
+		// embedded credential cannot be identified, and git's own output is
+		// then unsafe to echo at all (loam-9h1e).
+		return errors.New("ls-remote: parsing upstream URL: invalid URL")
+	}
+	redacted, secrets := redactUserinfo(u), userinfoSecrets(u)
 	home, err := os.MkdirTemp("", "loam-forge-probe-*")
 	if err != nil {
 		return fmt.Errorf("creating isolated git environment: %w", err)
@@ -88,14 +100,26 @@ func lsRemoteProbeOverGit(ctx context.Context, upstreamURL, token string, logger
 	if err == nil {
 		return nil
 	}
-	logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", redacted, "err", err, "output", string(bytes.TrimSpace(out)))
+	// git's own output is scrubbed before it reaches either the log line or
+	// the returned error. git strips userinfo from MOST of its messages
+	// ("unable to access", "repository ... not found", "Authentication
+	// failed"), which is what an earlier reading of this function
+	// generalized from -- but not from the one it emits when it needs to
+	// PROMPT: against a 401 challenge with a username and no password in the
+	// URL, it prints `could not read Password for 'https://<token>@host'`
+	// verbatim, because the username is exactly what it is reporting it
+	// already has. A 401 is what a wrong, expired, or revoked bound token
+	// produces, so that is the LIKELIEST failure this probe sees, not an
+	// exotic one (loam-9h1e).
+	output := scrubUserinfo(string(bytes.TrimSpace(out)), secrets)
+	logger.DebugContext(ctx, "ls-remote probe failed", "upstream_url", redacted, "err", redactTransportError(err, secrets), "output", output)
 	if ctx.Err() != nil {
 		return fmt.Errorf("ls-remote %s: %w", redacted, ctx.Err())
 	}
 	if errors.Is(err, exec.ErrNotFound) {
 		return fmt.Errorf("ls-remote %s: %w", redacted, err)
 	}
-	return fmt.Errorf("ls-remote %s: %w: %s", redacted, ErrRepoNotFound, bytes.TrimSpace(out))
+	return fmt.Errorf("ls-remote %s: %w: %s", redacted, ErrRepoNotFound, output)
 }
 
 // receivePackProbe issues the GET request that a `git push` makes as its
@@ -121,15 +145,25 @@ func receivePackProbeOverGit(ctx context.Context, upstreamURL *url.URL, token st
 	redacted := redactUserinfo(&probe)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return fmt.Errorf("building receive-pack probe request: %w", err)
+		return fmt.Errorf("building receive-pack probe request: %w", redactTransportError(err, userinfoSecrets(&probe)))
 	}
 	if token != "" {
 		req.SetBasicAuth(gitUsername, token)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		logger.DebugContext(ctx, "receive-pack probe transport error", "url", redacted, "err", err)
-		return fmt.Errorf("receive-pack probe %s: %w", redacted, err)
+		// Both the log field and the %w wrap take the REDACTED error, never
+		// err itself: http.Client.Do returns *url.Error, which renders the
+		// whole request URL through net/http's stripPassword -- and that
+		// masks the password component only, so the token in a
+		// "https://<token>@host" upstream URL travels through it untouched
+		// into the log stream (which ships to Loki) and into any error chain
+		// a handler renders upstream. Wrapping is not the lesser half of that
+		// pair; an RPC error message discloses a credential exactly as well
+		// as a log line does (loam-9h1e).
+		safe := redactTransportError(err, userinfoSecrets(&probe))
+		logger.DebugContext(ctx, "receive-pack probe transport error", "url", redacted, "err", safe)
+		return fmt.Errorf("receive-pack probe %s: %w", redacted, safe)
 	}
 	defer drainAndClose(resp.Body)
 	logger.DebugContext(ctx, "receive-pack probe response", "url", redacted, "status", resp.StatusCode)
@@ -291,7 +325,166 @@ func redactUserinfo(u *url.URL) string {
 func redactURLString(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "<unparseable-url>"
+		return unparseableURLPlaceholder
 	}
 	return redactUserinfo(u)
+}
+
+// redactHost returns hostOrURL in a form safe to render in an error or a
+// log line. It is the host-shaped counterpart to redactURLString: the
+// host strings this package's REST methods take (ValidateToken's explicit
+// parameter, and the bound host NewForgejo/NewGitHub are constructed with)
+// may be a bare domain, a domain:port, or a scheme-qualified origin, and
+// apiBaseURL/apiBaseURLForGitHub turn any of those into a request URL.
+//
+// The userinfo-free case returns hostOrURL UNCHANGED rather than a
+// re-rendered parse of it, so every existing message is byte-identical and
+// this can be applied at every call site as pure defence in depth. A host
+// that does carry userinfo collapses to its bare authority, which is all
+// any of those messages needed from it.
+//
+// A missing scheme is supplied before parsing because net/url reads a
+// scheme-less string as a PATH: "token@host" parses with User == nil and
+// would sail through an unprefixed check, while apiBaseURL would go on to
+// splice it into "https://token@host/api/v1/..." with the credential fully
+// live.
+func redactHost(hostOrURL string) string {
+	probe := hostOrURL
+	if !strings.Contains(probe, "://") {
+		probe = "https://" + probe
+	}
+	u, err := url.Parse(probe)
+	if err != nil {
+		return unparseableURLPlaceholder
+	}
+	if u.User == nil {
+		return hostOrURL
+	}
+	return u.Host
+}
+
+// unparseableURLPlaceholder stands in for a URL that could not be parsed,
+// and therefore could not be inspected for an embedded credential.
+const unparseableURLPlaceholder = "<unparseable-url>"
+
+// redactedMarker replaces a credential wherever scrubUserinfo finds one.
+// Nothing asserts on its shape -- the tests for this file assert on the
+// ABSENCE of the secret, deliberately, so this marker stays free to change
+// (see userinfo_leak_test.go's own doc comment on why).
+const redactedMarker = "[REDACTED]"
+
+// userinfoSecrets returns every distinct string form of u's embedded
+// credential that could appear in something derived from a request to u.
+// All three forms are needed because different layers echo different ones:
+//
+//   - u.User.String() is the wire form, percent-encoded -- which is what a
+//     URL rendered back out carries, and the form that defeats a naive
+//     password-only redaction when a token itself contains a ":" (see
+//     internal/gittransport's transport_test.go on the "user%3Atoken" case).
+//   - Username() is the DECODED username -- the position a Forgejo/GitHub/
+//     GitLab PAT actually occupies in the standard "https://<token>@host"
+//     spelling, and the one git echoes verbatim when it prompts (see
+//     lsRemoteProbeOverGit).
+//   - Password() is the decoded password, the only position net/http's own
+//     stripPassword and net/url's Redacted ever mask.
+//
+// The combined form is returned FIRST so scrubUserinfo replaces the longest
+// match before its components, leaving no half-redacted remnant behind.
+func userinfoSecrets(u *url.URL) []string {
+	if u == nil || u.User == nil {
+		return nil
+	}
+	secrets := []string{u.User.String()}
+	if username := u.User.Username(); username != "" {
+		secrets = append(secrets, username)
+	}
+	if password, ok := u.User.Password(); ok && password != "" {
+		secrets = append(secrets, password)
+	}
+	return secrets
+}
+
+// scrubUserinfo returns s with every non-empty entry of secrets replaced by
+// redactedMarker. The empty-string guard is load-bearing rather than
+// defensive tidiness: strings.ReplaceAll(s, "", marker) splices the marker
+// between every rune of s, which would mangle an unrelated message beyond
+// reading (the same trap internal/handler/credential's redactToken
+// documents for itself).
+func scrubUserinfo(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, secret, redactedMarker)
+	}
+	return s
+}
+
+// redactTransportError returns err in a form safe to log AND safe to
+// %w-wrap. Wrapping matters as much as logging here: a %w chain rendered by
+// a handler, or collapsed into an RPC error message, discloses a credential
+// exactly as effectively as a log line does (loam-9h1e).
+//
+// THE DEFECT THIS EXISTS FOR. net/http returns transport failures as
+// *url.Error, whose Error() renders the request URL through net/http's
+// stripPassword -- which masks the PASSWORD COMPONENT ONLY. A token in the
+// userinfo USERNAME position, which is the standard PAT-in-URL spelling for
+// every forge this package supports, passes through completely unmasked.
+// net/url's own Redacted() has the identical blind spot, documented at
+// length in internal/gittransport's validateUpstreamURL.
+//
+// TWO LAYERS, IN THIS ORDER, because neither alone is sufficient:
+//
+//  1. STRUCTURAL. When err is a top-level *url.Error whose URL parses and
+//     carries userinfo, it is rebuilt with the userinfo-free rendering and
+//     the SAME inner error. This is the layer that matters in practice: it
+//     preserves the unwrap chain, so errors.Is against what the transport
+//     actually reported (a cancelled context, http.ErrSchemeMismatch --
+//     which Forgejo.ValidateToken's plaintext-HTTP retry depends on)
+//     survives redaction untouched.
+//  2. SCRUBBING. Whatever the first layer produced is then swept for the
+//     secrets themselves -- both those the caller knows (extra, typically
+//     userinfoSecrets of the URL it built the request from) and those
+//     recoverable from the *url.Error's own URL field. This catches a
+//     credential the structural rewrite cannot reach: one echoed by the
+//     INNER error, by a nested wrapper, or by a proxy/TLS layer quoting the
+//     request back.
+//
+// If scrubbing had to change anything, the chain is DROPPED and a plain
+// errors.New is returned. That is deliberate and follows
+// internal/handler/credential's redactErr precedent: an error that redacts
+// its own Error() while still wrapping the original hands the plaintext to
+// anyone who calls errors.Unwrap, or formats it with %+v. Losing errors.Is
+// on a path that was already leaking is a strictly better trade than
+// keeping it.
+//
+// A *url.Error whose URL field does not parse is handled the way
+// redactURLString handles the same case, and for the same reason: a parse
+// failure says nothing about whether the string embeds a credential, so the
+// URL is dropped entirely rather than rendered.
+func redactTransportError(err error, extra []string) error {
+	if err == nil {
+		return nil
+	}
+	// extra is COPIED rather than appended to in place: a caller's slice
+	// with spare capacity would otherwise have its backing array written
+	// through by the append below, which is a silent action-at-a-distance
+	// bug waiting for the first caller that reuses one.
+	secrets := append([]string(nil), extra...)
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		u, parseErr := url.Parse(uerr.URL)
+		if parseErr != nil {
+			return fmt.Errorf("%s %s: %s", uerr.Op, unparseableURLPlaceholder, scrubUserinfo(uerr.Err.Error(), secrets))
+		}
+		secrets = append(secrets, userinfoSecrets(u)...)
+		if err == error(uerr) && u.User != nil {
+			err = &url.Error{Op: uerr.Op, URL: redactUserinfo(u), Err: uerr.Err}
+		}
+	}
+	rendered := err.Error()
+	if scrubbed := scrubUserinfo(rendered, secrets); scrubbed != rendered {
+		return errors.New(scrubbed)
+	}
+	return err
 }

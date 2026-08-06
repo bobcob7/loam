@@ -121,23 +121,34 @@ type forgejoErrorEnvelope struct {
 // with (an explicit "https://" is never second-guessed), this method
 // retries once against "http://"+host before giving up. Any other
 // transport failure (DNS, refused connection, timeout) is returned as-is.
+//
+// # Userinfo in host (loam-9h1e)
+//
+// host is rendered into every message this method produces, and into the
+// API URL it derives, so a host carrying embedded userinfo would put that
+// credential into an error string and -- via *url.Error -- into the
+// transport failure it wraps. internal/forgehost.Canonicalize rejects such
+// a host at credential write time, so no caller in this tree can reach that
+// today; safeHost below is what keeps it true regardless, since this method
+// takes host as an explicit parameter and cannot see that validation.
 func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
+	safeHost := redactHost(host)
 	if token == "" {
-		return fmt.Errorf("validating token for %s: %w", host, ErrInvalidToken)
+		return fmt.Errorf("validating token for %s: %w", safeHost, ErrInvalidToken)
 	}
-	resp, err := f.probeValidateToken(ctx, host, token)
+	resp, err := f.probeValidateToken(ctx, host, safeHost, token)
 	if err != nil && !strings.Contains(host, "://") && errors.Is(err, http.ErrSchemeMismatch) {
-		resp, err = f.probeValidateToken(ctx, "http://"+strings.TrimSuffix(host, "/"), token)
+		resp, err = f.probeValidateToken(ctx, "http://"+strings.TrimSuffix(host, "/"), safeHost, token)
 	}
 	if err != nil {
-		return fmt.Errorf("validating token for %s: %w", host, err)
+		return fmt.Errorf("validating token for %s: %w", safeHost, err)
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("validating token for %s: %w", host, ErrInvalidToken)
+		return fmt.Errorf("validating token for %s: %w", safeHost, ErrInvalidToken)
 	}
 	if resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("validating token for %s: %w", host, ErrInsufficientScope)
+		return fmt.Errorf("validating token for %s: %w", safeHost, ErrInsufficientScope)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
@@ -147,9 +158,9 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 		if err := json.NewDecoder(resp.Body).Decode(&envelope); err == nil && envelope.Message != "" {
 			return nil
 		}
-		return fmt.Errorf("validating token for %s: probe returned 404 without a Forgejo error body; host may not be reachable as a Forgejo API", host)
+		return fmt.Errorf("validating token for %s: probe returned 404 without a Forgejo error body; host may not be reachable as a Forgejo API", safeHost)
 	}
-	return fmt.Errorf("validating token for %s: unexpected status %s", host, resp.Status)
+	return fmt.Errorf("validating token for %s: unexpected status %s", safeHost, resp.Status)
 }
 
 // probeValidateToken issues the scope probe described on ValidateToken's
@@ -158,16 +169,23 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 // (so errors.Is(err, http.ErrSchemeMismatch) still works after the %w
 // wrap here — url.Error, which f.httpClient.Do returns on failure, always
 // unwraps to the underlying transport error).
-func (f *Forgejo) probeValidateToken(ctx context.Context, host, token string) (*http.Response, error) {
+// redactTransportError preserves that unwrap chain, see its own doc
+// comment.
+//
+// safeHost is host rendered for messages (redactHost); host itself is used
+// only to build the request URL. The two differ only when host carries
+// embedded userinfo, which no caller in this tree can produce -- see
+// ValidateToken's doc comment.
+func (f *Forgejo) probeValidateToken(ctx context.Context, host, safeHost, token string) (*http.Response, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL(host), probeOwner, probeRepo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building validate-token request for %s: %w", host, err)
+		return nil, fmt.Errorf("building validate-token request for %s: %w", safeHost, redactTransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+token)
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("validating token for %s: %w", host, err)
+		return nil, fmt.Errorf("validating token for %s: %w", safeHost, redactTransportError(err, nil))
 	}
 	return resp, nil
 }
@@ -314,12 +332,12 @@ func (f *Forgejo) listOpenPRsPage(ctx context.Context, repo string, page int) ([
 	url := fmt.Sprintf("%s/repos/%s/pulls?state=open&limit=%d&page=%d", apiBaseURL(f.host), repo, listOpenPRsPageSize, page)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building list-PRs request: %w", err)
+		return nil, fmt.Errorf("building list-PRs request: %w", redactTransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+f.token)
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling GET %s: %w", url, err)
+		return nil, fmt.Errorf("calling GET %s: %w", redactURLString(url), redactTransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
@@ -353,7 +371,7 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, fmt.Errorf("building %s request: %w", method, err)
+		return nil, fmt.Errorf("building %s request: %w", method, redactTransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+f.token)
 	if body != nil {
@@ -361,7 +379,7 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	}
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling %s %s: %w", method, url, err)
+		return nil, fmt.Errorf("calling %s %s: %w", method, redactURLString(url), redactTransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
