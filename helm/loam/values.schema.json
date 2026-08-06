@@ -146,9 +146,17 @@
       "minimum": 35
     },
     "resources": { "$ref": "#/definitions/resources" },
-    "nodeSelector": { "type": "object" },
-    "tolerations": { "type": "array" },
-    "affinity": { "type": "object" }
+    "nodeSelector": {
+      "description": "Free-form by nature -- the keys are arbitrary node labels -- so this is open by DECISION, not by omission: values.schema.json closes every other object to unknown keys and internal/deploycheck's TestHelmValuesSchemaExists requires each one to say which it is.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": {
+      "description": "Passed through verbatim to the Pod spec. Open by DECISION: this is a large, deeply nested slice of the Kubernetes API, and a partial restatement of it here would reject valid affinity rules -- a worse failure than accepting an invalid one, which the API server rejects at apply time anyway.",
+      "type": "object",
+      "additionalProperties": true
+    }
   },
   "definitions": {
     "resources": {

@@ -51,8 +51,23 @@ This table adds the deployment angle: where each value comes from in
 | `LOAM_EMBEDDER_MODEL` | no | no | `nomic-embed-text` | `config.embedderModel` (values.yaml) |
 | `LOAM_INGEST_WORKERS` | no | no | `2` | `config.ingestWorkers` (values.yaml) |
 | `LOAM_LOG_LEVEL` | no | no | `info` | `config.logLevel` (values.yaml) |
+| `LOAM_OTEL_ENDPOINT` | no | no | — (telemetry off) | `config.otelEndpoint` (values.yaml), **empty by default** — empty means the key is not emitted into the ConfigMap at all and the server creates no exporter. There is no `LOAM_OTEL_ENABLED`; this is the switch |
+| `LOAM_OTEL_SERVICE_NAME` | no | no | `loam` | `config.otelServiceName` (values.yaml), empty by default |
+| `LOAM_OTEL_SAMPLE_RATIO` | no | no | `0.1` | `config.otelSampleRatio` (values.yaml), empty by default. `0` is a legitimate value and **not** an off switch — it silences traces while metrics keep being pushed |
 
-Two things worth being explicit about, since the chart's comments only hint at them:
+Three things worth being explicit about, since the chart's comments only hint at them:
+
+- **Unknown values keys are now a render failure, not a silent no-op.**
+  `helm/loam/values.schema.json` sets `additionalProperties: false` at every
+  object level. Before it existed, Helm accepted and discarded any key it did
+  not recognise: rendering this chart with `--set config.otelEndpoint=...
+  --set terminationGracePeriodSeconds=45` produced a **zero-byte diff**
+  against the default render, so a plausible-looking wiring in an ArgoCD
+  Application would have synced green and configured nothing (`loam-uwus`).
+  The cost of the schema is that adding a values key means adding it there
+  too, or the chart stops rendering — which is the trade being made
+  deliberately: a forgotten schema entry fails loudly on the author's
+  machine, an unvalidated typo fails silently in someone else's cluster.
 
 - **All three loam secrets, plus the Postgres password, live in one Secret object**,
   not four, referenced by `secret.name` (values.yaml, default `loam-secrets`) — but
@@ -67,6 +82,44 @@ Two things worth being explicit about, since the chart's comments only hint at t
 - **`LOAM_DATA_DIR` is set twice** (image `ENV` default, ConfigMap override) and both
   currently agree on `/var/lib/loam`. If you ever need to change it, change both, plus
   the PVC mount path — nothing checks these three stay in sync.
+
+## Shutdown Grace
+
+`terminationGracePeriodSeconds` is **45**, and it is derived rather than
+picked. `cmd/server/serve.go` budgets `defaultShutdownGrace` (30s) for the
+HTTP drain, the policy-socket close and the background drain — which *share*
+that one context, so they are 30s in total, not each — and then
+`telemetryFlushGrace` (5s) for the OTLP flush, on its own context, running
+strictly after them. That is a 35s floor.
+
+35 is a floor and not a safe value: setting it exactly reproduces the zero
+margin that made Kubernetes' 30s default wrong to begin with, with the
+SIGKILL racing the process exit. The extra 10s covers the steps no constant
+bounds — SIGTERM delivery and Go signal handling (the kubelet starts the
+clock when it *sends* the signal), and the deferred `pgxpool` close that runs
+after the flush.
+
+Two things follow that are easy to get backwards:
+
+- **An overrun costs the telemetry, never the drain.** The flush is last, so
+  the drain has always had its full 30s before an overrun is even possible.
+- **The margin was already zero before telemetry existed** — a 30s drain
+  against a 30s default. The flush made an existing zero margin negative; it
+  did not create the problem.
+
+`deploy/docker-compose.yml` sets the same 45s as `stop_grace_period` on the
+loam service, and that exposure is *worse* than Kubernetes': compose's
+default is **10 seconds**, so an unset value SIGKILLs loam a third of the way
+into its own drain on every `docker compose down`.
+
+None of this is left to prose. `internal/deploycheck`'s
+`TestChartGracePeriodExceedsGoShutdownBudget`,
+`TestComposeGracePeriodExceedsGoShutdownBudget` and
+`TestValuesSchemaGracePeriodFloorMatchesGoConstants` parse those two
+constants out of `cmd/server`'s source and fail if the chart default, the
+compose value, or `values.schema.json`'s enforced minimum stops clearing
+their sum with margin. Tuning a Go timeout turns them red rather than leaving
+three stale copies of an arithmetic behind.
 
 ## The Stateful Surface
 

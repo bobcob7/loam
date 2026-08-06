@@ -31,8 +31,9 @@ const (
 // field rather than a second parser.
 type composeFile struct {
 	Services map[string]struct {
-		Image       string            `yaml:"image"`
-		Environment map[string]string `yaml:"environment"`
+		Image           string            `yaml:"image"`
+		Environment     map[string]string `yaml:"environment"`
+		StopGracePeriod string            `yaml:"stop_grace_period"`
 	} `yaml:"services"`
 }
 
@@ -335,9 +336,25 @@ func TestMustSetVariablesHaveNoWorkingDefault(t *testing.T) {
 	}
 }
 
-// configEnvNames returns every LOAM_* string literal appearing in
-// internal/config's non-test sources. internal/config reads its
-// environment exclusively through helpers taking a literal key
+// envNameShape is what distinguishes a variable NAME from a string that
+// merely starts with one. internal/config's error messages lead with the
+// variable they are about -- "LOAM_INGEST_WORKERS: %w: got %d, want between
+// 1 and %d" -- and those are string literals beginning with "LOAM_" just
+// like the keys are.
+//
+// This never mattered while the only consumer was
+// TestComposeSetsOnlyRealConfigVariables, which asks whether each name the
+// COMPOSE file sets is in this set: extra junk in the set could not make
+// that assertion wrong, only less discriminating. It matters the moment
+// anything reads the set in the other direction and asks whether an artifact
+// covers all of it, which is what helm_test.go's
+// TestHelmChartCanCarryEveryConfigVariable does -- every format string would
+// be reported as a variable helm/loam had failed to carry.
+var envNameShape = regexp.MustCompile(`^LOAM_[A-Z0-9_]+$`)
+
+// configEnvNames returns every LOAM_* environment-variable name appearing as
+// a string literal in internal/config's non-test sources. internal/config
+// reads its environment exclusively through helpers taking a literal key
 // (lookupRequired, lookupDefault, the parse*Env family, isEnvSet) plus the
 // databaseURLPartKeys slice, so the literals ARE the surface -- there is no
 // computed key to miss. Walking the AST rather than grepping means a name
@@ -363,7 +380,7 @@ func configEnvNames(t *testing.T) []string {
 			if err != nil {
 				return true
 			}
-			if strings.HasPrefix(value, "LOAM_") {
+			if envNameShape.MatchString(value) {
 				seen[value] = struct{}{}
 			}
 			return true

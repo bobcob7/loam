@@ -81,11 +81,20 @@ import (
 // DefaultShutdownTimeout bounds how long Shutdown will wait for the OTLP
 // exporters to flush before giving up on them. It is deliberately small
 // relative to cmd/server's 30s shutdown grace: an unreachable collector is
-// the case that actually happens in production, and a flush that outlived
-// the pod's terminationGracePeriodSeconds would turn a graceful shutdown
-// into a SIGKILL -- losing the in-flight HTTP requests and background work
-// this repository already drains carefully, in exchange for telemetry about
-// a shutdown nobody will ever see, since the collector is unreachable.
+// the case that actually happens in production, and an unbounded flush would
+// hold SIGTERM open until the pod's terminationGracePeriodSeconds ran out
+// and the kubelet SIGKILLed it.
+//
+// Note carefully WHAT that SIGKILL would cost, because an earlier version of
+// this comment had it backwards and the inversion leads a reader to size the
+// grace period to protect the wrong thing. The flush runs strictly AFTER the
+// HTTP drain, the policy-socket close and the background drain (cmd/server/
+// serve.go, an ordering pinned by mutation during loam-p56y's review), so by
+// the time an overrun is possible those have already had their full budget.
+// The only thing an overrun can discard is the telemetry itself -- and it
+// would be telemetry about a shutdown nobody will ever see, since the
+// collector is unreachable. Bounding it small is therefore cheap: it gives
+// up on data that was not going to arrive.
 const DefaultShutdownTimeout = 5 * time.Second
 
 // exportRequestTimeout bounds a single OTLP HTTP request. The exporter's own
