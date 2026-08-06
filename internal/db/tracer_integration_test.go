@@ -401,7 +401,7 @@ func TestQueryTracer_AcquireSpanOnRealPoolExhaustion(t *testing.T) {
 	// Backdating proved against a REAL wait: a span constructed at
 	// TraceAcquireEnd without trace.WithTimestamp would be ~instantaneous,
 	// hiding the very queue time it exists to show.
-	assert.GreaterOrEqual(t, span.EndTime().Sub(span.StartTime()), acquireWaitThreshold,
+	assert.GreaterOrEqual(t, span.EndTime().Sub(span.StartTime()), defaultAcquireSpanThreshold,
 		"the acquire span must cover the real queue wait")
 	// The failed acquire must NOT also produce a query span -- no query ran.
 	for _, s := range recorder.Ended() {

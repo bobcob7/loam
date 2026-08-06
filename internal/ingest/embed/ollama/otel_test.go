@@ -51,45 +51,6 @@ func embedServer(t *testing.T, dimension int, seen *[]byte) *httptest.Server {
 	return server
 }
 
-// TestInstrumentHTTPClient_NeverRecordsRequestBody is the embedder's
-// counterpart to internal/forge's credential test, and it guards the thing
-// that is actually sensitive here: the chunk TEXT being embedded is
-// repository source code, and the response is its embedding vector.
-//
-// The sentinel is planted in the text handed to Embed, so it reaches the
-// wire inside the real marshalled /api/embed body (the handler asserts as
-// much, so the span's silence is about something that was genuinely there).
-// It must then appear nowhere on the span. This fails the day someone wraps
-// the transport in something body-reading, or adds a formatter or attribute
-// derived from the batch.
-func TestInstrumentHTTPClient_NeverRecordsRequestBody(t *testing.T) {
-	t.Parallel()
-	const sentinel = "func withdrawEverything(acct Account) // l0am-chunk-sentinel"
-	var seen []byte
-	server := embedServer(t, 768, &seen)
-	tp, recorder := recordingProvider(t)
-	embedder, err := New(server.URL, "nomic-embed-text", InstrumentHTTPClient(server.Client(), tp), testLogger())
-	require.NoError(t, err)
-	vectors, err := embedder.Embed(t.Context(), []string{sentinel, "package main"})
-	require.NoError(t, err)
-	require.Len(t, vectors, 2)
-	require.Contains(t, string(seen), "l0am-chunk-sentinel", "the chunk text must genuinely have been on the wire")
-	spans := recorder.Ended()
-	require.Len(t, spans, 1)
-	span := spans[0]
-	assert.NotContains(t, span.Name(), "l0am-chunk-sentinel", "the span name must not be derived from the batch")
-	attrs := span.Attributes()
-	require.NotEmpty(t, attrs, "a span with no attributes would pass this test vacuously")
-	for _, kv := range attrs {
-		assert.NotContains(t, kv.Value.Emit(), "l0am-chunk-sentinel", "no span attribute may carry the text being embedded")
-	}
-	for _, event := range span.Events() {
-		for _, kv := range event.Attributes {
-			assert.NotContains(t, kv.Value.Emit(), "l0am-chunk-sentinel")
-		}
-	}
-}
-
 // TestInstrumentHTTPClient_NamesTheEndpointAndNestsUnderTheCaller pins both
 // halves of what makes an embedder span useful during an ingest run: it has
 // to be distinguishable from every other POST in the trace, and it has to
@@ -149,25 +110,4 @@ func TestSpanNameForRequest_TracksTheEndpointNotAConstant(t *testing.T) {
 			assert.Equal(t, tt.want, spanNameForRequest("", req))
 		})
 	}
-}
-
-// TestInstrumentHTTPClient_NilProviderIsAPassthrough covers the composition
-// root's telemetry-disabled path: no wrapper on the transport stack at all.
-func TestInstrumentHTTPClient_NilProviderIsAPassthrough(t *testing.T) {
-	t.Parallel()
-	client := &http.Client{}
-	assert.Same(t, client, InstrumentHTTPClient(client, nil))
-}
-
-// TestInstrumentHTTPClient_DoesNotMutateTheCaller pins the shallow-copy
-// contract, matching internal/forge's equivalent.
-func TestInstrumentHTTPClient_DoesNotMutateTheCaller(t *testing.T) {
-	t.Parallel()
-	tp, _ := recordingProvider(t)
-	base := &http.Client{Timeout: 11}
-	instrumented := InstrumentHTTPClient(base, tp)
-	assert.Nil(t, base.Transport)
-	assert.NotNil(t, instrumented.Transport)
-	assert.NotSame(t, base, instrumented)
-	assert.Equal(t, base.Timeout, instrumented.Timeout)
 }

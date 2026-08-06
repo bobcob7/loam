@@ -69,7 +69,7 @@ func newPoolConfig(cfg Config) (*pgxpool.Config, error) {
 	}
 	poolCfg.AfterConnect = pgxvec.RegisterTypes
 	if cfg.TracerProvider != nil {
-		poolCfg.ConnConfig.Tracer = newQueryTracer(cfg.TracerProvider)
+		poolCfg.ConnConfig.Tracer = newQueryTracer(cfg.TracerProvider, cfg.AcquireSpanThreshold)
 	}
 	return poolCfg, nil
 }

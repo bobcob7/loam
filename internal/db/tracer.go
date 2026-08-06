@@ -82,15 +82,19 @@ const unnamedQuery = "unnamed"
 // diagnostic value without the payload, and
 // TestQueryTracer_ErrorPathNeverLeaksArgument holds that line.
 type queryTracer struct {
-	tracer trace.Tracer
+	tracer           trace.Tracer
+	acquireThreshold time.Duration
 }
 
 // newQueryTracer builds the pgx tracing hook from tp. tp must not be nil;
 // newPoolConfig only calls this when Config.TracerProvider is set, and
 // telemetry.Provider hands out upstream's no-op provider rather than nil
 // when telemetry is disabled.
-func newQueryTracer(tp trace.TracerProvider) *queryTracer {
-	return &queryTracer{tracer: tp.Tracer(tracerName)}
+func newQueryTracer(tp trace.TracerProvider, acquireThreshold time.Duration) *queryTracer {
+	if acquireThreshold <= 0 {
+		acquireThreshold = defaultAcquireSpanThreshold
+	}
+	return &queryTracer{tracer: tp.Tracer(tracerName), acquireThreshold: acquireThreshold}
 }
 
 // TraceQueryStart opens the span for one Query/QueryRow/Exec, named for the
@@ -152,13 +156,18 @@ func (t *queryTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pg
 	span.End()
 }
 
-// acquireWaitThreshold is how long a pool acquire has to take before it is
-// worth a span of its own. A pool with a free connection hands one over in
-// microseconds; anything past this bound means the caller QUEUED, which is a
-// different performance story from a slow query and is invisible in the
-// query span, since pgxpool finishes acquiring before pgx starts tracing the
-// query.
-const acquireWaitThreshold = 50 * time.Millisecond
+// defaultAcquireSpanThreshold is how long a pool acquire has to take before
+// it is worth a span of its own, when Config.AcquireSpanThreshold is unset.
+// A pool with a free connection hands one over in microseconds; anything
+// past this bound means the caller QUEUED, which is a different performance
+// story from a slow query and is invisible in the query span, since pgxpool
+// finishes acquiring before pgx starts tracing the query.
+//
+// It is a DEFAULT rather than a fixed constant because the bound that makes
+// a saturated pool visible depends on the deployment: one sitting at a 30ms
+// p50 is in trouble and would show nothing here. See
+// Config.AcquireSpanThreshold and LOAM_OTEL_DB_ACQUIRE_THRESHOLD.
+const defaultAcquireSpanThreshold = 50 * time.Millisecond
 
 // acquireStartKey is the private context key carrying an acquire's start
 // time from TraceAcquireStart to TraceAcquireEnd.
@@ -171,7 +180,7 @@ func (t *queryTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ 
 }
 
 // TraceAcquireEnd emits a span for a pool acquire ONLY when the acquire
-// failed or took longer than acquireWaitThreshold. pgxpool discovers this
+// failed or took longer than the configured threshold. pgxpool discovers this
 // method by type-asserting the same value in ConnConfig.Tracer that carries
 // the query and CopyFrom hooks.
 //
@@ -202,7 +211,7 @@ func (t *queryTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, data
 		return
 	}
 	ended := time.Now()
-	if data.Err == nil && ended.Sub(started) < acquireWaitThreshold {
+	if data.Err == nil && ended.Sub(started) < t.acquireThreshold {
 		return
 	}
 	_, span := t.tracer.Start(ctx, spanNamePrefix+"acquire",

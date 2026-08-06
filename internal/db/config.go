@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 )
@@ -40,6 +41,17 @@ type Config struct {
 	// build a pool from a bare db.Config{DatabaseURL: dsn} untouched by
 	// this field's existence.
 	TracerProvider trace.TracerProvider
+	// AcquireSpanThreshold is the minimum pool-acquire duration that earns a
+	// span. ZERO MEANS defaultAcquireSpanThreshold, not "trace every
+	// acquire" -- pgxpool acquires a connection for every query, so a zero
+	// that meant "no threshold" would silently double the process's span
+	// count for anyone who left the field unset. A FAILED acquire is
+	// recorded regardless of this value.
+	//
+	// The composition root feeds this from LOAM_OTEL_DB_ACQUIRE_THRESHOLD,
+	// so an operator whose pool sits chronically just under the default can
+	// lower it without recompiling.
+	AcquireSpanThreshold time.Duration
 }
 
 // LoadConfig reads Config from the environment, requiring both DATABASE_URL

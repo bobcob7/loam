@@ -58,6 +58,7 @@ func baseEnv(t *testing.T, dataDir string) {
 	t.Setenv("LOAM_OTEL_ENDPOINT", "")
 	t.Setenv("LOAM_OTEL_SERVICE_NAME", "")
 	t.Setenv("LOAM_OTEL_SAMPLE_RATIO", "")
+	t.Setenv("LOAM_OTEL_DB_ACQUIRE_THRESHOLD", "")
 }
 
 func TestLoad_Defaults(t *testing.T) {
@@ -432,11 +433,45 @@ func TestLoad_TelemetryOverrides(t *testing.T) {
 	t.Setenv("LOAM_OTEL_ENDPOINT", "https://collector.example:4318")
 	t.Setenv("LOAM_OTEL_SERVICE_NAME", "loam-staging")
 	t.Setenv("LOAM_OTEL_SAMPLE_RATIO", "0.25")
+	t.Setenv("LOAM_OTEL_DB_ACQUIRE_THRESHOLD", "5ms")
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, "https://collector.example:4318", cfg.OTelEndpoint)
 	assert.Equal(t, "loam-staging", cfg.OTelServiceName)
 	assert.InDelta(t, 0.25, cfg.OTelSampleRatio, 0)
+	assert.Equal(t, 5*time.Millisecond, cfg.OTelDBAcquireThreshold)
+}
+
+// TestLoad_OTelDBAcquireThreshold covers the variable that lets an operator
+// whose pool sits chronically just under the default see its waits at all
+// (loam-9v9s). The default case is asserted here rather than only in
+// TestLoad_Defaults because the value is load-bearing: internal/db treats
+// zero as "use the default", so a loader that silently produced zero would
+// look identical in a Config dump while behaving correctly -- and a loader
+// that produced zero for an operator who set "0s" would too.
+func TestLoad_OTelDBAcquireThreshold(t *testing.T) {
+	// Not parallel: t.Setenv is incompatible with t.Parallel.
+	t.Run("defaults when unset", func(t *testing.T) {
+		baseEnv(t, t.TempDir())
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, defaultOTelDBAcquireThreshold, cfg.OTelDBAcquireThreshold)
+	})
+	t.Run("rejects a negative duration", func(t *testing.T) {
+		baseEnv(t, t.TempDir())
+		t.Setenv("LOAM_OTEL_DB_ACQUIRE_THRESHOLD", "-1s")
+		_, err := Load()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidDuration)
+		assert.Contains(t, err.Error(), "LOAM_OTEL_DB_ACQUIRE_THRESHOLD", "the message must name the variable an operator has to fix")
+	})
+	t.Run("rejects an unparseable duration", func(t *testing.T) {
+		baseEnv(t, t.TempDir())
+		t.Setenv("LOAM_OTEL_DB_ACQUIRE_THRESHOLD", "soon")
+		_, err := Load()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidDuration)
+	})
 }
 
 // TestLoad_OTelSampleRatioBoundaries exercises LOAM_OTEL_SAMPLE_RATIO's

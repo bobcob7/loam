@@ -42,6 +42,16 @@ const defaultOTelServiceName = "loam"
 // sampled trace is therefore never a partial one.
 const defaultOTelSampleRatio = 0.1
 
+// defaultOTelDBAcquireThreshold is how long a pgx pool acquire must take
+// before internal/db emits a span for it. Below this bound an acquire is a
+// free hand-off from an idle pool and is not worth one span per query on top
+// of the query's own; above it the caller QUEUED, which the query span cannot
+// show because pgxpool finishes acquiring before pgx starts tracing. A
+// chronically saturated pool sitting just under the default is exactly the
+// case an operator needs to be able to lower it for, which is why this is a
+// variable rather than a constant in the tracer.
+const defaultOTelDBAcquireThreshold = 50 * time.Millisecond
+
 // Config holds the fully validated server configuration decoded from the
 // LOAM_* environment variables in docs/server-spec.md.
 type Config struct {
@@ -64,6 +74,12 @@ type Config struct {
 	OTelEndpoint    string
 	OTelServiceName string
 	OTelSampleRatio float64
+	// OTelDBAcquireThreshold is the minimum pool-acquire duration that earns
+	// a span (LOAM_OTEL_DB_ACQUIRE_THRESHOLD). A FAILED acquire is always
+	// recorded regardless of this value -- it is the case the span exists
+	// for -- so setting it high silences the slow-acquire signal but never
+	// the pool-exhaustion one.
+	OTelDBAcquireThreshold time.Duration
 	// TracerProvider is the resolved handle instrumentation creates tracers
 	// from. Like Logger above it is NOT an environment variable: Load leaves
 	// it nil, and cmd/server sets it from telemetry.Provider once
@@ -79,22 +95,44 @@ type Config struct {
 	// # THE RULE FOR ADDING A THIRD NON-ENV FIELD
 	//
 	// Logger and TracerProvider are both OBSERVABILITY SINKS: the process
-	// writes to them and never reads a value back out to make a decision
-	// with. That is what makes carrying them here a pattern rather than a
-	// service locator, and it is the test a third field has to pass. Two
-	// properties follow from it and are what keep this honest:
+	// writes observations to them, and their presence changes what an
+	// operator can SEE, never what the server DOES. That is what makes
+	// carrying them here a pattern rather than a service locator, and it is
+	// what a third field has to satisfy.
 	//
-	//   - Removing the field can change what an operator SEES, never what
-	//     the server DOES. Nothing branches on it. If a proposed field would
-	//     be read in an `if`, it is an input, and it belongs in a parameter
-	//     on the constructor that needs it -- not here.
-	//   - Its zero value is inert, so a Config literal in a test is
-	//     automatically correct without knowing the field exists.
+	// The question that discriminates is a thought experiment, not a
+	// mechanical check: DELETE THE FIELD ENTIRELY. Would any caller get a
+	// different result, or would the server take a different action on any
+	// request? If the only thing that changes is what can be observed from
+	// outside, it is a sink. If any behaviour changes, it is an input, and
+	// it belongs as a parameter on the constructor that needs it.
 	//
-	// A MeterProvider would qualify. A database pool, an *http.Client, a
-	// feature flag or a clock would NOT -- each is an input to behaviour,
-	// and putting one here would turn Config into the bag of dependencies
-	// this comment exists to prevent.
+	// By that test a MeterProvider qualifies. A database pool, an
+	// *http.Client, a feature flag and a clock do not -- each determines
+	// what the server does or what a caller gets back, and putting one here
+	// would turn Config into the bag of dependencies this comment exists to
+	// prevent.
+	//
+	// TWO TEMPTING SHORTHANDS FOR THIS RULE ARE FALSE, and are written down
+	// because both were proposed and both would have misjudged the fields
+	// already here:
+	//
+	//   - "If it is read in an `if`, it is an input." TracerProvider is read
+	//     in three (internal/db's newPoolConfig, and both
+	//     InstrumentHTTPClient functions). Those branches choose whether to
+	//     ATTACH instrumentation; none changes the work performed or the
+	//     result returned. Nil-checking a sink is wiring, not behaviour.
+	//   - "Its zero value is inert, so a Config literal in a test is
+	//     automatically correct." Not so: Logger's zero value is a nil
+	//     *slog.Logger that PANICS on first use, which is why every
+	//     composition-root test sets it explicitly. TracerProvider's nil is
+	//     genuinely inert, but that is a property of this one field, not of
+	//     the category. Needing to know the field exists is a real cost of
+	//     this pattern; it is not an argument for it.
+	//
+	// There is no mechanical test here on purpose. The category is sharp,
+	// the shorthands are not, and a wrong test is worse than none because
+	// the next field gets judged by it.
 	TracerProvider trace.TracerProvider
 }
 
@@ -251,5 +289,13 @@ func loadTelemetry(cfg *Config) error {
 		return fmt.Errorf("LOAM_OTEL_SAMPLE_RATIO: %w: got %v, want between 0 and 1", errOTelSampleRatioRange, sampleRatio)
 	}
 	cfg.OTelSampleRatio = sampleRatio
+	acquireThreshold, err := parseDurationEnv("LOAM_OTEL_DB_ACQUIRE_THRESHOLD", defaultOTelDBAcquireThreshold)
+	if err != nil {
+		return err
+	}
+	if acquireThreshold < 0 {
+		return fmt.Errorf("LOAM_OTEL_DB_ACQUIRE_THRESHOLD: %w: got %s, want a non-negative duration", errInvalidDuration, acquireThreshold)
+	}
+	cfg.OTelDBAcquireThreshold = acquireThreshold
 	return nil
 }

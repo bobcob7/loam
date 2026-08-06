@@ -4,10 +4,9 @@ import (
 	"net/http"
 	"strings"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	metricnoop "go.opentelemetry.io/otel/metric/noop"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/bobcob7/loam/internal/otelhttpclient"
 )
 
 // spanNamePrefix namespaces every span produced by a client this package
@@ -16,86 +15,19 @@ import (
 // queries at a glance.
 const spanNamePrefix = "forge "
 
-// InstrumentHTTPClient returns a copy of client whose transport is wrapped
-// with otelhttp, so every request the Provider implementations in this
-// package make (forgejo.go, github.go, and the git-protocol probes in
-// forgejo_git.go) becomes a client span nested under whatever span its
-// caller's context already carries. A nil tp returns client unchanged.
+// InstrumentHTTPClient wraps client's transport so every request the
+// Provider implementations in this package make (forgejo.go, github.go, and
+// the git-protocol probes in forgejo_git.go) becomes a client span. A nil tp
+// returns client unchanged.
 //
-// The returned client is a SHALLOW COPY: client's own Timeout, CookieJar and
-// CheckRedirect are preserved, and the caller's value is not mutated, so one
-// *http.Client can be instrumented for this package without silently
-// changing behaviour for anything else that happens to hold it.
-//
-// # WHY THIS CANNOT LEAK THE FORGE TOKEN, ESTABLISHED RATHER THAN ASSUMED
-//
-// Every Provider method here authenticates, either with `Authorization:
-// token <pat>` (forgejo.go, github.go) or HTTP Basic over the git smart-HTTP
-// probe (forgejo_git.go). Handing that request to a tracing transport is one
-// misconfiguration away from writing a live credential into a span, so the
-// claim was checked against otelhttp v0.69.0's source rather than its README:
-//
-//   - The client-side attribute set is closed and enumerated in
-//     otelhttp/internal/semconv's HTTPClient.RequestTraceAttrs /
-//     ResponseTraceAttrs: http.request.method, http.request.method.original,
-//     url.full, server.address, server.port, network.protocol.name,
-//     network.protocol.version, http.response.status_code, error.type. No
-//     request header is read except Host and User-Agent, and no response
-//     header is read at all.
-//   - There is no option to capture headers. All eleven of otelhttp's
-//     exported Option constructors were checked; none takes a header
-//     allow-list, and the only header the transport touches is the
-//     traceparent it WRITES via propagators.Inject. This is unlike
-//     otelhttptrace, which does record them -- hence the explicit option
-//     list below rather than a bare NewTransport(nil).
-//   - url.full is userinfo-stripped upstream: RequestTraceAttrs nils
-//     req.URL.User before stringifying and restores it afterwards. That is
-//     load-bearing here and not merely reassuring, because
-//     receivePackProbeOverGit derives its probe URL from a caller-supplied
-//     upstream URL that MAY embed a "https://<token>@host/..." credential --
-//     the exact form redactUserinfo exists for.
-//
-// The first and third of those are upstream behaviour, so they are pinned
-// here by TestInstrumentHTTPClient_NeverRecordsCredentials rather than left
-// to survive a dependency bump on trust.
-//
-// # BOTH GLOBAL FALLBACKS ARE CLOSED, NOT JUST THE OBVIOUS ONE
-//
-// otelhttp reaches for a process-wide global in TWO places when the
-// corresponding option is omitted, and internal/telemetry installs neither:
-//
-//   - WithMeterProvider, or otel.GetMeterProvider(). A no-op is passed so
-//     HTTP metrics -- a different bead -- cannot appear as a side effect of
-//     adding spans.
-//   - WithPropagators, or otel.GetTextMapPropagator(). An EMPTY composite is
-//     passed, which injects nothing.
-//
-// The second is the one that is easy to miss and the more consequential of
-// the two. otelhttp's transport calls propagators.Inject on every outbound
-// request, writing headers into a request bound for a THIRD-PARTY forge --
-// git.example.com, api.github.com. Today the global default is a no-op, so
-// nothing is injected and the call is inert. But it is a global: a single
-// otel.SetTextMapPropagator anywhere in the process, in any future bead or
-// dependency, would silently begin leaking this deployment's internal trace
-// and span IDs to an external service that is not part of its trace domain,
-// with no diff to this file to explain it. Passing the propagator
-// explicitly makes that a decision someone has to come here and make.
-//
-// If loam ever runs against a forge inside its own trace domain and wants
-// end-to-end traces through it, this is the one line to change -- and it
-// should be changed here, per client, not by installing a global.
+// The wrapping itself, and the reasoning about why it cannot leak the forge
+// token this package's every method carries, live in
+// internal/otelhttpclient -- deliberately in ONE place, so the tests that
+// enforce those guarantees cannot fall out of step with a second copy. What
+// stays here is the only part that is genuinely forge-specific: the span
+// name.
 func InstrumentHTTPClient(client *http.Client, tp trace.TracerProvider) *http.Client {
-	if tp == nil {
-		return client
-	}
-	instrumented := *client
-	instrumented.Transport = otelhttp.NewTransport(client.Transport,
-		otelhttp.WithTracerProvider(tp),
-		otelhttp.WithMeterProvider(metricnoop.NewMeterProvider()),
-		otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()),
-		otelhttp.WithSpanNameFormatter(spanNameForRequest),
-	)
-	return &instrumented
+	return otelhttpclient.Instrument(client, tp, spanNameForRequest)
 }
 
 // spanNameForRequest names a forge request "forge <METHOD> <route>", where

@@ -135,8 +135,8 @@ func TestTraceAcquire_SpanOnlyWhenSlowOrFailed(t *testing.T) {
 		wantSpan bool
 	}{
 		{name: "fast and successful emits nothing", elapsed: 0, err: nil, wantSpan: false},
-		{name: "just under the threshold emits nothing", elapsed: acquireWaitThreshold - time.Millisecond, err: nil, wantSpan: false},
-		{name: "past the threshold emits a span", elapsed: acquireWaitThreshold + time.Second, err: nil, wantSpan: true},
+		{name: "just under the threshold emits nothing", elapsed: defaultAcquireSpanThreshold - time.Millisecond, err: nil, wantSpan: false},
+		{name: "past the threshold emits a span", elapsed: defaultAcquireSpanThreshold + time.Second, err: nil, wantSpan: true},
 		{name: "a fast FAILURE still emits a span", elapsed: 0, err: context.DeadlineExceeded, wantSpan: true},
 	}
 	for _, tt := range tests {
@@ -145,7 +145,7 @@ func TestTraceAcquire_SpanOnlyWhenSlowOrFailed(t *testing.T) {
 			recorder := tracetest.NewSpanRecorder()
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 			t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
-			tracer := newQueryTracer(tp)
+			tracer := newQueryTracer(tp, 0)
 			ctx := context.WithValue(t.Context(), acquireStartKey{}, time.Now().Add(-tt.elapsed))
 			tracer.TraceAcquireEnd(ctx, nil, pgxpool.TraceAcquireEndData{Err: tt.err})
 			spans := recorder.Ended()
@@ -167,13 +167,65 @@ func TestTraceAcquire_SpanOnlyWhenSlowOrFailed(t *testing.T) {
 	}
 }
 
+// TestTraceAcquire_ThresholdIsConfigurable is what makes
+// Config.AcquireSpanThreshold more than a field that is read and ignored.
+// A deployment whose pool sits chronically just under the default sees
+// nothing and, before this, could only recompile.
+//
+// The two rows are the same elapsed time on either side of a CUSTOM
+// threshold, so a tracer that kept using defaultAcquireSpanThreshold would
+// fail both: 10ms is under the 50ms default, so the first row would emit
+// nothing where a 5ms threshold demands a span.
+func TestTraceAcquire_ThresholdIsConfigurable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		threshold time.Duration
+		elapsed   time.Duration
+		wantSpan  bool
+	}{
+		{name: "a threshold below the default surfaces a wait the default would hide", threshold: 5 * time.Millisecond, elapsed: 10 * time.Millisecond, wantSpan: true},
+		{name: "a threshold above the default hides a wait the default would surface", threshold: time.Second, elapsed: 100 * time.Millisecond, wantSpan: false},
+		{name: "zero falls back to the default", threshold: 0, elapsed: defaultAcquireSpanThreshold + time.Millisecond, wantSpan: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+			tracer := newQueryTracer(tp, tt.threshold)
+			ctx := context.WithValue(t.Context(), acquireStartKey{}, time.Now().Add(-tt.elapsed))
+			tracer.TraceAcquireEnd(ctx, nil, pgxpool.TraceAcquireEndData{})
+			assert.Len(t, recorder.Ended(), map[bool]int{true: 1, false: 0}[tt.wantSpan])
+		})
+	}
+}
+
+// TestTraceAcquire_FailureIgnoresTheThreshold pins the one thing the
+// threshold must NOT be able to silence. Pool exhaustion is the case these
+// spans exist for -- no query ever runs, so nothing else records it -- and an
+// operator who raises the threshold to quieten slow-acquire noise must not
+// lose it.
+func TestTraceAcquire_FailureIgnoresTheThreshold(t *testing.T) {
+	t.Parallel()
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	tracer := newQueryTracer(tp, time.Hour)
+	ctx := context.WithValue(t.Context(), acquireStartKey{}, time.Now())
+	tracer.TraceAcquireEnd(ctx, nil, pgxpool.TraceAcquireEndData{Err: context.DeadlineExceeded})
+	require.Len(t, recorder.Ended(), 1, "a failed acquire must be recorded however high the threshold is set")
+	assert.Equal(t, codes.Error, recorder.Ended()[0].Status().Code)
+}
+
 // TestTraceAcquireStart_CarriesTheStartTime pins the half of the pair that
 // TestTraceAcquire_SpanOnlyWhenSlowOrFailed fakes, so the two together cover
 // the real path rather than leaving a gap where the key is written with one
 // type and read with another.
 func TestTraceAcquireStart_CarriesTheStartTime(t *testing.T) {
 	t.Parallel()
-	tracer := newQueryTracer(tracenoop.NewTracerProvider())
+	tracer := newQueryTracer(tracenoop.NewTracerProvider(), 0)
 	before := time.Now()
 	ctx := tracer.TraceAcquireStart(t.Context(), nil, pgxpool.TraceAcquireStartData{})
 	started, ok := ctx.Value(acquireStartKey{}).(time.Time)
