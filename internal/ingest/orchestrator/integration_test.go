@@ -235,6 +235,11 @@ func newOrchestratorWithLogger(t *testing.T, f *fixture, tx transactor, embedder
 		vectorAdapter{indexer: vectors.New(embedder, logger), logger: logger},
 		storeDropper{logger: logger},
 		refAdapter{logger: logger},
+		// The ledger adapter reads through writerPool rather than
+		// readerPool: it is part of the production graph under test, and
+		// readerPool exists solely for the assertions to observe from a
+		// genuinely separate session (loam-qj21).
+		ledgerAdapter{pool: writerPool, logger: logger},
 		tx,
 		embedder,
 		diffplan.Versions{Grammar: GrammarVersion, Pipeline: PipelineVersion, EmbeddingModel: embedder.ModelID()},

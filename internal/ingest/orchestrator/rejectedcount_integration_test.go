@@ -212,7 +212,7 @@ func TestIngest_RejectedFiles_AreCountedAndReachEveryChosenSurface(t *testing.T)
 	assert.Equal(t, slog.LevelInfo, committed[0].level,
 		"the commit line stays INFO and stays greppable for ALL completed ingests; moving the partial ones off it would hide them")
 
-	partial := capture.withMessage("ingest committed with rejected files; this repo is partially indexed until those files change again or a full rebuild runs")
+	partial := capture.withMessage("ingest committed with rejected files; they are recorded in the rejection ledger and will be retried by the next ingest")
 	require.Len(t, partial, 1, "the incompleteness needs a line of its own, because operators alert on level and a field on an INFO line is not reachable by an alert")
 	assert.Equal(t, slog.LevelWarn, partial[0].level)
 	assert.Equal(t, int64(3), partial[0].attrs["files_rejected"])
