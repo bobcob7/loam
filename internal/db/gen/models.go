@@ -21,6 +21,21 @@ type Chunk struct {
 	CreatedAt    pgtype.Timestamptz
 }
 
+type ChunkRejection struct {
+	RepoID          pgtype.UUID
+	TargetBranch    string
+	File            string
+	Attempts        int32
+	State           string
+	ChunksState     string
+	Sqlstate        pgtype.Text
+	Error           string
+	JobID           pgtype.UUID
+	RejectedRef     string
+	FirstRejectedAt pgtype.Timestamptz
+	LastRejectedAt  pgtype.Timestamptz
+}
+
 type Comment struct {
 	ID        pgtype.UUID
 	ThreadID  pgtype.UUID

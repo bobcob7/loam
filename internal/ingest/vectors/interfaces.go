@@ -27,12 +27,18 @@
 //
 // Persist's per-file WRITES are not (loam-c94.21): a file the store
 // rejects -- a malformed row, a constraint, a size limit -- is counted in
-// Stats.FilesRejected, logged, and skipped, exactly the "skipped and
-// counted, never silently" treatment chunker.ChunkFiles already gives a
-// binary or unparseable file one step earlier. A cancelled context or an
-// infrastructure-class failure (a dead pool, a closed transaction) is not
-// survivable and still aborts the whole batch immediately -- see Persist's
-// own doc comment for the exact line this bead draws and why.
+// Stats.FilesRejected, NAMED in Stats.Rejected, logged, and skipped,
+// exactly the "skipped and counted, never silently" treatment
+// chunker.ChunkFiles already gives a binary or unparseable file one step
+// earlier. Naming it is what makes it recoverable rather than merely
+// visible: the caller ledgers those paths (chunk_rejections, loam-qj21)
+// and the next ingest unions them back into its plan, because a count
+// cannot be re-planned and a git diff cannot name a file nobody touched.
+//
+// A cancelled context or an infrastructure-class failure (a dead pool, a
+// closed transaction) is not survivable and still aborts the whole batch
+// immediately -- see Persist's own doc comment for the exact line this bead
+// draws and why.
 //
 // That per-file tolerance was necessary but NOT sufficient on its own to
 // keep one bad file from costing a whole repo when st is bound to a shared
@@ -100,4 +106,12 @@ type embedder interface {
 // owns -- chunkstore.NewInTx -- so nothing here auto-commits.
 type store interface {
 	ReplaceFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string, inputs []chunkstore.ChunkInput) ([]chunkstore.Chunk, error)
+	// CountFileChunks reports how many chunks rows one file currently has
+	// ON THIS TRANSACTION, which Persist asks only after a rejection: a
+	// file that still has chunks is stale, one that has none is absent
+	// (loam-qj21). It is part of this seam rather than a separate one
+	// because it must be answered by the same store, on the same
+	// transaction, as the write that was just unwound -- a count taken
+	// anywhere else could not see a full rebuild's own uncommitted drop.
+	CountFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string) (int, error)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/diffplan"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
@@ -88,6 +89,7 @@ type harness struct {
 	vectors  *vectorTrackMock
 	dropper  *dropperMock
 	refs     *refWriterMock
+	ledger   *rejectionLedgerMock
 	tx       *transactorMock
 	repoID   uuid.UUID
 	commits  int
@@ -184,6 +186,27 @@ func newHarness(t *testing.T) *harness {
 			return nil
 		},
 	}
+	// The ledger's default is the healthy shape: no outstanding
+	// rejections, so List returns nothing and no write is expected. Tests
+	// that care override the funcs they need.
+	h.ledger = &rejectionLedgerMock{
+		ListFunc: func(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error) {
+			h.log.record("ledger.List")
+			return nil, nil
+		},
+		ClearFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error {
+			h.log.record("ledger.Clear")
+			return nil
+		},
+		ClearAllFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error {
+			h.log.record("ledger.ClearAll")
+			return nil
+		},
+		RecordFunc: func(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error {
+			h.log.record("ledger.Record")
+			return nil
+		},
+	}
 	h.tx = &transactorMock{
 		withinTxFunc: func(ctx context.Context, fn func(tx pgx.Tx) error) error {
 			h.log.record("beginTx")
@@ -199,7 +222,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	h.orch = newOrchestrator(
 		testLogger(), t.TempDir(), h.planner, h.repos, h.content, h.graph, h.chunker,
-		h.vectors, h.dropper, h.refs, h.tx, fixedBudgeter(2048),
+		h.vectors, h.dropper, h.refs, h.ledger, h.tx, fixedBudgeter(2048),
 		diffplan.Versions{Grammar: GrammarVersion, Pipeline: PipelineVersion, EmbeddingModel: "test-model"},
 	)
 	return h

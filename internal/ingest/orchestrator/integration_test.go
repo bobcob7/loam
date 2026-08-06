@@ -235,6 +235,11 @@ func newOrchestratorWithLogger(t *testing.T, f *fixture, tx transactor, embedder
 		vectorAdapter{indexer: vectors.New(embedder, logger), logger: logger},
 		storeDropper{logger: logger},
 		refAdapter{logger: logger},
+		// The ledger adapter reads through writerPool rather than
+		// readerPool: it is part of the production graph under test, and
+		// readerPool exists solely for the assertions to observe from a
+		// genuinely separate session (loam-qj21).
+		ledgerAdapter{pool: writerPool, logger: logger},
 		tx,
 		embedder,
 		diffplan.Versions{Grammar: GrammarVersion, Pipeline: PipelineVersion, EmbeddingModel: embedder.ModelID()},
@@ -586,7 +591,9 @@ func TestIngest_IncrementalDeleteDropsTheFilesRowsAndRecomputesEdges(t *testing.
 // nanVectorEmbedder wraps the deterministic test embedder and poisons the
 // vector of every chunk whose text contains marker, by setting one
 // coordinate to NaN. pgvector rejects NaN at INSERT ("NaN not allowed in
-// vector", SQLSTATE 22P02) -- a real per-statement error raised by the
+// vector", SQLSTATE 22000 -- data_exception, measured against a real
+// server rather than the 22P02 several notes in this tree assume; see
+// vectors.sqlStateOf) -- a real per-statement error raised by the
 // SERVER, in the same class as a constraint or a type error, which is
 // exactly what internal/ingest/vectors.Persist classifies as a per-file
 // rejection.

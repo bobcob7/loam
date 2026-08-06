@@ -58,31 +58,36 @@ type Stats struct {
 	// FilesRejected is how many files the chunks store refused to write
 	// during this job (vectors.Stats.FilesRejected, loam-c94.21/c94.24).
 	// Their symbols and edges are in the index; their chunks are not the
-	// ones this job's ingested ref claims -- stale if the file had chunks
+	// ones this job's ingested ref claims -- STALE if the file had chunks
 	// before (the rejection unwinds to a savepoint, so the prior rows
-	// survive whole) and absent if this was its first ingest. Either way
-	// the job still reports success. Zero on a fully indexed ingest.
+	// survive whole, and the file still answers searches with older
+	// content) and ABSENT if there were none to survive, which is a first
+	// ingest or a full rebuild whose repo-scoped drop already ran. Either
+	// way the job still reports success. Zero on a fully indexed ingest.
 	//
 	// It is carried here rather than only logged (loam-2d44) because a
-	// non-zero value is the ONLY durable record that a committed ingest was
-	// partial. Before per-file savepoints (loam-c94.24) a rejection aborted
-	// the whole transaction, so the job FAILED and the failure was the
-	// signal; savepoints deliberately removed that signal, which is what
-	// turned this counter from decorative into the only one there is.
+	// non-zero value is the durable PER-JOB record that a committed ingest
+	// was partial. Before per-file savepoints (loam-c94.24) a rejection
+	// aborted the whole transaction, so the job FAILED and the failure was
+	// the signal; savepoints deliberately removed that signal, which is
+	// what turned this counter from decorative into load-bearing.
 	//
-	// It deliberately does NOT change repos.sync_state, which stays 'idle'.
-	// Note what does and does not rule the alternatives out, because
-	// loam-qj21 inherits this reasoning: loam-c94.13's transactional
-	// invariant forbids 'error' (it would disagree with
-	// ingest_jobs.status='succeeded') but NOT a distinct 'degraded', which
-	// Pool.succeed could write in the same transaction without any
-	// disagreement. What rules 'degraded' out is the clearing rule -- a
-	// rejected file is never re-planned, since the ingested ref advanced
-	// past it and a git diff cannot name a path nobody touched, so the next
-	// unrelated ingest would write 'idle' and announce "fixed" with nothing
-	// fixed. See docs/ingestion-spec.md "Consistency & Failure" for the
-	// full argument, including the KindFull-cleared variant that dodges
-	// that and still belongs with loam-qj21 rather than here.
+	// It is a COUNT and nothing more, which is its limit: a count cannot
+	// be unioned into the next ingest's plan. The paths live in the
+	// per-path rejection ledger (chunk_rejections, loam-qj21), written in
+	// the swap's own transaction and carrying this job's id, so the two
+	// are joinable. That ledger is what actually RETRIES a rejected file
+	// -- a git diff cannot name a path nobody touched, so before it existed
+	// a rejected file was never re-planned at all.
+	//
+	// It deliberately does NOT change repos.sync_state, which stays 'idle',
+	// and the reason has moved on from loam-2d44's: the ledger now supplies
+	// an honest clearing rule (a row clears when that path's chunks land),
+	// so a distinct 'degraded' state is finally defensible. What is missing
+	// is the rest of the stack -- the proto enum member, the handler
+	// mapping and the console label -- without which the value renders as
+	// "Unspecified". See docs/ingestion-spec.md "Consistency & Failure" for
+	// the full argument and the exact remaining work.
 	FilesRejected int `json:"files_rejected"`
 }
 

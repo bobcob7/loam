@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/diffplan"
 	"github.com/bobcob7/loam/internal/ingest"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
@@ -70,6 +71,7 @@ type Orchestrator struct {
 	vectors  vectorTrack
 	dropper  dropper
 	refs     refWriter
+	ledger   rejectionLedger
 	tx       transactor
 	budgeter chunker.Budgeter
 	versions diffplan.Versions
@@ -92,6 +94,7 @@ func newOrchestrator(
 	v vectorTrack,
 	d dropper,
 	refs refWriter,
+	ledger rejectionLedger,
 	tx transactor,
 	budgeter chunker.Budgeter,
 	versions diffplan.Versions,
@@ -107,6 +110,7 @@ func newOrchestrator(
 		vectors:  v,
 		dropper:  d,
 		refs:     refs,
+		ledger:   ledger,
 		tx:       tx,
 		budgeter: budgeter,
 		versions: versions,
@@ -153,10 +157,18 @@ func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, e
 	if err != nil {
 		return ingest.Stats{}, fmt.Errorf("planning ingest for %s@%s: %w", repo.Name, job.TargetBranch, err)
 	}
+	ledgered, err := o.ledger.List(ctx, job.RepoID, job.TargetBranch)
+	if err != nil {
+		return ingest.Stats{}, fmt.Errorf("reading the rejection ledger for %s@%s: %w", repo.Name, job.TargetBranch, err)
+	}
+	retry := chunkstore.PendingPaths(ledgered)
+	plan = plan.WithRetryPaths(retry)
 	o.logger.InfoContext(ctx, "planned ingest",
 		"repo", repo.Name, "target_branch", job.TargetBranch, "job_id", job.ID,
 		"kind", plan.Kind, "escalation_reason", plan.Reason,
-		"drop_files", len(plan.DropFiles), "reparse_files", len(plan.ReparseFiles))
+		"drop_files", len(plan.DropFiles), "reparse_files", len(plan.ReparseFiles),
+		"ledgered_files", len(ledgered), "retried_files", len(retry))
+	o.warnIfExhausted(ctx, repo.Name, job, ledgered)
 	files, err := o.content.ReadFiles(ctx, mirrorDir, newRef, plan.ReparseFiles)
 	if err != nil {
 		return ingest.Stats{}, fmt.Errorf("reading %d file(s) at %s from mirror %s: %w", len(plan.ReparseFiles), newRef, mirrorDir, err)
@@ -168,7 +180,7 @@ func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, e
 	var written writeResult
 	if err := o.tx.withinTx(ctx, func(tx pgx.Tx) error {
 		var err error
-		written, err = o.writeSwap(ctx, tx, job, plan, newRef, work)
+		written, err = o.writeSwap(ctx, tx, job, plan, newRef, work, ledgered)
 		return err
 	}); err != nil {
 		return ingest.Stats{}, err
@@ -183,7 +195,7 @@ func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, e
 		"ingested_ref", newRef, "files_parsed", stats.FilesParsed, "chunks_embedded", stats.ChunksEmbedded,
 		"files_rejected", stats.FilesRejected,
 		"edges_recomputed", written.graphStats.EdgesRecomputed)
-	o.warnIfPartial(ctx, repo.Name, job, newRef, stats)
+	o.warnIfPartial(ctx, repo.Name, job, newRef, stats, written.chunkStats.Rejected)
 	return stats, nil
 }
 
@@ -201,16 +213,45 @@ func (o *Orchestrator) Run(ctx context.Context, job ingest.Job) (ingest.Stats, e
 // message would quietly drop them out of an INFO-level grep -- hiding
 // exactly the ingests this bead exists to surface.
 //
-// This is the loudest surface a rejection gets, and that is a decision, not
-// a limit reached: see internal/ingest.Stats.FilesRejected for why
+// It now names the FILES as well as the count (loam-qj21). Before the
+// ledger existed, the per-file ERROR lines carried no job id and this line
+// carried no paths, so the count was joinable to a job and the filenames
+// were not -- the paths were recoverable only by correlating two log
+// streams by timestamp. The ledger is the durable answer (its rows carry
+// job_id); this attribute is the one an operator reading logs already has
+// in front of them.
+//
+// The message says "will be retried", and that is a claim this change had
+// to earn: it is true only because the same transaction ledgered these
+// paths and the next ingest unions them into its plan. Each path is
+// tagged with what a SEARCHER sees for it right now, which is not the same
+// question and not the same urgency -- 'stale' means the file's prior
+// chunks survived the rollback and it still answers searches from an older
+// commit, 'absent' means there were none to survive and it is out of the
+// index entirely.
+//
+// This is the loudest surface a rejection gets, and that is a decision,
+// not a limit reached: see internal/ingest.Stats.FilesRejected for why
 // repos.sync_state stays 'idle'.
-func (o *Orchestrator) warnIfPartial(ctx context.Context, repoName string, job ingest.Job, newRef string, stats ingest.Stats) {
+func (o *Orchestrator) warnIfPartial(ctx context.Context, repoName string, job ingest.Job, newRef string, stats ingest.Stats, rejected []vectors.Rejection) {
 	if stats.FilesRejected == 0 {
 		return
 	}
-	o.logger.WarnContext(ctx, "ingest committed with rejected files; this repo is partially indexed until those files change again or a full rebuild runs",
+	files := make([]string, 0, len(rejected))
+	stale := make([]string, 0, len(rejected))
+	absent := make([]string, 0, len(rejected))
+	for _, r := range rejected {
+		files = append(files, r.Path)
+		if r.ChunksState == chunkstore.ChunksStale {
+			stale = append(stale, r.Path)
+			continue
+		}
+		absent = append(absent, r.Path)
+	}
+	o.logger.WarnContext(ctx, "ingest committed with rejected files; they are recorded in the rejection ledger and will be retried by the next ingest",
 		"repo", repoName, "target_branch", job.TargetBranch, "job_id", job.ID,
-		"ingested_ref", newRef, "files_rejected", stats.FilesRejected, "files_parsed", stats.FilesParsed)
+		"ingested_ref", newRef, "files_rejected", stats.FilesRejected, "files_parsed", stats.FilesParsed,
+		"files", files, "stale_chunks", stale, "absent_chunks", absent)
 }
 
 // targetBranch finds job.TargetBranch's repo_target_branches row, which
@@ -277,6 +318,15 @@ type computeResult struct {
 	prepared   vectors.Prepared
 	embedStats vectors.Stats
 	chunkStats chunker.Stats
+	// attempted is every path the chunk track actually tried to write, in
+	// plan order: the plan's reparse set MINUS whatever the mirror could
+	// not hand back (contentReader.ReadFiles skips a path that no longer
+	// resolves to a blob). writeSwap needs exactly this set, not the
+	// plan's, to decide which ledger rows this ingest is entitled to
+	// clear -- a ledgered path the reader silently skipped was never
+	// retried, and clearing it would delete the only record that its
+	// chunks are still missing.
+	attempted []string
 }
 
 // writeResult is what the write phase reported back, for the job's stats
@@ -300,6 +350,10 @@ type writeResult struct {
 // to completion for a transaction that will never open.
 func (o *Orchestrator) compute(ctx context.Context, job ingest.Job, files []File) (computeResult, error) {
 	var out computeResult
+	out.attempted = make([]string, len(files))
+	for i, f := range files {
+		out.attempted[i] = f.Path
+	}
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		inputs := make([]graph.FileInput, len(files))
@@ -344,7 +398,7 @@ func (o *Orchestrator) compute(ctx context.Context, job ingest.Job, files []File
 // The step order is the package doc comment's, and each step is its own
 // named call so the order is asserted directly by this package's tests
 // rather than inferred from a single fused write.
-func (o *Orchestrator) writeSwap(ctx context.Context, tx pgx.Tx, job ingest.Job, plan diffplan.Plan, newRef string, c computeResult) (writeResult, error) {
+func (o *Orchestrator) writeSwap(ctx context.Context, tx pgx.Tx, job ingest.Job, plan diffplan.Plan, newRef string, c computeResult, ledgered []chunkstore.Rejection) (writeResult, error) {
 	var out writeResult
 	if err := o.applyDrops(ctx, tx, job, plan); err != nil {
 		return out, err
@@ -362,6 +416,9 @@ func (o *Orchestrator) writeSwap(ctx context.Context, tx pgx.Tx, job ingest.Job,
 		return out, fmt.Errorf("persisting chunks for %s@%s: %w", job.RepoID, job.TargetBranch, err)
 	}
 	out.chunkStats = chunkStats
+	if err := o.updateLedger(ctx, tx, job, plan, newRef, c, ledgered, chunkStats); err != nil {
+		return out, err
+	}
 	versions, err := json.Marshal(o.versions)
 	if err != nil {
 		return out, fmt.Errorf("encoding ingested versions for %s@%s: %w", job.RepoID, job.TargetBranch, err)
@@ -370,6 +427,123 @@ func (o *Orchestrator) writeSwap(ctx context.Context, tx pgx.Tx, job ingest.Job,
 		return out, fmt.Errorf("recording ingested ref %s for %s@%s: %w", newRef, job.RepoID, job.TargetBranch, err)
 	}
 	return out, nil
+}
+
+// updateLedger reconciles the per-path rejection ledger with what this
+// ingest just did, inside the swap's own transaction and BEFORE
+// AdvanceIngestedRef (loam-qj21).
+//
+// The position is the whole point. The defect this ledger closes is that
+// the ingested ref advances past a rejected file, after which no diff can
+// ever name that path again. Writing the ledger in the same transaction,
+// one statement before the ref moves, is what makes "the ref advanced past
+// this path" and "this path is recorded as owed" a single atomic fact
+// instead of two that can disagree.
+//
+// CLEARING, and the two ways a path earns it:
+//
+//   - A full rebuild empties the ledger wholesale, then re-records
+//     whatever rejects during it. It has to be wholesale: KindFull exists
+//     precisely for the cases with no usable diff, so the ledger may hold
+//     paths the new tree does not contain at all and no per-path clear
+//     keyed on what was attempted could name them. This is the same
+//     argument that makes chunks' own full-rebuild drop repo-scoped.
+//   - An incremental ingest clears a ledgered path only if it was
+//     ATTEMPTED (or dropped) and did not reject again. "Attempted" is
+//     c.attempted, not plan.ReparseFiles: contentReader.ReadFiles silently
+//     skips a path that no longer resolves to a blob, and clearing a
+//     ledger row for a file nothing actually re-chunked would delete the
+//     only record that its chunks are missing. A path in plan.DropFiles is
+//     cleared too -- the file was deleted or renamed away, so nothing is
+//     owed for it any more.
+func (o *Orchestrator) updateLedger(
+	ctx context.Context,
+	tx pgx.Tx,
+	job ingest.Job,
+	plan diffplan.Plan,
+	newRef string,
+	c computeResult,
+	ledgered []chunkstore.Rejection,
+	chunkStats vectors.Stats,
+) error {
+	if plan.Kind == ingest.KindFull {
+		if err := o.ledger.ClearAll(ctx, tx, job.RepoID, job.TargetBranch); err != nil {
+			return fmt.Errorf("clearing the rejection ledger for the full rebuild of %s@%s: %w", job.RepoID, job.TargetBranch, err)
+		}
+	} else if cleared := clearablePaths(ledgered, c.attempted, plan.DropFiles, chunkStats.Rejected); len(cleared) > 0 {
+		if err := o.ledger.Clear(ctx, tx, job.RepoID, job.TargetBranch, cleared); err != nil {
+			return fmt.Errorf("clearing %d resolved rejection(s) for %s@%s: %w", len(cleared), job.RepoID, job.TargetBranch, err)
+		}
+	}
+	for _, r := range chunkStats.Rejected {
+		if err := o.ledger.Record(ctx, tx, job.RepoID, job.TargetBranch, chunkstore.RejectionInput{
+			File:        r.Path,
+			ChunksState: r.ChunksState,
+			SQLState:    r.SQLState,
+			Error:       r.Err.Error(),
+			JobID:       job.ID,
+			RejectedRef: newRef,
+		}); err != nil {
+			return fmt.Errorf("recording the rejection of %s for %s@%s: %w", r.Path, job.RepoID, job.TargetBranch, err)
+		}
+	}
+	return nil
+}
+
+// clearablePaths is the incremental clear set: every ledgered path this
+// ingest either wrote successfully or dropped. Returned in the ledger's
+// own order (path order, as ListChunkRejections sorts) so the statement is
+// deterministic and a test can assert on it directly.
+func clearablePaths(ledgered []chunkstore.Rejection, attempted, dropped []string, rejected []vectors.Rejection) []string {
+	if len(ledgered) == 0 {
+		return nil
+	}
+	resolved := make(map[string]struct{}, len(attempted)+len(dropped))
+	for _, p := range attempted {
+		resolved[p] = struct{}{}
+	}
+	for _, p := range dropped {
+		resolved[p] = struct{}{}
+	}
+	for _, r := range rejected {
+		delete(resolved, r.Path)
+	}
+	var out []string
+	for _, l := range ledgered {
+		if _, ok := resolved[l.File]; ok {
+			out = append(out, l.File)
+		}
+	}
+	return out
+}
+
+// warnIfExhausted names the ledgered paths that have spent their whole
+// attempt budget (chunkstore.MaxRejectionAttempts) and are therefore no
+// longer retried automatically. It runs once per ingest of the affected
+// repo, at planning time, because that is the only recurring surface such
+// a path has left: it is by definition not in the diff, so it produces no
+// per-file log line of its own on the ingests that skip it, and the
+// "ingest committed with rejected files" WARN below fires only for files
+// rejected by THIS job.
+//
+// A recurring WARN is exactly right here and is not the "warning that is
+// always present" anti-pattern: it fires only while an unresolved problem
+// exists, it names the specific paths, and it stops the moment the ledger
+// clears. See chunkstore.MaxRejectionAttempts for what an operator does
+// about one.
+func (o *Orchestrator) warnIfExhausted(ctx context.Context, repoName string, job ingest.Job, ledgered []chunkstore.Rejection) {
+	var paths []string
+	for _, l := range ledgered {
+		if l.State == chunkstore.RejectionExhausted {
+			paths = append(paths, l.File)
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	o.logger.WarnContext(ctx, "files have exhausted their chunk-write attempts and are no longer retried automatically; their chunks stay stale or absent until the file changes or a full rebuild runs",
+		"repo", repoName, "target_branch", job.TargetBranch, "job_id", job.ID,
+		"files", paths, "max_attempts", chunkstore.MaxRejectionAttempts)
 }
 
 // applyDrops runs step 1 of the write order. A full rebuild drops every

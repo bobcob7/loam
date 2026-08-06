@@ -59,7 +59,14 @@
 //     unchanged file's reference must resolve against a symbol a changed
 //     file has only just redefined.
 //  4. The reparse files' chunks, per file, drop-then-insert.
-//  5. repo_target_branches.ingested_ref/ingested_at/ingested_versions
+//  5. The per-path rejection ledger (chunk_rejections, loam-qj21): clear
+//     the rows this ingest resolved, then record the files the chunk
+//     store refused in step 4. Its position -- after the writes it
+//     describes and immediately BEFORE step 6 -- is the point: step 6
+//     moves the diff base past those files, after which no `git diff`
+//     can ever name them again, so "the ref advanced past this path" and
+//     "this path is recorded as owed" have to be one atomic fact.
+//  6. repo_target_branches.ingested_ref/ingested_at/ingested_versions
 //     (this bead's NOTES: the write-back belongs inside the ingest
 //     transaction, so the recorded diff base can never disagree with the
 //     index it describes).
@@ -69,6 +76,16 @@
 // usable diff, so rows may exist for files the new tree does not contain
 // and no per-file loop over the new tree could ever name them. Reversing
 // the order would drop the rebuild it had just written.
+//
+// # One read happens before the transaction, and it is an input to the plan
+//
+// The rejection ledger is READ before any of the above, alongside the repo
+// and target-branch reads, because its outstanding paths are unioned into
+// diffplan.Plan.ReparseFiles (Plan.WithRetryPaths). Without that union a
+// file the chunk store rejected is unreachable: the ingest that rejected
+// it still advanced the ingested ref, so it did not change between that
+// ref and the tip, so `git diff` names it in neither DropFiles nor
+// ReparseFiles, and nothing else re-plans it either.
 //
 // # Symbol history (loam-c94.7) is not implemented here
 //
@@ -89,6 +106,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/bobcob7/loam/internal/chunkstore"
 	"github.com/bobcob7/loam/internal/diffplan"
 	"github.com/bobcob7/loam/internal/ingest/chunker"
 	"github.com/bobcob7/loam/internal/ingest/graph"
@@ -96,7 +114,7 @@ import (
 	"github.com/bobcob7/loam/internal/reposstore"
 )
 
-//go:generate go tool moq -out moq_test.go . planner repoReader contentReader graphTrack fileChunker vectorTrack dropper refWriter transactor embedderInfo
+//go:generate go tool moq -out moq_test.go . planner repoReader contentReader graphTrack fileChunker vectorTrack dropper refWriter transactor embedderInfo rejectionLedger
 
 // planner is internal/diffplan.Planner's one method: the full-vs-
 // incremental decision, including every full-rebuild escalation trigger
@@ -189,6 +207,31 @@ type dropper interface {
 // bound and that one is not.
 type refWriter interface {
 	AdvanceIngestedRef(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, branch, ref string, ingestedAt time.Time, versions []byte) error
+}
+
+// rejectionLedger is the per-path rejection ledger (loam-qj21), split
+// across the transaction boundary the same way graphTrack and vectorTrack
+// are -- and for a stricter reason than either.
+//
+// List is a READ made before the transaction opens, because its result is
+// an input to the plan: without it, a file the chunk store rejected is
+// never re-planned at all. `git diff ingested_ref..tip` reports only paths
+// that DIFFER between the two refs, the rejected file did not change (the
+// rejecting ingest still advanced the ref, since every other file landed),
+// so it is in neither DropFiles nor ReparseFiles and nothing else brings
+// it back.
+//
+// Record/Clear/ClearAll are WRITES that take the transaction and must be
+// staged in it. A ledger written outside the swap could disagree with what
+// committed in both directions -- recording a rejection for an ingest that
+// then rolled back, or missing one for an ingest that committed -- and
+// either disagreement is worse than no ledger, because the ledger is what
+// decides whether the path is retried.
+type rejectionLedger interface {
+	List(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error)
+	Record(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error
+	Clear(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error
+	ClearAll(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error
 }
 
 // transactor runs fn inside one transaction, committing if and only if fn

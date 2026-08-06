@@ -58,6 +58,7 @@ func New(
 		vectorAdapter{indexer: ix, logger: logger},
 		storeDropper{logger: logger},
 		refAdapter{logger: logger},
+		ledgerAdapter{pool: pool, logger: logger},
 		&pgxTransactor{pool: pool},
 		emb,
 		diffplan.Versions{Grammar: GrammarVersion, Pipeline: PipelineVersion, EmbeddingModel: emb.ModelID()},
@@ -184,4 +185,33 @@ type refAdapter struct {
 func (a refAdapter) AdvanceIngestedRef(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, branch, ref string, ingestedAt time.Time, versions []byte) error {
 	_, err := reposstore.NewStoreInTx(tx, a.logger).AdvanceIngestedRef(ctx, repoID, branch, ref, ingestedAt, versions)
 	return err
+}
+
+// ledgerAdapter is rejectionLedger's production implementation over
+// chunkstore.Rejections (loam-qj21). It is the one adapter here that binds
+// to BOTH a pool and a transaction, because the seam genuinely straddles
+// the transaction boundary: List runs before the swap opens, since its
+// result is an input to the plan, while every write must be staged inside
+// the swap so the ledger can never disagree with what committed. Holding
+// the pool and taking the tx per write call is what expresses that split
+// without letting a caller accidentally write through the pool.
+type ledgerAdapter struct {
+	pool   *pgxpool.Pool
+	logger *slog.Logger
+}
+
+func (a ledgerAdapter) List(ctx context.Context, repoID uuid.UUID, targetBranch string) ([]chunkstore.Rejection, error) {
+	return chunkstore.NewRejections(a.pool, a.logger).List(ctx, repoID, targetBranch)
+}
+
+func (a ledgerAdapter) Record(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, in chunkstore.RejectionInput) error {
+	return chunkstore.NewRejectionsInTx(tx, a.logger).Record(ctx, repoID, targetBranch, in)
+}
+
+func (a ledgerAdapter) Clear(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string, paths []string) error {
+	return chunkstore.NewRejectionsInTx(tx, a.logger).Clear(ctx, repoID, targetBranch, paths)
+}
+
+func (a ledgerAdapter) ClearAll(ctx context.Context, tx pgx.Tx, repoID uuid.UUID, targetBranch string) error {
+	return chunkstore.NewRejectionsInTx(tx, a.logger).ClearAll(ctx, repoID, targetBranch)
 }

@@ -122,6 +122,21 @@ func newFakeStore() (*storeMock, *[]replaceCall) {
 			*calls = append(*calls, replaceCall{repoID: repoID, targetBranch: targetBranch, file: file, inputs: inputs})
 			return nil, nil
 		},
+		// The default answer is "this file has no chunks", i.e. a
+		// rejection here classifies as chunkstore.ChunksAbsent. That is
+		// the honest default for a fake with no table behind it: nothing
+		// in these unit tests ever wrote a chunk anywhere, so reporting
+		// surviving prior chunks would be a fiction. Tests that care
+		// about the stale/absent distinction override this, and the ones
+		// that genuinely need a real table live in integration_test.go.
+		//
+		// It is configured at all because an unconfigured moq method
+		// panics, and Persist calls this on every rejection path -- so
+		// leaving it nil would turn every rejection test in this file
+		// into a panic rather than an assertion (loam-qj21).
+		CountFileChunksFunc: func(_ context.Context, _ uuid.UUID, _, _ string) (int, error) {
+			return 0, nil
+		},
 	}
 	return mock, calls
 }

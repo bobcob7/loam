@@ -12,6 +12,35 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
+const countChunksByFile = `-- name: CountChunksByFile :one
+SELECT count(*) FROM chunks
+WHERE repo_id = $1 AND target_branch = $2 AND file = $3
+`
+
+type CountChunksByFileParams struct {
+	RepoID       pgtype.UUID
+	TargetBranch string
+	File         string
+}
+
+// How many chunks rows one file currently has (loam-qj21). Called only on
+// the rejection path, to decide whether a rejected file is STALE (its
+// prior chunks survived the ROLLBACK TO SAVEPOINT, so it is still
+// searchable at an older commit) or ABSENT (there were none to survive --
+// a first ingest, or a full rebuild whose repo-scoped drop already removed
+// them outside the savepoints).
+//
+// It must run on the SAME transaction as the write it is describing: read
+// through a separate connection it would not observe the full rebuild's
+// own uncommitted DELETE, and would report 'stale' for a file whose chunks
+// this very transaction has already thrown away.
+func (q *Queries) CountChunksByFile(ctx context.Context, arg CountChunksByFileParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countChunksByFile, arg.RepoID, arg.TargetBranch, arg.File)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteChunksByFile = `-- name: DeleteChunksByFile :exec
 DELETE FROM chunks
 WHERE repo_id = $1 AND target_branch = $2 AND file = $3

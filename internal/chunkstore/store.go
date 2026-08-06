@@ -313,6 +313,40 @@ func (s *Store) DropRepoBranch(ctx context.Context, repoID uuid.UUID, targetBran
 	return nil
 }
 
+// CountFileChunks reports how many chunks rows (repoID, targetBranch,
+// file) currently has (loam-qj21).
+//
+// It exists for exactly one caller and one question: after the store has
+// REJECTED a file, is that file still searchable? A rejection unwinds to
+// the call's own SAVEPOINT, so a file that was already indexed keeps its
+// prior chunks and is merely STALE, while a file with none -- a first
+// ingest, or a full rebuild whose repo-scoped DropRepoBranch already
+// deleted them outside the savepoints -- is ABSENT from search entirely.
+// Those are different problems and the ledger records which one happened.
+//
+// It deliberately runs through the Store's own transactor rather than
+// against a fresh connection, so under NewInTx it observes the caller's
+// UNCOMMITTED writes. That is the whole point: a full rebuild's drop has
+// not committed yet when this runs, and a count that could not see it
+// would report "stale" for a file whose chunks this very transaction has
+// already thrown away.
+func (s *Store) CountFileChunks(ctx context.Context, repoID uuid.UUID, targetBranch, file string) (int, error) {
+	var count int64
+	err := s.tx.withinTx(ctx, func(q queries) error {
+		var err error
+		count, err = q.CountChunksByFile(ctx, gen.CountChunksByFileParams{
+			RepoID:       pgUUID(repoID),
+			TargetBranch: targetBranch,
+			File:         file,
+		})
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("counting chunks for repo %s file %s: %w", repoID, file, err)
+	}
+	return int(count), nil
+}
+
 // Search returns the limit nearest chunks to embedding by cosine distance
 // (the chunks_embedding HNSW index's vector_cosine_ops), restricted to
 // targetBranch and to repoIDs — the scope's repo ids
