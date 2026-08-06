@@ -38,8 +38,20 @@ var (
 	// TestHelmChartCanCarryEveryConfigVariable green, because the paragraph
 	// of prose above the deleted lines still contained the name.
 	helmCommentBlock = regexp.MustCompile(`(?s)\{\{-?\s*/\*.*?\*/\s*-?\}\}`)
-	helmYAMLComment  = regexp.MustCompile(`(?m)^[ \t]*#.*$`)
-	loamEnvName      = regexp.MustCompile(`LOAM_[A-Z0-9_]+`)
+	// Everything from a `#` to end of line, NOT just whole-line comments.
+	// The whole-line form was the first version and it had the same hole M2
+	// exposed in the block-comment stripper, reached through YAML's comment
+	// syntax instead of Helm's: a TRAILING comment (`failureThreshold: 60 #
+	// ~5 minutes` is the shape this chart already uses) survives it, so a
+	// deleted emission could be masked by prose on the line above.
+	//
+	// Stripping from any `#` will also cut a `#` that appears inside a
+	// quoted value. That is deliberate, and it is the safe direction: the
+	// only effect is that a name is not FOUND, which makes
+	// TestHelmChartCanCarryEveryConfigVariable fail loudly. Being too
+	// permissive here is what fails silently.
+	helmYAMLComment = regexp.MustCompile(`(?m)#.*$`)
+	loamEnvName     = regexp.MustCompile(`LOAM_[A-Z0-9_]+`)
 )
 
 // helmChartEnvNames returns every LOAM_* environment-variable name the chart

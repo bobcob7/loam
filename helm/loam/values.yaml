@@ -4,10 +4,14 @@
 # edit it in place.
 #
 # EVERY KEY IN THIS FILE IS SCHEMA-CHECKED. values.schema.json sits beside
-# it with "additionalProperties": false at every level, so a key that is
-# not declared there -- a typo, a rename, a value invented against a newer
-# chart -- makes `helm template`/`install`/`upgrade` FAIL rather than be
-# silently ignored. That is not hardening for its own sake: loam-uwus was
+# it, and every object in it DECLARES whether it accepts unknown keys, so a
+# key that is not declared there -- a typo, a rename, a value invented
+# against a newer chart -- makes `helm template`/`install`/`upgrade` FAIL
+# rather than be silently ignored. (Declares, not closes: nodeSelector,
+# affinity and the resource blocks are deliberately open, because each is a
+# verbatim passthrough of a slice of the Kubernetes API that a partial
+# restatement in the schema would reject valid input for. Each says so in
+# its own description.) That is not hardening for its own sake: loam-uwus was
 # filed because rendering this chart with `--set config.otelEndpoint=...
 # --set terminationGracePeriodSeconds=45` produced a ZERO-BYTE diff against
 # the default render back when neither key existed and no schema did. A
@@ -290,21 +294,28 @@ ingress:
 #        -- a 30s drain against Kubernetes' 30s default -- so this is not
 #        a cost telemetry introduced. It made an existing zero margin
 #        negative.)
-#  +10s  margin for the steps that are real but unbounded by any constant,
-#        all of which fall outside the two budgets above:
-#          - SIGTERM delivery and Go runtime signal handling: the kubelet
-#            starts this clock when it sends the signal, not when the
-#            process observes it.
-#          - db.Close (pgxpool), the top-of-function defer in serve, which
-#            therefore runs strictly AFTER the flush and waits for
-#            in-flight connections to be released.
-#          - process teardown and exit-status reporting after that.
+#  +10s  margin, sized for ONE step rather than three. db.Close (pgxpool)
+#        is serve's top-of-function defer, so it runs strictly AFTER the
+#        flush, and it is the only participant in the entire sequence with
+#        NO bound of its own: it blocks until every in-flight connection
+#        is returned, for as long as that takes. The other unbudgeted
+#        steps are real but are milliseconds -- SIGTERM delivery and Go
+#        signal handling (the kubelet starts this clock when it SENDS the
+#        signal, not when the process observes it), and process teardown
+#        after db.Close returns. Worth being precise about, because the
+#        day someone asks whether 10s is still enough, the question is
+#        about the pool.
 #  ====
-#   45s  what we set.
+#   45s  what we set, and what values.schema.json ENFORCES as its minimum.
+#        The schema deliberately does not admit the 35s floor: it is the
+#        only guard a consumer's own valuesObject passes through, so a
+#        floor there would let an override take the value this comment
+#        spends ten lines calling unsafe.
 #
 # Raising this is cheap; the pod only uses the time it needs, because the
-# kubelet moves on as soon as the process exits. Lowering it below 35 is
-# not a tuning knob -- it silently truncates the drain or the flush.
+# kubelet moves on as soon as the process exits. Lowering it is not a
+# tuning knob -- below 35 it silently truncates the drain or the flush,
+# and between 35 and 45 it removes the margin above.
 # -----------------------------------------------------------------------
 terminationGracePeriodSeconds: 45
 

@@ -362,14 +362,16 @@ Three things about the value are worth getting right the first time:
   concept, so 0 silences traces while metrics keep being pushed. To stop
   both, clear the endpoint.
 
-There is no collector in this stack, on purpose. Unlike the bundled ollama
-profile — which exists because loam does not *work* without an embedder — a
-collector adds no loam functionality, and it is a pipe that needs somewhere
-to empty into, so shipping one would mean shipping a tracing backend too and
-making the quickstart several services heavier for a reader who wanted to try
-loam. If you want one inside this project's network anyway, the bottom of
-`deploy/docker-compose.yml` has a ready-to-paste service definition and a
-minimal collector config to go with it.
+There is no collector in this stack, on purpose, and the reason is not that
+it would make the quickstart heavier — `profiles:` already answers that, as
+the bundled ollama demonstrates. It is that a collector is a *pipe*, and the
+only one we could ship without also picking your tracing backend is one whose
+exporter writes your spans to its own stdout and throws them away. That is
+worse than shipping nothing, because it looks like observability: a healthy
+container, a reachable endpoint, and nothing retained. If you want one inside
+this project's network anyway, the bottom of `deploy/docker-compose.yml` has
+a ready-to-paste service definition and a minimal collector config to go with
+it.
 
 ---
 

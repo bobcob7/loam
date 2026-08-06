@@ -58,8 +58,14 @@ This table adds the deployment angle: where each value comes from in
 Three things worth being explicit about, since the chart's comments only hint at them:
 
 - **Unknown values keys are now a render failure, not a silent no-op.**
-  `helm/loam/values.schema.json` sets `additionalProperties: false` at every
-  object level. Before it existed, Helm accepted and discarded any key it did
+  Every object in `helm/loam/values.schema.json` *declares* whether it accepts
+  unknown keys, and all but three are closed. The exceptions — `nodeSelector`,
+  `affinity`, and the `resources` blocks — are verbatim passthroughs of slices
+  of the Kubernetes API, where a partial restatement in the schema would
+  reject valid input (`resources.limits.ephemeral-storage`,
+  `nvidia.com/gpu`, `resources.claims`); each says so in its own description,
+  and `internal/deploycheck` requires the declaration rather than any
+  particular answer. Before the schema existed, Helm accepted and discarded any key it did
   not recognise: rendering this chart with `--set config.otelEndpoint=...
   --set terminationGracePeriodSeconds=45` produced a **zero-byte diff**
   against the default render, so a plausible-looking wiring in an ArgoCD
@@ -94,10 +100,18 @@ strictly after them. That is a 35s floor.
 
 35 is a floor and not a safe value: setting it exactly reproduces the zero
 margin that made Kubernetes' 30s default wrong to begin with, with the
-SIGKILL racing the process exit. The extra 10s covers the steps no constant
-bounds — SIGTERM delivery and Go signal handling (the kubelet starts the
-clock when it *sends* the signal), and the deferred `pgxpool` close that runs
-after the flush.
+SIGKILL racing the process exit. So `values.schema.json` enforces a minimum of
+**45, not 35** — it is the only guard a consumer's own `valuesObject` passes
+through, and a floor there would admit exactly the value this section calls
+unsafe.
+
+The extra 10s is sized for one step, not three: `db.Close` runs strictly
+*after* the flush (it is `serve`'s top-of-function defer) and is the only
+participant in the sequence with **no bound of its own** — `pgxpool.Close`
+blocks until every in-flight connection is returned. SIGTERM delivery, Go
+signal handling and process teardown are real and belong in the accounting,
+but they are milliseconds. If anyone ever asks whether 10s is still enough,
+the question is about the pool.
 
 Two things follow that are easy to get backwards:
 

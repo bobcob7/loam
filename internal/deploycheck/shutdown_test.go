@@ -28,17 +28,18 @@ import (
 // Why the sum alone is not the bar, and why this is not fussiness: 30s drain
 // + 5s flush = 35s is the FLOOR. Setting exactly 35 reproduces precisely the
 // zero margin that made the Kubernetes default (30s against a 30s drain)
-// wrong in the first place -- the SIGKILL would race the process exit. Ten
-// seconds covers the steps no constant bounds, all of which sit outside both
-// budgets:
+// wrong in the first place -- the SIGKILL would race the process exit.
 //
-//   - SIGTERM delivery and Go runtime signal handling. The kubelet (and
-//     compose) start this clock when the signal is SENT, not when the
-//     process observes it.
-//   - db.Close, serve's top-of-function defer, which therefore runs strictly
-//     AFTER the telemetry flush and waits for in-flight pgx connections to
-//     be released.
-//   - process teardown and exit reporting after that.
+// Ten seconds is sized for ONE step, not three. db.Close is serve's
+// top-of-function defer, so it runs strictly AFTER the telemetry flush, and
+// it is the only participant in the whole sequence with NO bound of its own:
+// pgxpool.Close blocks until every in-flight connection is returned, for as
+// long as that takes. The other two unbudgeted steps -- SIGTERM delivery and
+// Go runtime signal handling, and process teardown after db.Close returns --
+// are real and belong in the accounting, but they are milliseconds. Sizing
+// the margin as though it were three comparable costs would misplace where
+// the risk actually is, which matters the day someone asks whether 10s is
+// still enough: the question is about the pool, not about signal delivery.
 const shutdownMargin = 10 * time.Second
 
 // shutdownBudgetName matches the constants in cmd/server that make up the
@@ -212,6 +213,34 @@ func TestChartGracePeriodExceedsGoShutdownBudget(t *testing.T) {
 		grace, budget, shutdownMargin, budget)
 }
 
+// TestDeploymentTemplateConsumesTheGracePeriod is the test whose absence
+// made every other test in this file prove the wrong thing, and it was found
+// by mutation: deleting the terminationGracePeriodSeconds line from
+// templates/deployment.yaml left all fourteen tests green while restoring
+// the ORIGINAL loam-uwus defect exactly.
+//
+// The tests around this one read values.yaml, values.schema.json and the
+// compose file. Every one of them proves the number is DECLARED and
+// VALIDATED. Not one of them proves it reaches a pod -- and "a values key
+// that exists and goes nowhere" is not an incidental gap here, it is
+// verbatim the failure this bead exists to end. The old chart's problem was
+// never that its values were wrong; it was that they were unconsumed.
+//
+// So this checks the consuming end: the Pod spec must set the field, and it
+// must set it FROM the value rather than from a literal, since a hardcoded
+// 45 would satisfy the first half while quietly ignoring every override a
+// consumer's valuesObject makes.
+func TestDeploymentTemplateConsumesTheGracePeriod(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(helmTemplatesDir, "deployment.yaml"))
+	require.NoError(t, err)
+	body := helmYAMLComment.ReplaceAllString(helmCommentBlock.ReplaceAllString(string(raw), ""), "")
+	assert.Contains(t, body, "terminationGracePeriodSeconds:",
+		"templates/deployment.yaml sets no terminationGracePeriodSeconds, so Kubernetes' 30s default applies and the pod is SIGKILLed mid-shutdown -- exactly the loam-uwus defect. values.yaml declaring the value changes nothing on its own; an unconsumed values key is what this whole bead is about")
+	assert.Contains(t, body, ".Values.terminationGracePeriodSeconds",
+		"templates/deployment.yaml sets terminationGracePeriodSeconds from something other than .Values.terminationGracePeriodSeconds; a literal here satisfies the check above while silently ignoring every consumer override, which is the same class of failure one level down")
+}
+
 // TestComposeGracePeriodExceedsGoShutdownBudget is the same property for the
 // single-machine stack, and the exposure there is WORSE than Kubernetes',
 // which is easy to miss when k8s is the deployment you are thinking about.
@@ -247,9 +276,18 @@ func TestComposeGracePeriodExceedsGoShutdownBudget(t *testing.T) {
 //
 // That minimum is therefore load-bearing, and it is a hand-written number in
 // a JSON file -- precisely the shape doc.go warns rots. So this test
-// re-derives the floor from cmd/server's constants and asserts the schema
-// still states it. Tuning a Go timeout without updating the schema is a red
-// test here, not a bound that silently stopped meaning anything.
+// re-derives it from cmd/server's constants and asserts the schema still
+// states it. Tuning a Go timeout without updating the schema is a red test
+// here, not a bound that silently stopped meaning anything.
+//
+// It re-derives FLOOR PLUS MARGIN, not the bare floor, and the distinction
+// is the whole point of the test rather than a detail of it. An earlier
+// version asserted the sum alone, which set the schema minimum to 35 while
+// values.yaml, the compose file and the two tests above all required 45 --
+// so the single guard that a consumer's own valuesObject actually passes
+// through was the one place admitting the value everything else in this
+// change argues is unsafe. A schema floor below the required value is not a
+// lenient floor; it is a floor that does not enforce the thing it exists for.
 func TestValuesSchemaGracePeriodFloorMatchesGoConstants(t *testing.T) {
 	t.Parallel()
 	budget := totalShutdownBudget(t)
@@ -266,6 +304,8 @@ func TestValuesSchemaGracePeriodFloorMatchesGoConstants(t *testing.T) {
 	minimum := schema.Properties.TerminationGracePeriodSeconds.Minimum
 	require.NotNil(t, minimum,
 		"values.schema.json declares no minimum for terminationGracePeriodSeconds; a consumer's valuesObject could set it below cmd/server's %s shutdown budget and Helm would render it happily", budget)
-	assert.Equal(t, budget.Seconds(), *minimum,
-		"values.schema.json's terminationGracePeriodSeconds minimum is %v but cmd/server's bounded shutdown steps now sum to %s; the schema is the only guard a consumer's own valuesObject passes through, so a stale floor there is a floor that means nothing", *minimum, budget)
+	required := budget + shutdownMargin
+	assert.Equal(t, required.Seconds(), *minimum,
+		"values.schema.json's terminationGracePeriodSeconds minimum is %v, but cmd/server's bounded shutdown steps sum to %s and the required value is %s (sum plus %s of margin). The schema is the ONLY guard a consumer's own valuesObject passes through, so it must enforce what is actually required -- a minimum set to the bare sum admits precisely the zero-margin value everything else here refuses.",
+		*minimum, budget, required, shutdownMargin)
 }
