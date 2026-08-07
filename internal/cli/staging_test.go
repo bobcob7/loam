@@ -281,13 +281,20 @@ func legacyStagingWorkspace(root, legacyRoot, agentIdentifier string) *workspace
 	return newWorkspace(cloneRoot, agentIdentifier, root, lookup)
 }
 
+// legacyStagedPath is where the pre-fix, cwd-derived staging root put the
+// staged document: the exact string adoptLegacyStaging composes and names
+// in its failure messages.
+func legacyStagedPath(legacyRoot, agent string) string {
+	return filepath.Join(legacyRoot, loamDirName, stagingDirName, testRepo, testWorkBranch, agent, stagedFileName)
+}
+
 // writeLegacyStaged plants a staged.json where the pre-fix, cwd-derived
 // staging root would have put it.
 func writeLegacyStaged(t *testing.T, legacyRoot, agent, contents string) {
 	t.Helper()
-	dir := filepath.Join(legacyRoot, loamDirName, stagingDirName, testRepo, testWorkBranch, agent)
-	require.NoError(t, os.MkdirAll(dir, stagingDirPerm))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, stagedFileName), []byte(contents), stagingFilePerm))
+	path := legacyStagedPath(legacyRoot, agent)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), stagingDirPerm))
+	require.NoError(t, os.WriteFile(path, []byte(contents), stagingFilePerm))
 }
 
 // TestOpenStaging_AdoptsStagedCommentsLeftAtThePreviousLocation proves the
@@ -353,18 +360,85 @@ func TestOpenStaging_ExistingStagedComments_AreNotOverwrittenByTheLegacyOnes(t *
 // exists but cannot be read is exactly the case where carrying on would
 // present an empty staging area as the answer — and an empty staging area
 // presented as the answer is this whole bead.
+//
+// THE UNREADABILITY IS INJECTED WITH FILESYSTEM SHAPE, NOT MODE BITS, AND
+// THAT IS THE POINT OF loam-9g17. The obvious spelling is
+// os.Chmod(legacyFile, 0o000), and it worked on every developer machine
+// and nowhere that mattered: the per-PR gate runs `go test ./... -race`
+// inside golang:1.26.5 as uid 0, root bypasses DAC mode bits outright, the
+// read succeeded, err was nil, and this assertion held main red for days.
+// It is not a flake — it is deterministic, and deterministically invisible
+// to everyone who ran the suite locally.
+//
+// The repo's established answer to that shape is
+// `if os.Geteuid() == 0 { t.Skip(...) }` (four sites at the time of
+// writing, one of them ninety lines below). It is one line and it is
+// consistent, and it buys a green gate by making the gate stop looking —
+// at a branch that exists because loam-rgyg silently lost a reviewer's
+// staged comments. A check that cannot fail is not a check, and a skip and
+// a pass are indistinguishable in the summary output CI is read from.
+//
+// EISDIR and ENOTDIR are not permission checks, so uid 0 receives them
+// exactly as an unprivileged user does, and both land in the SAME arm of
+// adoptLegacyStaging: the non-ErrNotExist branch of os.ReadFile. What they
+// do not reproduce is EACCES specifically. That is an acceptable loss
+// because adoptLegacyStaging does not discriminate on errno — every read
+// error that is not "absent" is fatal by the same line — so the errno is
+// not part of the behaviour under test. What is under test is that a
+// legacy document which is PRESENT and UNREADABLE fails loudly and names
+// itself instead of being reported as an empty staging area, and that is
+// now asserted on every machine, at every uid, including inside the gate.
+//
+// Each case re-reads the corrupted path with a plain os.ReadFile first. If
+// a future runtime, filesystem, or privilege level ever made one of these
+// shapes readable, the test would say "precondition" rather than quietly
+// asserting nothing — which is the failure mode the mode-bit version had.
 func TestOpenStaging_UnreadableLegacyDocument_FailsRatherThanReportingEmpty(t *testing.T) {
 	t.Parallel()
-	root := realTempDir(t)
-	legacyRoot := realTempDir(t)
-	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":2,"items":[{"id":"s1","body":"unreachable"}]}`)
-	legacyFile := filepath.Join(legacyRoot, loamDirName, stagingDirName, testRepo, testWorkBranch, testReviewer, stagedFileName)
-	require.NoError(t, os.Chmod(legacyFile, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(legacyFile, stagingFilePerm) })
-	_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, errStagingArea)
-	assert.Contains(t, err.Error(), legacyFile, "the failure must name the document it could not carry over")
+	for _, tc := range []struct {
+		name    string
+		corrupt func(t *testing.T, legacyFile string)
+	}{
+		{
+			// A directory standing where the document belongs: the open
+			// succeeds and the READ fails with EISDIR.
+			name: "the staged document is a directory",
+			corrupt: func(t *testing.T, legacyFile string) {
+				require.NoError(t, os.Remove(legacyFile))
+				require.NoError(t, os.Mkdir(legacyFile, stagingDirPerm))
+			},
+		},
+		{
+			// A regular file standing where the per-agent directory
+			// belongs: the failure is ENOTDIR, one component earlier, at
+			// the open rather than the read. Go does not fold ENOTDIR into
+			// os.ErrNotExist (syscall.Errno.Is maps only ENOENT), so this
+			// is a genuine read failure and not the "no legacy document
+			// here" path — which would return nil and prove nothing.
+			name: "a path component is not a directory",
+			corrupt: func(t *testing.T, legacyFile string) {
+				agentDir := filepath.Dir(legacyFile)
+				require.NoError(t, os.RemoveAll(agentDir))
+				require.NoError(t, os.WriteFile(agentDir, []byte("not a directory"), stagingFilePerm))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := realTempDir(t)
+			legacyRoot := realTempDir(t)
+			writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":2,"items":[{"id":"s1","body":"unreachable"}]}`)
+			legacyFile := legacyStagedPath(legacyRoot, testReviewer)
+			tc.corrupt(t, legacyFile)
+			_, readErr := os.ReadFile(legacyFile)
+			require.Error(t, readErr, "precondition: the legacy document must really be unreadable to whoever is running this test")
+			require.NotErrorIs(t, readErr, os.ErrNotExist, "precondition: it must be unreadable, not absent — absent is the do-nothing path")
+			_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
+			require.Error(t, err, "a legacy document that cannot be read must not be reported as an empty staging area")
+			assert.ErrorIs(t, err, errStagingArea)
+			assert.Contains(t, err.Error(), legacyFile, "the failure must name the document it could not carry over")
+		})
+	}
 }
 
 // TestOpenStaging_NoLegacyDocument_IsAnOrdinaryEmptyStagingArea is the
@@ -446,11 +520,27 @@ func TestOpenStaging_EmptyLegacyDocument_IsNotAdoptedAndDoesNotCloseTheDoor(t *t
 // that is read successfully and then cannot be written to the new location
 // is the one path in adoption that would silently drop comments, so it must
 // be the loudest.
+//
+// This one used to chmod the destination directory to 0o500 and skip under
+// root, for the same reason the read half used to chmod the document — and
+// with the same consequence, that the gate never once exercised the branch
+// (loam-9g17). The destination is instead made unwritable by shape: the
+// staged file name is already a symlink to sub/x, and sub does not exist.
+//
+// That shape is chosen to thread a narrow gap. It must be INVISIBLE to
+// adoption's own "is there already a staged.json here" probe, which treats
+// only os.ErrNotExist as "no" and returns any other error before ever
+// reaching the write — a dangling symlink reads as ENOENT, so the probe
+// says "no" and adoption proceeds exactly as it would into a clean
+// directory. It must then make os.Root's create FAIL, which it does,
+// because the create follows the symlink and the parent directory of its
+// target is missing. And it must be immune to uid 0, which ENOENT is:
+// root does not get to open a file whose directory does not exist. The
+// symlink stays inside the staging root throughout, so this is a write
+// failure and not a containment refusal — the escape cases are separate
+// tests above and must not be what this one accidentally asserts.
 func TestOpenStaging_UnwritableDestination_FailsRatherThanDroppingTheBatch(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: mode bits do not deny writes")
-	}
 	root := realTempDir(t)
 	legacyRoot := realTempDir(t)
 	writeLegacyStaged(t, legacyRoot, testReviewer, `{"version":1,"next_id":3,"items":[
@@ -458,12 +548,15 @@ func TestOpenStaging_UnwritableDestination_FailsRatherThanDroppingTheBatch(t *te
 		{"id":"s2","body":"second finding"}]}`)
 	dest := filepath.Join(root, loamDirName, stagingDirName, testRepo, testWorkBranch, testReviewer)
 	require.NoError(t, os.MkdirAll(dest, stagingDirPerm))
-	require.NoError(t, os.Chmod(dest, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(dest, stagingDirPerm) })
+	blocked := filepath.Join(dest, stagedFileName)
+	plantSymlink(t, filepath.Join("sub", "x"), blocked)
+	_, statErr := os.Stat(blocked)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "precondition: the symlink must dangle, so adoption's probe sees no staged.json and proceeds to the write")
 	_, err := openStagingStore(legacyStagingWorkspace(root, legacyRoot, testReviewer), testRepo, testWorkBranch)
 	require.Error(t, err, "a batch that could not be carried over must not be reported as an empty staging area")
 	assert.ErrorIs(t, err, errStagingArea)
 	assert.Contains(t, err.Error(), filepath.Join(legacyRoot, loamDirName), "the failure must name the document it could not carry over")
+	assert.NoFileExists(t, filepath.Join(dest, "sub", "x"), "a write that could not be completed must not have half-landed at the symlink's target")
 }
 
 // TestOpenStaging_UnparseableLegacyDocument_FailsRatherThanReportingEmpty
