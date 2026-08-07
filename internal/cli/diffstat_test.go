@@ -90,6 +90,23 @@ func TestComputeDiffStat_RenameWithNoContentChange(t *testing.T) {
 	assert.Equal(t, "new/path.go", stat.Files[0].Path)
 }
 
+// TestComputeDiffStat_RenameIntoAPathContainingTheHeaderSeparator is why
+// the `rename to` branch exists at all. For an ordinary rename the
+// `diff --git` fallback already recovers the destination from the last
+// " b/", so nothing distinguishes the two routes -- until the destination
+// path itself contains " b/", at which point the fallback splits in the
+// wrong place and only the explicit `rename to` line is right. Without this
+// case, deleting the branch entirely changes no observable behaviour.
+func TestComputeDiffStat_RenameIntoAPathContainingTheHeaderSeparator(t *testing.T) {
+	t.Parallel()
+	const dst = "docs/section b/notes.md"
+	assert.NotEqual(t, dst, pathFromDiffGitLine("a/notes.md b/"+dst), "precondition: the header-line fallback cannot recover this path, which is what makes `rename to` load-bearing")
+	diff := "diff --git a/notes.md b/" + dst + "\nsimilarity index 100%\nrename from notes.md\nrename to " + dst + "\n"
+	stat := computeDiffStat(diff)
+	require.Len(t, stat.Files, 1)
+	assert.Equal(t, dst, stat.Files[0].Path)
+}
+
 // TestPathFromDiffGitLine covers the fallback path namer directly,
 // including the case a naive split on the first space gets wrong.
 func TestPathFromDiffGitLine(t *testing.T) {
@@ -136,17 +153,24 @@ func TestDiffWasTruncated_DetectsTheServersMarker(t *testing.T) {
 	assert.Equal(t, 1, stat.FilesChanged, "the part that DID arrive is still summarized")
 }
 
-// TestDiffWasTruncated_IgnoresTheMarkerInThePatchBody is the false-positive
-// guard, and it is not hypothetical: internal/gitdiff's own source contains
-// that sentence, so any diff touching that file carries it in its content.
-// Only a marker in the TAIL means truncation.
-func TestDiffWasTruncated_IgnoresTheMarkerInThePatchBody(t *testing.T) {
+// TestDiffWasTruncated_OnlyTheTailCounts is the false-positive guard. The
+// marker is always the LAST thing in a truncated diff, so a match anywhere
+// earlier is content, not truncation -- and content is exactly where it can
+// appear, since internal/gitdiff's own source carries that sentence and any
+// diff touching that file reproduces it.
+//
+// The fixture places a genuine, byte-for-byte match at the START and then
+// pushes it out of the tail with padding, which is the only construction
+// that actually distinguishes a tail search from a whole-text one: a
+// fixture whose "marker" differs from the real one at all (an escaped
+// newline, say) would pass under either implementation and prove nothing.
+func TestDiffWasTruncated_OnlyTheTailCounts(t *testing.T) {
 	t.Parallel()
-	body := "diff --git a/diff.go b/diff.go\n--- a/diff.go\n+++ b/diff.go\n@@ -1 +1 @@\n" +
-		"+const marker = \"\\n... diff truncated at %d bytes; git produced more\"\n"
-	padding := strings.Repeat("+padding line to push the marker out of the tail\n", 100)
-	assert.False(t, diffWasTruncated(body+padding))
-	assert.False(t, computeDiffStat(body+padding).Truncated)
+	marker := diffTruncatedNeedle + "4194304 bytes; git produced more ...\n"
+	require.True(t, diffWasTruncated("some diff"+marker), "precondition: this IS the marker, so the test below is not passing on a near-miss")
+	padded := "some diff" + marker + strings.Repeat("+padding pushing the marker out of the tail\n", 100)
+	require.Greater(t, len(padded)-len("some diff"+marker), diffTruncatedTailBytes, "precondition: the padding must exceed the tail window")
+	assert.False(t, diffWasTruncated(padded))
 }
 
 // TestHumanDiffStat_ReportsEveryFileAndTheSummary pins the human rendering

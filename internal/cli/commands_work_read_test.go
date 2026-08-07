@@ -865,19 +865,41 @@ func TestRunWorkDiff_OutsideAClone_ReportsThatTheCheckWasSkipped(t *testing.T) {
 
 // TestRunWorkDiff_DifferentCloneCheckedOut_DoesNotCompareAgainstIt guards
 // the case that would produce a confidently wrong answer: standing in some
-// OTHER repository, whose HEAD has nothing to do with this work branch.
+// OTHER clone, whose HEAD has nothing to do with this work branch.
+//
+// The two halves of insideCloneOf are exercised SEPARATELY on purpose. A
+// single fixture differing in both repo and branch would pass even if one
+// of the two checks were deleted -- the other would still catch it -- which
+// is precisely the "what do the fixtures make indistinguishable" trap. The
+// same-branch-name case is not contrived either: work-branch names are
+// randomly generated per repo, but an agent running several repos' clones
+// side by side is the ordinary shape here.
 func TestRunWorkDiff_DifferentCloneCheckedOut_DoesNotCompareAgainstIt(t *testing.T) {
 	t.Parallel()
-	refs := advertisingRefs()
-	refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testLocalHeadSHA, nil }
-	var encoded any
-	ws := cloneWorkspace("someone-else/other-repo", "wb-different")
-	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), ws, refs, &encoded), []string{testRepo, testWorkBranch})
-	require.NoError(t, err)
-	out, ok := encoded.(workDiffOutput)
-	require.True(t, ok)
-	assert.Empty(t, out.LocalHeadSHA)
-	assert.Empty(t, refs.RevParseCalls())
+	tests := []struct {
+		name       string
+		repo       string
+		workBranch string
+	}{
+		{"different repo, same branch name", "someone-else/other-repo", testWorkBranch},
+		{"same repo, different branch", testRepo, "wb-different"},
+		{"neither matches", "someone-else/other-repo", "wb-different"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			refs := advertisingRefs()
+			refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testLocalHeadSHA, nil }
+			var encoded any
+			ws := cloneWorkspace(tt.repo, tt.workBranch)
+			err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), ws, refs, &encoded), []string{testRepo, testWorkBranch})
+			require.NoError(t, err)
+			out, ok := encoded.(workDiffOutput)
+			require.True(t, ok)
+			assert.Empty(t, out.LocalHeadSHA)
+			assert.Empty(t, refs.RevParseCalls(), "no local git fact may be read from a clone that is not this work branch's")
+		})
+	}
 }
 
 // TestRunWorkDiff_LsRemoteFailure_ReportsWhyRatherThanOmitting pins that an
