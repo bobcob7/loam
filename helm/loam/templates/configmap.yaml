@@ -26,12 +26,14 @@ data:
   LOAM_INGEST_WORKERS: {{ .Values.config.ingestWorkers | quote }}
   LOAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   {{- /*
-  OpenTelemetry (loam-uwus). Each key is emitted ONLY when its value is
-  non-empty, so a release that configures no telemetry renders exactly
-  the ConfigMap this chart produced before these keys existed -- no empty
-  strings, no new data entries. internal/config would treat an emitted
-  empty string as unset anyway (env.go's lookupDefault/parseFloatEnv), so
-  this `if` buys a clean manifest rather than correctness.
+  OpenTelemetry (loam-uwus; the fourth key added by loam-wu10, one release
+  after internal/config started reading it). Each key is emitted ONLY when
+  its value is non-empty, so a release that configures no telemetry renders
+  exactly the ConfigMap this chart produced before these keys existed -- no
+  empty strings, no new data entries. internal/config would treat an emitted
+  empty string as unset anyway (env.go's lookupDefault, parseFloatEnv and
+  parseDurationEnv), so this `if` buys a clean manifest rather than
+  correctness.
   LOAM_OTEL_ENDPOINT is the only enable switch; with it absent the server
   creates no exporter at all. See values.yaml's config.otel* comments.
   */ -}}
