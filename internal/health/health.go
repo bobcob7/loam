@@ -240,18 +240,30 @@ func NewReadiness(db Pinger, schema SchemaChecker, mp metric.MeterProvider, logg
 // See databaseFailureReason for the claim that had to stop being made.
 //
 // The context handed to both checks is marked with telemetry.WithProbe, and
-// that marker is the load-bearing half of loam-om77. BOTH checks are
-// database work -- Ping execs a bare ";" and CheckSchema runs a hand-written
-// SELECT, neither carrying an sqlc name -- so before the marker existed each
-// poll emitted two parentless postgres.unnamed root traces, roughly 34,000 a
-// day at a 5s interval. Marking here rather than guessing in internal/db is
-// deliberate: this handler is the only thing in the process that KNOWS the
-// work is a health probe, and the same inference that would catch it would
-// also silence the sync scheduler and ingest, whose root traces are the only
-// record they leave. See telemetry.WithProbe.
+// that marker is the load-bearing half of loam-om77: before it, every poll
+// left a parentless postgres.unnamed root trace behind, ~8,600 a day at
+// helm's 10s readinessProbe interval and at the deployed sample ratio of 1.0.
 //
-// It marks the whole evaluation rather than just the ping, so a check added
-// here later inherits the policy instead of quietly reopening the problem.
+// ONE root per poll, from CheckSchema -- not two. Ping is database work too,
+// but pgxpool.Pool.Ping never reaches internal/db's query tracer at all (it
+// bottoms out below the layer that consults ConnConfig.Tracer), so the only
+// readiness statement that was ever traced is migrations' hand-written
+// `SELECT version, dirty FROM schema_migrations`. Do not "improve" this
+// comment back to two: a test that pings and asserts silence proves nothing,
+// and internal/db's TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer
+// exists to keep that trap shut.
+//
+// The marker still covers the WHOLE evaluation rather than just the traced
+// half, and deliberately so. It costs nothing on the untraced path, it means
+// a check added here later inherits the policy instead of quietly reopening
+// the problem, and it does not depend on which pgx internals happen to
+// consult the tracer this release.
+//
+// Marking here rather than inferring in internal/db is the other half of the
+// decision: this handler is the only thing in the process that KNOWS the
+// work is a health probe, and any inference that would catch it would also
+// silence the sync scheduler and ingest, whose root traces are the only
+// record they leave. See telemetry.WithProbe.
 func (rd *Readiness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(telemetry.WithProbe(r.Context()), checkTimeout)
 	defer cancel()

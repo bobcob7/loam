@@ -31,13 +31,17 @@ type probeKey struct{}
 //
 // The alternative loam-om77 considered was to have internal/db infer it:
 // skip any operation that has no parent span and no sqlc query name. That
-// heuristic is wrong on both halves. "No parent span" is equally true of
-// the sync scheduler and of ingest, which are legitimate background work
-// whose root traces are the ONLY record of them -- inferring would silence
-// those too. And "no query name" is a property of hand-written SQL, not of
-// health checking; internal/db/migrations' schema check is unheadered and
-// so is a future one-off admin query. Only the health handler knows it is a
-// health handler, so only the health handler gets to say so.
+// heuristic is wrong on both halves, and production measurement settled it
+// rather than taste. "No parent span" is equally true of the sync scheduler
+// and of ingest -- whose idle job-claim loop turned out to emit ~85% of the
+// very root traces being complained about, as legitimate work polling an
+// empty queue, and whose root traces are the ONLY record of it. Inferring
+// would have silenced the majority case without anyone deciding to. And "no
+// query name" is a property of hand-written SQL, not of health checking;
+// internal/db/migrations' schema check is unheadered, so is pgvector-go's
+// per-connection type registration, and so is a future one-off admin query.
+// Only the health handler knows it is a health handler, so only the health
+// handler gets to say so.
 //
 // It also puts the decision beside the one already made at the RPC layer:
 // internal/server's RegisterUnauthenticated does not instrument /healthz or

@@ -86,13 +86,21 @@ func tracedPool(ctx context.Context, t *testing.T, dsnParams ...string) (*pgxpoo
 	pool, err := NewPool(ctx, Config{DatabaseURL: dsn, EncryptionKey: "key", TracerProvider: tp}, logger)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	// NewPool's own Ping execs a bare ";" through the tracer, so the pool
-	// arrives with one postgres.unnamed span already recorded. That is
-	// correct behaviour -- and incidentally the first proof that the tracer
-	// is attached at all -- but it would make every "exactly one span named
-	// X" assertion below ambiguous, so the recorder starts from the state
-	// each test actually set up.
-	require.NotEmpty(t, recorder.Ended(), "NewPool's Ping must already have produced a span; if not, the tracer is not attached")
+	// The pool arrives with one postgres.unnamed span already recorded, and
+	// it is worth naming WHICH, because this comment used to get it wrong:
+	// it is pgvector-go's `to_regtype(...)` query, run by the RegisterTypes
+	// hook newPoolConfig installs as AfterConnect on every new connection.
+	// It is NOT NewPool's Ping -- pgxpool.Pool.Ping never reaches this
+	// tracer at all (see TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer
+	// and tracer.go's unnamedQuery).
+	//
+	// That distinction matters here rather than being trivia: a helper that
+	// believes Ping is traced will happily "prove" a suppression that does
+	// not exist, because Ping emits nothing either way. The span is still
+	// the first proof the tracer is attached, so the check stays -- it just
+	// now says what it is checking.
+	require.NotEmpty(t, recorder.Ended(),
+		"AfterConnect's pgvector registration query must already have produced a span; if not, the tracer is not attached")
 	recorder.Reset()
 	return pool, tp, recorder
 }
@@ -431,11 +439,21 @@ func TestQueryTracer_HealthProbeIsSilentUntilItIsNot(t *testing.T) {
 	pool, _, recorder := tracedPool(ctx, t)
 	probeCtx := telemetry.WithProbe(ctx)
 
-	// PHASE 1 -- the 121,000-spans-a-day case. Pool.Ping is exactly what
-	// /readyz calls, and its bare ";" is the statement that produced the
-	// production roots.
-	require.NoError(t, pool.Ping(probeCtx))
-	require.NoError(t, pool.Ping(probeCtx))
+	// PHASE 1 -- the case this bead removes. The statement is the one
+	// /readyz's schema check actually issues, VERBATIM, because that is the
+	// one readiness operation the tracer ever sees.
+	//
+	// It is deliberately NOT pool.Ping. Ping emits no span whether or not
+	// the marker works (tracer.go's probeQuery explains why), so asserting
+	// "no spans" after a Ping is a test that passes against an empty diff --
+	// which is exactly what the first draft of this test did.
+	const schemaCheckSQL = "SELECT version, dirty FROM schema_migrations"
+	for range 5 {
+		rows, err := pool.Query(probeCtx, schemaCheckSQL)
+		require.NoError(t, err)
+		rows.Close()
+		require.NoError(t, rows.Err())
+	}
 	assert.Empty(t, spanNames(recorder),
 		"a healthy health probe must leave no span at all; got %v", spanNames(recorder))
 
@@ -506,4 +524,34 @@ func TestQueryTracer_ProbeMarkerNeverSuppressesTheAcquireFailure(t *testing.T) {
 		"a probe against a dead database must still produce the acquire failure span")
 	assert.NotContains(t, spanNames(recorder), spanNamePrefix+unnamedQuery,
 		"and no query span, because pgx never reached the query -- which is exactly why the acquire span must survive the marker")
+}
+
+// TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer pins a property of pgx
+// that this package cannot change and must not assume away.
+//
+// pgxpool.Pool.Ping bottoms out in pgconn.PgConn.Exec, a layer below the one
+// that consults ConnConfig.Tracer, so no Ping produces a span -- traced
+// pool, no marker, healthy database, still nothing. loam-om77's bead was
+// written on the opposite assumption ("/readyz's DATABASE PING is traced"),
+// and it is an easy assumption to keep, because every consequence of it
+// looks the same as success: a suppression test that pings and asserts
+// silence passes identically whether the suppression works, is broken, or
+// was never written.
+//
+// So this asserts the fact directly, with NO marker anywhere, and pairs it
+// with a statement that IS traced on the same pool in the same breath. If a
+// future pgx moves Ping onto the traced path, this fails and every
+// probe-suppression test in the tree needs rereading.
+func TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer(t *testing.T) {
+	t.Parallel()
+	ctx := context.WithoutCancel(t.Context())
+	pool, _, recorder := tracedPool(ctx, t)
+	require.NoError(t, pool.Ping(ctx))
+	require.NoError(t, pool.Ping(ctx))
+	assert.Empty(t, spanNames(recorder),
+		"pgxpool.Pool.Ping must produce no span even completely unmarked; if it now does, the probe tests that ping and assert silence have become meaningful and must be rechecked")
+	_, err := pool.Exec(ctx, "SELECT 1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{spanNamePrefix + unnamedQuery}, spanNames(recorder),
+		"the same pool must trace an ordinary unheadered statement, or the silence above proves only that the tracer is detached")
 }

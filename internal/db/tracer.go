@@ -33,8 +33,15 @@ const spanNamePrefix = "postgres."
 // point: falling back to the statement text would reintroduce both problems
 // this file exists to avoid -- unbounded span-name cardinality, and a span
 // name derived from something a future caller might interpolate a value into.
-// pgxpool.Pool.Ping (which execs a bare ";") and any hand-written statement
-// land here.
+//
+// Every hand-written statement in the tree lands here: internal/db/
+// migrations' schema-version SELECT, internal/chunkstore's SAVEPOINT trio,
+// internal/ingest's job-claim query, and pgvector-go's `to_regtype` probe on
+// each new connection (internal/db.newPoolConfig installs it as AfterConnect).
+//
+// pgxpool.Pool.Ping DOES NOT, and an earlier version of this comment said it
+// did. Ping bottoms out in pgconn.PgConn.Exec, below the layer that consults
+// ConnConfig.Tracer, so it produces no span of any name. See probeQuery.
 const unnamedQuery = "unnamed"
 
 // queryTracer is the pgx tracing hook this package attaches at pool
@@ -130,18 +137,54 @@ type probeQueryKey struct{}
 // probeQuery is what TraceQueryStart records instead of starting a span when
 // the caller marked the context as a health probe (telemetry.WithProbe).
 //
-// # WHY THIS EXISTS: 34,000 ROOT TRACES A DAY FROM AN IDLE REPLICA
+// # WHY THIS EXISTS, AND WHAT THE MEASUREMENT ACTUALLY SAID
 //
-// Measured in production right after v0.0.8, not predicted. /readyz is
-// polled every ~5s and performs TWO unheadered database operations per poll
-// -- pgxpool.Pool.Ping's bare ";" and internal/db/migrations' hand-written
-// `SELECT version, dirty FROM schema_migrations` -- so each poll produced
-// TWO spans, both named postgres.unnamed by queryName's deliberate fallback.
-// Neither had a parent, because internal/server's RegisterUnauthenticated
-// does not instrument the health endpoints, so both arrived as ROOTS. At the
-// deployed sample ratio of 1.0 that is ~17k polls and ~34k root traces per
-// day from a replica doing nothing at all, drowning the traces someone
-// actually opened Tempo to find.
+// Production carries ~1.40 postgres.unnamed spans per second -- ~121,000 a
+// day, 65% of every ROOT trace loam emits -- at the deployed sample ratio of
+// 1.0. Those numbers are measured (Tempo search counts, corroborated by
+// spanmetrics in VictoriaMetrics), not estimated.
+//
+// /readyz is one contributor to that wall, and this type removes its share.
+// Be precise about the size of that share, because the bead that prompted
+// this work over-attributed it and the corrected figure is the honest one:
+// the readiness probe runs every 10s (helm's readinessProbe periodSeconds)
+// and emits ONE unnamed span per poll, so ~0.10/s -- about 8,600 a day, or
+// 7% of the wall. THE REMAINING ~85% IS internal/ingest's IDLE JOB-CLAIM
+// LOOP, which is a different bug with the same symptom; see the note at the
+// end of this comment.
+//
+// # /readyz EMITS ONE SPAN PER POLL, NOT TWO. pgxpool.Pool.Ping IS INVISIBLE
+//
+// This is worth stating because the obvious reading is wrong and it changes
+// what the fix has to cover. /readyz does two pieces of database work --
+// Pool.Ping and internal/db/migrations' hand-written `SELECT version, dirty
+// FROM schema_migrations` -- and only the SECOND is ever traced.
+//
+// pgx never offers Ping to this tracer. pgxpool.Pool.Ping reaches
+// pgconn.PgConn.Exec, which is a layer BELOW the one that consults
+// ConnConfig.Tracer: only pgx.Conn's Query/QueryRow/Exec/CopyFrom do that.
+// So the ping is untraceable here no matter what this file does.
+// TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer pins it, because it is
+// the kind of fact that silently turns an assertion into a false pass --
+// "Ping produced no span" is true of a working suppression AND of no
+// suppression at all.
+//
+// Neither poll had a parent, because internal/server's
+// RegisterUnauthenticated does not instrument the health endpoints, so what
+// did arrive arrived as a ROOT with no way to tell it from a genuine
+// unheadered query by a real caller.
+//
+// # THE BIGGER SHARE IS NOT THIS PACKAGE'S TO FIX
+//
+// The ~1.18/s balance is internal/ingest's claim loop: each worker tickers
+// every 5s and, against an empty queue, issues begin + the unheadered
+// `FOR UPDATE SKIP LOCKED` claim + rollback. Three unheadered statements per
+// worker per tick, arriving as a sub-millisecond burst of exactly
+// 3 x LOAM_INGEST_WORKERS root spans every 5 seconds. That is the dominant
+// source and it is real work polling an empty queue, not a health check --
+// telemetry.WithProbe is the right instrument for it too, applied at the
+// claim loop, but that is a separate bead against a package this one does
+// not own.
 //
 // # THE SPAN IS DEFERRED, NOT DELETED
 //
