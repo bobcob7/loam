@@ -62,7 +62,7 @@ func TestLive_Returns200AndTouchesNoDependency(t *testing.T) {
 func TestLive_StaysOKWhileReadinessFails(t *testing.T) {
 	t.Parallel()
 	down := &PingerMock{PingFunc: func(context.Context) error { return errors.New("connection refused") }}
-	ready := NewReadiness(down, okSchema(), testLogger())
+	ready := NewReadiness(down, okSchema(), nil, testLogger())
 	assert.Equal(t, http.StatusServiceUnavailable, get(t, ready, "/readyz").Code)
 	assert.Equal(t, http.StatusOK, get(t, Live(), "/healthz").Code,
 		"a failed readiness check must never make the process report not-live: restarting it would not fix a downstream outage")
@@ -75,7 +75,7 @@ func TestLive_StaysOKWhileReadinessFails(t *testing.T) {
 func TestReadiness_BothChecksPass_Returns200(t *testing.T) {
 	t.Parallel()
 	pinger, schema := okPinger(), okSchema()
-	rec := get(t, NewReadiness(pinger, schema, testLogger()), "/readyz")
+	rec := get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz")
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, readyBody, rec.Body.String())
 	assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
@@ -96,7 +96,7 @@ func TestReadiness_PingFails_Returns503NamingTheDatabase(t *testing.T) {
 	t.Parallel()
 	pinger := &PingerMock{PingFunc: func(context.Context) error { return errors.New("dial tcp 10.0.0.5:5432: connect: connection refused") }}
 	schema := okSchema()
-	rec := get(t, NewReadiness(pinger, schema, testLogger()), "/readyz")
+	rec := get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "not ready: "+databaseReason, rec.Body.String())
 	assert.Empty(t, schema.CheckSchemaCalls(), "an unreachable database must short-circuit before the schema query, which runs over that same pool")
@@ -120,7 +120,7 @@ func TestReadiness_PgvectorRegistrationFails_NamesTheExtensionNotTheNetwork(t *t
 		return fmt.Errorf("acquiring connection: %w", errors.New(pgvectorRegistrationMessage))
 	}}
 	schema := okSchema()
-	rec := get(t, NewReadiness(pinger, schema, testLogger()), "/readyz")
+	rec := get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "not ready: "+pgvectorReason, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "unreachable",
@@ -150,7 +150,7 @@ func TestReadiness_UnrecognisedPingFailure_StillReportsTheBroadDatabaseReason(t 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pinger := &PingerMock{PingFunc: func(context.Context) error { return tt.err }}
-			rec := get(t, NewReadiness(pinger, okSchema(), testLogger()), "/readyz")
+			rec := get(t, NewReadiness(pinger, okSchema(), nil, testLogger()), "/readyz")
 			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 			assert.Equal(t, "not ready: "+databaseReason, rec.Body.String())
 		})
@@ -166,7 +166,7 @@ func TestReadiness_SchemaCheckFails_Returns503NamingMigrations(t *testing.T) {
 	schema := &SchemaCheckerMock{CheckSchemaFunc: func(context.Context) error {
 		return errors.New("migration state is dirty: version 2")
 	}}
-	rec := get(t, NewReadiness(okPinger(), schema, testLogger()), "/readyz")
+	rec := get(t, NewReadiness(okPinger(), schema, nil, testLogger()), "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "not ready: "+migrationsReason, rec.Body.String())
 	assert.Len(t, schema.CheckSchemaCalls(), 1)
@@ -186,7 +186,7 @@ func TestReadiness_FailureBodyCarriesNoUnderlyingErrorDetail(t *testing.T) {
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	pinger := &PingerMock{PingFunc: func(context.Context) error { return errors.New(secretish) }}
-	rec := get(t, NewReadiness(pinger, okSchema(), logger), "/readyz")
+	rec := get(t, NewReadiness(pinger, okSchema(), nil, logger), "/readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "10.11.12.13", "the 503 body is served to an unauthenticated caller and must not carry connection detail")
 	assert.NotContains(t, rec.Body.String(), "password")
@@ -210,7 +210,7 @@ func TestReadiness_LogsTheFailingCheckStructurally(t *testing.T) {
 			name: "database",
 			readiness: NewReadiness(
 				&PingerMock{PingFunc: func(context.Context) error { return errors.New("boom") }},
-				okSchema(), nil,
+				okSchema(), nil, nil,
 			),
 			wantCheck: databaseReason,
 		},
@@ -219,7 +219,7 @@ func TestReadiness_LogsTheFailingCheckStructurally(t *testing.T) {
 			readiness: NewReadiness(
 				okPinger(),
 				&SchemaCheckerMock{CheckSchemaFunc: func(context.Context) error { return errors.New("boom") }},
-				nil,
+				nil, nil,
 			),
 			wantCheck: migrationsReason,
 		},
@@ -256,7 +256,7 @@ func TestReadiness_ChecksRunPerRequest(t *testing.T) {
 		}
 		return errors.New("connection refused")
 	}}
-	readiness := NewReadiness(pinger, okSchema(), testLogger())
+	readiness := NewReadiness(pinger, okSchema(), nil, testLogger())
 	assert.Equal(t, http.StatusServiceUnavailable, get(t, readiness, "/readyz").Code)
 	healthy = true
 	assert.Equal(t, http.StatusOK, get(t, readiness, "/readyz").Code, "readiness must be re-evaluated per request, never cached from startup or from a previous probe")
@@ -277,7 +277,7 @@ func TestReadiness_BoundsHowLongACheckTakes(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	rec := get(t, NewReadiness(pinger, okSchema(), testLogger()), "/readyz")
+	rec := get(t, NewReadiness(pinger, okSchema(), nil, testLogger()), "/readyz")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "not ready: "+databaseReason, rec.Body.String())
 }
@@ -297,7 +297,7 @@ func TestReadiness_PassesADeadlineToItsChecks(t *testing.T) {
 		_, schemaDeadline = ctx.Deadline()
 		return nil
 	}}
-	require.Equal(t, http.StatusOK, get(t, NewReadiness(pinger, schema, testLogger()), "/readyz").Code)
+	require.Equal(t, http.StatusOK, get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz").Code)
 	assert.True(t, pingDeadline, "the pool ping must run under the handler's own deadline")
 	assert.True(t, schemaDeadline, "the schema check must run under the handler's own deadline")
 }

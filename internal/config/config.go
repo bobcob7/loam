@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -134,6 +135,24 @@ type Config struct {
 	// the shorthands are not, and a wrong test is worse than none because
 	// the next field gets judged by it.
 	TracerProvider trace.TracerProvider
+	// MeterProvider is the resolved handle instrumentation creates meters
+	// from, and is the third field the rule above anticipated by name. It
+	// carries the same terms as TracerProvider: not an environment
+	// variable, left nil by Load, set by cmd/server from telemetry.Provider
+	// after telemetry.New has run.
+	//
+	// It passes the delete-the-field test for the same reason. Its only
+	// consumer today is health.NewReadiness, which records how long each
+	// /readyz evaluation took and how it came out (loam-om77); delete the
+	// field and the endpoint returns the identical status, body and headers
+	// to every caller, and the only loss is that an operator can no longer
+	// see whether this process has been reaching its database. That is a
+	// sink.
+	//
+	// Its nil is inert at the consumer rather than a panic -- NewReadiness
+	// simply records nothing -- but do not generalise that either; see the
+	// second false shorthand above.
+	MeterProvider metric.MeterProvider
 }
 
 // Load reads and validates every LOAM_* environment variable, applying the
