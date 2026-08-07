@@ -156,9 +156,15 @@ describe("Proposals", () => {
     // Green over a screen telling the admin its one healthy proposal is
     // blocked. Asserted here so the healthy case is pinned, not just the
     // blocked ones two tests down.
+    // The positive half matters as much as the negatives: "no blocker pill"
+    // is also what an EMPTY cell looks like, so the clear marker is asserted
+    // by its own text rather than inferred from three absences.
+    expect(withinRow.getByText("—")).toBeInTheDocument();
     expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
     expect(withinRow.queryByText("Conflicted")).not.toBeInTheDocument();
     expect(withinRow.queryByText("Upstream diverged")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Conflict unknown")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Upstream drift unknown")).not.toBeInTheDocument();
 
     // Paginates via Pager: pageInfo.total (40) exceeds the default limit
     // (25), so the pager must render its landmark and the correct summary.
