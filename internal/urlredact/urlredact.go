@@ -27,9 +27,12 @@
 //	                     redactToken           (handler/credential)
 //	[TransportError]  <- redactTransportError  (forge)
 //
-// Eleven definitions, six functions: FIVE were redundant duplicates of a
-// sibling and six were the only implementation of their behaviour.
-// internal/forge alone held six of the eleven.
+// Eleven definitions, six functions. FIVE of the eleven were redundant
+// duplicates of a sibling (two extra redactUserinfo, one extra
+// URLString-shaped, two extra Scrub-shaped); the other six are one per
+// resulting function. Three of those six -- Host, Secrets and
+// TransportError -- had only ever been implemented once, in
+// internal/forge, which alone held six of the eleven.
 //
 // Every one of the three multi-implementation families was confirmed
 // equivalent by running the deleted body against the shared one over a
