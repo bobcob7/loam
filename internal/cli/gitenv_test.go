@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,9 +129,33 @@ func TestExecGitRefs_LsRemote_IgnoresEnclosingRepoInsteadOf(t *testing.T) {
 // the ONLY way to see that is to make the server demand authentication and
 // look at what arrives on the retry.
 //
-// BEFORE: the server's second request carried "Authorization: Basic
-// <base64 of pwned-user:pwned-secret>" -- the enclosing clone's helper ran
-// and answered. AFTER: no Authorization header arrives at all.
+// BEFORE: the server received a second request carrying "Authorization:
+// Basic cHduZWQtdXNlcjpwd25lZC1zZWNyZXQ=" -- base64 of exactly this
+// fixture's pwned-user:pwned-secret, so the enclosing clone's helper
+// demonstrably ran and answered. AFTER: one request, no Authorization
+// header at all.
+//
+// The three environment settings below are what make that a MEASUREMENT
+// rather than a coincidence, and every one of them was earned:
+//
+//   - Written naively, this test passed for the wrong reason. git config's
+//     credential.helper is MULTI-valued and system config is consulted
+//     first, so on a developer machine the macOS system gitconfig's
+//     osxkeychain answered before the enclosing repo's helper was ever
+//     reached -- and it answered with anyuser:push-token, a credential
+//     internal/fakeforge's own tests had cached against http://127.0.0.1
+//     (osxkeychain keys by protocol+host and IGNORES the port, the hazard
+//     internal/gittransport and internal/gitrun both document). Worse, the
+//     BEFORE run's 401 made git ERASE that keychain entry, so the AFTER run
+//     found nothing to send and "passed" on an artifact of the run before
+//     it. GIT_CONFIG_NOSYSTEM and a nonexistent GIT_CONFIG_GLOBAL remove
+//     every credential source except the one under test.
+//   - HOME is redirected because libcurl consults ~/.netrc unconditionally,
+//     outside git's credential-helper machinery entirely.
+//
+// None of the three is on gitSubprocessEnv's deny list, so all three reach
+// the subprocess identically in both conditions: the only thing that
+// differs between BEFORE and AFTER is the fix.
 //
 // GIT_TERMINAL_PROMPT=0 keeps the AFTER case from blocking on a terminal
 // prompt when no helper answers; it does not affect whether a configured
@@ -139,6 +164,9 @@ func TestExecGitRefs_LsRemote_IgnoresEnclosingRepoInsteadOf(t *testing.T) {
 // Deliberately no t.Parallel(): t.Chdir and t.Setenv are both process-global.
 func TestExecGitRefs_LsRemote_IgnoresEnclosingRepoCredentialHelper(t *testing.T) {
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "no-global-gitconfig"))
+	t.Setenv("HOME", t.TempDir())
 	srv := newRecordingServer(t, http.StatusUnauthorized)
 	helper := `!f() { echo username=pwned-user; echo password=pwned-secret; }; f`
 	t.Chdir(hostileRepo(t, "credential.helper", helper))
@@ -147,7 +175,9 @@ func TestExecGitRefs_LsRemote_IgnoresEnclosingRepoCredentialHelper(t *testing.T)
 
 	require.Error(t, err, "the server always answers 401, so ls-remote must fail -- what matters is what it sent while failing")
 	require.Positive(t, srv.count(), "git must have reached the server at all, or this test proves nothing")
-	assert.Empty(t, srv.authorizations(), "the enclosing clone's credential.helper must never supply a credential to a request loam made")
+	assert.NotContains(t, srv.authorizations(), "Basic "+base64.StdEncoding.EncodeToString([]byte("pwned-user:pwned-secret")),
+		"the enclosing clone's credential.helper must never supply a credential to a request loam made")
+	assert.Empty(t, srv.authorizations(), "and with every other credential source removed, nothing at all should have been sent")
 }
 
 // TestExecGitRefs_LsRemote_IgnoresEnclosingRepoProxy pins the third
@@ -288,11 +318,19 @@ func TestExecGitLookup_IgnoresAmbientGitDir(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "wb-named", got, "an ambient GIT_DIR must not decide which work branch loam infers")
 	})
-	t.Run("CloneRoot", func(t *testing.T) {
+	// CloneRoot is a CONTROL, not a third attack, and saying so is the
+	// point: measured on the pre-fix tree this subtest PASSED while its two
+	// siblings failed. `rev-parse --show-toplevel` reports the WORKING
+	// TREE, which `-C` supplies directly, so an ambient GIT_DIR (which
+	// redirects the git dir, not the work tree) does not move it. Left in
+	// place because a green assertion that is green for a known reason is
+	// worth more than a deleted one -- and because it pins that the fix did
+	// not break the one method that was already correct.
+	t.Run("CloneRootWasNeverVulnerable", func(t *testing.T) {
 		t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 		got, err := execGitLookup{}.CloneRoot(named)
 		require.NoError(t, err)
-		assert.Equal(t, resolvedPath(t, named), resolvedPath(t, got), "an ambient GIT_DIR must not decide which clone root loam reports")
+		assert.Equal(t, resolvedPath(t, named), resolvedPath(t, got), "--show-toplevel reports the work tree -C supplied, before and after this fix alike")
 	})
 }
 
