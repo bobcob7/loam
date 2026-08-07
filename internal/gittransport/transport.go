@@ -413,6 +413,15 @@ var inheritedRepoVars = map[string]struct{}{
 	"GIT_CEILING_DIRECTORIES":          {},
 	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
 	"GIT_CONFIG":                       {},
+	// GIT_TEMPLATE_DIR does not locate anything -- it decides what
+	// executable code lands in a repository this package CREATES. `git
+	// clone` copies the named directory's hooks/ into the new repository
+	// and runs post-checkout out of it, so an ambient value is arbitrary
+	// code execution on Clone, under this package's otherwise-complete
+	// isolation (measured on git 2.50.1). It is listed here rather than
+	// left to the "locating" charter because that charter is what hid it
+	// in internal/cli for a revision; see gitenv.go's own note.
+	"GIT_TEMPLATE_DIR": {},
 }
 
 // dropInheritedRepoVars returns environ with every inheritedRepoVars entry

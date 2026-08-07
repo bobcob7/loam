@@ -52,15 +52,35 @@ import (
 //     (credential.helper);
 //   - what proxy it traversed (http.proxy).
 //
-// Ambient GIT_* variables belong on the same side of that boundary, because
-// git ITSELF sets them: a `loam` command run from a git hook, an alias, or
-// `git rebase -x` inherits GIT_DIR, GIT_INDEX_FILE and GIT_CONFIG_PARAMETERS
-// from the parent git, pointed at the parent's repository. Measured against
-// git 2.50.1: an ambient absolute GIT_DIR OVERRIDES `-C dir` for config and
-// ref resolution while `-C dir` still supplies the working tree, so a
-// `-C`-addressed invocation silently reads one repository's config against
-// another's tree. GIT_CONFIG_PARAMETERS carries arbitrary config, including
-// insteadOf.
+// Ambient GIT_* variables belong on the same side of that boundary. The two
+// that matter get there by different routes, and an earlier draft of this
+// comment conflated them -- it claimed git sets GIT_DIR on a `loam` run from
+// a hook, an alias or `git rebase -x`, under a "measured" prefix, and that
+// is false. What was actually measured, on git 2.50.1:
+//
+//   - GIT_CONFIG_PARAMETERS IS propagated by git itself. An alias sets it
+//     (carrying any `-c` given alongside), and it carries arbitrary config
+//     including url.insteadOf -- and, pre-loam-54ze, init.templatedir, which
+//     was a live CODE EXECUTION channel (see inheritedGitRepoVars). This is
+//     the sharper of the two, and the one git routinely hands to children.
+//     `git rebase -x` and hooks did NOT set it.
+//   - GIT_DIR is NOT set by an alias, by `git rebase -x`, or by a
+//     pre-commit/pre-push/post-checkout hook -- all four measured UNSET.
+//     git sets it absolute in `git filter-branch` and in hooks run DURING a
+//     clone or checkout, and relative (".git") in `git submodule foreach`.
+//     Its real reachability is therefore external tooling -- IDEs, hook
+//     managers, wrapper scripts, CI harnesses -- rather than git handing it
+//     to you routinely, plus those two git contexts.
+//
+// GIT_DIR is on the list regardless of how it gets set, because of what it
+// does when it is: an ambient ABSOLUTE GIT_DIR OVERRIDES `-C dir` for
+// config, ref and object resolution while `-C dir` still supplies the
+// working tree, so a `-C`-addressed invocation silently reads one
+// repository's config against another's tree. The "absolute" qualifier is
+// load-bearing and must not be dropped in a later edit: a RELATIVE ambient
+// GIT_DIR (".git", as submodule foreach sets it) resolves against the
+// directory `-C` supplied and does NOT override. Both measured on git
+// 2.50.1.
 //
 // # Mechanism 1: gitSubprocessEnv (every invocation)
 //
@@ -116,6 +136,20 @@ import (
 //     process just created two lines earlier -- so it is not reachable with
 //     a foreign dest today. Nothing here would stop it if a future caller
 //     passed one.
+//
+// One thing this list must NOT be read as saying, because an earlier draft
+// did say it and it is false: it is NOT true that "no discovery-performing
+// CLI invocation writes a ref or checks out a tree". `git clone` checks out
+// a tree and runs post-checkout. The accurate statement is narrower and
+// stronger: clone runs hooks from the DESTINATION IT JUST CREATED, and the
+// enclosing repository cannot influence what lands there -- verified on git
+// 2.50.1 for both core.hooksPath (an enclosing hooksPath did not fire
+// during clone) and init.templateDir (an enclosing templateDir did not
+// reach clone). The channels that CAN put code there are ambient, not
+// inherited-from-cwd, and both are closed above: GIT_CONFIG_PARAMETERS
+// carrying init.templatedir, and GIT_TEMPLATE_DIR. That distinction is the
+// whole reason this list exists, so a future reader deciding whether a new
+// call site needs detaching does not conclude "clone executes nothing".
 //   - `-C dir` where dir is not itself a repository: git walks UP and
 //     operates on an enclosing one. Every current caller passes a directory
 //     this package just cloned, so it is not reachable; internal/gitrun's
@@ -129,11 +163,33 @@ import (
 // gitDetached points GIT_DIR at and deliberately never creates.
 const detachedGitDirName = "loam-cli-no-repository"
 
-// inheritedGitRepoVars are the environment variables git uses to locate a
-// repository, its index, its object stores, or extra config -- the ones a
-// parent git process sets on its children, and the ones that would let
+// inheritedGitRepoVars are the environment variables that would let
 // something outside this package redirect an invocation this package
-// addressed explicitly. gitSubprocessEnv drops every one of them.
+// addressed explicitly -- by relocating the repository, its index or its
+// object stores, by injecting config, or by deciding what executable code
+// lands in a repository this package creates. gitSubprocessEnv drops every
+// one of them.
+//
+// The charter is deliberately "anything ambient that changes what the
+// invocation DOES", not the narrower "variables that locate a repository"
+// an earlier draft used. That narrower charter is what hid GIT_TEMPLATE_DIR
+// (below) for a whole revision: it is not a locating variable, and under
+// the old wording it did not obviously belong.
+//
+// GIT_TEMPLATE_DIR is the sharpest entry here and the only one that is
+// CODE EXECUTION rather than misdirection: `git clone` copies the named
+// directory's hooks/ into the new repository and then runs post-checkout
+// out of it. Measured on git 2.50.1 under this package's full post-fix
+// shape (detached GIT_DIR, GIT_CONFIG_PARAMETERS stripped), an ambient
+// GIT_TEMPLATE_DIR still executed an attacker's post-checkout during
+// `loam clone` and left the hook installed in the clone; dropping the
+// variable stops both.
+//
+// The same execution was reachable pre-loam-54ze through
+// GIT_CONFIG_PARAMETERS carrying init.templatedir -- also measured, also
+// fired -- and stripping GIT_CONFIG_PARAMETERS already closed that door.
+// So this list was closing a code-execution channel before anyone noticed
+// it was one.
 //
 // GIT_CEILING_DIRECTORIES is on the list for the opposite reason to the
 // rest: an ambient one would stop discovery EARLY, which would make
@@ -156,6 +212,7 @@ var inheritedGitRepoVars = map[string]struct{}{
 	"GIT_CONFIG":                       {},
 	"GIT_CONFIG_PARAMETERS":            {},
 	"GIT_CONFIG_COUNT":                 {},
+	"GIT_TEMPLATE_DIR":                 {},
 }
 
 // isInheritedGitRepoVar reports whether name is one of the variables

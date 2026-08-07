@@ -351,7 +351,7 @@ func TestGitSubprocessEnv_DropsEveryRepositoryLocatingVariable(t *testing.T) {
 		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 		"GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG",
-		"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+		"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_TEMPLATE_DIR",
 		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17",
 	}
@@ -478,4 +478,157 @@ func resolvedPath(t *testing.T, path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	require.NoError(t, err)
 	return resolved
+}
+
+// TestExecGitCloner_Clone_IgnoresAmbientGitTemplateDir is the only test here
+// whose failure mode is ARBITRARY CODE EXECUTION rather than misdirection,
+// and it exists because the reasoning that dismissed this whole family was
+// wrong. The claim was "no discovery-performing CLI invocation writes a ref
+// or checks out a tree". `git clone` checks out a tree and runs
+// post-checkout out of the destination's hooks -- and GIT_TEMPLATE_DIR is
+// what decides which hooks land there, since git copies the named
+// directory's hooks/ into the new repository before that checkout.
+//
+// BEFORE (GIT_TEMPLATE_DIR absent from the deny list -- i.e. this change's
+// own first revision, with detachment and every other strip in place): the
+// attacker's post-checkout RAN and was left installed at
+// dest/.git/hooks/post-checkout. AFTER: neither happens.
+//
+// The marker file is written by the hook itself, so a passing assertion
+// means the hook did not run -- not merely that it was not copied. Both are
+// asserted, because a hook that lands but does not fire this time is still
+// a hook that fires on the agent's next checkout.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestExecGitCloner_Clone_IgnoresAmbientGitTemplateDir(t *testing.T) {
+	upstream := bareRepoWithMarkerCommit(t, "INTENDED-UPSTREAM")
+	marker := filepath.Join(t.TempDir(), "PWNED")
+	template := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(template, "hooks"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(template, "hooks", "post-checkout"),
+		[]byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755))
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+	dest := filepath.Join(t.TempDir(), "doc-server")
+
+	require.NoError(t, execGitCloner{}.Clone(t.Context(), "file://"+upstream, "main", dest, nil))
+
+	assert.NoFileExists(t, marker, "an ambient GIT_TEMPLATE_DIR must never execute code during `loam clone`")
+	assert.NoFileExists(t, filepath.Join(dest, ".git", "hooks", "post-checkout"),
+		"and must not leave a hook installed in the clone to fire on the agent's next checkout")
+}
+
+// TestExecGitCloner_Clone_IgnoresAmbientInitTemplateDirViaConfigParameters
+// pins the code-execution channel this change closed WITHOUT KNOWING IT
+// HAD. init.templatedir does what GIT_TEMPLATE_DIR does, and
+// GIT_CONFIG_PARAMETERS -- which git itself sets on children of an alias --
+// carries it.
+//
+// BEFORE (gitSubprocessEnv returning bare os.Environ()): the hook ran.
+// AFTER: stripping GIT_CONFIG_PARAMETERS stops it. This is the sibling of
+// Clone_IgnoresAmbientGitConfigParameters, which covers the same variable's
+// misdirection half; this covers its execution half.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestExecGitCloner_Clone_IgnoresAmbientInitTemplateDirViaConfigParameters(t *testing.T) {
+	upstream := bareRepoWithMarkerCommit(t, "INTENDED-UPSTREAM")
+	marker := filepath.Join(t.TempDir(), "PWNED")
+	template := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(template, "hooks"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(template, "hooks", "post-checkout"),
+		[]byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755))
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'init.templatedir'='"+template+"'")
+	dest := filepath.Join(t.TempDir(), "doc-server")
+
+	require.NoError(t, execGitCloner{}.Clone(t.Context(), "file://"+upstream, "main", dest, nil))
+
+	assert.NoFileExists(t, marker, "an ambient GIT_CONFIG_PARAMETERS carrying init.templatedir must never execute code during `loam clone`")
+}
+
+// TestExecGitCloner_Clone_IsDetachedFromTheEnclosingRepository closes the
+// gap the reviewer named: Clone_IgnoresAmbientGitConfigParameters passes on
+// the env-stripping alone, so reverting runDetachedGitCommand to
+// runGitCommand(ctx, "") at that call site would leave the suite green.
+//
+// `git clone` reads no enclosing repository, so there is no attack to
+// demonstrate here and this is a MECHANISM pin rather than a wire test: it
+// asserts the one observable difference detachment makes, which is that the
+// subprocess ran with GIT_DIR pointing at a path outside the enclosing
+// repository. Without it the assertion below sees the enclosing clone's own
+// git dir.
+//
+// Deliberately no t.Parallel(): t.Chdir is process-global.
+func TestExecGitCloner_Clone_IsDetachedFromTheEnclosingRepository(t *testing.T) {
+	enclosing := workingCopyWithMarkerCommit(t, "ENCLOSING")
+	t.Chdir(enclosing)
+
+	gitDir, cleanup, err := gitDetached()
+	require.NoError(t, err)
+	defer cleanup()
+	env := gitSubprocessEnv(gitDir)
+
+	var got string
+	for _, kv := range env {
+		if name, value, _ := strings.Cut(kv, "="); name == "GIT_DIR" {
+			got = value
+		}
+	}
+	require.Equal(t, gitDir, got, "the detached invocation must carry its own GIT_DIR")
+	assert.NotContains(t, got, enclosing, "and it must point outside the repository the caller is standing in")
+	assert.NoFileExists(t, got)
+}
+
+// TestExecGitRefs_LsRemote_ResetsAGlobalExtraHeader is the test the
+// `-c http.extraHeader=` reset in LsRemote never had.
+//
+// That line's own comment calls it "the one defence that covers a layer
+// detachment does not", and that was true and unpinned: deleting the line
+// left the entire internal/cli suite green. The test that used to cover it,
+// SendsOnlyTheHeadersItWasGiven, silently became DETACHMENT's test once
+// detachment made the enclosing clone unreadable -- so the reset lost its
+// only coverage to a fix that did not replace it. That is the same shape as
+// the fixture trap caught for the header FIELDS, missed for the header
+// RESET.
+//
+// The hostile header lives in GIT_CONFIG_GLOBAL, deliberately: that is the
+// layer detachment does NOT reach (this package keeps honouring the user's
+// own config -- see gitenv.go), so it isolates the reset as the only thing
+// that can be doing the work. GIT_CONFIG_GLOBAL is not on the deny list, so
+// it reaches the subprocess unmolested; GIT_CONFIG_NOSYSTEM and a
+// redirected HOME remove the remaining ambient layers so the assertion has
+// exactly one explanation.
+//
+// BEFORE (reset deleted): the server received Loam-Agent-Name twice --
+// GLOBAL-ATTACKER first, then loam's own, and git accumulates rather than
+// replaces, so the first one wins. AFTER: exactly the caller's three.
+//
+// Asserting Equal on the full value list, not Contains, is what makes this
+// distinguish "reset away" from "dropped everything": `git config
+// --get-all` is useless here (it dumps all values including the empty one
+// and never applies reset semantics), so only the wire shows it.
+//
+// Deliberately no t.Parallel(): t.Chdir and t.Setenv are process-global.
+func TestExecGitRefs_LsRemote_ResetsAGlobalExtraHeader(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(globalConfig,
+		[]byte("[http]\n\textraHeader = Loam-Agent-Name: GLOBAL-ATTACKER\n\textraHeader = Loam-Agent-Id: 999\n\textraHeader = Loam-Agent-Role: reviewer\n"), 0o600))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("HOME", t.TempDir())
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	headers := []string{"Loam-Agent-Name: grace-hopper", "Loam-Agent-Id: 3", "Loam-Agent-Role: author"}
+
+	_, err := execGitRefs{}.LsRemote(t.Context(), srv.URL+"/git/bobcob7/doc-server.git", headers, []string{"refs/heads/main"})
+
+	require.Error(t, err, "the stub is not a real smart-HTTP backend, so ls-remote must fail -- what matters is what it sent")
+	require.NotNil(t, captured, "git must have sent a request before failing")
+	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"), "the global layer's identity must be reset away, and loam's own must survive")
+	assert.Equal(t, []string{"3"}, captured.Values("Loam-Agent-Id"))
+	assert.Equal(t, []string{"author"}, captured.Values("Loam-Agent-Role"))
 }
