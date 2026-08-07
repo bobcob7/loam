@@ -40,13 +40,22 @@
 // WithTracerProvider option, so no downstream bead is forced into the global
 // either.
 //
-// One consequence is worth naming rather than discovering: the SDK reports
-// its OWN internal errors (an unreachable collector, a rejected payload)
-// through otel.Handle, whose default handler writes to stderr via the
-// standard log package, not through cfg.Logger's JSON handler. Routing that
-// into slog means setting otel.SetErrorHandler, which is a process-wide
-// global and belongs at the composition root if it is done at all; it is
-// deliberately out of scope here.
+// One consequence was named here before it was fixed, and the fix is the one
+// exception: the SDK reports its OWN internal errors (an unreachable
+// collector, a rejected payload) through otel.Handle, whose default handler
+// writes to stderr via the standard log package, not through cfg.Logger's
+// JSON handler. loam-0jle resolved that with InstallErrorHandler, which does
+// call otel.SetErrorHandler -- see errorhandler.go for why a WRITE-ONLY sink
+// with no injection seam is a different question from a provider global, and
+// why keeping it out of New is what preserves the inertness proof below.
+//
+// Worth stating plainly, because it is the reason the exception is worth
+// taking at all: against an unreachable collector, otel.Handle is the ONLY
+// report of a failed flush. sdktrace's batch processor runs its final drain
+// on its own goroutine and hands the export error to otel.Handle rather than
+// returning it, so Provider.Shutdown below returns nil for a flush that sent
+// nothing. Without a handler installed, telemetry fails in plain text or not
+// at all.
 //
 // # Disabled must be genuinely inert
 //

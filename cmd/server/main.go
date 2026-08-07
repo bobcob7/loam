@@ -263,6 +263,17 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	if err := validateSyncInterval(cfg.SyncInterval); err != nil {
 		return err
 	}
+	// The one OpenTelemetry global this binary installs, and it goes in
+	// BEFORE telemetry.New rather than after: New builds the OTLP exporters,
+	// and the SDK reports some construction-time problems through otel.Handle
+	// instead of returning them, so a handler installed afterwards would miss
+	// exactly the errors that explain why telemetry never worked. Without
+	// this line the SDK writes its own failures to stderr through the
+	// standard log package, putting non-JSON lines into the stream Loki
+	// receives -- see internal/telemetry/errorhandler.go for the full
+	// argument, including why this is not a reason to install any other
+	// global.
+	telemetry.InstallErrorHandler(cfg.Logger)
 	// Telemetry is constructed FIRST, before anything it might one day
 	// instrument exists, so a later bead can hand its providers to the pgx
 	// pool's QueryTracer, the router, and the ingest pool without moving
