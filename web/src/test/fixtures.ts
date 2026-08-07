@@ -27,7 +27,10 @@ import {
  * as blocked, and any assertion written against it is an assertion about a
  * world that does not exist. Paired with a component that reads `UNSPECIFIED`
  * as healthy, the two errors cancel and the suite goes green over a real
- * regression. `fixtures.test.ts` fails if a future field re-opens the gap.
+ * regression. `fixtures.test.ts` is what pins this -- and on the proposal
+ * queue it is the ONLY thing that does, because that screen's "Blocked by"
+ * cell short-circuits on `Proposal.acceptable` and never reads these two
+ * fields on an acceptable row.
  *
  * Overrides are applied last, so a test that wants a conflicted or drifted
  * branch names exactly the field it is varying and inherits a faithful rest.

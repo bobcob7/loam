@@ -15,15 +15,22 @@ import { workBranchFixture } from "./fixtures";
  * DELIBERATE unset are the same bytes -- and a hand-built fixture omits by
  * default. That makes "did this fixture set every enum?" invisible to review
  * and to `tsc` alike (`MessageInitShape` makes every field optional, as it
- * must). So it is asserted here, driven off the schema's own field list
- * rather than a hand-written checklist: add an enum field to
- * `loam.v1.WorkBranch` and this fails until {@link workBranchFixture} says
- * what a healthy branch's value for it is.
+ * must). So it is asserted here.
+ *
+ * WHAT ACTUALLY CATCHES A NEW FIELD IS THE PINNED LIST, NOT THE SWEEP, and
+ * the two tests are named accordingly. The sweep reaches less far than
+ * "every enum field" sounds: a `repeated` enum arrives as
+ * `fieldKind === "list"` and is filtered out, and an `optional`
+ * (explicit-presence) enum is `undefined` rather than `0` when unset in
+ * protobuf-es v2, so `not.toBe(0)` would PASS on exactly the omission it
+ * exists to catch. Both holes are closed here only because the pinned list
+ * fails first and forces a human to look. Generalising the sweep properly is
+ * loam-yhcz; this file deliberately does not attempt it.
  */
 describe("workBranchFixture", () => {
   const enumFields = WorkBranchSchema.fields.filter((field) => field.fieldKind === "enum");
 
-  it("has enum fields to check at all, so an empty sweep cannot pass vacuously", () => {
+  it("pins WorkBranch's exact enum field list, so a new field fails here first", () => {
     expect(enumFields.map((field) => field.localName).sort()).toEqual([
       "conflict",
       "state",
@@ -31,8 +38,9 @@ describe("workBranchFixture", () => {
     ]);
   });
 
+  // Singular enum fields only -- see the holes recorded above (loam-yhcz).
   it.each(enumFields.map((field) => [field.localName] as const))(
-    "leaves no enum field at its UNSPECIFIED zero: %s",
+    "leaves no singular enum field at its UNSPECIFIED zero: %s",
     (localName) => {
       const values = workBranchFixture() as unknown as Record<string, unknown>;
       expect(values[localName]).not.toBe(0);

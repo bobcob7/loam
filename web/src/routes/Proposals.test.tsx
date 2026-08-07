@@ -62,16 +62,14 @@ const badgeClass = (intent: "success" | "neutral" | "warning"): string => {
 };
 
 /**
- * The healthy branch every case below starts from, and the fixture whose
- * `acceptable` flag is now TRUE (loam-mvso).
+ * The healthy branch every case below starts from (loam-mvso).
  *
- * Both of those were wrong together, which is why the suite was green: the
- * local `workBranch()` this replaces omitted `conflict` and `upstream_drift`
- * -- decoding as `UNSPECIFIED`, a value a real server never sends -- while
- * `acceptable` was left at its own `false` zero. So the "Blocked by" column
- * rendered a "Not acceptable" pill on a reviewed, approved, cleanly-merging
- * branch in every test in this file, and none of them looked at that column.
- * See src/test/fixtures.ts for why the omission is not cosmetic.
+ * `acceptable` is now TRUE, matching what the server's `acceptableNow` would
+ * compute from the accompanying branch; it was left at its `false` zero
+ * before, so this response rendered a "Not acceptable" pill on a reviewed,
+ * approved, cleanly-merging branch. The `conflict`/`upstream_drift` values
+ * come from the shared builder -- see src/test/fixtures.ts for why omitting
+ * them is not cosmetic.
  */
 const oneProposalResponse = (): ListProposalsResponse =>
   create(ListProposalsResponseSchema, {
@@ -149,16 +147,13 @@ describe("Proposals", () => {
     expect(withinRow.getByText("Round 1")).toBeInTheDocument();
     expect(withinRow.getByText("Round 2")).toBeInTheDocument();
 
-    // loam-mvso. THE assertion that was missing, and the reason the fixture
-    // gap survived: this row is a reviewed, cleanly-merging, non-stale-approved
-    // branch -- the queue's whole subject -- and it rendered a "Not acceptable"
-    // pill in every test in this file, because no test looked at the column.
-    // Green over a screen telling the admin its one healthy proposal is
-    // blocked. Asserted here so the healthy case is pinned, not just the
-    // blocked ones two tests down.
-    // The positive half matters as much as the negatives: "no blocker pill"
-    // is also what an EMPTY cell looks like, so the clear marker is asserted
-    // by its own text rather than inferred from three absences.
+    // loam-mvso. The "Blocked by" cell short-circuits on `row.acceptable`
+    // (Proposals.tsx), so on an acceptable row the branch's `conflict` and
+    // `upstream_drift` never reach the DOM at all. This pins the clear row
+    // saying so out loud: "no blocker pill" and "empty cell" are the same DOM,
+    // so the marker is asserted by its own text rather than inferred from the
+    // absences below. It does NOT pin the fixture's enum fidelity --
+    // src/test/fixtures.test.ts does.
     expect(withinRow.getByText("—")).toBeInTheDocument();
     expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
     expect(withinRow.queryByText("Conflicted")).not.toBeInTheDocument();
@@ -276,14 +271,14 @@ describe("Proposals", () => {
     expect(await screen.findByText("Not acceptable")).toBeInTheDocument();
   });
 
-  // loam-mvso. The case the old fixture accidentally produced on every row,
-  // and which the old statusIntent.ts then rendered as silence. UNSPECIFIED is
-  // set here DELIBERATELY -- spelled out, not omitted -- because that is the
-  // only way to say "the server did not report this" as a claim rather than as
-  // an oversight. docs/web-spec.md: UNSPECIFIED never means "fine", so a
-  // column headed "Blocked by" must not leave the cell empty, and it must name
-  // both fields separately rather than emit two identical "Unknown" pills that
-  // collide as React keys and tell the admin nothing about which is which.
+  // loam-mvso. UNSPECIFIED is set here DELIBERATELY -- spelled out, not
+  // omitted -- because that is the only way to say "the server did not report
+  // this" as a claim rather than as an oversight. docs/web-spec.md:
+  // UNSPECIFIED never means "fine", so a column headed "Blocked by" must not
+  // leave the cell empty, and it must name both fields separately rather than
+  // emit two identical "Unknown" pills that collide as React keys and tell the
+  // admin nothing about which is which. `acceptable` is false because a server
+  // old enough not to send these two is old enough not to send it either.
   it("names both fields when the server reported neither, rather than reading as clear", async () => {
     const transport = createRouterTransport(({ service }) => {
       service(ProposalService, {
