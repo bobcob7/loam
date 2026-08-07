@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // GitHub implements Provider against GitHub's REST API
@@ -140,18 +142,18 @@ const githubRequiredScope = "repo"
 // both this method's error strings and the URL whose *url.Error those
 // errors wrap, so userinfo embedded in it would travel by both routes.
 func (g *GitHub) ValidateToken(ctx context.Context, host, token string) error {
-	safeHost := redactHost(host)
+	safeHost := urlredact.Host(host)
 	if token == "" {
 		return fmt.Errorf("validating token for %s: %w", safeHost, ErrInvalidToken)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBaseURLForGitHub(host)+"/user", nil)
 	if err != nil {
-		return fmt.Errorf("validating token for %s: building request: %w", safeHost, redactTransportError(err, nil))
+		return fmt.Errorf("validating token for %s: building request: %w", safeHost, urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+token)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("validating token for %s: %w", safeHost, redactTransportError(err, nil))
+		return fmt.Errorf("validating token for %s: %w", safeHost, urlredact.TransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -454,12 +456,12 @@ func (g *GitHub) FindOpenPR(ctx context.Context, repo, headBranch, targetBranch 
 		apiBaseURLForGitHub(g.host), repo, owner+":"+headBranch, targetBranch)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: building request: %w", repo, headBranch, targetBranch, redactTransportError(err, nil))
+		return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: building request: %w", repo, headBranch, targetBranch, urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+g.token)
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: %w", repo, headBranch, targetBranch, redactTransportError(err, nil))
+		return "", 0, false, fmt.Errorf("finding open PR for %s %s->%s: %w", repo, headBranch, targetBranch, urlredact.TransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if err := githubClassifyNonOKStatus(resp); err != nil {
@@ -492,7 +494,7 @@ func (g *GitHub) doPullRequest(ctx context.Context, method, repo string, prNumbe
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, fmt.Errorf("building %s request: %w", method, redactTransportError(err, nil))
+		return nil, fmt.Errorf("building %s request: %w", method, urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+g.token)
 	if body != nil {
@@ -500,7 +502,7 @@ func (g *GitHub) doPullRequest(ctx context.Context, method, repo string, prNumbe
 	}
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling %s %s: %w", method, redactURLString(url), redactTransportError(err, nil))
+		return nil, fmt.Errorf("calling %s %s: %w", method, urlredact.URLString(url), urlredact.TransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusUnprocessableEntity {

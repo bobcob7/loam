@@ -12,6 +12,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/credentialstore"
 	"github.com/bobcob7/loam/internal/fakeforge"
+	"github.com/bobcob7/loam/internal/urlredact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,7 +178,11 @@ func TestTransport_ErrorAndLogNeverContainToken(t *testing.T) {
 }
 
 // TestRun_ScrubsEveryFormOfTheSecret exercises the scrubbing contract
-// directly, against text that actually contains each form. Asserting the
+// directly, against text that actually contains each form. It stayed here
+// rather than moving to internal/urlredact with the scrubber itself
+// (loam-051m): what it pins is THIS package's three-form secret list --
+// plaintext token, password, base64 auth header -- which is a fact about
+// what git can echo, not about how Scrub replaces a substring. Asserting the
 // base64 is absent from a real failed fetch would pass vacuously: git does
 // not echo the Authorization header on a 401, so the encoded value never
 // reaches that output whether the scrubber handles it or not. The header
@@ -192,7 +197,7 @@ func TestRun_ScrubsEveryFormOfTheSecret(t *testing.T) {
 		"\nGIT_CONFIG_VALUE_0=" + header +
 		"\nraw-b64=" + encoded + "\n"
 
-	got := scrubSecrets(captured, token, token, encoded)
+	got := urlredact.Scrub(captured, token, token, encoded)
 
 	assert.NotContains(t, got, token, "the plaintext token must be redacted")
 	assert.NotContains(t, got, encoded, "the base64 payload must be redacted -- it decodes straight back to the token")
@@ -367,7 +372,7 @@ func TestTransport_CredentialLookupFailurePreventsGitInvocation(t *testing.T) {
 // upstreamURL is passed straight into exec.Command args by every exported
 // method here, so a URL enrolled as https://user:token@forge/... would
 // leak that credential into `ps` output on every scheduler tick --
-// scrubSecrets would NOT redact it, since it is not the credential this
+// scrubbing would NOT redact it, since it is not the credential this
 // package itself resolves and injects. Transport must reject such a URL
 // before it ever reaches the credential store or the git subprocess, for
 // every method that accepts an upstreamURL.

@@ -15,6 +15,7 @@ import (
 	"github.com/bobcob7/loam/internal/gittransport"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/reposstore"
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // Handler implements adminv1connect.RepoAdminServiceHandler.
@@ -133,7 +134,7 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 		return "", "", fmt.Errorf("parsing upstream url: unparseable")
 	}
 	if u.User != nil {
-		return "", "", fmt.Errorf("upstream url %s: %w", redactUserinfo(u), gittransport.ErrUpstreamURLHasUserinfo)
+		return "", "", fmt.Errorf("upstream url %s: %w", urlredact.URL(u), gittransport.ErrUpstreamURLHasUserinfo)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", "", fmt.Errorf("upstream url (host %s): scheme must be http or https", u.Host)
@@ -198,18 +199,6 @@ func deriveRepoIdentity(upstreamURL string) (host, name string, err error) {
 // a second way to reach the same row.
 func forgeHostOf(u *url.URL) string {
 	return forgehost.FromURL(u)
-}
-
-// redactUserinfo reconstructs u's string form with any embedded userinfo
-// (user, or user:password) cleared, rather than string-replacing the
-// password component -- which fails for the empty-password PAT form
-// "https://<token>@host/path" (no ":" for a naive replace to find) --
-// loam-ra1k. Safe to render in an error message or log line: nothing this
-// package derives from u ever needs the userinfo component itself.
-func redactUserinfo(u *url.URL) string {
-	redacted := *u
-	redacted.User = nil
-	return redacted.String()
 }
 
 // stringOrEmpty dereferences s, or returns "" for a nil pointer -- the

@@ -115,8 +115,8 @@ func installLeakyGit(t *testing.T) {
 }
 
 // TestTransport_ScrubsHeaderGitEchoedIntoOutput pins the production call
-// site's secret list, not just scrubSecrets' own behaviour. Dropping
-// authHeaderValue from run's scrubSecrets call leaves every other test in
+// site's secret list, not just urlredact.Scrub's own behaviour. Dropping
+// authHeaderValue from run's scrub call leaves every other test in
 // this package green, because nothing else ever puts the base64 into git's
 // output. The header carries base64(user:token), which decodes straight
 // back to the credential.

@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // gitUsername is the username Forgejo's git-over-HTTPS convention
@@ -132,7 +134,7 @@ type forgejoErrorEnvelope struct {
 // today; safeHost below is what keeps it true regardless, since this method
 // takes host as an explicit parameter and cannot see that validation.
 func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
-	safeHost := redactHost(host)
+	safeHost := urlredact.Host(host)
 	if token == "" {
 		return fmt.Errorf("validating token for %s: %w", safeHost, ErrInvalidToken)
 	}
@@ -169,10 +171,10 @@ func (f *Forgejo) ValidateToken(ctx context.Context, host, token string) error {
 // (so errors.Is(err, http.ErrSchemeMismatch) still works after the %w
 // wrap here — url.Error, which f.httpClient.Do returns on failure, always
 // unwraps to the underlying transport error).
-// redactTransportError preserves that unwrap chain, see its own doc
+// urlredact.TransportError preserves that unwrap chain, see its own doc
 // comment.
 //
-// safeHost is host rendered for messages (redactHost); host itself is used
+// safeHost is host rendered for messages (urlredact.Host); host itself is used
 // only to build the request URL. The two differ only when host carries
 // embedded userinfo, which no caller in this tree can produce -- see
 // ValidateToken's doc comment.
@@ -180,12 +182,12 @@ func (f *Forgejo) probeValidateToken(ctx context.Context, host, safeHost, token 
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL(host), probeOwner, probeRepo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building validate-token request for %s: %w", safeHost, redactTransportError(err, nil))
+		return nil, fmt.Errorf("building validate-token request for %s: %w", safeHost, urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+token)
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("validating token for %s: %w", safeHost, redactTransportError(err, nil))
+		return nil, fmt.Errorf("validating token for %s: %w", safeHost, urlredact.TransportError(err, nil))
 	}
 	return resp, nil
 }
@@ -332,12 +334,12 @@ func (f *Forgejo) listOpenPRsPage(ctx context.Context, repo string, page int) ([
 	url := fmt.Sprintf("%s/repos/%s/pulls?state=open&limit=%d&page=%d", apiBaseURL(f.host), repo, listOpenPRsPageSize, page)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building list-PRs request: %w", redactTransportError(err, nil))
+		return nil, fmt.Errorf("building list-PRs request: %w", urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+f.token)
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling GET %s: %w", redactURLString(url), redactTransportError(err, nil))
+		return nil, fmt.Errorf("calling GET %s: %w", urlredact.URLString(url), urlredact.TransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
@@ -371,7 +373,7 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, fmt.Errorf("building %s request: %w", method, redactTransportError(err, nil))
+		return nil, fmt.Errorf("building %s request: %w", method, urlredact.TransportError(err, nil))
 	}
 	req.Header.Set("Authorization", "token "+f.token)
 	if body != nil {
@@ -379,7 +381,7 @@ func (f *Forgejo) doPullRequest(ctx context.Context, method, repo string, prNumb
 	}
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling %s %s: %w", method, redactURLString(url), redactTransportError(err, nil))
+		return nil, fmt.Errorf("calling %s %s: %w", method, urlredact.URLString(url), urlredact.TransportError(err, nil))
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {

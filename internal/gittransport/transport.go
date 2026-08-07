@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // ErrUpstreamURLHasUserinfo indicates an upstream URL carries embedded
@@ -31,9 +33,9 @@ var ErrUpstreamURLHasUserinfo = errors.New("gittransport: upstream URL must not 
 // validateUpstreamURL rejects an upstreamURL carrying userinfo
 // (user:token@host) before it ever reaches exec.Command args. A credential
 // embedded this way would land in `ps` output on every scheduler tick, and
-// scrubSecrets cannot redact it -- it is not the credential this package
+// scrubbing cannot redact it -- it is not the credential this package
 // itself resolves from credStore and injects via gitEnv's header, so
-// scrubSecrets never learns it. forge.CheckRepo parses the URL and checks
+// urlredact.Scrub never learns it. forge.CheckRepo parses the URL and checks
 // the host but does not reject u.User; Transport is the natural choke
 // point, since every exported method (Fetch, Push, DeleteRemoteRef, Clone,
 // LsRemote) takes upstreamURL as an explicit parameter and funnels it
@@ -241,7 +243,7 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
 	cmd.Env = gitEnv(home, authHeaderValue)
 	out, cmdErr := cmd.CombinedOutput()
-	scrubbed := scrubSecrets(string(out), token, password, authHeaderValue)
+	scrubbed := urlredact.Scrub(string(out), token, password, authHeaderValue)
 	// args is echoed into both the log line and the returned error below.
 	// It never carries a secret today (Fetch/Push/DeleteRemoteRef/Clone/
 	// LsRemote pass upstreamURL/refspecs straight through; credentials
@@ -250,7 +252,7 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 	// a future bug that did let a secret reach args could not surface it
 	// through this echo either -- the same belt-and-suspenders reasoning
 	// as gitEnv's GIT_TRACE*=0 overrides alongside this same scrubbing.
-	scrubbedArgs := scrubSecrets(strings.Join(args, " "), token, password, authHeaderValue)
+	scrubbedArgs := urlredact.Scrub(strings.Join(args, " "), token, password, authHeaderValue)
 	if cmdErr != nil {
 		t.logger.ErrorContext(ctx, "git subprocess failed", "args", scrubbedArgs, "err", cmdErr, "output", strings.TrimSpace(scrubbed))
 		return nil, fmt.Errorf("git %s: %w: %s", scrubbedArgs, cmdErr, strings.TrimSpace(scrubbed))
@@ -279,8 +281,9 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 // only presence-checks that one -- see below) so an inherited
 // GIT_TRACE/GIT_CURL_VERBOSE/GIT_TRACE_CURL cannot print the injected
 // Authorization header -- and therefore the token -- to stderr, where it
-// would otherwise land in a returned error or a log line; scrubSecrets
-// is the second, independent layer against that same leak.
+// would otherwise land in a returned error or a log line;
+// urlredact.Scrub is the second, independent layer against that same
+// leak.
 //
 // GIT_CONFIG_GLOBAL is also pointed at a path inside home that never
 // exists, not left inherited: git treats that env var, when set, as an
@@ -373,20 +376,4 @@ func dropGitCurlVerbose(environ []string) []string {
 		filtered = append(filtered, kv)
 	}
 	return filtered
-}
-
-// scrubSecrets returns s with every occurrence of each non-empty value
-// in secrets replaced by a fixed marker, so a failing invocation's
-// returned output/error can never carry the token even if git itself
-// echoed it somehow. Belt and suspenders alongside gitEnv's GIT_TRACE*
-// overrides and GIT_CURL_VERBOSE removal, which stop git from producing
-// that trace in the first place.
-func scrubSecrets(s string, secrets ...string) string {
-	for _, secret := range secrets {
-		if secret == "" {
-			continue
-		}
-		s = strings.ReplaceAll(s, secret, "[REDACTED]")
-	}
-	return s
 }

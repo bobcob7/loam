@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // Kind names a forge implementation NewProvider can resolve to. It is a
@@ -108,7 +110,7 @@ func KindForHost(host string) (Kind, error) {
 		return KindGitHub, nil
 	}
 	if strings.Contains(bare, "github") {
-		return "", fmt.Errorf("resolving forge kind for host %q: looks like GitHub but is not %s or %s; GitHub Enterprise Server is not supported: %w", redactHost(host), githubHost, githubAPIHost, errUnsupportedForgeKind)
+		return "", fmt.Errorf("resolving forge kind for host %q: looks like GitHub but is not %s or %s; GitHub Enterprise Server is not supported: %w", urlredact.Host(host), githubHost, githubAPIHost, errUnsupportedForgeKind)
 	}
 	return KindForgejo, nil
 }
@@ -132,7 +134,7 @@ func NewProvider(host, token string, httpClient *http.Client, logger *slog.Logge
 	case KindGitHub:
 		return NewGitHub(host, token, httpClient, logger), nil
 	default:
-		return nil, fmt.Errorf("resolving forge kind for host %q: %s support is not implemented: %w", redactHost(host), kind, errUnsupportedForgeKind)
+		return nil, fmt.Errorf("resolving forge kind for host %q: %s support is not implemented: %w", urlredact.Host(host), kind, errUnsupportedForgeKind)
 	}
 }
 
