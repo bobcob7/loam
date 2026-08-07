@@ -20,10 +20,10 @@ import {
   VerdictOutcome,
   VerdictSummarySchema,
   WorkBranchConflict,
-  WorkBranchSchema,
   WorkBranchState,
 } from "../gen/loam/v1/common_pb";
 import styles from "../components/StatusBadge.module.css";
+import { workBranchFixture } from "../test/fixtures";
 import { Proposals } from "./Proposals";
 
 /**
@@ -61,22 +61,24 @@ const badgeClass = (intent: "success" | "neutral" | "warning"): string => {
   return name;
 };
 
-const workBranch = () =>
-  create(WorkBranchSchema, {
-    repo: "acme/widgets",
-    name: "wb-9c2f1a",
-    target: "main",
-    title: "Add retry to the sync loop",
-    description: "",
-    state: WorkBranchState.REVIEWED,
-    author: "agent-3-implementer",
-  });
-
+/**
+ * The healthy branch every case below starts from, and the fixture whose
+ * `acceptable` flag is now TRUE (loam-mvso).
+ *
+ * Both of those were wrong together, which is why the suite was green: the
+ * local `workBranch()` this replaces omitted `conflict` and `upstream_drift`
+ * -- decoding as `UNSPECIFIED`, a value a real server never sends -- while
+ * `acceptable` was left at its own `false` zero. So the "Blocked by" column
+ * rendered a "Not acceptable" pill on a reviewed, approved, cleanly-merging
+ * branch in every test in this file, and none of them looked at that column.
+ * See src/test/fixtures.ts for why the omission is not cosmetic.
+ */
 const oneProposalResponse = (): ListProposalsResponse =>
   create(ListProposalsResponseSchema, {
     proposals: [
       create(ProposalSchema, {
-        workBranch: workBranch(),
+        acceptable: true,
+        workBranch: workBranchFixture(),
         verdicts: [
           create(VerdictSummarySchema, {
             reviewer: "agent-1-reviewer",
@@ -147,6 +149,17 @@ describe("Proposals", () => {
     expect(withinRow.getByText("Round 1")).toBeInTheDocument();
     expect(withinRow.getByText("Round 2")).toBeInTheDocument();
 
+    // loam-mvso. THE assertion that was missing, and the reason the fixture
+    // gap survived: this row is a reviewed, cleanly-merging, non-stale-approved
+    // branch -- the queue's whole subject -- and it rendered a "Not acceptable"
+    // pill in every test in this file, because no test looked at the column.
+    // Green over a screen telling the admin its one healthy proposal is
+    // blocked. Asserted here so the healthy case is pinned, not just the
+    // blocked ones two tests down.
+    expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Conflicted")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Upstream diverged")).not.toBeInTheDocument();
+
     // Paginates via Pager: pageInfo.total (40) exceeds the default limit
     // (25), so the pager must render its landmark and the correct summary.
     const pager = screen.getByRole("navigation", { name: "Pagination" });
@@ -170,7 +183,7 @@ describe("Proposals", () => {
             proposals: [
               create(ProposalSchema, {
                 acceptable: true,
-                workBranch: workBranch(),
+                workBranch: workBranchFixture(),
                 verdicts: [
                   create(VerdictSummarySchema, {
                     reviewer: "agent-2-reviewer",
@@ -182,13 +195,10 @@ describe("Proposals", () => {
               }),
               create(ProposalSchema, {
                 acceptable: false,
-                workBranch: create(WorkBranchSchema, {
-                  repo: "acme/widgets",
+                workBranch: workBranchFixture({
                   name: "wb-88c455",
-                  target: "main",
                   title: "Strip pool params from the migration DSN",
                   state: WorkBranchState.DRAFT,
-                  author: "agent-3-implementer",
                   conflict: WorkBranchConflict.RESET,
                   upstreamDrift: UpstreamDrift.DIVERGED,
                 }),
@@ -244,15 +254,10 @@ describe("Proposals", () => {
             proposals: [
               create(ProposalSchema, {
                 acceptable: false,
-                workBranch: create(WorkBranchSchema, {
-                  repo: "acme/widgets",
+                workBranch: workBranchFixture({
                   name: "wb-1a2b3c",
-                  target: "main",
                   title: "Sent back for another round",
                   state: WorkBranchState.REVIEWABLE,
-                  author: "agent-3-implementer",
-                  conflict: WorkBranchConflict.NONE,
-                  upstreamDrift: UpstreamDrift.NONE,
                 }),
                 verdicts: [],
               }),
