@@ -148,16 +148,44 @@ describe("conflictIntent", () => {
     expect(conflictIntent(value)).toEqual(expected);
   });
 
-  it("badges nothing for a branch that merges cleanly, or for a server that never sent the field", () => {
+  it("badges nothing for a branch that merges cleanly -- NONE, and NONE only", () => {
     expect(conflictIntent(WorkBranchConflict.NONE)).toBeUndefined();
-    expect(conflictIntent(WorkBranchConflict.UNSPECIFIED)).toBeUndefined();
+  });
+
+  // loam-mvso. This assertion USED to pair UNSPECIFIED with NONE and expect
+  // silence from both. That contradicted docs/web-spec.md ("UNSPECIFIED never
+  // means 'fine': NONE is a positive claim, so an unrecognized stored value
+  // surfaces as UNSPECIFIED rather than being rounded down to it") and
+  // contradicted acceptBlocker, which withholds the Accept button on
+  // UNSPECIFIED. A screen whose column is headed "Blocked by" saying nothing
+  // is not neutral -- it reads as "nothing blocks this" -- so the queue
+  // cleared a branch the accept gate would refuse.
+  it("badges the unset zero value rather than rounding it down to NONE", () => {
+    expect(conflictIntent(WorkBranchConflict.UNSPECIFIED)).toEqual({
+      intent: "warning",
+      label: "Conflict unknown",
+    });
   });
 
   it("still badges a value outside the generated union: that is a newer server, not an absence", () => {
     expect(conflictIntent(999 as unknown as WorkBranchConflict)).toEqual({
       intent: "warning",
-      label: "Unknown",
+      label: "Conflict unknown",
     });
+  });
+
+  // The label names its own field rather than reusing the bare "Unknown" the
+  // other helpers fall back to: these two are the only pills that render side
+  // by side in one cell (Proposals' "Blocked by" column, keyed by label), so a
+  // shared string would collide as a React key and leave the admin two
+  // identical pills with no way to tell which field each spoke for.
+  it("names the field it speaks for, distinctly from the drift helper's own unknown", () => {
+    expect(conflictIntent(WorkBranchConflict.UNSPECIFIED)).not.toEqual(
+      upstreamDriftIntent(UpstreamDrift.UNSPECIFIED),
+    );
+    expect(conflictIntent(999 as unknown as WorkBranchConflict)).not.toEqual(
+      upstreamDriftIntent(999 as unknown as UpstreamDrift),
+    );
   });
 });
 
@@ -177,15 +205,24 @@ describe("upstreamDriftIntent", () => {
     expect(upstreamDriftIntent(value)).toEqual(expected);
   });
 
-  it("badges nothing when upstream is where Loam left it", () => {
+  it("badges nothing when upstream is where Loam left it -- NONE, and NONE only", () => {
     expect(upstreamDriftIntent(UpstreamDrift.NONE)).toBeUndefined();
-    expect(upstreamDriftIntent(UpstreamDrift.UNSPECIFIED)).toBeUndefined();
+  });
+
+  // loam-mvso, the same correction as conflictIntent's above and for the same
+  // reason: NONE is the positive claim that upstream is where Loam left it,
+  // and a field that never arrived is not evidence of it.
+  it("badges the unset zero value rather than rounding it down to NONE", () => {
+    expect(upstreamDriftIntent(UpstreamDrift.UNSPECIFIED)).toEqual({
+      intent: "warning",
+      label: "Upstream drift unknown",
+    });
   });
 
   it("still badges a value outside the generated union", () => {
     expect(upstreamDriftIntent(999 as unknown as UpstreamDrift)).toEqual({
       intent: "warning",
-      label: "Unknown",
+      label: "Upstream drift unknown",
     });
   });
 

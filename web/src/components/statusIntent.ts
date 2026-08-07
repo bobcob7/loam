@@ -27,6 +27,10 @@ export interface StatusBadgeContent {
  *    the same intent as the schema's other "nothing to see here" states
  *    (SYNC_STATE_IDLE, WORK_BRANCH_STATE_DRAFT/CLOSED); tokens.css does not
  *    name it explicitly, but "unset" fits that bucket rather than any other.
+ *    THIS DOES NOT HOLD for the two enums that also declare a `NONE = 1`
+ *    (`WorkBranchConflict`, `UpstreamDrift`): for those, `NONE` is the
+ *    positive "nothing to see here" claim and `UNSPECIFIED` is the absence of
+ *    one, so the two must not share a rendering. See {@link CONFLICT_UNKNOWN}.
  *  - the `default` branch is the one this bead exists for: every generated
  *    enum here is an open `as const` object with a trailing `UnknownEnum`
  *    member (see web/src/gen), so TypeScript will not force -- or even let --
@@ -97,35 +101,67 @@ export function workBranchStateIntent(state: WorkBranchState): StatusBadgeConten
 }
 
 /**
+ * `WorkBranchConflict` and `UpstreamDrift` are the two enums in this file
+ * that carry an explicit `NONE = 1` alongside the proto3 `UNSPECIFIED = 0`,
+ * and that changes what silence is allowed to mean for them.
+ *
+ * `docs/web-spec.md` is explicit: "`UNSPECIFIED` never means 'fine': `NONE`
+ * is a positive claim, so an unrecognized stored value surfaces as
+ * `UNSPECIFIED` rather than being rounded down to it -- and the console
+ * applies the same reading when it decides whether to offer the accept
+ * button". `acceptBlocker` (src/data/acceptability.ts) implements exactly
+ * that, withholding Accept on `UNSPECIFIED`. This file used to round
+ * `UNSPECIFIED` down to `NONE` and badge nothing (loam-mvso), so the queue
+ * and the detail screen said "clear" about the same branch the accept gate
+ * said was blocked -- two components disagreeing about what an unset enum
+ * means, one of them contradicting the spec. An absence of badge is not a
+ * neutral rendering here; on a screen whose whole job is naming blockers it
+ * reads as "nothing blocks this".
+ *
+ * Both the zero value and a value outside the generated union therefore
+ * badge, with the same `warning` intent and the same sentence, because they
+ * are the same fact to an operator: this console cannot vouch for the field.
+ * (The two differ only in provenance -- a server that never set it versus one
+ * newer than this client -- which is not an actionable distinction.)
+ *
+ * The label NAMES ITS FIELD rather than being a bare "Unknown" shared with
+ * the other helpers' {@link UNKNOWN_STATUS}. These two are the only pills
+ * that can render side by side in one cell (Proposals' "Blocked by" column,
+ * keyed by label), so a shared string would both collide as a React key and
+ * leave the admin with two identical pills and no way to tell which field
+ * each spoke for.
+ */
+const CONFLICT_UNKNOWN: StatusBadgeContent = { intent: "warning", label: "Conflict unknown" };
+const DRIFT_UNKNOWN: StatusBadgeContent = { intent: "warning", label: "Upstream drift unknown" };
+
+/**
  * Maps `loam.v1.WorkBranchConflict` to a status pill, or `undefined` when
  * there is nothing to say.
  *
- * `undefined` covers NONE and UNSPECIFIED together, and that pairing is
- * deliberate rather than a shortcut. NONE means the branch merges cleanly, so
- * a badge would be noise on every healthy proposal. UNSPECIFIED means the
- * field never arrived -- which is what a server older than this field looks
- * like -- and badging every proposal "Unspecified" against such a server would
- * be worse than silence about a state it cannot report. An UNKNOWN value still
- * badges: that is a server NEWER than this client, which is a real
- * needs-attention signal rather than an absence.
+ * `undefined` covers `NONE` and `NONE` only: it is the branch's own positive
+ * claim that it merges cleanly into the current target tip, so a badge would
+ * be noise on every healthy proposal. Everything else badges -- see
+ * {@link CONFLICT_UNKNOWN} for why `UNSPECIFIED` is not folded in with it.
  */
 export function conflictIntent(conflict: WorkBranchConflict): StatusBadgeContent | undefined {
   switch (conflict) {
-    case WorkBranchConflict.UNSPECIFIED:
     case WorkBranchConflict.NONE:
       return undefined;
+    case WorkBranchConflict.UNSPECIFIED:
+      return CONFLICT_UNKNOWN;
     case WorkBranchConflict.FLAGGED:
       return { intent: "warning", label: "Conflicted" };
     case WorkBranchConflict.RESET:
       return { intent: "warning", label: "Conflict reset" };
     default:
-      return UNKNOWN_STATUS;
+      return CONFLICT_UNKNOWN;
   }
 }
 
 /**
  * Maps `loam.v1.UpstreamDrift` to a status pill, or `undefined` when there is
- * nothing to say -- the same absence rule as {@link conflictIntent}.
+ * nothing to say -- the same absence rule as {@link conflictIntent}, and the
+ * same refusal to round `UNSPECIFIED` down to it.
  *
  * DIVERGED is `danger`, not `warning`, and it is a separate badge from the
  * conflict one on purpose. The two describe independent facts that can hold at
@@ -137,13 +173,14 @@ export function conflictIntent(conflict: WorkBranchConflict): StatusBadgeContent
  */
 export function upstreamDriftIntent(drift: UpstreamDrift): StatusBadgeContent | undefined {
   switch (drift) {
-    case UpstreamDrift.UNSPECIFIED:
     case UpstreamDrift.NONE:
       return undefined;
+    case UpstreamDrift.UNSPECIFIED:
+      return DRIFT_UNKNOWN;
     case UpstreamDrift.DIVERGED:
       return { intent: "danger", label: "Upstream diverged" };
     default:
-      return UNKNOWN_STATUS;
+      return DRIFT_UNKNOWN;
   }
 }
 

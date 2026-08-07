@@ -20,10 +20,10 @@ import {
   VerdictOutcome,
   VerdictSummarySchema,
   WorkBranchConflict,
-  WorkBranchSchema,
   WorkBranchState,
 } from "../gen/loam/v1/common_pb";
 import styles from "../components/StatusBadge.module.css";
+import { workBranchFixture } from "../test/fixtures";
 import { Proposals } from "./Proposals";
 
 /**
@@ -61,22 +61,22 @@ const badgeClass = (intent: "success" | "neutral" | "warning"): string => {
   return name;
 };
 
-const workBranch = () =>
-  create(WorkBranchSchema, {
-    repo: "acme/widgets",
-    name: "wb-9c2f1a",
-    target: "main",
-    title: "Add retry to the sync loop",
-    description: "",
-    state: WorkBranchState.REVIEWED,
-    author: "agent-3-implementer",
-  });
-
+/**
+ * The healthy branch every case below starts from (loam-mvso).
+ *
+ * `acceptable` is now TRUE, matching what the server's `acceptableNow` would
+ * compute from the accompanying branch; it was left at its `false` zero
+ * before, so this response rendered a "Not acceptable" pill on a reviewed,
+ * approved, cleanly-merging branch. The `conflict`/`upstream_drift` values
+ * come from the shared builder -- see src/test/fixtures.ts for why omitting
+ * them is not cosmetic.
+ */
 const oneProposalResponse = (): ListProposalsResponse =>
   create(ListProposalsResponseSchema, {
     proposals: [
       create(ProposalSchema, {
-        workBranch: workBranch(),
+        acceptable: true,
+        workBranch: workBranchFixture(),
         verdicts: [
           create(VerdictSummarySchema, {
             reviewer: "agent-1-reviewer",
@@ -147,6 +147,20 @@ describe("Proposals", () => {
     expect(withinRow.getByText("Round 1")).toBeInTheDocument();
     expect(withinRow.getByText("Round 2")).toBeInTheDocument();
 
+    // loam-mvso. The "Blocked by" cell short-circuits on `row.acceptable`
+    // (Proposals.tsx), so on an acceptable row the branch's `conflict` and
+    // `upstream_drift` never reach the DOM at all. This pins the clear row
+    // saying so out loud: "no blocker pill" and "empty cell" are the same DOM,
+    // so the marker is asserted by its own text rather than inferred from the
+    // absences below. It does NOT pin the fixture's enum fidelity --
+    // src/test/fixtures.test.ts does.
+    expect(withinRow.getByText("—")).toBeInTheDocument();
+    expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Conflicted")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Upstream diverged")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Conflict unknown")).not.toBeInTheDocument();
+    expect(withinRow.queryByText("Upstream drift unknown")).not.toBeInTheDocument();
+
     // Paginates via Pager: pageInfo.total (40) exceeds the default limit
     // (25), so the pager must render its landmark and the correct summary.
     const pager = screen.getByRole("navigation", { name: "Pagination" });
@@ -170,7 +184,7 @@ describe("Proposals", () => {
             proposals: [
               create(ProposalSchema, {
                 acceptable: true,
-                workBranch: workBranch(),
+                workBranch: workBranchFixture(),
                 verdicts: [
                   create(VerdictSummarySchema, {
                     reviewer: "agent-2-reviewer",
@@ -182,13 +196,10 @@ describe("Proposals", () => {
               }),
               create(ProposalSchema, {
                 acceptable: false,
-                workBranch: create(WorkBranchSchema, {
-                  repo: "acme/widgets",
+                workBranch: workBranchFixture({
                   name: "wb-88c455",
-                  target: "main",
                   title: "Strip pool params from the migration DSN",
                   state: WorkBranchState.DRAFT,
-                  author: "agent-3-implementer",
                   conflict: WorkBranchConflict.RESET,
                   upstreamDrift: UpstreamDrift.DIVERGED,
                 }),
@@ -244,15 +255,10 @@ describe("Proposals", () => {
             proposals: [
               create(ProposalSchema, {
                 acceptable: false,
-                workBranch: create(WorkBranchSchema, {
-                  repo: "acme/widgets",
+                workBranch: workBranchFixture({
                   name: "wb-1a2b3c",
-                  target: "main",
                   title: "Sent back for another round",
                   state: WorkBranchState.REVIEWABLE,
-                  author: "agent-3-implementer",
-                  conflict: WorkBranchConflict.NONE,
-                  upstreamDrift: UpstreamDrift.NONE,
                 }),
                 verdicts: [],
               }),
@@ -263,6 +269,50 @@ describe("Proposals", () => {
     });
     renderProposals(transport);
     expect(await screen.findByText("Not acceptable")).toBeInTheDocument();
+  });
+
+  // loam-mvso. UNSPECIFIED is set here DELIBERATELY -- spelled out, not
+  // omitted -- because that is the only way to say "the server did not report
+  // this" as a claim rather than as an oversight. docs/web-spec.md:
+  // UNSPECIFIED never means "fine", so a column headed "Blocked by" must not
+  // leave the cell empty, and it must name both fields separately rather than
+  // emit two identical "Unknown" pills that collide as React keys and tell the
+  // admin nothing about which is which. `acceptable` is false because a server
+  // old enough not to send these two is old enough not to send it either.
+  it("names both fields when the server reported neither, rather than reading as clear", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(ProposalService, {
+        listProposals: () =>
+          create(ListProposalsResponseSchema, {
+            proposals: [
+              create(ProposalSchema, {
+                acceptable: false,
+                workBranch: workBranchFixture({
+                  name: "wb-7d3e9f",
+                  title: "Reported by a server that never set the fields",
+                  conflict: WorkBranchConflict.UNSPECIFIED,
+                  upstreamDrift: UpstreamDrift.UNSPECIFIED,
+                }),
+                verdicts: [],
+              }),
+            ],
+            pageInfo: create(PageInfoSchema, { total: 1 }),
+          }),
+      });
+    });
+    renderProposals(transport);
+
+    const link = await screen.findByRole("link", {
+      name: "Reported by a server that never set the fields",
+    });
+    const row = link.closest("tr");
+    if (row === null) throw new Error("unreachable: the link renders inside a table row");
+    const withinRow = within(row);
+    expect(withinRow.getByText("Conflict unknown")).toBeInTheDocument();
+    expect(withinRow.getByText("Upstream drift unknown")).toBeInTheDocument();
+    // Not the generic fallback: the two fields DID say something -- that they
+    // cannot be vouched for -- which is more than "not acceptable" conveys.
+    expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
   });
 
   it("renders the empty state when no proposals are awaiting a decision", async () => {

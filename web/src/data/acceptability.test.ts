@@ -1,25 +1,18 @@
-import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
-import {
-  UpstreamDrift,
-  WorkBranchConflict,
-  WorkBranchSchema,
-  WorkBranchState,
-  type WorkBranch,
-} from "../gen/loam/v1/common_pb";
+import { UpstreamDrift, WorkBranchConflict, WorkBranchState } from "../gen/loam/v1/common_pb";
+import { workBranchFixture } from "../test/fixtures";
 import { acceptBlocker } from "./acceptability";
 
-/** A branch nothing blocks: reviewed, merges cleanly, upstream untouched. */
-const acceptable = (overrides: MessageInitShape<typeof WorkBranchSchema> = {}): WorkBranch =>
-  create(WorkBranchSchema, {
-    repo: "acme/widgets",
-    name: "wb-9c2f1a",
-    target: "main",
-    state: WorkBranchState.REVIEWED,
-    conflict: WorkBranchConflict.NONE,
-    upstreamDrift: UpstreamDrift.NONE,
-    ...overrides,
-  });
+/**
+ * A branch nothing blocks: reviewed, merges cleanly, upstream untouched.
+ *
+ * The shared builder, not a local literal (loam-mvso): this file's own copy
+ * was already faithful, but a per-file literal is exactly how the gap got
+ * into `Proposals.test.tsx` -- the next file to need a work branch copies
+ * whichever literal it finds first. One builder, checked by
+ * `src/test/fixtures.test.ts`, means there is no second copy to drift.
+ */
+const acceptable = workBranchFixture;
 
 describe("acceptBlocker", () => {
   it("returns undefined for a reviewed, unconflicted, undrifted branch", () => {
