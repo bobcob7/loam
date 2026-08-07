@@ -3,6 +3,7 @@ package proposal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/bobcob7/loam/internal/forge"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
@@ -572,6 +574,56 @@ func TestListProposals_OrdinaryDraftIsNotScannedIntoTheQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, resp.Msg.GetProposals(),
 		"only conflict='reset' means demoted; 'flagged' is a draft that was never in review, and 'none' is ordinary work")
+}
+
+// TestListProposals_AcceptableIsOnTheWireAsProtojsonRendersIt pins the JSON
+// key and the omission rule the OTHER readers of this response depend on.
+//
+// Two consumers decode this by hand rather than through the generated types:
+// `cmd/demoenv`'s check-proposals (which `task test:e2e:golden` and
+// `task demo:m5` invoke, and which deliberately restates the contract instead
+// of importing the protos, exactly as its attributionFooter does) and the
+// console. Neither would fail to COMPILE if the field were renamed; they would
+// silently decode `acceptable` as false, which reads as "blocked" and would
+// hide every proposal's accept button with no error anywhere. This test is the
+// compile error they cannot have.
+//
+// The omission is asserted as well as the name: protojson drops a false bool
+// entirely, so an unacceptable proposal arrives with NO key. That is the shape
+// demoenv's sampleBlockedQueue encodes, and it is only safe because absent and
+// false mean the same thing here -- which is true by construction and worth
+// pinning, since a future `json_name` or an emit-defaults marshaler option
+// would change it.
+func TestListProposals_AcceptableIsOnTheWireAsProtojsonRendersIt(t *testing.T) {
+	t.Parallel()
+	blocked := branchNamed("wb-blocked", func(wb *workbranchstore.WorkBranch) {
+		wb.State = workbranchstore.StateDraft
+		wb.Conflict = workbranchstore.ConflictReset
+	})
+	d := listDeps(branchNamed("wb-clean", nil), blocked)
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	encoded, err := protojson.Marshal(resp.Msg)
+	require.NoError(t, err)
+	var doc struct {
+		Proposals []struct {
+			WorkBranch struct {
+				Name string `json:"name"`
+			} `json:"workBranch"`
+			Acceptable bool `json:"acceptable"`
+		} `json:"proposals"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &doc))
+	require.Len(t, doc.Proposals, 2)
+	byName := map[string]bool{}
+	for _, p := range doc.Proposals {
+		byName[p.WorkBranch.Name] = p.Acceptable
+	}
+	assert.True(t, byName["wb-clean"], `the key must be exactly "acceptable"; a rename decodes as false and silently hides every accept button`)
+	assert.False(t, byName["wb-blocked"])
+	assert.NotContains(t, string(encoded), `"acceptable":false`,
+		"protojson omits a false bool, so demoenv's decoder must read ABSENT as blocked -- if this ever emits the key, that assumption needs revisiting, not the decoder")
+	assert.Contains(t, string(encoded), `"acceptable":true`)
 }
 
 // TestAcceptableNow_MatchesTheAcceptGate pins acceptableNow clause by clause,
