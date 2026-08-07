@@ -270,6 +270,50 @@ describe("Proposals", () => {
     expect(await screen.findByText("Not acceptable")).toBeInTheDocument();
   });
 
+  // loam-mvso. The case the old fixture accidentally produced on every row,
+  // and which the old statusIntent.ts then rendered as silence. UNSPECIFIED is
+  // set here DELIBERATELY -- spelled out, not omitted -- because that is the
+  // only way to say "the server did not report this" as a claim rather than as
+  // an oversight. docs/web-spec.md: UNSPECIFIED never means "fine", so a
+  // column headed "Blocked by" must not leave the cell empty, and it must name
+  // both fields separately rather than emit two identical "Unknown" pills that
+  // collide as React keys and tell the admin nothing about which is which.
+  it("names both fields when the server reported neither, rather than reading as clear", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(ProposalService, {
+        listProposals: () =>
+          create(ListProposalsResponseSchema, {
+            proposals: [
+              create(ProposalSchema, {
+                acceptable: false,
+                workBranch: workBranchFixture({
+                  name: "wb-7d3e9f",
+                  title: "Reported by a server that never set the fields",
+                  conflict: WorkBranchConflict.UNSPECIFIED,
+                  upstreamDrift: UpstreamDrift.UNSPECIFIED,
+                }),
+                verdicts: [],
+              }),
+            ],
+            pageInfo: create(PageInfoSchema, { total: 1 }),
+          }),
+      });
+    });
+    renderProposals(transport);
+
+    const link = await screen.findByRole("link", {
+      name: "Reported by a server that never set the fields",
+    });
+    const row = link.closest("tr");
+    if (row === null) throw new Error("unreachable: the link renders inside a table row");
+    const withinRow = within(row);
+    expect(withinRow.getByText("Conflict unknown")).toBeInTheDocument();
+    expect(withinRow.getByText("Upstream drift unknown")).toBeInTheDocument();
+    // Not the generic fallback: the two fields DID say something -- that they
+    // cannot be vouched for -- which is more than "not acceptable" conveys.
+    expect(withinRow.queryByText("Not acceptable")).not.toBeInTheDocument();
+  });
+
   it("renders the empty state when no proposals are awaiting a decision", async () => {
     const transport = createRouterTransport(({ service }) => {
       service(ProposalService, {
