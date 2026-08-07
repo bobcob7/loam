@@ -205,7 +205,12 @@ func TestVerifyStoredCredentialsDecrypt_NoTokenRace_IsSkippedNotFatal(t *testing
 func TestVerifyStoredCredentialsDecrypt_ReadFailure_IsNotBlamedOnTheKey(t *testing.T) {
 	t.Parallel()
 	const badHost = "forgejo.example.com"
-	readErr := errors.New("getting credential for host forgejo.example.com: vector type not found in the database")
+	// Deliberately does NOT repeat the host. credentialstore's own
+	// wrapping does include it, which is exactly how an earlier version of
+	// this test passed while the message's own format string named no host
+	// at all -- the assertion was reading the wrapped error, not the
+	// sentence being tested.
+	readErr := errors.New("acquiring connection: vector type not found in the database")
 	// The first listing enumerates hosts and succeeds -- it is served from
 	// a connection the pool already had. Every later call is the probe,
 	// and by then the pool can no longer open one. The mock records its
@@ -229,7 +234,9 @@ func TestVerifyStoredCredentialsDecrypt_ReadFailure_IsNotBlamedOnTheKey(t *testi
 		"a database that cannot serve a plain, non-decrypting read is not evidence about the encryption key")
 	assert.Contains(t, err.Error(), "vector type not found in the database",
 		"the operator has to be able to see the failure that actually happened")
-	assert.Contains(t, err.Error(), badHost)
+	assert.Contains(t, err.Error(), "do NOT touch the key",
+		"the expensive mistake this failure invites is acting on the key, so the message has to head it off")
+	assert.Contains(t, err.Error(), badHost, "the failing host is still worth naming")
 	assert.Len(t, lister.ListStatusesCalls(), 2,
 		"the read failure must be established by re-reading the same rows without decrypting, not assumed")
 }
