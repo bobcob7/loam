@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -151,23 +154,126 @@ func TestPathFromDiffGitLine_EqualHalvesScanBeatsTheLastSeparator(t *testing.T) 
 	assert.Equal(t, path, pathFromDiffGitLine(rest))
 }
 
-// TestComputeDiffStat_PlusPlusPlusHeaderNamesTheFileIndependently is the
-// other half of the masking pair. Here the `diff --git` line is
-// deliberately UNRECOVERABLE -- a rename whose destination contains
-// `" b/"`, with no `rename to` line, which is what git emits for a rename
-// that also changed content -- so the only route to the right name is the
-// `+++ b/` override. Without this, deleting that branch changes nothing:
-// the header fallback would answer for every case the other tests cover.
-func TestComputeDiffStat_PlusPlusPlusHeaderNamesTheFileIndependently(t *testing.T) {
+// TestComputeDiffStat_PlusPlusPlusHeaderNamesACopiedFile is the other half
+// of the masking pair, and it runs on BYTE-FOR-BYTE REAL GIT OUTPUT rather
+// than a typed fixture. That is not fastidiousness: a hand-typed `+++ b/`
+// line differs from git's in a way that hid a real defect for two rounds
+// (see TestComputeDiffStat_RealGitOutput_SpacePathsCarryNoTrailingTab), and
+// this file has now been bitten twice by fixtures that could not fail.
+//
+// An earlier version of this test justified the `+++ b/` override by
+// claiming git emits no `rename to` for a rename that also changes content.
+// THAT CLAIM IS FALSE -- verified: a 50%-similarity rename emits `rename
+// from`/`rename to` exactly as a pure rename does, so the override was
+// being defended on a premise that does not hold. The real, checkable
+// ground is COPY detection:
+//
+//	diff --git a/src.md b/docs/section b/notes.md
+//	copy from src.md
+//	copy to docs/section b/notes.md
+//	+++ b/docs/section b/notes.md
+//
+// pathFromDiffGitLine cannot split that header (the halves differ, so the
+// equal-halves scan declines, and the last " b/" lands inside the
+// destination itself), computeDiffStat handles `rename to` but NOT `copy
+// to`, and so `+++ b/` is the only route to the right name. Delete it and
+// this file is reported as "notes.md".
+//
+// Known residual, stated rather than papered over: a 100%-similarity COPY
+// has no hunk and therefore no `+++` line at all, so a copy of that kind
+// into a path containing " b/" would still be misnamed. Handling `copy to`
+// would close it -- and would also make this override redundant again. It
+// is left alone because plain `git diff` (what internal/gitdiff runs) does
+// not detect copies at all without -C, so nothing loam produces today can
+// reach either case.
+func TestComputeDiffStat_PlusPlusPlusHeaderNamesACopiedFile(t *testing.T) {
 	t.Parallel()
 	const dst = "docs/section b/notes.md"
-	header := "a/notes.md b/" + dst
+	repo := newProbeRepo(t)
+	writeProbeFile(t, repo, "src.md", "one\ntwo\nthree\nfour\nfive\n")
+	mustRunGit(t, repo, "add", "-A")
+	mustRunGit(t, repo, "commit", "--quiet", "-m", "base")
+	writeProbeFile(t, repo, dst, "one\ntwo\nthree\nfour\nFIVE\n")
+	mustRunGit(t, repo, "add", "-A")
+	mustRunGit(t, repo, "commit", "--quiet", "-m", "copied")
+	diff := probeDiff(t, repo, "-C", "--find-copies-harder", "HEAD~1", "HEAD")
+
+	require.Contains(t, diff, "copy to "+dst, "precondition: git must actually have detected a copy, or this proves nothing")
+	require.NotContains(t, diff, "rename to ", "precondition: a copy, not a rename -- `rename to` is handled and would answer instead")
+	header := strings.TrimPrefix(strings.SplitN(diff, "\n", 2)[0], "diff --git ")
 	require.NotEqual(t, dst, pathFromDiffGitLine(header), "precondition: the diff --git line alone cannot name this file, so the +++ header is what is under test")
-	diff := "diff --git " + header + "\nsimilarity index 80%\n--- a/notes.md\n+++ b/" + dst + "\n@@ -1 +1 @@\n-x\n+y\n"
+
 	stat := computeDiffStat(diff)
 	require.Len(t, stat.Files, 1)
 	assert.Equal(t, dst, stat.Files[0].Path)
-	assert.Equal(t, diffStatFile{Path: dst, Insertions: 1, Deletions: 1}, stat.Files[0])
+}
+
+// TestComputeDiffStat_RealGitOutput_SpacePathsCarryNoTrailingTab pins the
+// defect a reviewer found in the shipped code: GIT APPENDS A TAB to the
+// `---`/`+++` header lines when the path contains a space (it is git's own
+// disambiguation, since those lines are otherwise space-delimited).
+//
+// So for every space-containing path the `+++ b/` override did not merely
+// duplicate the other routes -- it OVERWROTE A CORRECT ANSWER WITH A WRONG
+// ONE, reporting "docs/my notes.md\t" where the diff --git fallback had
+// already produced "docs/my notes.md". `work diff --stat`'s per-file rows
+// were wrong for a whole class of real paths.
+//
+// It survived two rounds and a mutation battery for one reason: every
+// fixture for that branch was TYPED, and a typed `+++ b/` line has no tab.
+// A test that cannot reproduce the input cannot find the bug in it, which
+// is why this one shells out to git and feeds the bytes straight through.
+func TestComputeDiffStat_RealGitOutput_SpacePathsCarryNoTrailingTab(t *testing.T) {
+	t.Parallel()
+	const path = "docs/my notes.md"
+	repo := newProbeRepo(t)
+	writeProbeFile(t, repo, path, "alpha\nbeta\n")
+	mustRunGit(t, repo, "add", "-A")
+	mustRunGit(t, repo, "commit", "--quiet", "-m", "base")
+	writeProbeFile(t, repo, path, "alpha\nGAMMA\n")
+	mustRunGit(t, repo, "add", "-A")
+	mustRunGit(t, repo, "commit", "--quiet", "-m", "modified")
+	diff := probeDiff(t, repo, "HEAD~1", "HEAD")
+
+	require.Contains(t, diff, "+++ b/"+path+"\t", "precondition: real git must be emitting the trailing tab this test exists for")
+
+	stat := computeDiffStat(diff)
+	require.Len(t, stat.Files, 1)
+	assert.Equal(t, path, stat.Files[0].Path, "the reported path must not carry git's disambiguating tab")
+	assert.Equal(t, diffStatFile{Path: path, Insertions: 1, Deletions: 1}, stat.Files[0])
+}
+
+// newProbeRepo initializes a real, isolated git working repo with an author
+// identity configured, so mustRunGit can commit in it.
+func newProbeRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	mustRunGit(t, dir, "init", "--quiet", "-b", "main")
+	mustRunGit(t, dir, "config", "user.name", "fixture")
+	mustRunGit(t, dir, "config", "user.email", "fixture@example.com")
+	return dir
+}
+
+// writeProbeFile writes content at rel inside repo, creating parent
+// directories. rel may contain spaces -- that is the point.
+func writeProbeFile(t *testing.T, repo, rel, content string) {
+	t.Helper()
+	full := filepath.Join(repo, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+	require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
+}
+
+// probeDiff returns `git diff <args...>` output VERBATIM. It deliberately
+// does not go through mustRunGit, which trims: the trailing bytes of a diff
+// are exactly what these tests are about.
+func probeDiff(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"--no-pager", "diff", "--no-ext-diff"}, args...)...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	return string(out)
 }
 
 // TestComputeDiffStat_EmptyDiff_IsZeroFilesNotNil pins that nothing changed
