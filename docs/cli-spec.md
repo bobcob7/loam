@@ -321,6 +321,21 @@ A `branch` the repo does not report as a target branch is taken to be a work bra
 cloned from its server-owned ref; `clone` renames the resulting local branch back to the
 bare name, so the checked-out branch is `wb-9c2f1a`, as every other command expects.
 
+`clone` also **fetches the branch's target** as `refs/remotes/origin/<target>` and writes
+the refspec that keeps it current, so ordinary git works in the clone with no
+Loam-specific command:
+
+```
+git diff origin/main...HEAD      # what this branch changed
+git log origin/main..HEAD        # the commits it added
+```
+
+Without that fetch a single-branch clone has no `origin/main`, no merge base, and no
+record of the commit the branch was cut from; `git diff origin/main...HEAD` fails with
+*unknown revision*, and the natural recovery — reading `git log` and guessing where the
+branch starts — produces a diff that looks correct whether the guess was right or not. A
+clone that cannot obtain its target ref **fails** rather than succeeding without one.
+
 After the clone, **source control is plain git** — commit, push, fetch, merge, pull.
 There are no `loam commit` or `loam push` commands and no client-side hook guard. The
 server authorizes each push at receive time from the identity in the clone's config and
@@ -331,10 +346,22 @@ Ref Policy).
 **Output** (JSON):
 
 ```json
-{ "repo": "bobcob7/doc-server", "path": "./doc-server", "branch": "wb-9c2f1a" }
+{
+  "repo": "bobcob7/doc-server",
+  "path": "./doc-server",
+  "branch": "wb-9c2f1a",
+  "target": "main",
+  "base_sha": "9f1c0ae…",
+  "head_sha": "4b7de21…"
+}
 ```
 
-**Errors:** exit `3` if the repo is not enrolled; exit `2` if `branch` does not exist.
+`base_sha` is the **merge base** of `target` and `branch` — the commit this branch's
+changes start from, and the left endpoint of the range both `git diff
+origin/<target>...HEAD` and `loam work diff` compute. It is not the target's tip.
+
+**Errors:** exit `3` if the repo is not enrolled; exit `2` if `branch` does not exist, or
+if the target branch cannot be fetched.
 
 ### Work Branches
 
@@ -510,8 +537,15 @@ convention above).
 { "repo": "bobcob7/doc-server", "name": "wb-9c2f1a", "target": "main", "title": "Add login",
   "description": "…", "state": "reviewable", "author": "grace-hopper-3-author",
   "round": { "number": 2, "requested_by": "grace-hopper-3-author" },
-  "latest_verdict": { "outcome": "disapprove", "reviewer": "ada-lovelace-7-reviewer", "round": 2, "stale": false } }
+  "latest_verdict": { "outcome": "disapprove", "reviewer": "ada-lovelace-7-reviewer", "round": 2, "stale": false },
+  "target_sha": "9f1c0ae…", "head_sha": "4b7de21…" }
 ```
+
+`target_sha` and `head_sha` are the tips the server's mirror currently holds for `target`
+and for this work branch — the same two endpoints `diff` reports. `round.number` alone
+tells a re-reviewer *which* round it is on but not *from where*; `head_sha` is the piece of
+state that lets a round-2 review scope itself to what changed. When they cannot be
+obtained, `refs_error` says why; unlike `diff`, that is never fatal here.
 
 `round` is omitted entirely (not `{ "number": 0 }`) for a work branch with no review round
 yet — e.g. still `draft`, before the first `request-review`.
@@ -531,19 +565,60 @@ resolved (not in a clone and arguments omitted).
 #### diff
 Return the work branch's diff against its target, separately from `show` to keep both small.
 
-**Synopsis:** `loam work diff [repo] [work-branch]`
+**Synopsis:** `loam work diff [repo] [work-branch] [--format <patch|stat>] [--stat] [--allow-unpushed]`
 
-**Input:** `repo` and `work-branch` positional arguments identify the work branch (see the
-convention above).
+**Input:**
 
-**Output:** the unified diff of the work branch against its target branch, as a field in the
-active `LOAM_OUTPUT_FORMAT` (e.g. `{ "diff": "…" }` for JSON). In `human` mode this is the
-one exception to that wrapping: the diff is written verbatim, with no field wrapper and no
-added or stripped trailing newline, so it can be read directly or piped to a pager instead
-of requiring the caller to unwrap the JSON first.
+- `repo`, `work-branch` positional — identify the work branch (see the convention above).
+- `--format` *(optional, default `patch`)* — `patch` returns the full unified diff; `stat`
+  returns which files changed and by how much, derived from the same patch bytes rather
+  than fetched separately. `stat` is usually the right choice for verifying that the
+  intended files went up.
+- `--stat` *(optional)* — shorthand for `--format=stat`. Passing both is fine when they
+  agree and exit `2` when they contradict each other.
+- `--allow-unpushed` *(optional)* — proceed even when the local clone holds commits the
+  server does not (see below).
+
+**Output:** the diff, plus the commits it was computed from:
+
+```json
+{
+  "repo": "bobcob7/doc-server",
+  "work_branch": "wb-9c2f1a",
+  "target": "main",
+  "range": "9f1c0ae…...4b7de21…",
+  "target_sha": "9f1c0ae…",
+  "head_sha": "4b7de21…",
+  "local_head_sha": "4b7de21…",
+  "local_check": "local HEAD matches the server's tip",
+  "format": "patch",
+  "diff": "…"
+}
+```
+
+`range` is spelled so it can be re-run verbatim (`git diff <target_sha>...<head_sha>`).
+Three dots: the diff starts at the **merge base** of the two, which is why both endpoints
+are named rather than a single "base". `local_check` is always present — "we did not
+check" and "we checked and it was fine" are different answers, and an absent field cannot
+tell them apart. When the SHAs cannot be obtained, `refs_error` says why; they are never
+omitted silently.
+
+In `human` mode with `--format=patch` the diff is written verbatim, with no field wrapper
+and no added or stripped trailing newline, so it can be read directly or piped to a pager
+instead of requiring the caller to unwrap the JSON first. `--format=stat` is not a patch
+and carries the identification above as a short header.
+
+**Unpushed commits.** `work diff` reports the diff of the **pushed** branch. Called from a
+clone that holds commits the server does not have, it would otherwise return a well-formed
+diff of an older state with no error and no warning — silently omitting the caller's most
+recent work. It therefore **refuses** (exit `2`) in that case, naming both tips, before
+fetching the diff at all. `--allow-unpushed` overrides it, and taking that override is
+recorded in `local_check`. The check runs only when the caller is inside a clone of that
+same repo and work branch; every other situation reports why it was skipped rather than
+guessing.
 
 **Errors:** exit `3` if the work branch does not exist; exit `2` if the identifier cannot be
-resolved.
+resolved, if the flags contradict each other, or if the local clone holds unpushed commits.
 
 #### comments (get)
 Fetch the comment threads on a work branch, or the caller's own staged comments.

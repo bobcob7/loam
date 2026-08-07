@@ -32,7 +32,10 @@ as before.
    record.
 3. **Dispatch a separate reviewer** under a different identity. Tell it to
    mutate the code and confirm tests fail. A reviewer that only re-runs the
-   suite adds nothing.
+   suite adds nothing. Name the diff command it should use — see *Naming the
+   diff* below; briefs in this project told reviewers to "diff against
+   `origin/main`" while a clone had no such ref, and every reviewer worked
+   around it silently rather than reporting it.
 4. **Carry findings between them.** loam has no round-over-round view, so the
    mapping from a reviewer's finding to the commit answering it exists only in
    the orchestrator's context. This is the least automatable part of the job.
@@ -123,6 +126,33 @@ Block on prose that asserts a mechanism which does not exist, because a reader
 ends up with a false model. Do not block on prose that is merely loose where a
 neighbouring sentence fixes the scope — that is a standard no sentence can
 satisfy.
+
+### Naming the diff
+
+The most expensive review defect this project hit was not a missed bug. It was
+reviewing the **wrong range**, confidently, because every way of getting a diff
+wrong still produces a well-formed diff:
+
+* guessing the base with `git diff` → wrong **range**
+* `loam work diff` before pushing → wrong **tip**
+* neither one printing a SHA → **no signal** in either case
+
+Any of the following now works, and all of them name the commits involved, so a
+reviewer's diff can be checked against what the author said it pushed:
+
+```
+loam work diff <repo> <work-branch> --stat   # which files, and by how much
+loam work diff <repo> <work-branch>          # the full patch
+git diff origin/<target>...HEAD              # from inside the clone
+```
+
+Two habits follow from this. **Give the reviewer the head SHA the author
+pushed**, which `loam work show` reports as `head_sha` — round-over-round
+scoping has no other home, since loam carries no round-to-round view. And do
+not accept a review artifact that names no commit: an unidentified diff cannot
+be contradicted, which is the same reason this project reports *which*
+mutations died rather than how many, and *which* comment ids were staged rather
+than how many.
 
 ## Territory and concurrency
 
