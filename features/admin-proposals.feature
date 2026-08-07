@@ -59,11 +59,17 @@ Feature: Deciding on proposals
     When the upstream PR is closed without merging
     Then the next sync sets the work branch to state "closed"
 
-  Scenario: A conflicting target advance removes a proposal from the queue
+  # A conflicting advance demotes the branch out of REVIEWED without staling its
+  # approve (docs/git-spec.md -> Target Advances & Catch-Up), which used to make it
+  # vanish from the only surface an operator watches. It missed a release that way
+  # (loam-u84g): absent is not the same as blocked, and only one of the two can be
+  # acted on.
+  Scenario: A conflicting target advance blocks a proposal without hiding it
     Given a proposal in state "reviewed" with one "approve" verdict
     When its target branch advances with conflicting changes
     Then the work branch is in state "draft"
-    And it no longer appears in the proposal queue
+    And it is still listed in the proposal queue, marked as not acceptable
+    And accepting it is still rejected as a failed precondition
 
   Scenario: Re-accepting a caught-up work branch updates the existing PR
     Given a work branch whose upstream PR has been created
