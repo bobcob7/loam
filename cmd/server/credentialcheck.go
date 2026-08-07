@@ -141,19 +141,32 @@ func verifyEncryptionKeyAgainstStoredCredentials(ctx context.Context, cfg config
 // worked and nothing at all about connection #2.
 //
 // So the shape of the failure is established from evidence that is already
-// at hand: ListStatuses reads the same rows over the same pool and decrypts
-// NOTHING (see credentialLister). Re-running it after a GetByHost failure
-// answers the only question that matters here -- if that plain read fails
-// too, the database is not serving reads and the key is not implicated; if
-// it succeeds, reading demonstrably works and the decrypt is what failed.
-// That needs no error-string matching and no access to internal/crypto's
-// unexported decryption sentinel (loam-ai4 tracks exporting it).
+// at hand: ListStatuses queries the same table over the same pool and
+// decrypts NOTHING (see credentialLister). Re-running it after a GetByHost
+// failure answers the only question that matters here -- if that plain read
+// fails too, the database is not serving reads and the key is not
+// implicated; if it succeeds, reading demonstrably works and the decrypt is
+// what failed. That needs no error-string matching and no access to
+// internal/crypto's unexported decryption sentinel (loam-ai4 tracks
+// exporting it).
 //
-// The probe travels the same lazy pool it is asking about, so it narrows
-// the window rather than closing it: a probe served by an already-open
-// connection cannot rule the database out. What it removes is the
+// Two limits on what the probe establishes, stated rather than glossed,
+// since not asserting an unobserved cause is this function's whole subject:
+//
+//   - It is a DIFFERENT STATEMENT, not a replay. ListStatuses selects three
+//     named columns; GetCredentialByHost is a SELECT *. So what a
+//     successful probe shows is that the pool hands out connections and the
+//     credentials table is readable -- not that GetByHost's own statement
+//     would have succeeded. A failure specific to that statement's shape
+//     (pgx's `cached plan must not change result type`, say) would pass the
+//     probe and still be attributed to the key. Nothing at this call site
+//     can produce one, so this is a bound on the argument, not a live gap.
+//   - It travels the same lazy pool it is asking about, so a probe served
+//     by an already-open connection cannot rule the database out.
+//
+// Both narrow the window rather than closing it. What they remove is the
 // ASSUMPTION -- the key is now only named when a non-decrypting read of the
-// same rows has just succeeded.
+// same table has just succeeded.
 //
 // # The two benign exceptions
 //
@@ -180,7 +193,7 @@ func verifyStoredCredentialsDecrypt(ctx context.Context, lister credentialLister
 		if _, probeErr := lister.ListStatuses(ctx); probeErr != nil {
 			return fmt.Errorf("reading the stored credential for host %s failed, and so did a plain re-read that decrypts nothing (%w) -- the database is not serving reads, which is NOT evidence about LOAM_ENCRYPTION_KEY: repair the database and restart, and do NOT touch the key: %w", status.Host, probeErr, err)
 		}
-		return fmt.Errorf("decrypting the stored credential for host %s: the row read back fine, so LOAM_ENCRYPTION_KEY does not match the key that encrypted it (or the row is corrupt): %w", status.Host, err)
+		return fmt.Errorf("decrypting the stored credential for host %s: the credentials table still reads back fine over this same pool, so LOAM_ENCRYPTION_KEY does not match the key that encrypted it (or the row is corrupt): %w", status.Host, err)
 	}
 	logger.InfoContext(ctx, "verified LOAM_ENCRYPTION_KEY against stored credentials", "hosts_checked", len(statuses))
 	return nil

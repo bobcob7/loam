@@ -456,8 +456,8 @@ a password the database never adopted). Two of the reasons in the 503 body are
 worth telling apart: `not ready: database unreachable` means loam could not get
 a connection to Postgres at all (down, wrong host, wrong password), while
 `not ready: pgvector extension missing or not on the search_path` means
-Postgres answered fine and the *extension* is the problem — see the next two
-entries.
+Postgres answered fine and the *extension* is the problem — see the two vector
+entries at the end of this section.
 
 **Ingest jobs never leave `queued`** — that is the embedder, not loam. Check
 `LOAM_EMBEDDER_URL` is reachable *from inside the container*
