@@ -1,6 +1,7 @@
 package fakeforge
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -71,6 +72,53 @@ func TestClientCheckRepoRejectsForeignHost(t *testing.T) {
 	assert.ErrorIs(t, err, errInvalidUpstream)
 	assert.NotErrorIs(t, err, forge.ErrRepoNotFound, "a bound-host mismatch must be rejected on its own terms, not folded into repo-not-found")
 	assert.NotErrorIs(t, err, forge.ErrNoWriteAccess, "a bound-host mismatch is not a permissions problem")
+}
+
+// TestClientCheckRepoNeverEchoesUserinfo is the leak test this fake was
+// missing. Its CheckRepo renders the caller-supplied URL into three
+// different errors, so a credential embedded in that URL travels into
+// whatever a test asserts on or prints -- the same shape as loam-9h1e on
+// the real provider, and the reason this fake carried its own copy of
+// redactUserinfo in the first place.
+//
+// It was found by mutation rather than by reading: reintroducing the leak
+// into internal/urlredact.URL killed named tests in internal/forge and
+// internal/handler/repoadmin and left this package entirely green, which
+// is what "hardening nobody tests" looks like from the outside
+// (loam-051m). Assertions are on the ABSENCE OF THE SENTINEL, matching the
+// rule internal/urlredact's own tests document.
+//
+// Both error routes are driven: the bound-host branch (a repo that is not
+// there) and the foreign-host branch, since each interpolates the redacted
+// URL separately.
+func TestClientCheckRepoNeverEchoesUserinfo(t *testing.T) {
+	t.Parallel()
+	const sentinel = "SENTINEL-loam051m-fakeforge-token" //nolint:gosec // test fixture, not a real credential
+	srv, ts := newTestServer(t)
+	srv.AddToken("rw-token")
+	client := NewClient(ts.URL, "rw-token")
+	withUserinfo := func(rawURL string) string {
+		u, err := url.Parse(rawURL)
+		require.NoError(t, err)
+		u.User = url.User(sentinel)
+		return u.String()
+	}
+	t.Run("bound host, repo not there", func(t *testing.T) {
+		t.Parallel()
+		err := client.CheckRepo(t.Context(), withUserinfo(srv.GitURL("acme/nope")))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "acme/nope", "positive control: the repo must still be named")
+		assert.NotContains(t, err.Error(), sentinel)
+	})
+	t.Run("foreign host", func(t *testing.T) {
+		t.Parallel()
+		foreign := "http://bound-to-a-different-forge.invalid" + strings.TrimPrefix(srv.GitURL("acme/widgets"), ts.URL)
+		err := client.CheckRepo(t.Context(), withUserinfo(foreign))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errInvalidUpstream)
+		assert.Contains(t, err.Error(), "bound-to-a-different-forge.invalid", "positive control: the offending host must still be named")
+		assert.NotContains(t, err.Error(), sentinel)
+	})
 }
 
 // TestClientCheckRepoUnregisteredTokenLooksLikeRepoNotFound documents that
