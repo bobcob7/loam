@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -180,13 +181,49 @@ func TestDeleteRepo_MirrorCannotBeMovedAside_IsReported(t *testing.T) {
 // rename frees that path first, so re-enrolling the same repo still works
 // and the RPC still reports success.
 //
-// This is the one test here that needs POSIX permission semantics to hold,
-// so it skips as root, where they do not. Every other property of this
-// package is covered by a test that does not.
+// THE SKIP UNDER ROOT IS DELIBERATE AND, UNLIKE THE OTHER FOUR SITES IN
+// THIS TREE, UNAVOIDABLE (loam-0nuo). It is a real hole -- the gate runs as
+// uid 0, so this branch has never been exercised in CI -- and the reason it
+// stays open is worth writing down, because "just use the uid-immune
+// technique" is the obvious review note and it does not work here.
+//
+// loam-9g17's technique replaces a permission failure with a SHAPE failure:
+// a directory where a file is expected reads EISDIR, a regular file where a
+// directory is expected opens ENOTDIR, a dangling symlink creates ENOENT.
+// Root receives all three exactly as anyone else does, because none of them
+// is a permission check. Every one of those is a READ, OPEN or CREATE
+// failure. What this test needs is an UNLINK failure -- os.RemoveAll must
+// get partway through and stop -- and on a writable POSIX filesystem the
+// only thing that makes unlink fail is the write permission on the
+// containing directory, which is precisely what CAP_DAC_OVERRIDE bypasses.
+// There is no shape that survives it:
+//
+//   - 0o500 and 0o000 on the containing directory: os.RemoveAll returns nil
+//     as root (measured inside golang:1.26.5, the gate's own image).
+//   - The immutable inode flag does block root, but setting it needs
+//     CAP_LINUX_IMMUTABLE, which the gate's container does not have (the
+//     ioctl returns EPERM there), and an unprivileged developer could never
+//     set it either -- so it would trade this skip for a differently-shaped
+//     one.
+//   - EBUSY from a mount point inside the tree needs CAP_SYS_ADMIN, same
+//     problem.
+//   - Path-length limits do not help: os.RemoveAll descends with openat and
+//     unlinkat relative to a directory fd, so it deletes trees no absolute
+//     path could name.
+//
+// So this stays a skip, and everything around it is arranged so that the
+// skip is the only thing lost. The precondition below asserts the subtree
+// really was made undeletable before anything is concluded from it, so the
+// day this fixture stops working the test says which step stopped working
+// rather than failing as a bare "expected no error". And the rename leg
+// itself IS covered at every uid by
+// TestDeleteRepo_MirrorCannotBeMovedAside_IsReported above; what is
+// uncovered in CI is specifically the combination "rename succeeded, delete
+// failed, RPC still reports success".
 func TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
-		t.Skip("root ignores the directory permissions this test uses to make a subtree undeletable")
+		t.Skip("uid 0 holds CAP_DAC_OVERRIDE and deletes the subtree this test makes undeletable; see the comment above for why no uid-immune shape reaches an unlink failure")
 	}
 	r, _, dataDir := newRemover(t)
 	mirrorDir := seedMirror(t, dataDir)
@@ -195,10 +232,20 @@ func TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish(t *testin
 	t.Cleanup(func() {
 		// Restored before t.TempDir's own cleanup runs (cleanups are
 		// LIFO), which would otherwise fail the test trying to remove
-		// what this one deliberately made unremovable.
+		// what this one deliberately made unremovable. Registered before
+		// the precondition below so that a precondition failure still
+		// leaves a removable tree behind.
 		_ = os.Chmod(locked, 0o700)
 		_ = os.Chmod(filepath.Dir(locked), 0o700)
 	})
+	// The whole test rests on that chmod having actually taken effect for
+	// whoever is running it. Probe it directly rather than inferring it from
+	// the outcome: a caller that is not uid 0 but does hold CAP_DAC_OVERRIDE
+	// (or a filesystem that ignores mode bits) would otherwise sail past the
+	// guard above and fail three assertions later, saying nothing about why.
+	probeErr := os.Remove(filepath.Join(locked, "pack-1.pack"))
+	require.Error(t, probeErr, "precondition: the 0o500 chmod must really make %s undeletable, or this test proves nothing", locked)
+	require.ErrorIs(t, probeErr, fs.ErrPermission, "precondition: the undeletability must come from the mode bits this test set")
 	require.NoError(t, r.DeleteRepo(t.Context(), uuid.New()), "a mirror whose delete cannot finish must not fail the removal once the canonical path is free")
 	assert.NoDirExists(t, mirrorDir, "the canonical mirror path must be free, so the same repo can be re-enrolled")
 	left := trashSiblings(t, mirrorDir)
