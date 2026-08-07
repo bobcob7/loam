@@ -457,19 +457,32 @@ func unwritableDataDirShapes() []unwritableDataDirShape {
 //
 // The limit is a property of the filesystem, not of the caller's privileges
 // (PATH_MAX is 4096 on Linux and 1024 on darwin), so this is discovered at
-// runtime rather than hardcoded, and holds identically at uid 0.
+// runtime rather than hardcoded, and holds identically at uid 0. Measured:
+// it lands on 4095 = PATH_MAX-1 inside golang:1.26.5, and reaches the second
+// arm on darwin too.
+//
+// The iteration cap is the reason this loop is not the one construct in the
+// file whose failure mode is a hung test rather than a named assertion.
+// Termination otherwise depends entirely on the kernel eventually refusing,
+// which every POSIX kernel does -- getname() caps at PATH_MAX before the
+// filesystem is consulted -- but "no platform anyone has tried does this" is
+// exactly the assumption this bead exists to stop trusting. 1<<16 components
+// is unreachable at any plausible PATH_MAX and a hard stop at any other.
 func longestCreatableDir(t *testing.T, parent string) string {
 	t.Helper()
 	dir := parent
 	for _, width := range []int{128, 16, 1} {
 		component := strings.Repeat("d", width)
-		for {
+		grew := false
+		for i := 0; i < 1<<16; i++ {
 			next := filepath.Join(dir, component)
 			if err := os.Mkdir(next, 0o700); err != nil {
+				grew = true
 				break
 			}
 			dir = next
 		}
+		require.True(t, grew, "this filesystem accepted 65536 components of %d characters without refusing: it has no path length limit for this fixture to find", width)
 	}
 	return dir
 }
@@ -496,19 +509,46 @@ func probeDataDir(dir string) error {
 	return os.Remove(f.Name())
 }
 
+// requireShapeIsUnwritable is the precondition BOTH tests below run, factored
+// into one place rather than copied: two spellings of the same fixture that
+// disagree about how many preconditions they carry is how the next person to
+// add a shape ends up copying whichever they read first.
+//
+// The os.ErrNotExist assertion is redundant TODAY -- Go 1.26.5 maps only
+// ENOENT, so requiring the shape's own errno already excludes it -- and is
+// kept because it is the assertion that would fire if that ever changed.
+// Were EEXIST or ENOTDIR to start mapping, the shape would silently become
+// the "no data directory here, create it and carry on" path, which returns
+// nil and proves nothing.
+func requireShapeIsUnwritable(t *testing.T, shape unwritableDataDirShape, dir string) {
+	t.Helper()
+	probeErr := probeDataDir(dir)
+	require.Error(t, probeErr, "precondition: the planted shape must really make %s unwritable for whoever is running this test", dir)
+	require.ErrorIs(t, probeErr, shape.wantErrno, "precondition: the failure must be the one this shape manufactures")
+	require.NotErrorIs(t, probeErr, os.ErrNotExist, "precondition: it must be unwritable, not merely absent -- absent is the create-it-and-carry-on path")
+}
+
 func TestLoad_UnwritableDataDir(t *testing.T) {
 	// Not parallel (nor are the subtests): t.Setenv is incompatible with
 	// t.Parallel.
 	for _, shape := range unwritableDataDirShapes() {
 		t.Run(shape.name, func(t *testing.T) {
 			dir := shape.plant(t, t.TempDir())
-			probeErr := probeDataDir(dir)
-			require.Error(t, probeErr, "precondition: the planted shape must really make %s unwritable for whoever is running this test", dir)
-			require.ErrorIs(t, probeErr, shape.wantErrno, "precondition: the failure must be the one this shape manufactures")
-			require.NotErrorIs(t, probeErr, os.ErrNotExist, "precondition: it must be unwritable, not merely absent -- absent is the create-it-and-carry-on path")
+			requireShapeIsUnwritable(t, shape, dir)
 			baseEnv(t, dir)
 			_, err := Load()
 			require.ErrorIs(t, err, errDataDirNotWritable)
+			// The errno survives dataDirError's %w as a structured value
+			// (os.PathError unwraps to syscall.Errno), so this reaches the
+			// underlying cause without asserting on the message text. It
+			// pins that Load failed for the reason the shape manufactured
+			// and not a later, incidental one: swallowing MkdirAll's error
+			// leaves a dangling LOAM_DATA_DIR reported as ENOENT from the
+			// write probe -- "no such file or directory" about a path that
+			// demonstrably exists as a symlink -- which is a diagnosability
+			// regression in precisely the misconfigured-bind-mount case
+			// dataDirError was written for.
+			require.ErrorIs(t, err, shape.wantErrno, "the wrapped cause must be the failure the shape manufactured, not a later one")
 		})
 	}
 }
@@ -532,9 +572,7 @@ func TestLoad_UnwritableDataDirErrorNamesUIDAndPath(t *testing.T) {
 	for _, shape := range unwritableDataDirShapes() {
 		t.Run(shape.name, func(t *testing.T) {
 			dir := shape.plant(t, t.TempDir())
-			probeErr := probeDataDir(dir)
-			require.Error(t, probeErr, "precondition: the planted shape must really make %s unwritable for whoever is running this test", dir)
-			require.ErrorIs(t, probeErr, shape.wantErrno, "precondition: the failure must be the one this shape manufactures")
+			requireShapeIsUnwritable(t, shape, dir)
 			baseEnv(t, dir)
 			_, err := Load()
 			require.ErrorIs(t, err, errDataDirNotWritable)

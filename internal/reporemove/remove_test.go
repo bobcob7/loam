@@ -191,25 +191,54 @@ func TestDeleteRepo_MirrorCannotBeMovedAside_IsReported(t *testing.T) {
 // a directory where a file is expected reads EISDIR, a regular file where a
 // directory is expected opens ENOTDIR, a dangling symlink creates ENOENT.
 // Root receives all three exactly as anyone else does, because none of them
-// is a permission check. Every one of those is a READ, OPEN or CREATE
-// failure. What this test needs is an UNLINK failure -- os.RemoveAll must
-// get partway through and stop -- and on a writable POSIX filesystem the
-// only thing that makes unlink fail is the write permission on the
-// containing directory, which is precisely what CAP_DAC_OVERRIDE bypasses.
-// There is no shape that survives it:
+// is a permission check.
+//
+// What this test needs is for os.RemoveAll to STOP PARTWAY with the
+// canonical path still occupied. The distinction that matters is not which
+// syscall fails -- under 0o000 it stops at openfdat, an open failure, which
+// is the same class loam-9g17 uses -- it is DAC VERSUS SHAPE. Every way of
+// making a tree undeletable that is available to an ordinary test turns out
+// to be a permission bit on the containing directory, and permission bits
+// are what CAP_DAC_OVERRIDE ignores. A shape cannot substitute, because a
+// tree the walk cannot delete is not a tree of the wrong shape; it is a tree
+// the walker is not allowed into.
+//
+// NO SHAPE COMPATIBLE WITH A PARALLEL, IN-PROCESS TEST SURVIVES UID 0. That
+// is deliberately not the same claim as "no shape survives uid 0" -- the
+// fourth bullet is a measured counterexample, and a universal here would
+// only stop the next person looking. All four measured inside
+// golang:1.26.5, the gate's own image, at uid 0 (CapEff 0x800405fb:
+// CAP_DAC_OVERRIDE set, CAP_LINUX_IMMUTABLE and CAP_SYS_ADMIN clear):
 //
 //   - 0o500 and 0o000 on the containing directory: os.RemoveAll returns nil
-//     as root (measured inside golang:1.26.5, the gate's own image).
+//     and the tree is gone. (At uid 1000 the same two fixtures fail at
+//     unlinkat and openfdat respectively, which is the asymmetry.)
 //   - The immutable inode flag does block root, but setting it needs
 //     CAP_LINUX_IMMUTABLE, which the gate's container does not have (the
 //     ioctl returns EPERM there), and an unprivileged developer could never
 //     set it either -- so it would trade this skip for a differently-shaped
 //     one.
 //   - EBUSY from a mount point inside the tree needs CAP_SYS_ADMIN, same
-//     problem.
-//   - Path-length limits do not help: os.RemoveAll descends with openat and
-//     unlinkat relative to a directory fd, so it deletes trees no absolute
-//     path could name.
+//     problem: mount -t tmpfs returns EPERM there.
+//   - Resource exhaustion DOES survive uid 0, and is the reason the sentence
+//     above is qualified rather than universal. RLIMIT_NOFILE is not a
+//     permission and no capability bypasses it, and LOWERING A SOFT LIMIT
+//     NEEDS NO PRIVILEGE: with NOFILE=12 over a 40-deep tree, os.RemoveAll
+//     as uid 0 fails at "openfdat ...: too many open files" with the
+//     top-level path still occupied -- exactly the state this test needs.
+//     It is unusable HERE, for reasons that have nothing to do with uid:
+//     syscall.Setrlimit is process-global and this test is t.Parallel(), so
+//     a shared test binary at NOFILE=12 would take the rest of the package
+//     down with it. A re-exec'd helper subprocess would isolate it, at the
+//     cost of pinning the fixture to how many directory fds os.RemoveAll
+//     holds concurrently -- an implementation detail of the standard
+//     library, and a far more fragile thing to depend on than a chmod.
+//
+// Path length is not a fourth option, for a reason worth recording because
+// it is the obvious next idea: os.RemoveAll descends with openat and
+// unlinkat relative to a directory fd, so it deletes trees no absolute path
+// could name. Measured, a tree whose nominal absolute path is 12080
+// characters -- three times PATH_MAX -- is removed with a nil error.
 //
 // So this stays a skip, and everything around it is arranged so that the
 // skip is the only thing lost. The precondition below asserts the subtree
