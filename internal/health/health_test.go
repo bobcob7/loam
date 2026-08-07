@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -99,6 +100,61 @@ func TestReadiness_PingFails_Returns503NamingTheDatabase(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "not ready: "+databaseReason, rec.Body.String())
 	assert.Empty(t, schema.CheckSchemaCalls(), "an unreachable database must short-circuit before the schema query, which runs over that same pool")
+}
+
+// TestReadiness_PgvectorRegistrationFails_NamesTheExtensionNotTheNetwork
+// is this bead's readiness-side proof. pgxpool is lazy: internal/db.NewPool
+// installs pgvector-go's type registration as AfterConnect, which runs on
+// every connection the pool opens, so dropping the extension out from under
+// a long-running process makes Ping fail while Postgres is up, reachable
+// and authenticating perfectly. Reporting that as "database unreachable"
+// sent operators to the network for a schema problem -- and ServeHTTP's
+// short-circuit means the schema check never gets to say otherwise.
+//
+// The error is wrapped, deliberately: pgxpool returns AfterConnect's error
+// through its own acquisition path, so the message an operator's /readyz
+// actually reflects is never the bare string.
+func TestReadiness_PgvectorRegistrationFails_NamesTheExtensionNotTheNetwork(t *testing.T) {
+	t.Parallel()
+	pinger := &PingerMock{PingFunc: func(context.Context) error {
+		return fmt.Errorf("acquiring connection: %w", errors.New(pgvectorRegistrationMessage))
+	}}
+	schema := okSchema()
+	rec := get(t, NewReadiness(pinger, schema, testLogger()), "/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "not ready: "+pgvectorReason, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "unreachable",
+		"Postgres is up and answering here; only the pool's per-connection type registration failed")
+	assert.Empty(t, schema.CheckSchemaCalls(),
+		"the schema check runs over the same pool and would fail at the same acquisition, so the ping's reason is the whole of what the operator gets")
+}
+
+// TestReadiness_UnrecognisedPingFailure_StillReportsTheBroadDatabaseReason
+// pins the direction the pgvector carve-out is allowed to work in: it
+// REFINES, it never widens. Everything not positively identified keeps the
+// old, deliberately broad reason -- including an authentication failure,
+// which docs/deployment-spec.md and helm/loam's postgres-statefulset
+// comment both tell operators to expect as "database unreachable".
+func TestReadiness_UnrecognisedPingFailure_StillReportsTheBroadDatabaseReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "dial failure", err: errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")},
+		{name: "authentication failure", err: errors.New(`failed to connect: FATAL: password authentication failed for user "loam" (SQLSTATE 28P01)`)},
+		{name: "context deadline", err: context.DeadlineExceeded},
+		{name: "unknown", err: errors.New("boom")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pinger := &PingerMock{PingFunc: func(context.Context) error { return tt.err }}
+			rec := get(t, NewReadiness(pinger, okSchema(), testLogger()), "/readyz")
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.Equal(t, "not ready: "+databaseReason, rec.Body.String())
+		})
+	}
 }
 
 // TestReadiness_SchemaCheckFails_Returns503NamingMigrations covers the

@@ -105,19 +105,62 @@ func verifyEncryptionKeyAgainstStoredCredentials(ctx context.Context, cfg config
 //     can only be answered by asking the database, which is why it lives
 //     here, right after the pool connects, rather than in internal/config.
 //
-// # Why any error is fail-worthy, not only a decryption failure
+// # A failed READ is not a failed DECRYPT, and the difference is expensive
 //
-// This intentionally does NOT branch on internal/crypto's specific
-// decryption sentinel (unexported; loam-ai4 tracks exporting it for a
-// caller that needs to tell "wrong key" apart from "unrecognized format").
-// It doesn't need to: by the time this runs, connectDatabase has already
-// proven Postgres is reachable, so the only errors GetByHost can plausibly
-// return here are a genuine decryption failure or an equally-fatal local
-// anomaly -- neither is a condition startup should paper over. The one
-// exception is ErrNotFound, treated as benign and skipped rather than
-// fatal: it means the row this host's status was read from is already
-// gone by the time GetByHost re-reads it, which is not a key problem at
-// all, just a lost race with nothing left to verify.
+// GetByHost does two things -- it reads the row, then decrypts the
+// ciphertext in it -- and its failures therefore come in two shapes that
+// call for opposite operator actions:
+//
+//   - the row could not be READ at all: the pool could not hand out a
+//     usable connection, the query failed, the table is not visible. This
+//     says nothing whatsoever about LOAM_ENCRYPTION_KEY.
+//   - the row was read and could not be DECRYPTED. That is the key
+//     mismatch this check exists to catch.
+//
+// Telling them apart matters more than anything else this function does,
+// because the two remedies are not comparable in cost. LOAM_ENCRYPTION_KEY
+// cannot be rotated in place and is not covered by a database backup
+// (docs/compose-quickstart.md -> "Back up LOAM_ENCRYPTION_KEY before you go
+// any further"), so an operator told their key is wrong reasonably
+// concludes it is LOST -- and the documented recovery from a lost key is
+// deleting every credentials row and re-entering every forge token.
+// Reporting a database fault as a key mismatch therefore costs an operator
+// every stored credential, on the strength of a diagnosis nothing checked.
+//
+// # Why the two are classified by evidence rather than assumed
+//
+// Every error used to be collapsed into the key diagnosis, justified by a
+// comment claiming connectDatabase had already proven Postgres reachable.
+// It had not, and could not: PGXPOOL IS LAZY. db.NewPool's AfterConnect
+// hook (pgvector type registration) runs on EVERY connection the pool
+// opens, not just the first, and pgxpool fails the whole acquisition when
+// it errors. A pool that connected cleanly at startup still fails every
+// later acquisition once the pgvector extension is dropped, a backup is
+// restored without it, a failover lands on a database that lacks it, or a
+// search_path change hides the type. connectDatabase proves connection #1
+// worked and nothing at all about connection #2.
+//
+// So the shape of the failure is established from evidence that is already
+// at hand: ListStatuses reads the same rows over the same pool and decrypts
+// NOTHING (see credentialLister). Re-running it after a GetByHost failure
+// answers the only question that matters here -- if that plain read fails
+// too, the database is not serving reads and the key is not implicated; if
+// it succeeds, reading demonstrably works and the decrypt is what failed.
+// That needs no error-string matching and no access to internal/crypto's
+// unexported decryption sentinel (loam-ai4 tracks exporting it).
+//
+// The probe travels the same lazy pool it is asking about, so it narrows
+// the window rather than closing it: a probe served by an already-open
+// connection cannot rule the database out. What it removes is the
+// ASSUMPTION -- the key is now only named when a non-decrypting read of the
+// same rows has just succeeded.
+//
+// # The two benign exceptions
+//
+// ErrNotFound and ErrNoToken are skipped rather than fatal. Both mean the
+// row this host's status was read from changed underneath us between
+// ListStatuses and GetByHost -- deleted outright, or its token cleared --
+// which is a lost race with nothing left to verify, not a key problem.
 func verifyStoredCredentialsDecrypt(ctx context.Context, lister credentialLister, lookup forgeCredentialLookup, logger *slog.Logger) error {
 	statuses, err := lister.ListStatuses(ctx)
 	if err != nil {
@@ -127,12 +170,17 @@ func verifyStoredCredentialsDecrypt(ctx context.Context, lister credentialLister
 		if !status.HasToken {
 			continue
 		}
-		if _, err := lookup.GetByHost(ctx, status.Host); err != nil {
-			if errors.Is(err, credentialstore.ErrNotFound) {
-				continue
-			}
-			return fmt.Errorf("decrypting the stored credential for host %s: LOAM_ENCRYPTION_KEY does not match the key that encrypted it (or the row is corrupt): %w", status.Host, err)
+		_, err := lookup.GetByHost(ctx, status.Host)
+		if err == nil {
+			continue
 		}
+		if errors.Is(err, credentialstore.ErrNotFound) || errors.Is(err, credentialstore.ErrNoToken) {
+			continue
+		}
+		if _, probeErr := lister.ListStatuses(ctx); probeErr != nil {
+			return fmt.Errorf("reading the stored credential for host %s failed, and so did a plain re-read that decrypts nothing (%w) -- the database is not serving reads, which is NOT evidence about LOAM_ENCRYPTION_KEY: repair the database and restart, and do NOT touch the key: %w", status.Host, probeErr, err)
+		}
+		return fmt.Errorf("decrypting the stored credential for host %s: the row read back fine, so LOAM_ENCRYPTION_KEY does not match the key that encrypted it (or the row is corrupt): %w", status.Host, err)
 	}
 	logger.InfoContext(ctx, "verified LOAM_ENCRYPTION_KEY against stored credentials", "hosts_checked", len(statuses))
 	return nil

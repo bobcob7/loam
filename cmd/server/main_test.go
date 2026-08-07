@@ -56,4 +56,24 @@ func TestLoamhookBinaryPath_MissingSiblingIsAHardErrorEvenWithNoReposEnrolled(t 
 	_, err := loamhookBinaryPath(executable, fixedStat(statErr))
 	require.Error(t, err, "a missing loamhook sibling must fail startup even when no repo is enrolled yet")
 	assert.ErrorIs(t, err, statErr)
+	assert.Contains(t, err.Error(), "not found", "the one stat failure that genuinely means the file is absent should say so")
+}
+
+// TestLoamhookBinaryPath_UnstatableSiblingIsNotReportedAsMissing is the
+// same distinction from the other side. stat can fail without the file
+// being absent -- a directory component this process cannot traverse, a
+// symlink loop, an I/O error, a dead network mount -- and every one of
+// those used to be reported as "loamhook binary not found", sending an
+// operator to install a binary that is already sitting there. Startup must
+// still fail; it just must not name a cause it did not observe.
+func TestLoamhookBinaryPath_UnstatableSiblingIsNotReportedAsMissing(t *testing.T) {
+	t.Parallel()
+	executable := func() (string, error) { return filepath.Join("/opt/loam", "loam-server"), nil }
+	statErr := os.ErrPermission
+	_, err := loamhookBinaryPath(executable, fixedStat(statErr))
+	require.Error(t, err, "an unstatable path is still a startup failure: this process cannot show the hook binary is there")
+	assert.ErrorIs(t, err, statErr)
+	assert.NotContains(t, err.Error(), "not found",
+		"stat failing for a reason other than absence is not evidence the file is absent")
+	assert.Contains(t, err.Error(), filepath.Join("/opt/loam", "loamhook"), "the operator still needs the path that could not be checked")
 }

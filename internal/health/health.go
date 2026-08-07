@@ -56,6 +56,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -69,15 +70,41 @@ const (
 	readyBody = "ready"
 )
 
-// databaseReason and migrationsReason name WHICH readiness check failed in
-// the 503 body. They are fixed strings, never the underlying error: an
-// error from pgx can carry the database host, port and user, and this
-// body is served to an unauthenticated caller. The full error is logged
-// instead, where the operator who needs it can see it and a probe cannot.
+// databaseReason, pgvectorReason and migrationsReason name WHICH readiness
+// check failed in the 503 body. They are fixed strings, never the
+// underlying error: an error from pgx can carry the database host, port and
+// user, and this body is served to an unauthenticated caller. The full
+// error is logged instead, where the operator who needs it can see it and a
+// probe cannot.
+//
+// databaseReason stays the answer for every failure to reach Postgres,
+// including an authentication failure -- docs/deployment-spec.md and
+// helm/loam/templates/postgres-statefulset.yaml both tell operators to
+// expect exactly that for a password that disagrees with the DSN's.
+// pgvectorReason is the one failure carved out of it, because it is not a
+// reachability problem at all: see databaseFailureReason.
 const (
 	databaseReason   = "database unreachable"
+	pgvectorReason   = "pgvector extension missing or not on the search_path"
 	migrationsReason = "migrations not current"
 )
+
+// pgvectorRegistrationMessage is the exact text pgvector-go's
+// pgx.RegisterTypes returns when `to_regtype('vector')` comes back NULL
+// (pgvector-go/pgx/register.go). internal/db.NewPool installs that function
+// as the pool's AfterConnect hook, so this error surfaces from Ping -- and
+// from every other acquisition -- rather than from anything vector-shaped
+// the caller did.
+//
+// It is matched as a STRING because pgvector-go offers nothing else: the
+// value is a bare fmt.Errorf with no sentinel, no type and no wrapped
+// cause, so errors.Is and errors.As have nothing to bind to. Matching a
+// dependency's message text is normally the wrong thing, and what makes it
+// acceptable here is that the match can only REFINE the answer, never widen
+// it -- an error that does not match still reports databaseReason, exactly
+// as every failure did before. If pgvector-go rewords this, /readyz
+// degrades to today's vaguer 503, never to a wrong one.
+const pgvectorRegistrationMessage = "vector type not found in the database"
 
 // checkTimeout bounds one whole /readyz evaluation. Without it a Postgres
 // that accepts the TCP connection but never answers (a hung host, a
@@ -113,15 +140,20 @@ func NewReadiness(db Pinger, schema SchemaChecker, logger *slog.Logger) *Readine
 // ServeHTTP implements http.Handler.
 //
 // The two checks are ordered and short-circuiting, not collected: the
-// schema check is itself a query over the same pool, so with Postgres
-// unreachable it can only fail for a second, derived reason. Reporting
-// the first, causal failure is more useful to an operator than reporting
-// both.
+// schema check is itself a query over the same pool, so whatever stopped
+// the ping from getting a usable connection stops it too, and it could
+// only fail for a second, derived reason. Reporting the first, causal
+// failure is more useful to an operator than reporting both.
+//
+// That short-circuit is exactly why the ping's own failure has to be NAMED
+// rather than assumed: it is the only reason this endpoint will ever
+// report, so whatever it claims is the whole of what the operator gets.
+// See databaseFailureReason for the claim that had to stop being made.
 func (rd *Readiness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
 	defer cancel()
 	if err := rd.db.Ping(ctx); err != nil {
-		rd.notReady(ctx, w, databaseReason, err)
+		rd.notReady(ctx, w, databaseFailureReason(err), err)
 		return
 	}
 	if err := rd.schema.CheckSchema(ctx); err != nil {
@@ -129,6 +161,33 @@ func (rd *Readiness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writePlain(w, http.StatusOK, readyBody)
+}
+
+// databaseFailureReason names WHICH database failure Ping reported, and
+// exists because "the ping failed" and "Postgres is unreachable" are not
+// the same statement.
+//
+// PGXPOOL IS LAZY. internal/db.NewPool's AfterConnect hook runs on EVERY
+// connection the pool opens, not just the first, and pgxpool fails the
+// whole acquisition -- Ping included -- when it errors. So a pool that
+// connected cleanly at startup begins failing every later acquisition the
+// moment the pgvector extension is dropped, a backup is restored without
+// it, a failover lands on a database that lacks it, or a search_path change
+// hides the type. Postgres is up, reachable, authenticating and serving;
+// what this process cannot do is finish setting up a connection to it.
+//
+// Reporting that as "database unreachable" pointed operators at the
+// network for a problem that lives in the schema, and the short-circuit in
+// ServeHTTP means the schema check never gets to say anything either. So
+// the one failure that is diagnosable from the error itself is diagnosed
+// here. Everything else keeps the old, deliberately broad reason: see the
+// constants above for why an authentication failure in particular must
+// stay under databaseReason.
+func databaseFailureReason(err error) string {
+	if strings.Contains(err.Error(), pgvectorRegistrationMessage) {
+		return pgvectorReason
+	}
+	return databaseReason
 }
 
 // notReady logs the full failure and serves the short, reason-naming 503.

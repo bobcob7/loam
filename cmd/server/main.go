@@ -69,7 +69,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -432,7 +434,17 @@ func loamhookBinaryPath(executable func() (string, error), stat func(string) (os
 	}
 	path := filepath.Join(filepath.Dir(execPath), loamhookBinaryPathName)
 	if _, err := stat(path); err != nil {
-		return "", fmt.Errorf("loamhook binary not found at %s (expected as a sibling of this server's own executable): %w", path, err)
+		// "not found" is a claim about the filesystem, and stat can
+		// fail without supporting it: a directory component the
+		// process cannot traverse, a symlink loop, an I/O error, a
+		// dead network mount. All of those used to be reported as a
+		// missing binary, sending an operator to install a file that
+		// is already sitting there. fs.ErrNotExist is the only error
+		// that earns that sentence.
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("loamhook binary not found at %s (expected as a sibling of this server's own executable): %w", path, err)
+		}
+		return "", fmt.Errorf("checking for the loamhook binary at %s (expected as a sibling of this server's own executable): %w", path, err)
 	}
 	return path, nil
 }
