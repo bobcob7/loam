@@ -272,6 +272,11 @@ func TestTransport_LsRemoteIgnoresAmbientGitDir(t *testing.T) {
 // package's environment is deliberately os.Environ() plus overrides (see
 // internal/gitrun's package doc on why that base model is right here), so
 // over-filtering would be its own defect.
+//
+// It exercises the helper DIRECTLY, so it is adequate only as a PAIR with
+// TestTransport_GitEnvCarriesExactlyOneGitDir: this one keeps passing if
+// gitEnv stops calling dropInheritedRepoVars at all, and that one is what
+// catches it. Neither name says so on its own, hence this note.
 func TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable(t *testing.T) {
 	t.Parallel()
 	environ := []string{"PATH=/usr/bin", "HTTPS_PROXY=http://proxy.example"}

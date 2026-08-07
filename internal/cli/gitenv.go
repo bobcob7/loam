@@ -123,11 +123,23 @@ import (
 //
 // # What this rule does NOT neutralise, stated plainly
 //
-//   - A hostile ~/.gitconfig or /etc/gitconfig. Deliberately out of scope
-//     (see the boundary argument above). A global http.extraHeader is still
-//     sent on `loam clone`'s initial fetch; LsRemote's surviving
-//     empty-string reset happens to cover the global layer too, which is
-//     why that reset is kept rather than deleted as redundant.
+//   - A hostile ~/.gitconfig or /etc/gitconfig, IN GENERAL. Deliberately
+//     out of scope (see the boundary argument above): loam has no opinion
+//     about http.proxy, http.sslCAInfo, core.autocrlf or LFS filters, and
+//     clobbering them would break clones that must work.
+//
+//     ONE key is excepted, and the exception is deliberate rather than an
+//     inconsistency: http.extraHeader carries Loam-Agent-*, which is loam's
+//     own identity assertion and the thing the whole authorisation model is
+//     keyed on -- not a user setting loam is neutral about. Both LsRemote
+//     and Clone therefore reset it with an empty-string entry, which clears
+//     only that key. This was a declared residual on `loam clone` until
+//     round 2 measured it: a global http.extraHeader really did reach
+//     clone's initial fetch AHEAD of loam's own identity, and the reset
+//     really does close it. Every OTHER global key still applies, by design.
+//   - A hostile GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM setting is likewise
+//     honoured, since those select which of the user's own files apply.
+//     Same trust domain, same reasoning.
 //   - `execGitRefs.Fetch(ctx, dest, ...)`, which by design uses dest's own
 //     remote, headers and hooks. `git fetch` runs the reference-transaction
 //     hook out of the fetched repository's core.hooksPath (verified against
