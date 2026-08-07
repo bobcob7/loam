@@ -296,7 +296,8 @@ func TestClaim_EveryCandidateRejected_ReportsNothingToClaimNotAnError(t *testing
 		holds[i] = holdUncommittedRunningJob(ctx, t, pgPool, repos[i])
 	}
 	handler, logger := newCapturingHandler()
-	pool := NewPool(logger, pgPool, &OrchestratorMock{}, 1)
+	mp, reader := claimMeter(t)
+	pool := NewPool(logger, pgPool, &OrchestratorMock{}, 1, WithMeterProvider(mp))
 	type result struct {
 		claimed bool
 		err     error
@@ -322,6 +323,14 @@ func TestClaim_EveryCandidateRejected_ReportsNothingToClaimNotAnError(t *testing
 		"exhausting the bound is rare enough to be worth a WARN -- unlike the per-rejection DEBUG, which is ordinary contention")
 	assert.False(t, handler.findLevel(claimExhaustedMsg, slog.LevelDebug),
 		"nor is it DEBUG: every visible repo running elsewhere is a standing symptom (fleet-wide contention, or a stranded 'running' row) an operator should see")
+	// loam-gp7m: exhaustion is the ONLY producer of the 'contended' claim
+	// outcome, and it is the one outcome that is indistinguishable from
+	// 'empty' in claim's return values -- no job, no error -- while meaning
+	// the opposite thing. This test already owns the machinery that forces
+	// it deterministically, so the metric assertion belongs here rather than
+	// duplicating five holds elsewhere.
+	assert.Equal(t, map[string]int64{claimOutcomeContended: 1}, claimCounts(ctx, t, reader),
+		"a claim that exhausted every candidate must count as contended, never as empty")
 }
 
 // TestClaim_NonGuardErrorStillSurfaces is the other side of matching by
