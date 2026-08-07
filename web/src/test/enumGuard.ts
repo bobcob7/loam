@@ -43,6 +43,14 @@ import { expect } from "vitest";
  *  - enum members of a `oneof`: only one member can be set, so the GROUP is
  *    reported when no case is selected, and the selected member is checked.
  *
+ * Presence is `ReflectMessage.isSet()` from `@bufbuild/protobuf/reflect` --
+ * NOT the similarly-named top-level `isFieldSet()`, though both delegate to
+ * the same `unsafeIsSet` and agree. Its rules, read from `reflect/unsafe.js`
+ * rather than assumed: implicit compares against the first DECLARED enum value
+ * (which proto3 forces to be 0); explicit is `!== undefined` plus an own-
+ * property check; list is `length > 0`; map is `Object.keys().length > 0`;
+ * oneof is `case === name`.
+ *
  * Requiring presence on a `repeated` enum is the one place this is stricter
  * than "a value the server never sends" -- an empty list is something a server
  * sends routinely. It is still the right default here, for the reason above:
@@ -62,8 +70,12 @@ export interface UnspecifiedEnum {
   readonly path: string;
   /** Fully qualified name of the enum, e.g. `loam.v1.UpstreamDrift`. */
   readonly enumType: string;
-  /** `unset` -- the field was never given a value; `element` -- a populated list/map holds a zero. */
-  readonly why: "unset" | "element";
+  /**
+   * `unset` -- the field was never given a value; `zero` -- an explicit-presence
+   * or oneof member was SET to the UNSPECIFIED zero, which is a different fact;
+   * `element` -- a populated list/map holds a zero.
+   */
+  readonly why: "unset" | "zero" | "element";
 }
 
 /**
@@ -140,9 +152,11 @@ const walk = (message: ReflectMessage, prefix: string, seen: Set<Message>, out: 
           }
         }
       } else if (value === 0) {
-        // Only reachable for an explicit-presence or oneof member that was set
-        // to UNSPECIFIED on purpose; `isSet` is false for the implicit case.
-        out.push({ path, enumType: enumType.typeName, why: "unset" });
+        // Reported as `zero`, not `unset`: this is only reachable for an
+        // explicit-presence or oneof member SET to UNSPECIFIED (`isSet` is
+        // already false for the implicit case), and a field someone assigned
+        // the zero to is a different fact from one nobody filled in.
+        out.push({ path, enumType: enumType.typeName, why: "zero" });
       }
       continue;
     }

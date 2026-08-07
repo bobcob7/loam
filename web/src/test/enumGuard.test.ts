@@ -109,7 +109,24 @@ const testFile = () => {
           },
           {
             name: "Outer",
-            nestedType: [mapEntry],
+            // `Deep` and `NestedFlag` exist to reach `messagesIn`'s
+            // nestedMessages recursion and `enumsIn`'s nestedEnums collection.
+            // loam/*.proto declares neither a nested message nor a nested
+            // enum, so both lines are unreachable from the real schema -- the
+            // same argument this file's header makes for the four field
+            // shapes, applied to the two declaration shapes it missed. Neither
+            // is referenced by a field on Outer, because what is under test is
+            // that they are FOUND, not that they are walked.
+            nestedType: [mapEntry, { name: "Deep", field: [enumField("deep_flag", 1, ".test.v1.Outer.NestedFlag")] }],
+            enumType: [
+              {
+                name: "NestedFlag",
+                value: [
+                  { name: "NESTED_FLAG_UNSPECIFIED", number: 0 },
+                  { name: "NESTED_FLAG_SET", number: 1 },
+                ],
+              },
+            ],
             oneofDecl: [{ name: "_singular_optional" }, { name: "choice" }],
             field: [
               enumField("singular", 1, ".test.v1.Flag"),
@@ -200,8 +217,14 @@ describe("findUnspecifiedEnums", () => {
     expect(paths(Outer, message)).toEqual(["singularOptional"]);
   });
 
-  it("catches an OPTIONAL enum deliberately set to the zero, which is a different fact from unset", () => {
-    expect(paths(Outer, faithfulOuter({ singularOptional: 0 }))).toEqual(["singularOptional"]);
+  it("catches an OPTIONAL enum deliberately set to the zero, and SAYS it is a different fact from unset", () => {
+    expect(findUnspecifiedEnums(Outer, faithfulOuter({ singularOptional: 0 }))).toEqual([
+      { path: "singularOptional", enumType: "test.v1.Flag", why: "zero" },
+    ]);
+    // The same field left alone reports `unset`, so the two are not collapsed.
+    expect(findUnspecifiedEnums(Outer, faithfulOuter({ singularOptional: undefined }))).toEqual([
+      { path: "singularOptional", enumType: "test.v1.Flag", why: "unset" },
+    ]);
   });
 
   it("catches an empty REPEATED enum, which the old fieldKind filter dropped entirely", () => {
@@ -247,9 +270,9 @@ describe("findUnspecifiedEnums", () => {
   });
 
   it("checks the selected oneof member's value", () => {
-    expect(paths(Outer, faithfulOuter({ choice: { case: "choiceFlag", value: 0 } }))).toEqual([
-      "choiceFlag",
-    ]);
+    expect(findUnspecifiedEnums(Outer, faithfulOuter({ choice: { case: "choiceFlag", value: 0 } }))).toEqual(
+      [{ path: "choiceFlag", enumType: "test.v1.Flag", why: "zero" }],
+    );
   });
 
   it("reports every offending field, not just the first", () => {
@@ -321,6 +344,27 @@ describe("generated schema assumptions", () => {
     expect(enums.length).toBeGreaterThan(0);
     expect(enums.filter((desc) => !enumHasUnspecifiedZero(desc)).map((desc) => desc.typeName)).toEqual(
       [],
+    );
+  });
+
+  it("finds a message nested inside another, and an enum nested inside a message", () => {
+    // Against the synthetic file, because the real one has neither. Without
+    // this, `messagesIn`'s nestedMessages recursion and `enumsIn`'s
+    // nestedEnums collection are both deletable with the whole suite green --
+    // and a nested enum-carrying message would then be silently uncovered,
+    // which is the under-report-in-silence failure this bead is about.
+    const synthetic = [...registry.files];
+    expect(messagesDeclaringEnumFields(synthetic).map((message) => message.typeName)).toContain(
+      "test.v1.Outer.Deep",
+    );
+    expect(generatedEnums(synthetic).map((desc) => desc.typeName)).toContain("test.v1.Outer.NestedFlag");
+  });
+
+  it("does not mistake a map-entry message for a declaration a fixture must cover", () => {
+    // protobuf-es omits synthetic map entries from `nestedMessages`; if it
+    // ever stopped, every map field in the schema would demand a builder.
+    expect(messagesDeclaringEnumFields([...registry.files]).map((m) => m.typeName)).not.toContain(
+      "test.v1.Outer.FlagsEntry",
     );
   });
 
