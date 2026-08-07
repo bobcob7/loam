@@ -40,13 +40,35 @@
 // WithTracerProvider option, so no downstream bead is forced into the global
 // either.
 //
-// One consequence is worth naming rather than discovering: the SDK reports
-// its OWN internal errors (an unreachable collector, a rejected payload)
-// through otel.Handle, whose default handler writes to stderr via the
-// standard log package, not through cfg.Logger's JSON handler. Routing that
-// into slog means setting otel.SetErrorHandler, which is a process-wide
-// global and belongs at the composition root if it is done at all; it is
-// deliberately out of scope here.
+// One consequence was named here before it was fixed, and the fix is the one
+// exception: the SDK reports its OWN internal errors (an unreachable
+// collector, a rejected payload) through otel.Handle, whose default handler
+// writes to stderr via the standard log package, not through cfg.Logger's
+// JSON handler. loam-0jle resolved that with InstallErrorHandler, which does
+// call otel.SetErrorHandler -- see errorhandler.go for why a WRITE-ONLY sink
+// with no injection seam is a different question from a provider global, and
+// why keeping it out of New is what preserves the inertness proof below.
+//
+// Worth stating precisely, because it is the reason the exception is worth
+// taking at all, and because the imprecise version of it understates the
+// problem: against an unreachable collector, otel.Handle is the ONLY report
+// of a failed SPAN flush, and Provider.Shutdown's error actively points
+// somewhere else.
+//
+// Measured against the pinned go.opentelemetry.io/otel/sdk v1.44.0, with a
+// 30s ShutdownTimeout so nothing was cut short by the bound: otel.Handle
+// received exactly one error, the traces export failure, while
+// Provider.Shutdown returned "failed to upload metrics: ...". The trace
+// shutdown hook contributes NOTHING. batch_span_processor.go:126 starts the
+// drain on its own goroutine; drainQueue hands its export error to
+// otel.Handle (lines 379 and 385) and returns nothing at all; Shutdown
+// (lines 161-189) returns only bsp.e.Shutdown(ctx) -- the exporter's own
+// teardown, which succeeds -- or ctx.Err(). So Shutdown is non-nil here only
+// because the METRIC pipeline failed separately, and an operator reading that
+// error is told about metrics while the dropped spans go unmentioned.
+//
+// Without a handler installed, then, telemetry does not merely fail in plain
+// text: the one failure that IS reported names the wrong signal.
 //
 // # Disabled must be genuinely inert
 //
