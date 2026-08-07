@@ -219,7 +219,7 @@ func TestLazyPool_ExtensionDroppedBeforeAnyRead_FailsOnTheEnumeration(t *testing
 func TestLazyPool_ExtensionDroppedAfterStartup_ReadinessNamesTheExtensionNotTheNetwork(t *testing.T) {
 	dsn, pool, _ := lazyPoolFixture(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	readiness := health.NewReadiness(pool, migrations.NewSchemaCheck(pool), logger)
+	readiness := health.NewReadiness(pool, migrations.NewSchemaCheck(pool), nil, logger)
 
 	require.Equal(t, http.StatusOK, readyzCode(t, readiness), "readiness must be 200 first, or this test proves nothing")
 
@@ -250,7 +250,7 @@ func TestLazyPool_ReadinessStillSaysUnreachableWhenPostgresGenuinelyIs(t *testin
 	pool, err := db.NewPool(ctx, db.Config{DatabaseURL: dsn}, logger)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	readiness := health.NewReadiness(pool, migrations.NewSchemaCheck(pool), logger)
+	readiness := health.NewReadiness(pool, migrations.NewSchemaCheck(pool), nil, logger)
 	require.Equal(t, http.StatusOK, readyzCode(t, readiness))
 
 	stopTimeout := 30 * time.Second

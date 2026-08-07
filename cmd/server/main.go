@@ -298,6 +298,9 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 	// no-op provider when telemetry is disabled -- so no consumer needs a
 	// disabled check.
 	cfg.TracerProvider = telemetryProvider.TracerProvider()
+	// Same terms, same reasoning, one signal along: /readyz's outcome and
+	// duration are a metric rather than a trace (loam-om77). Also never nil.
+	cfg.MeterProvider = telemetryProvider.MeterProvider()
 	// This defer covers only the STARTUP-FAILURE paths below -- every
 	// `pool.Close(); return err` between here and serve -- so a boot that
 	// dies at, say, mirror reconciliation still stops the exporter's
@@ -908,5 +911,5 @@ func registerHealth(router *server.Router, cfg config.Config, pool *pgxpool.Pool
 	if pool == nil {
 		return
 	}
-	router.RegisterUnauthenticated("/readyz", health.NewReadiness(pool, migrations.NewSchemaCheck(pool), cfg.Logger))
+	router.RegisterUnauthenticated("/readyz", health.NewReadiness(pool, migrations.NewSchemaCheck(pool), cfg.MeterProvider, cfg.Logger))
 }

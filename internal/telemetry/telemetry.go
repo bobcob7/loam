@@ -1,11 +1,18 @@
 // Package telemetry owns this repository's single OpenTelemetry SDK seam
 // (loam-p56y). It constructs a TracerProvider, a MeterProvider, and one
-// bounded shutdown function, and it instruments NOTHING: no span, no metric,
-// and no import of this package exists anywhere outside cmd/server today.
-// The instrumentation beads (RPC spans at the internal/server chokepoint,
-// pgx/forge/embedder spans, ingest metrics) each take the providers this
-// package hands out and attach their own instrumentation at their own
-// chokepoint.
+// bounded shutdown function, and it instruments NOTHING: it opens no span
+// and records no metric of its own. The instrumentation beads (RPC spans at
+// the internal/server chokepoint, pgx/forge/embedder spans, ingest metrics)
+// each take the providers this package hands out and attach their own
+// instrumentation at their own chokepoint.
+//
+// It is no longer imported ONLY by cmd/server, and the exception is worth
+// naming because it is not instrumentation: probe.go's WithProbe/IsProbe is
+// a context marker, carrying a caller's statement that some work is routine
+// health polling. internal/health sets it and internal/db's query tracer
+// honours it (loam-om77). It creates no span, records no metric, and touches
+// neither provider -- it is policy that instrumentation reads, which is why
+// it lives with the SDK seam rather than in either of those two packages.
 //
 // # Export is OTLP push, over HTTP/protobuf
 //

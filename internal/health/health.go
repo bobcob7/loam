@@ -58,6 +58,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/bobcob7/loam/internal/telemetry"
 )
 
 // liveBody and readyBody are the exact bodies the two endpoints write on
@@ -124,17 +129,101 @@ func Live() http.Handler {
 	})
 }
 
+// meterName is the instrumentation scope this package's metric carries: the
+// import path, per OpenTelemetry convention.
+const meterName = "github.com/bobcob7/loam/internal/health"
+
+// durationMetric, outcomeAttribute and readyOutcome name the readiness
+// metric and its one dimension.
+//
+// readyOutcome is a SEPARATE constant from readyBody even though the two
+// currently hold the same word. They answer to different audiences: the body
+// is served to a probe and may be reworded freely, while the attribute value
+// is what an alert rule and a dashboard match on, and silently renaming a
+// metric dimension by editing an HTTP response body is a trap worth not
+// leaving behind.
+//
+// The FAILING values are the reason constants above (databaseReason,
+// pgvectorReason, migrationsReason), so the cardinality of this dimension is
+// four and is fixed at compile time. Nothing derived from an error message
+// or from request input ever reaches it -- see the reason constants for why
+// those strings are fixed in the first place.
+const (
+	durationMetric   = "loam.readiness.check.duration"
+	outcomeAttribute = "loam.readiness.outcome"
+	readyOutcome     = "ready"
+)
+
+// durationBuckets are this histogram's explicit bucket boundaries, in
+// SECONDS. They are supplied rather than defaulted because OpenTelemetry's
+// default boundaries (0, 5, 10, 25 ... 10000) are sized for MILLISECONDS: a
+// readiness check bounded at checkTimeout=2s would land every observation in
+// the first bucket, and the histogram would carry no distribution at all --
+// a failure mode that still produces a healthy-looking metric, which is the
+// worst kind.
+//
+// The range is chosen around the two numbers that matter: a local Postgres
+// answers in single-digit milliseconds, and checkTimeout cuts the check off
+// at 2s. The bound past it exists so a check that somehow overruns is
+// visible as an overflow rather than merged into the last real bucket.
+var durationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5}
+
 // Readiness is the GET /readyz handler.
 type Readiness struct {
-	db     Pinger
-	schema SchemaChecker
-	logger *slog.Logger
+	db       Pinger
+	schema   SchemaChecker
+	duration metric.Float64Histogram
+	logger   *slog.Logger
 }
 
 // NewReadiness builds the /readyz handler over the live pool (db) and the
 // migration-status check bound to that same pool (schema).
-func NewReadiness(db Pinger, schema SchemaChecker, logger *slog.Logger) *Readiness {
-	return &Readiness{db: db, schema: schema, logger: logger}
+//
+// # WHY THIS TAKES A METER, AND WHY A METRIC RATHER THAN A TRACE
+//
+// Before loam-om77 the only record that a readiness check had happened was
+// the SPAN its database ping incidentally produced, and there were ~34,000
+// of them a day from an idle replica (internal/db's probeQuery has the
+// measurement). Those spans are now deferred until a probe fails, which
+// closes the volume problem but would, on its own, leave the healthy case
+// with no signal whatsoever -- and "we stopped seeing evidence of health" is
+// not something anyone can alert on, because it is indistinguishable from a
+// collector outage or from the instrumentation having been deleted.
+//
+// A metric is the instrument this question always wanted. "Can this process
+// reach its database" is asked on a fixed interval and answered identically
+// thousands of times a day; that is a TIME SERIES. A trace answers "what
+// happened during THIS request", which is a question nobody has about the
+// 8,000th successful poll. The metric is emitted on EVERY probe, ready or
+// not, so the healthy stream is present and its disappearance or its flip to
+// a failing outcome is a legitimate alarm -- which is exactly what the wall
+// of root traces could never be used for.
+//
+// mp is never nil in production: telemetry.Provider hands out upstream's
+// no-op MeterProvider when telemetry is disabled, so this records into
+// nothing rather than branching. A nil mp is tolerated anyway (the handler
+// simply records nothing) so the many tests that construct a Readiness
+// directly do not all have to grow a provider.
+func NewReadiness(db Pinger, schema SchemaChecker, mp metric.MeterProvider, logger *slog.Logger) *Readiness {
+	rd := &Readiness{db: db, schema: schema, logger: logger}
+	if mp == nil {
+		return rd
+	}
+	duration, err := mp.Meter(meterName).Float64Histogram(durationMetric,
+		metric.WithDescription("Duration of one /readyz evaluation, by outcome."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(durationBuckets...),
+	)
+	if err != nil {
+		// A metric that cannot be created must not stop a process from
+		// reporting its readiness -- that would make observability a
+		// dependency of serving, which is the inversion this whole endpoint
+		// exists to avoid. Log it and serve on, unmetered.
+		logger.Warn("readiness metric unavailable", "metric", durationMetric, "error", err)
+		return rd
+	}
+	rd.duration = duration
+	return rd
 }
 
 // ServeHTTP implements http.Handler.
@@ -149,18 +238,76 @@ func NewReadiness(db Pinger, schema SchemaChecker, logger *slog.Logger) *Readine
 // rather than assumed: it is the only reason this endpoint will ever
 // report, so whatever it claims is the whole of what the operator gets.
 // See databaseFailureReason for the claim that had to stop being made.
+//
+// The context handed to both checks is marked with telemetry.WithProbe, and
+// that marker is the load-bearing half of loam-om77: before it, every poll
+// left a parentless postgres.unnamed root trace behind, ~8,600 a day at
+// helm's 10s readinessProbe interval and at the deployed sample ratio of 1.0.
+//
+// ONE root per poll, from CheckSchema -- not two. Ping is database work too,
+// but pgxpool.Pool.Ping never reaches internal/db's query tracer at all (it
+// bottoms out below the layer that consults ConnConfig.Tracer), so the only
+// readiness statement that was ever traced is migrations' hand-written
+// `SELECT version, dirty FROM schema_migrations`. Do not "improve" this
+// comment back to two: a test that pings and asserts silence proves nothing,
+// and internal/db's TestQueryTracer_PoolPingIsInvisibleToTheQueryTracer
+// exists to keep that trap shut.
+//
+// The marker still covers the WHOLE evaluation rather than just the traced
+// half, and deliberately so. It costs nothing on the untraced path, it means
+// a check added here later inherits the policy instead of quietly reopening
+// the problem, and it does not depend on which pgx internals happen to
+// consult the tracer this release.
+//
+// Marking here rather than inferring in internal/db is the other half of the
+// decision: this handler is the only thing in the process that KNOWS the
+// work is a health probe, and any inference that would catch it would also
+// silence the sync scheduler and ingest, whose root traces are the only
+// record they leave. See telemetry.WithProbe.
 func (rd *Readiness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+	ctx, cancel := context.WithTimeout(telemetry.WithProbe(r.Context()), checkTimeout)
 	defer cancel()
-	if err := rd.db.Ping(ctx); err != nil {
-		rd.notReady(ctx, w, databaseFailureReason(err), err)
-		return
-	}
-	if err := rd.schema.CheckSchema(ctx); err != nil {
-		rd.notReady(ctx, w, migrationsReason, err)
+	started := time.Now()
+	reason, err := rd.check(ctx)
+	rd.record(ctx, reason, time.Since(started))
+	if err != nil {
+		rd.notReady(ctx, w, reason, err)
 		return
 	}
 	writePlain(w, http.StatusOK, readyBody)
+}
+
+// check runs the two ordered, short-circuiting readiness checks and reports
+// the NAMED reason for the first failure alongside the underlying error.
+// Split out of ServeHTTP so the outcome is a value the metric can be
+// recorded from on every path, including the failing ones -- the previous
+// shape returned from inside each branch, and a metric bolted onto that
+// would have been recorded on the healthy path and forgotten on one of the
+// failing ones sooner or later.
+func (rd *Readiness) check(ctx context.Context) (string, error) {
+	if err := rd.db.Ping(ctx); err != nil {
+		return databaseFailureReason(err), err
+	}
+	if err := rd.schema.CheckSchema(ctx); err != nil {
+		return migrationsReason, err
+	}
+	return readyOutcome, nil
+}
+
+// record observes one completed readiness evaluation. It is called for EVERY
+// probe, healthy or not: see NewReadiness for why the healthy observations
+// are the point rather than the overhead.
+//
+// ctx is the (possibly already cancelled or expired) check context. That is
+// intentional and safe -- the OpenTelemetry metric API does not abort a
+// Record on a cancelled context, and passing the real context keeps whatever
+// baggage or exemplar linkage it carries -- but it is the reason the elapsed
+// time is measured by the caller rather than here.
+func (rd *Readiness) record(ctx context.Context, outcome string, elapsed time.Duration) {
+	if rd.duration == nil {
+		return
+	}
+	rd.duration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attribute.String(outcomeAttribute, outcome)))
 }
 
 // databaseFailureReason names WHICH database failure Ping reported, and
