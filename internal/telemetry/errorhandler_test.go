@@ -248,7 +248,11 @@ func TestBlackHoledCollectorChild(t *testing.T) {
 // It still never RESPONDS, and it never closes the connection either. Closing
 // would hand the exporter an EOF, which is a fast, different failure; holding
 // the connection open is what makes the client hit its own request timeout,
-// which is the shape a wedged collector actually has.
+// which is the shape a wedged collector actually has. That last property is
+// FIDELITY, not a guard, and the difference is measured: a mutant that closed
+// the connection instead of hanging survived both tests, because any failed
+// export drives otel.Handle. It is kept because the bead asks for the failure
+// production actually has, not because an assertion below can see it.
 func hangingCollector(t *testing.T, logger *slog.Logger) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
