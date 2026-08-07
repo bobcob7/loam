@@ -242,8 +242,9 @@ func TestHelmValuesSchemaExists(t *testing.T) {
 	// sentence is the thing a reviewer actually reads. That limit is
 	// measured, not assumed: the same two-line reopen PLUS a one-line
 	// description still passes this package. The guard buys review
-	// attention, not enforcement, and it should not be read as more. It costs nothing
-	// today: the chart's genuine passthroughs are the five
+	// attention, not enforcement, and it should not be read as more.
+	//
+	// It costs nothing today: the chart's genuine passthroughs are the five
 	// docs/deployment-spec.md already enumerates and justifies one by one,
 	// so each of them has an argument to state. An object with no argument
 	// available -- image, namespace, secret, postgres, persistence,
@@ -439,9 +440,11 @@ func resolveSchemaRef(t *testing.T, root, node map[string]any) map[string]any {
 // passing and `helm template --set config.otelDbAcquireThreshold=5ms`
 // failing. (Deliberately not "all N of them". A test count written into a
 // comment is the same construct as the key list this branch deleted --
-// nothing regenerates it and nothing fails when it goes stale.) Since loam-uwus closed the schema, a forgotten declaration is no
-// longer a silent no-op -- it is a chart the operator cannot render. Louder,
-// but still discovered by the wrong person at the wrong moment.
+// nothing regenerates it and nothing fails when it goes stale.)
+//
+// Since loam-uwus closed the schema, a forgotten declaration is no longer a
+// silent no-op -- it is a chart the operator cannot render. Louder, but
+// still discovered by the wrong person at the wrong moment.
 //
 // Both sides are discovered. The left is every `.Values.*` reference in the
 // templates, the right is the schema's own property tree, so this covers
