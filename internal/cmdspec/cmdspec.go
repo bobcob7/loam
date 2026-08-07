@@ -125,8 +125,15 @@ var Flags = map[string]string{
 	"work diff":     "[--format <patch|stat>] [--stat] [--allow-unpushed]",
 	"work comments": "[--staged]",
 	"work comment":  "[--file <path>] [--line <n>] [--resolve <thread-id>] [--edit <staged-id>] [--discard <staged-id>] [--list]",
-	"work reply":    "[--thread <thread-id>]",
-	"work verdict":  "[--outcome <approve|disapprove|neutral>]",
+	// --thread and --outcome are NOT bracketed: both are required, and both
+	// exit 2 with a usage error when omitted (commands_work_reply.go:55,
+	// commands_work_verdict.go:106). docs/cli-spec.md spells them the same
+	// way and marks them *(required)*. They were bracketed here when this
+	// map was first written, which would have told an agent the commands
+	// run without them. See TestFlags_CmdspecMatchesEveryRealFlagSet's doc
+	// comment for why the drift test cannot catch this class.
+	"work reply":   "--thread <thread-id>",
+	"work verdict": "--outcome <approve|disapprove|neutral>",
 
 	"graph def":        "[--repo <repo>] [--file <path>] [--limit <n>] [--all]",
 	"graph refs":       "[--repo <repo>] [--file <path>] [--limit <n>] [--all]",

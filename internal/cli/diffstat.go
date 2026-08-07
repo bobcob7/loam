@@ -93,7 +93,7 @@ func computeDiffStat(diff string) diffStat {
 		case strings.HasPrefix(line, "Binary files ") || strings.HasPrefix(line, "GIT binary patch"):
 			file.Binary = true
 		case !inHunk && strings.HasPrefix(line, "+++ b/"):
-			file.Path = strings.TrimPrefix(line, "+++ b/")
+			file.Path = trimGitHeaderPath(strings.TrimPrefix(line, "+++ b/"))
 		case !inHunk && strings.HasPrefix(line, "rename to "):
 			file.Path = strings.TrimPrefix(line, "rename to ")
 		case inHunk && strings.HasPrefix(line, "+"):
@@ -106,6 +106,29 @@ func computeDiffStat(diff string) diffStat {
 	}
 	stat.FilesChanged = len(stat.Files)
 	return stat
+}
+
+// trimGitHeaderPath strips the trailing TAB git appends to a `---`/`+++`
+// header whose path contains a space.
+//
+// This is git's own disambiguation: those header lines are otherwise
+// space-delimited (a `--- a/foo\t2026-08-07` form survives from the
+// classic unified-diff timestamp field), so a path with a space in it is
+// terminated with a tab to mark where it ends. Verified byte-for-byte
+// against real git via `od -c`, and pinned by
+// TestComputeDiffStat_RealGitOutput_SpacePathsCarryNoTrailingTab.
+//
+// Without this, the `+++ b/` override did not merely duplicate the other
+// naming routes -- it OVERWROTE A CORRECT ANSWER WITH A WRONG ONE for
+// every space-containing path, since pathFromDiffGitLine's equal-halves
+// scan had already produced the untabbed name. `work diff --stat` reported
+// those files with a trailing tab.
+//
+// Only the trailing tab is removed, never surrounding whitespace: a path
+// may legitimately end in a space, and TrimSpace here would corrupt one to
+// tidy the other.
+func trimGitHeaderPath(path string) string {
+	return strings.TrimSuffix(path, "\t")
 }
 
 // pathFromDiffGitLine recovers the changed path from the "a/<x> b/<y>"

@@ -84,10 +84,25 @@ func flagNamesRegisteredBy(fs *pflag.FlagSet) map[string]bool {
 //   - an entry for a leaf with no flags at all, or a missing entry for a
 //     leaf that has them.
 //
-// Only NAMES are compared. The value spelling ("<patch|stat>") is prose
-// aimed at a reader and has no machine-checkable counterpart; the name set
-// is the part an agent copies into a command line and the part that can be
-// wrong in a way that costs a round-trip.
+// ONLY NAMES ARE COMPARED, and a reader who trusts this test needs to know
+// what that leaves uncovered, because the gap is not obvious and has
+// already bitten once.
+//
+// Not covered: whether a flag is REQUIRED or OPTIONAL. Bracketing is a
+// convention in the map's text; pflag has no notion of it, since a required
+// flag is enforced by the handler's own check after parsing (e.g.
+// commands_work_reply.go's `if *thread == ""`), never by the FlagSet. So
+// `[--thread <thread-id>]` and `--thread <thread-id>` are indistinguishable
+// here, and both were shipped bracketed-but-required in this map's first
+// version -- telling an agent the command runs without them, when it exits
+// 2. The check for that is docs/cli-spec.md, read by a human.
+//
+// Also not covered: the value spelling ("<patch|stat>"), which is prose
+// aimed at a reader and has no machine-checkable counterpart, and default
+// values.
+//
+// What IS covered is the name set -- the part an agent copies into a
+// command line, and the part whose being wrong costs a round-trip.
 func TestFlags_CmdspecMatchesEveryRealFlagSet(t *testing.T) {
 	t.Parallel()
 	tree := commandTree()
