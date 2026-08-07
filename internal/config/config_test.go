@@ -473,16 +473,16 @@ func longestCreatableDir(t *testing.T, parent string) string {
 	dir := parent
 	for _, width := range []int{128, 16, 1} {
 		component := strings.Repeat("d", width)
-		grew := false
+		refused := false
 		for i := 0; i < 1<<16; i++ {
 			next := filepath.Join(dir, component)
 			if err := os.Mkdir(next, 0o700); err != nil {
-				grew = true
+				refused = true
 				break
 			}
 			dir = next
 		}
-		require.True(t, grew, "this filesystem accepted 65536 components of %d characters without refusing: it has no path length limit for this fixture to find", width)
+		require.True(t, refused, "this filesystem accepted 65536 components of %d characters without refusing: it has no path length limit for this fixture to find", width)
 	}
 	return dir
 }

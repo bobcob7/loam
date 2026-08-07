@@ -3,10 +3,10 @@ package reporemove
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -174,113 +174,180 @@ func TestDeleteRepo_MirrorCannotBeMovedAside_IsReported(t *testing.T) {
 	assert.Contains(t, err.Error(), testRepoName)
 }
 
+// raceTreeWidth and raceTreeFiles size the tree the concurrent writer below
+// repopulates. Wide rather than deep: os.RemoveAll empties a directory and
+// then rmdirs it, so every directory is an independent chance for the writer
+// to land a file in the window between those two steps, and 40 of them make
+// the window collectively hard to miss.
+const (
+	raceTreeWidth = 40
+	raceTreeFiles = 40
+)
+
+// raceAttempts bounds the retry loop. Each attempt is independently very
+// likely to leave a remnant, so this exists only so that the test FAILS,
+// naming the mechanism, rather than passing vacuously if the writer never
+// once wins -- the shape of "prove the failure was manufactured" that the
+// rest of this branch applies to preconditions.
+const raceAttempts = 8
+
+// seedRaceTree adds a wide tree of files under mirrorDir for a concurrent
+// writer to repopulate while the removal walks it.
+func seedRaceTree(t *testing.T, mirrorDir string) {
+	t.Helper()
+	for i := range raceTreeWidth {
+		dir := filepath.Join(mirrorDir, "race", fmt.Sprintf("d%d", i))
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		for j := range raceTreeFiles {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", j)), []byte("x"), 0o644))
+		}
+	}
+}
+
+// deleteRacingAConcurrentWriter runs one attempt: unenroll a repo whose
+// mirror a still-running writer is creating files under, and report whether
+// the delete was in fact left unfinished. Everything that must hold
+// REGARDLESS of who won the race is asserted here; only the return value is
+// conditional.
+//
+// The writer holds a DIRECTORY HANDLE opened before DeleteRepo is called,
+// which is the detail that makes this work at all. The test cannot name the
+// trash path -- removeMirror composes it from a fresh uuid -- but it does not
+// need to: an open handle is pinned to the directory's inode, so it follows
+// the tree through the rename exactly as a still-running git subprocess with
+// the mirror open would. os.Root is used here purely as that handle; none of
+// its containment checking is under test.
+func deleteRacingAConcurrentWriter(t *testing.T) bool {
+	t.Helper()
+	r, _, dataDir := newRemover(t)
+	mirrorDir := seedMirror(t, dataDir)
+	seedRaceTree(t, mirrorDir)
+	handle, err := os.OpenRoot(mirrorDir)
+	require.NoError(t, err)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for n := 0; ; n++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for i := range raceTreeWidth {
+				// Errors are the normal case once the walk has passed a
+				// directory, and are not the writer's business: it is
+				// modelling a process that does not know it is racing.
+				if f, err := handle.Create(fmt.Sprintf("race/d%d/n%d", i, n)); err == nil {
+					_ = f.Close()
+				}
+			}
+		}
+	}()
+	deleteErr := r.DeleteRepo(t.Context(), uuid.New())
+	close(stop)
+	<-done
+	require.NoError(t, handle.Close())
+	require.NoError(t, deleteErr, "a mirror whose delete cannot finish must not fail the removal once the canonical path is free")
+	assert.NoDirExists(t, mirrorDir, "the canonical mirror path must be free, so the same repo can be re-enrolled")
+	require.NoError(t, os.MkdirAll(mirrorDir, 0o755), "re-enrolment must be able to create the mirror path again -- which is the entire point of freeing it")
+	require.NoError(t, os.RemoveAll(mirrorDir))
+	left := trashSiblings(t, mirrorDir)
+	if len(left) != 1 {
+		return false
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(mirrorDir), left[0]))
+	require.NoError(t, err)
+	assert.NotEmpty(t, entries, "the remnant must be the tree that could not be deleted, not an empty husk renamed aside")
+	return true
+}
+
 // TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish is the
 // test that makes the rename-before-delete load-bearing rather than
-// decorative. With an undeletable entry inside it, a plain os.RemoveAll of
-// the mirror would fail partway and leave the canonical path occupied; the
+// decorative. With the delete unable to finish, a plain os.RemoveAll of the
+// mirror would fail partway and leave the canonical path occupied; the
 // rename frees that path first, so re-enrolling the same repo still works
 // and the RPC still reports success.
 //
-// THE SKIP UNDER ROOT IS DELIBERATE AND, UNLIKE THE OTHER FOUR SITES IN
-// THIS TREE, UNAVOIDABLE (loam-0nuo). It is a real hole -- the gate runs as
-// uid 0, so this branch has never been exercised in CI -- and the reason it
-// stays open is worth writing down, because "just use the uid-immune
-// technique" is the obvious review note and it does not work here.
+// TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish is the
+// test that makes the rename-before-delete load-bearing rather than
+// decorative. With the delete unable to finish, a plain os.RemoveAll of the
+// mirror would fail partway and leave the canonical path occupied; the
+// rename frees that path first, so re-enrolling the same repo still works
+// and the RPC still reports success.
 //
-// loam-9g17's technique replaces a permission failure with a SHAPE failure:
-// a directory where a file is expected reads EISDIR, a regular file where a
-// directory is expected opens ENOTDIR, a dangling symlink creates ENOENT.
-// Root receives all three exactly as anyone else does, because none of them
-// is a permission check.
+// IT USED TO SKIP UNDER ROOT, WHICH MEANT IT HAD NEVER RUN IN CI (loam-0nuo)
+// -- the gate is uid 0, and a skip and a pass are indistinguishable in
+// summary output. It now runs at every uid, because the delete is made to
+// fail by THE MECHANISM removeMirror'S DOC COMMENT ALREADY NAMES as its own
+// justification:
 //
-// What this test needs is for os.RemoveAll to STOP PARTWAY with the
-// canonical path still occupied. The distinction that matters is not which
-// syscall fails -- under 0o000 it stops at openfdat, an open failure, which
-// is the same class loam-9g17 uses -- it is DAC VERSUS SHAPE. Every way of
-// making a tree undeletable that is available to an ordinary test turns out
-// to be a permission bit on the containing directory, and permission bits
-// are what CAP_DAC_OVERRIDE ignores. A shape cannot substitute, because a
-// tree the walk cannot delete is not a tree of the wrong shape; it is a tree
-// the walker is not allowed into.
+//	"a concurrent git subprocess (a still-in-flight fetch or ingest) can
+//	re-create files under it while the walk is in progress, so it can return
+//	a partial success with the CANONICAL mirror path still occupied"
 //
-// NO SHAPE COMPATIBLE WITH A PARALLEL, IN-PROCESS TEST SURVIVES UID 0. That
-// is deliberately not the same claim as "no shape survives uid 0" -- the
-// fourth bullet is a measured counterexample, and a universal here would
-// only stop the next person looking. All four measured inside
-// golang:1.26.5, the gate's own image, at uid 0 (CapEff 0x800405fb:
+// A goroutine doing exactly that -- creating files under the tree while
+// os.RemoveAll walks it -- makes the removal fail with ENOTEMPTY, and no
+// capability exempts anyone from ENOTEMPTY. The fixture is now the hazard the
+// design exists for rather than a chmod standing in for it, which is a better
+// test than the one it replaces and not merely a uid-portable one.
+//
+// FOUR EARLIER ATTEMPTS AND WHAT EACH COST, recorded as an enumeration and
+// deliberately not as a claim about what exists -- three drafts of this
+// comment asserted a universal and all three were falsified. All measured
+// inside golang:1.26.5, the gate's own image, at uid 0 (CapEff 0x800405fb:
 // CAP_DAC_OVERRIDE set, CAP_LINUX_IMMUTABLE and CAP_SYS_ADMIN clear):
 //
-//   - 0o500 and 0o000 on the containing directory: os.RemoveAll returns nil
-//     and the tree is gone. (At uid 1000 the same two fixtures fail at
-//     unlinkat and openfdat respectively, which is the asymmetry.)
+//   - 0o500 or 0o000 on a containing directory, which is what this test used
+//     to do: os.RemoveAll returns nil and the tree is gone. Permission bits
+//     are precisely what CAP_DAC_OVERRIDE ignores. (At uid 1000 the same two
+//     fixtures fail at unlinkat and openfdat -- that asymmetry IS the bug
+//     this bead is about.)
 //   - The immutable inode flag does block root, but setting it needs
-//     CAP_LINUX_IMMUTABLE, which the gate's container does not have (the
-//     ioctl returns EPERM there), and an unprivileged developer could never
-//     set it either -- so it would trade this skip for a differently-shaped
-//     one.
-//   - EBUSY from a mount point inside the tree needs CAP_SYS_ADMIN, same
-//     problem: mount -t tmpfs returns EPERM there.
-//   - Resource exhaustion DOES survive uid 0, and is the reason the sentence
-//     above is qualified rather than universal. RLIMIT_NOFILE is not a
-//     permission and no capability bypasses it, and LOWERING A SOFT LIMIT
-//     NEEDS NO PRIVILEGE: with NOFILE=12 over a 40-deep tree, os.RemoveAll
-//     as uid 0 fails at "openfdat ...: too many open files" with the
-//     top-level path still occupied -- exactly the state this test needs.
-//     It is unusable HERE, for reasons that have nothing to do with uid:
-//     syscall.Setrlimit is process-global and this test is t.Parallel(), so
-//     a shared test binary at NOFILE=12 would take the rest of the package
-//     down with it. A re-exec'd helper subprocess would isolate it, at the
-//     cost of pinning the fixture to how many directory fds os.RemoveAll
-//     holds concurrently -- an implementation detail of the standard
-//     library, and a far more fragile thing to depend on than a chmod.
+//     CAP_LINUX_IMMUTABLE, which the gate's container lacks (the ioctl
+//     returns EPERM), and an unprivileged developer could never set it --
+//     it would trade this skip for a differently-shaped one.
+//   - EBUSY from a mount point inside the tree needs CAP_SYS_ADMIN: mount -t
+//     tmpfs returns EPERM there.
+//   - RLIMIT_NOFILE survives uid 0 -- it is not a permission and no
+//     capability bypasses it -- and at NOFILE=12 over a 40-deep tree
+//     os.RemoveAll fails at "too many open files" with the top-level path
+//     still occupied. Rejected because syscall.Setrlimit is process-global
+//     and would take the rest of the package down with it, and because
+//     isolating it in a subprocess would pin the fixture to how many
+//     directory fds os.RemoveAll holds concurrently -- a stdlib
+//     implementation detail.
 //
-// Path length is not a fourth option, for a reason worth recording because
-// it is the obvious next idea: os.RemoveAll descends with openat and
-// unlinkat relative to a directory fd, so it deletes trees no absolute path
-// could name. Measured, a tree whose nominal absolute path is 12080
-// characters -- three times PATH_MAX -- is removed with a nil error.
+// Path length is not among them, for a reason worth recording because it is
+// the obvious next idea: os.RemoveAll descends with openat and unlinkat
+// relative to a directory fd, so it deletes trees no absolute path could
+// name. A tree whose nominal absolute path is 12080 characters -- three
+// times PATH_MAX -- is removed with a nil error.
 //
-// So this stays a skip, and everything around it is arranged so that the
-// skip is the only thing lost. The precondition below asserts the subtree
-// really was made undeletable before anything is concluded from it, so the
-// day this fixture stops working the test says which step stopped working
-// rather than failing as a bare "expected no error". And the rename leg
-// itself IS covered at every uid by
-// TestDeleteRepo_MirrorCannotBeMovedAside_IsReported above; what is
-// uncovered in CI is specifically the combination "rename succeeded, delete
-// failed, RPC still reports success".
+// IT IS A RACE, SO ITS DETERMINISM IS MEASURED RATHER THAN ASSUMED. With the
+// retry loop set to a SINGLE attempt -- i.e. asking how often the writer wins
+// on the first try -- 200 consecutive runs under -race passed at uid 0, 200
+// at uid 1000, and 200 on darwin/arm64: 600 for 600. The loop below therefore
+// exists as a VACUITY GUARD rather than as flake tolerance: if the writer
+// ever stops winning, the test fails and says so, instead of quietly
+// asserting nothing about a delete that actually succeeded. The same reason
+// every fixture on this branch asserts that its failure was manufactured.
+//
+// WHAT THIS DOES NOT COVER: EACCES specifically. The delete now fails with
+// ENOTEMPTY rather than EPERM, so the literal "an operator's mirror contains
+// a file this process may not unlink" is no longer exercised. That is
+// acceptable because removeMirror does not discriminate on errno -- any
+// non-nil error from os.RemoveAll takes the same log-and-succeed branch --
+// so the errno is not part of the behaviour under test. What is under test
+// is that a delete which cannot finish still leaves the canonical path free
+// and still reports success, and that is now asserted at every uid.
 func TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("uid 0 holds CAP_DAC_OVERRIDE and deletes the subtree this test makes undeletable; see the comment above for why no uid-immune shape reaches an unlink failure")
+	for range raceAttempts {
+		if deleteRacingAConcurrentWriter(t) {
+			return
+		}
 	}
-	r, _, dataDir := newRemover(t)
-	mirrorDir := seedMirror(t, dataDir)
-	locked := filepath.Join(mirrorDir, "objects", "pack")
-	require.NoError(t, os.Chmod(locked, 0o500))
-	t.Cleanup(func() {
-		// Restored before t.TempDir's own cleanup runs (cleanups are
-		// LIFO), which would otherwise fail the test trying to remove
-		// what this one deliberately made unremovable. Registered before
-		// the precondition below so that a precondition failure still
-		// leaves a removable tree behind.
-		_ = os.Chmod(locked, 0o700)
-		_ = os.Chmod(filepath.Dir(locked), 0o700)
-	})
-	// The whole test rests on that chmod having actually taken effect for
-	// whoever is running it. Probe it directly rather than inferring it from
-	// the outcome: a caller that is not uid 0 but does hold CAP_DAC_OVERRIDE
-	// (or a filesystem that ignores mode bits) would otherwise sail past the
-	// guard above and fail three assertions later, saying nothing about why.
-	probeErr := os.Remove(filepath.Join(locked, "pack-1.pack"))
-	require.Error(t, probeErr, "precondition: the 0o500 chmod must really make %s undeletable, or this test proves nothing", locked)
-	require.ErrorIs(t, probeErr, fs.ErrPermission, "precondition: the undeletability must come from the mode bits this test set")
-	require.NoError(t, r.DeleteRepo(t.Context(), uuid.New()), "a mirror whose delete cannot finish must not fail the removal once the canonical path is free")
-	assert.NoDirExists(t, mirrorDir, "the canonical mirror path must be free, so the same repo can be re-enrolled")
-	left := trashSiblings(t, mirrorDir)
-	require.Len(t, left, 1, "what could not be deleted must still have been renamed out of the way")
-	// Point the cleanup at where the locked subtree actually ended up.
-	locked = filepath.Join(filepath.Dir(mirrorDir), left[0], "objects", "pack")
+	t.Fatalf("the concurrent writer never once left the delete unfinished in %d attempts: this test can no longer reach the branch it exists for", raceAttempts)
 }
 
 // TestPackageNeverImportsAForgeClient is the structural guarantee behind
