@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file loam/admin/v1/proposal.proto.
  */
 export const file_loam_admin_v1_proposal: GenFile = /*@__PURE__*/
-  fileDesc("Chxsb2FtL2FkbWluL3YxL3Byb3Bvc2FsLnByb3RvEg1sb2FtLmFkbWluLnYxIl8KCFByb3Bvc2FsEigKC3dvcmtfYnJhbmNoGAEgASgLMhMubG9hbS52MS5Xb3JrQnJhbmNoEikKCHZlcmRpY3RzGAIgAygLMhcubG9hbS52MS5WZXJkaWN0U3VtbWFyeSIzChRMaXN0UHJvcG9zYWxzUmVxdWVzdBIbCgRwYWdlGAEgASgLMg0ubG9hbS52MS5QYWdlImkKFUxpc3RQcm9wb3NhbHNSZXNwb25zZRIqCglwcm9wb3NhbHMYASADKAsyFy5sb2FtLmFkbWluLnYxLlByb3Bvc2FsEiQKCXBhZ2VfaW5mbxgCIAEoCzIRLmxvYW0udjEuUGFnZUluZm8iOgoVQWNjZXB0UHJvcG9zYWxSZXF1ZXN0EgwKBHJlcG8YASABKAkSEwoLd29ya19icmFuY2gYAiABKAkiQQoWQWNjZXB0UHJvcG9zYWxSZXNwb25zZRIOCgZwcl91cmwYASABKAkSFwoPdXBzdHJlYW1fYnJhbmNoGAIgASgJIkkKFkNsb3NlV29ya0JyYW5jaFJlcXVlc3QSDAoEcmVwbxgBIAEoCRITCgt3b3JrX2JyYW5jaBgCIAEoCRIMCgRib2R5GAMgASgJIkMKF0Nsb3NlV29ya0JyYW5jaFJlc3BvbnNlEigKC3dvcmtfYnJhbmNoGAEgASgLMhMubG9hbS52MS5Xb3JrQnJhbmNoMq4CCg9Qcm9wb3NhbFNlcnZpY2USWgoNTGlzdFByb3Bvc2FscxIjLmxvYW0uYWRtaW4udjEuTGlzdFByb3Bvc2Fsc1JlcXVlc3QaJC5sb2FtLmFkbWluLnYxLkxpc3RQcm9wb3NhbHNSZXNwb25zZRJdCg5BY2NlcHRQcm9wb3NhbBIkLmxvYW0uYWRtaW4udjEuQWNjZXB0UHJvcG9zYWxSZXF1ZXN0GiUubG9hbS5hZG1pbi52MS5BY2NlcHRQcm9wb3NhbFJlc3BvbnNlEmAKD0Nsb3NlV29ya0JyYW5jaBIlLmxvYW0uYWRtaW4udjEuQ2xvc2VXb3JrQnJhbmNoUmVxdWVzdBomLmxvYW0uYWRtaW4udjEuQ2xvc2VXb3JrQnJhbmNoUmVzcG9uc2ViBnByb3RvMw", [file_loam_v1_common]);
+  fileDesc("Chxsb2FtL2FkbWluL3YxL3Byb3Bvc2FsLnByb3RvEg1sb2FtLmFkbWluLnYxInMKCFByb3Bvc2FsEigKC3dvcmtfYnJhbmNoGAEgASgLMhMubG9hbS52MS5Xb3JrQnJhbmNoEikKCHZlcmRpY3RzGAIgAygLMhcubG9hbS52MS5WZXJkaWN0U3VtbWFyeRISCgphY2NlcHRhYmxlGAMgASgIIjMKFExpc3RQcm9wb3NhbHNSZXF1ZXN0EhsKBHBhZ2UYASABKAsyDS5sb2FtLnYxLlBhZ2UiaQoVTGlzdFByb3Bvc2Fsc1Jlc3BvbnNlEioKCXByb3Bvc2FscxgBIAMoCzIXLmxvYW0uYWRtaW4udjEuUHJvcG9zYWwSJAoJcGFnZV9pbmZvGAIgASgLMhEubG9hbS52MS5QYWdlSW5mbyI6ChVBY2NlcHRQcm9wb3NhbFJlcXVlc3QSDAoEcmVwbxgBIAEoCRITCgt3b3JrX2JyYW5jaBgCIAEoCSJBChZBY2NlcHRQcm9wb3NhbFJlc3BvbnNlEg4KBnByX3VybBgBIAEoCRIXCg91cHN0cmVhbV9icmFuY2gYAiABKAkiSQoWQ2xvc2VXb3JrQnJhbmNoUmVxdWVzdBIMCgRyZXBvGAEgASgJEhMKC3dvcmtfYnJhbmNoGAIgASgJEgwKBGJvZHkYAyABKAkiQwoXQ2xvc2VXb3JrQnJhbmNoUmVzcG9uc2USKAoLd29ya19icmFuY2gYASABKAsyEy5sb2FtLnYxLldvcmtCcmFuY2gyrgIKD1Byb3Bvc2FsU2VydmljZRJaCg1MaXN0UHJvcG9zYWxzEiMubG9hbS5hZG1pbi52MS5MaXN0UHJvcG9zYWxzUmVxdWVzdBokLmxvYW0uYWRtaW4udjEuTGlzdFByb3Bvc2Fsc1Jlc3BvbnNlEl0KDkFjY2VwdFByb3Bvc2FsEiQubG9hbS5hZG1pbi52MS5BY2NlcHRQcm9wb3NhbFJlcXVlc3QaJS5sb2FtLmFkbWluLnYxLkFjY2VwdFByb3Bvc2FsUmVzcG9uc2USYAoPQ2xvc2VXb3JrQnJhbmNoEiUubG9hbS5hZG1pbi52MS5DbG9zZVdvcmtCcmFuY2hSZXF1ZXN0GiYubG9hbS5hZG1pbi52MS5DbG9zZVdvcmtCcmFuY2hSZXNwb25zZWIGcHJvdG8z", [file_loam_v1_common]);
 
 /**
  * @generated from message loam.admin.v1.Proposal
@@ -29,6 +29,24 @@ export type Proposal = Message<"loam.admin.v1.Proposal"> & {
    * @generated from field: repeated loam.v1.VerdictSummary verdicts = 2;
    */
   verdicts: VerdictSummary[];
+
+  /**
+   * Whether AcceptProposal would accept this branch right now. False means the
+   * branch carries a live approve but something independent of the review blocks
+   * the merge -- a conflict flag, upstream drift, or a conflicting target advance
+   * that demoted it out of REVIEWED. The reason is already on work_branch
+   * (`conflict`, `upstream_drift`, `state`); this field exists so the console can
+   * decide whether to offer the accept button without re-deriving that predicate.
+   *
+   * Blocked entries used to be omitted from this list entirely, which made an
+   * approved branch vanish from the only surface an operator watches (loam-u84g);
+   * they are listed and marked instead. The default (false) is the SAFE one: a
+   * client that does not know this field suppresses the button rather than
+   * offering one AcceptProposal refuses.
+   *
+   * @generated from field: bool acceptable = 3;
+   */
+  acceptable: boolean;
 };
 
 /**
@@ -178,7 +196,9 @@ export const CloseWorkBranchResponseSchema: GenMessage<CloseWorkBranchResponse> 
 export const ProposalService: GenService<{
   /**
    * Proposals awaiting an admin decision, across all repos, paginated. Each carries
-   * its verdicts so the admin sees who approved without a second call.
+   * its verdicts so the admin sees who approved without a second call, and an
+   * `acceptable` flag: a branch with a live approve that something else blocks is
+   * listed and marked, not omitted (loam-u84g).
    *
    * @generated from rpc loam.admin.v1.ProposalService.ListProposals
    */

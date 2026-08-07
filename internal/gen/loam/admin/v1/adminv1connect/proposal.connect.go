@@ -47,7 +47,9 @@ const (
 // ProposalServiceClient is a client for the loam.admin.v1.ProposalService service.
 type ProposalServiceClient interface {
 	// Proposals awaiting an admin decision, across all repos, paginated. Each carries
-	// its verdicts so the admin sees who approved without a second call.
+	// its verdicts so the admin sees who approved without a second call, and an
+	// `acceptable` flag: a branch with a live approve that something else blocks is
+	// listed and marked, not omitted (loam-u84g).
 	ListProposals(context.Context, *connect.Request[v1.ListProposalsRequest]) (*connect.Response[v1.ListProposalsResponse], error)
 	// Create the upstream PR on the forge with a generated branch name and the work
 	// branch's title/description, recording pr_url on the work branch. The work branch
@@ -117,7 +119,9 @@ func (c *proposalServiceClient) CloseWorkBranch(ctx context.Context, req *connec
 // ProposalServiceHandler is an implementation of the loam.admin.v1.ProposalService service.
 type ProposalServiceHandler interface {
 	// Proposals awaiting an admin decision, across all repos, paginated. Each carries
-	// its verdicts so the admin sees who approved without a second call.
+	// its verdicts so the admin sees who approved without a second call, and an
+	// `acceptable` flag: a branch with a live approve that something else blocks is
+	// listed and marked, not omitted (loam-u84g).
 	ListProposals(context.Context, *connect.Request[v1.ListProposalsRequest]) (*connect.Response[v1.ListProposalsResponse], error)
 	// Create the upstream PR on the forge with a generated branch name and the work
 	// branch's title/description, recording pr_url on the work branch. The work branch
