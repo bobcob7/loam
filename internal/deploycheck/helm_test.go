@@ -239,7 +239,10 @@ func TestHelmValuesSchemaExists(t *testing.T) {
 	// Requiring a description does not make that impossible; nothing in a
 	// unit test can stop a determined edit, and this guards rot rather than
 	// adversaries. What it does is make the edit cost a SENTENCE, and a
-	// sentence is the thing a reviewer actually reads. It costs nothing
+	// sentence is the thing a reviewer actually reads. That limit is
+	// measured, not assumed: the same two-line reopen PLUS a one-line
+	// description still passes this package. The guard buys review
+	// attention, not enforcement, and it should not be read as more. It costs nothing
 	// today: the chart's genuine passthroughs are the five
 	// docs/deployment-spec.md already enumerates and justifies one by one,
 	// so each of them has an argument to state. An object with no argument
