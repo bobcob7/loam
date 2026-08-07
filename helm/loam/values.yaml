@@ -177,9 +177,10 @@ config:
   # internal/deploycheck does not check it; `helm template` does.
   #
   # internal/config would tolerate the keys being emitted as empty strings
-  # anyway (its lookupDefault/parseFloatEnv treat set-but-empty exactly as
-  # unset, internal/config/env.go), so the `if` is about keeping the
-  # rendered manifest honest, not about correctness of the loader.
+  # anyway (its lookupDefault, parseFloatEnv and parseDurationEnv all treat
+  # set-but-empty exactly as unset, internal/config/env.go), so the `if` is
+  # about keeping the rendered manifest honest, not about correctness of the
+  # loader.
 
   # LOAM_OTEL_ENDPOINT. The collector's OTLP base URL, and the ONLY enable
   # switch loam has -- there is deliberately no LOAM_OTEL_ENABLED, see
