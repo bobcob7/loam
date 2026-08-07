@@ -16,8 +16,10 @@ import {
 } from "../gen/loam/admin/v1/proposal_pb";
 import {
   PageInfoSchema,
+  UpstreamDrift,
   VerdictOutcome,
   VerdictSummarySchema,
+  WorkBranchConflict,
   WorkBranchSchema,
   WorkBranchState,
 } from "../gen/loam/v1/common_pb";
@@ -149,6 +151,118 @@ describe("Proposals", () => {
     // (25), so the pager must render its landmark and the correct summary.
     const pager = screen.getByRole("navigation", { name: "Pagination" });
     expect(within(pager).getByText(/page 1 of 2/i)).toBeInTheDocument();
+  });
+
+  // loam-u84g. A conflicting target advance demotes an approved branch out of
+  // REVIEWED and back to DRAFT, leaving its approve non-stale
+  // (docs/git-spec.md -> Target Advances & Catch-Up). Such a branch used to be
+  // omitted from this response entirely, so the operator merged everything the
+  // queue offered and never learned it existed; an approved P1 fix missed
+  // v0.0.8 that way. It is now listed with `acceptable = false`, and the row
+  // must SAY SO -- rendering it as an ordinary proposal would be worse than
+  // omitting it, because the admin would click Accept and the server would
+  // refuse.
+  it("marks a blocked proposal, naming the conflict, while leaving an acceptable one unmarked", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(ProposalService, {
+        listProposals: () =>
+          create(ListProposalsResponseSchema, {
+            proposals: [
+              create(ProposalSchema, {
+                acceptable: true,
+                workBranch: workBranch(),
+                verdicts: [
+                  create(VerdictSummarySchema, {
+                    reviewer: "agent-2-reviewer",
+                    outcome: VerdictOutcome.APPROVE,
+                    stale: false,
+                    round: 2,
+                  }),
+                ],
+              }),
+              create(ProposalSchema, {
+                acceptable: false,
+                workBranch: create(WorkBranchSchema, {
+                  repo: "acme/widgets",
+                  name: "wb-88c455",
+                  target: "main",
+                  title: "Strip pool params from the migration DSN",
+                  state: WorkBranchState.DRAFT,
+                  author: "agent-3-implementer",
+                  conflict: WorkBranchConflict.RESET,
+                  upstreamDrift: UpstreamDrift.DIVERGED,
+                }),
+                verdicts: [
+                  create(VerdictSummarySchema, {
+                    reviewer: "agent-1-reviewer",
+                    outcome: VerdictOutcome.APPROVE,
+                    stale: false,
+                    round: 3,
+                  }),
+                ],
+              }),
+            ],
+            pageInfo: create(PageInfoSchema, { total: 2 }),
+          }),
+      });
+    });
+    renderProposals(transport);
+
+    const blockedLink = await screen.findByRole("link", {
+      name: "Strip pool params from the migration DSN",
+    });
+    const blockedRow = blockedLink.closest("tr");
+    if (blockedRow === null) throw new Error("unreachable: the link renders inside a table row");
+    const withinBlocked = within(blockedRow);
+    // Both reasons, as two separate badges. Collapsing them would send the
+    // admin to fix the wrong thing (statusIntent.ts) -- a conflict is a
+    // catch-up push, divergence is reconciled on the forge.
+    expect(withinBlocked.getByText("Conflict reset")).toBeInTheDocument();
+    expect(withinBlocked.getByText("Upstream diverged")).toBeInTheDocument();
+    // Its approve is genuinely non-stale, so the success tint is correct and
+    // is exactly why "blocked" has to be said out loud somewhere else.
+    expect(withinBlocked.getByText("Approve").className).toContain(badgeClass("success"));
+
+    const okLink = screen.getByRole("link", { name: "Add retry to the sync loop" });
+    const okRow = okLink.closest("tr");
+    if (okRow === null) throw new Error("unreachable: the link renders inside a table row");
+    // The acceptable row must carry NO blocker badge -- otherwise "the blocked
+    // row is badged" would be satisfied by badging every row.
+    expect(within(okRow).queryByText("Conflict reset")).not.toBeInTheDocument();
+    expect(within(okRow).queryByText("Upstream diverged")).not.toBeInTheDocument();
+    expect(within(okRow).queryByText("Not acceptable")).not.toBeInTheDocument();
+  });
+
+  // The third blocker is neither `conflict` nor `upstream_drift`: a branch can
+  // be unacceptable purely because it is no longer REVIEWED. The row must
+  // still say something rather than render an empty cell that reads as clear.
+  it("falls back to a generic blocked badge when neither conflict nor drift explains it", async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(ProposalService, {
+        listProposals: () =>
+          create(ListProposalsResponseSchema, {
+            proposals: [
+              create(ProposalSchema, {
+                acceptable: false,
+                workBranch: create(WorkBranchSchema, {
+                  repo: "acme/widgets",
+                  name: "wb-1a2b3c",
+                  target: "main",
+                  title: "Sent back for another round",
+                  state: WorkBranchState.REVIEWABLE,
+                  author: "agent-3-implementer",
+                  conflict: WorkBranchConflict.NONE,
+                  upstreamDrift: UpstreamDrift.NONE,
+                }),
+                verdicts: [],
+              }),
+            ],
+            pageInfo: create(PageInfoSchema, { total: 1 }),
+          }),
+      });
+    });
+    renderProposals(transport);
+    expect(await screen.findByText("Not acceptable")).toBeInTheDocument();
   });
 
   it("renders the empty state when no proposals are awaiting a decision", async () => {
