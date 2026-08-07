@@ -19,6 +19,7 @@ import {
   verdictSummaryIntent,
   workBranchStateIntent,
 } from "../components/statusIntent";
+import { acceptBlocker } from "../data/acceptability";
 import { useMutationInvalidating } from "../data/invalidation";
 import { mapConnectError, type ErrorOutcome } from "../data/mapConnectError";
 import { toPagerState, useOffsetPagination } from "../data/pagination";
@@ -179,6 +180,12 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
   const verdicts = verdictsQuery.data?.verdicts ?? [];
   const threads = commentsQuery.data?.threads ?? [];
   const alreadyAccepted = wb.upstreamPrUrl !== undefined || acceptMutation.isSuccess;
+  // loam-u84g. Blocked branches used to be absent from the proposal queue, and
+  // Proposals.tsx is the ONLY link into this screen -- so listing them is what
+  // makes this page reachable for a branch AcceptProposal refuses. The button
+  // has to go with them: offering one that cannot work is the failure mode
+  // loam-giq.11 excluded drift to avoid, and it would simply have moved here.
+  const blocker = acceptBlocker(wb);
 
   return (
     <>
@@ -273,8 +280,13 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
             )}
           </div>
         )}
+        {blocker !== undefined && (
+          <p role="status" className={styles.blockedNotice}>
+            <strong>Cannot be accepted right now.</strong> {blocker}
+          </p>
+        )}
         <div className={styles.actions}>
-          {!alreadyAccepted && (
+          {!alreadyAccepted && blocker === undefined && (
             <Button variant="primary" onClick={() => setAcceptOpen(true)}>
               Accept
             </Button>
@@ -311,9 +323,26 @@ export function ProposalDetail({ repo, workBranch }: ProposalDetailProps): React
         {acceptMutation.isError && (
           <ErrorBanner
             title="Could not accept proposal"
+            // This used to assert ONE cause -- "needs at least one non-stale
+            // approve verdict" -- which is false by construction for every
+            // branch loam-u84g is about: those hold a non-stale approve and
+            // are refused for being demoted, conflicted, or drifted
+            // (AcceptProposal checks four preconditions, not one).
+            //
+            // The fix is the button, not a cleverer string here: `blocker`
+            // suppresses Accept for all three of those, so by the time this
+            // dialog can be opened the approve bar is the likeliest remaining
+            // cause. It is not the ONLY one -- a sync tick can demote the
+            // branch after this page loaded -- and naming a cause the server
+            // did not give is what went wrong the first time, so the sentence
+            // now says which one is likely and points at the recovery instead
+            // of asserting it. Deriving it from `blocker` here would not help:
+            // `blocker` is computed from the same snapshot that decided to
+            // show the button, so under exactly the race that makes the old
+            // sentence wrong it is stale too.
             message={
               mapConnectError(acceptMutation.error).kind === "failed-precondition"
-                ? "This proposal needs at least one non-stale approve verdict before it can be accepted."
+                ? "Loam refused this accept. The usual cause is no non-stale approve verdict in the current review round; a conflict, upstream drift, or a state change since this page loaded will also refuse it. Reload to see the branch's current status."
                 : errorMessage(mapConnectError(acceptMutation.error))
             }
           />

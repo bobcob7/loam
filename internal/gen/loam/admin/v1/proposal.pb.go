@@ -26,7 +26,20 @@ type Proposal struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	WorkBranch *v1.WorkBranch         `protobuf:"bytes,1,opt,name=work_branch,json=workBranch,proto3" json:"work_branch,omitempty"`
 	// This round's verdicts (unique reviewer + outcome), so the admin sees who approved.
-	Verdicts      []*v1.VerdictSummary `protobuf:"bytes,2,rep,name=verdicts,proto3" json:"verdicts,omitempty"`
+	Verdicts []*v1.VerdictSummary `protobuf:"bytes,2,rep,name=verdicts,proto3" json:"verdicts,omitempty"`
+	// Whether AcceptProposal would accept this branch right now. False means the
+	// branch carries a live approve but something independent of the review blocks
+	// the merge -- a conflict flag, upstream drift, or a conflicting target advance
+	// that demoted it out of REVIEWED. The reason is already on work_branch
+	// (`conflict`, `upstream_drift`, `state`); this field exists so the console can
+	// decide whether to offer the accept button without re-deriving that predicate.
+	//
+	// Blocked entries used to be omitted from this list entirely, which made an
+	// approved branch vanish from the only surface an operator watches (loam-u84g);
+	// they are listed and marked instead. The default (false) is the SAFE one: a
+	// client that does not know this field suppresses the button rather than
+	// offering one AcceptProposal refuses.
+	Acceptable    bool `protobuf:"varint,3,opt,name=acceptable,proto3" json:"acceptable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -73,6 +86,13 @@ func (x *Proposal) GetVerdicts() []*v1.VerdictSummary {
 		return x.Verdicts
 	}
 	return nil
+}
+
+func (x *Proposal) GetAcceptable() bool {
+	if x != nil {
+		return x.Acceptable
+	}
+	return false
 }
 
 type ListProposalsRequest struct {
@@ -384,11 +404,14 @@ var File_loam_admin_v1_proposal_proto protoreflect.FileDescriptor
 
 const file_loam_admin_v1_proposal_proto_rawDesc = "" +
 	"\n" +
-	"\x1cloam/admin/v1/proposal.proto\x12\rloam.admin.v1\x1a\x14loam/v1/common.proto\"u\n" +
+	"\x1cloam/admin/v1/proposal.proto\x12\rloam.admin.v1\x1a\x14loam/v1/common.proto\"\x95\x01\n" +
 	"\bProposal\x124\n" +
 	"\vwork_branch\x18\x01 \x01(\v2\x13.loam.v1.WorkBranchR\n" +
 	"workBranch\x123\n" +
-	"\bverdicts\x18\x02 \x03(\v2\x17.loam.v1.VerdictSummaryR\bverdicts\"9\n" +
+	"\bverdicts\x18\x02 \x03(\v2\x17.loam.v1.VerdictSummaryR\bverdicts\x12\x1e\n" +
+	"\n" +
+	"acceptable\x18\x03 \x01(\bR\n" +
+	"acceptable\"9\n" +
 	"\x14ListProposalsRequest\x12!\n" +
 	"\x04page\x18\x01 \x01(\v2\r.loam.v1.PageR\x04page\"~\n" +
 	"\x15ListProposalsResponse\x125\n" +

@@ -10,7 +10,9 @@ import "loam/v1/common.proto";
 // REVIEWED work branch with >= 1 non-stale approve verdict and no upstream PR yet.
 service ProposalService {
   // Proposals awaiting an admin decision, across all repos, paginated. Each carries
-  // its verdicts so the admin sees who approved without a second call.
+  // its verdicts so the admin sees who approved without a second call, and an
+  // `acceptable` flag: a branch with a live approve that something else blocks is
+  // listed and marked, not omitted (loam-u84g).
   rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
 
   // Create the upstream PR on the forge with a generated branch name and the work
@@ -29,6 +31,19 @@ message Proposal {
   loam.v1.WorkBranch work_branch = 1;
   // This round's verdicts (unique reviewer + outcome), so the admin sees who approved.
   repeated loam.v1.VerdictSummary verdicts = 2;
+  // Whether AcceptProposal would accept this branch right now. False means the
+  // branch carries a live approve but something independent of the review blocks
+  // the merge -- a conflict flag, upstream drift, or a conflicting target advance
+  // that demoted it out of REVIEWED. The reason is already on work_branch
+  // (`conflict`, `upstream_drift`, `state`); this field exists so the console can
+  // decide whether to offer the accept button without re-deriving that predicate.
+  //
+  // Blocked entries used to be omitted from this list entirely, which made an
+  // approved branch vanish from the only surface an operator watches (loam-u84g);
+  // they are listed and marked instead. The default (false) is the SAFE one: a
+  // client that does not know this field suppresses the button rather than
+  // offering one AcceptProposal refuses.
+  bool acceptable = 3;
 }
 
 message ListProposalsRequest {

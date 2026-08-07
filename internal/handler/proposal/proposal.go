@@ -38,11 +38,29 @@ const defaultListLimit = 100
 // wrong, not merely approximate: a page of 100 reviewed branches of which 3
 // are proposals would return 3 rows and a next-page offset of 100, so the
 // admin would page through mostly-empty pages and PageInfo.total would
-// report reviewed branches rather than proposals. Scanning is affordable
-// because the candidate set is bounded by "reviewed and not yet decided",
-// which is exactly the queue the admin is looking at; the same page-
-// everything-then-filter shape mirrorsync.StorePRPoller's pollSet uses, and
-// for the same reason.
+// report reviewed branches rather than proposals. The same
+// page-everything-then-filter shape mirrorsync.StorePRPoller's pollSet uses,
+// and for the same reason.
+//
+// # What this actually costs now (loam-u84g)
+//
+// The honest statement is about the SCAN, not the candidate set, and they are
+// no longer the same thing. queueCandidates pages TWO states: reviewed, which
+// is bounded by "approved and not yet decided" and is exactly the queue the
+// admin is looking at; and draft, which is bounded by nothing — it is every
+// work branch anyone has started and not yet submitted, the least bounded
+// state in the system. Only the `conflict = 'reset'` subset of that second
+// page survives into the candidate set, so the queue stays small, but the
+// READ does not: a repo with a thousand open drafts pages a thousand rows per
+// queue load to find the handful that were demoted.
+//
+// That is accepted rather than overlooked, on two grounds. The scan is already
+// per-request and uncached for the reviewed set, so this changes the constant
+// and not the shape; and the alternative — a conflict column on ListFilter and
+// a new sqlc query — buys a narrower read for the one caller that wants it at
+// the cost of a filter field every other List caller must now ignore. If the
+// draft population ever makes this the wrong trade, the fix is that filter,
+// and this comment is where to start.
 const candidateScanPageSize = 200
 
 // Handler implements adminv1connect.ProposalServiceHandler.
@@ -90,11 +108,40 @@ func New(
 	}
 }
 
-// ListProposals returns the proposal queue: every REVIEWED work branch,
-// across every enrolled repo, that carries at least one non-stale approve
-// verdict and no conflict flag, each with that round's verdicts so the
-// admin sees who approved without a second call (docs/web-spec.md ->
-// ProposalService).
+// ListProposals returns the proposal queue: every work branch, across every
+// enrolled repo, that carries at least one non-stale approve verdict and is
+// therefore awaiting an admin decision -- each with that round's verdicts so
+// the admin sees who approved without a second call (docs/web-spec.md ->
+// ProposalService), and each marked `acceptable` or not.
+//
+// # Blocked branches are listed and marked, never dropped (loam-u84g)
+//
+// The queue's membership test is "does this branch hold a live approve",
+// which is a fact about the REVIEW. Whether it can be merged right now is a
+// separate fact about the TARGET and the forge, and it now travels as
+// Proposal.acceptable rather than as absence from the list. The three things
+// that make a branch unacceptable -- a conflict flag, upstream drift, and the
+// demotion out of REVIEWED that a conflicting target advance performs -- used
+// to remove it from this response entirely.
+//
+// That was silent and it was expensive. An operator working this queue merges
+// what it offers; a branch that is absent is not skipped, not shown blocked,
+// and not distinguishable from one that was never approved. On
+// forgejo_admin/loam, wb-88c455 held a non-stale approve on an already-merged
+// P1 fix while sitting in draft (its target had advanced into a conflict), and
+// it missed the v0.0.8 release because no surface in the system named it. The
+// demotion itself is correct and specified (docs/git-spec.md -> "Target
+// Advances & Catch-Up", loam-di9q); making it invisible was not.
+//
+// Nothing this change lists becomes acceptable. AcceptProposal re-checks all
+// three preconditions itself and refuses exactly as before -- acceptableNow is
+// the same predicate, so the queue and the accept gate cannot disagree about
+// which branches the button is for. What loam-giq.11 wanted from excluding
+// drift ("listing it would offer the admin a button that cannot work") is
+// preserved by the flag, and its stated goal -- that conflict and drift
+// "reach the admin on WorkBranch itself ... [on] the proposal queue" -- becomes
+// true for the first time, since a filtered queue could only ever carry NONE
+// in both fields.
 //
 // # The predicate, made exact (loam-cgg)
 //
@@ -104,12 +151,13 @@ func New(
 // conflict catch-up that has been re-reviewed)". The first three conditions
 // are evaluated here exactly, as before.
 //
-// A branch carrying upstream drift is excluded alongside a conflicted one
-// (loam-giq.11, docs/web-spec.md -> "Upstream drift is surfaced, not
-// listed"). It is not awaiting an accept decision: AcceptProposal refuses
-// it, so listing it would offer the admin a button that cannot work. What
+// A branch carrying upstream drift is marked unacceptable alongside a
+// conflicted one (loam-giq.11, docs/web-spec.md -> "Upstream drift is
+// surfaced, not listed" -- surfaced is now literal: it is on the row, with
+// the button suppressed, rather than absent). AcceptProposal refuses it, so
+// offering the admin a button would be offering one that cannot work. What
 // the admin needs about it -- that it is diverged, and how that differs
-// from a conflict -- travels on the WorkBranch message itself now
+// from a conflict -- travels on the WorkBranch message itself
 // (workBranchToProto), which is the surface every other view of a branch
 // already reads. The final disjunction now is too:
 // mirrorsync.StoreProposalAccepter records the tip it pushes as
@@ -136,16 +184,13 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 	if err := requireAdmin(ctx, "listing proposals"); err != nil {
 		return nil, h.errors.ToConnectErr(err)
 	}
-	candidates, err := h.reviewedBranches(ctx)
+	candidates, err := h.queueCandidates(ctx)
 	if err != nil {
 		return nil, h.errors.ToConnectErr(err)
 	}
 	repoNames := make(map[uuid.UUID]string, len(candidates))
 	proposals := make([]*adminv1.Proposal, 0, len(candidates))
 	for _, wb := range candidates {
-		if wb.Conflict != workbranchstore.ConflictNone || wb.UpstreamDrift != workbranchstore.DriftNone {
-			continue
-		}
 		approvals, err := h.verdicts.CurrentRoundApproveCount(ctx, wb.ID)
 		if err != nil {
 			return nil, h.errors.ToConnectErr(fmt.Errorf("counting current-round approvals for work branch %s: %w", wb.Name, err))
@@ -157,12 +202,15 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 		if err != nil {
 			return nil, h.errors.ToConnectErr(err)
 		}
-		upToDate, err := h.proposalUpToDate(ctx, repoName, wb)
-		if err != nil {
-			return nil, h.errors.ToConnectErr(err)
-		}
-		if upToDate {
-			continue
+		canAccept := acceptableNow(wb)
+		if canAccept {
+			upToDate, err := h.proposalUpToDate(ctx, repoName, wb)
+			if err != nil {
+				return nil, h.errors.ToConnectErr(err)
+			}
+			if upToDate {
+				continue
+			}
 		}
 		records, err := h.verdicts.List(ctx, wb.ID)
 		if err != nil {
@@ -171,6 +219,7 @@ func (h *Handler) ListProposals(ctx context.Context, req *connect.Request[adminv
 		proposals = append(proposals, &adminv1.Proposal{
 			WorkBranch: workBranchToProto(repoName, wb),
 			Verdicts:   currentRoundVerdicts(records),
+			Acceptable: canAccept,
 		})
 	}
 	limit, offset := pageLimitOffset(req.Msg.GetPage())
@@ -331,17 +380,83 @@ func (h *Handler) CloseWorkBranch(ctx context.Context, req *connect.Request[admi
 	}), nil
 }
 
-// reviewedBranches pages the whole state=reviewed candidate set across every
-// enrolled repo. It stops on an empty page as well as on the total, so a
-// store whose total and page contents ever disagree cannot spin here
-// forever -- the same two-condition loop guard mirrorsync's pollSet uses.
-func (h *Handler) reviewedBranches(ctx context.Context) ([]workbranchstore.WorkBranch, error) {
+// acceptableNow reports whether AcceptProposal's own preconditions hold for
+// wb right now -- the same three the RPC checks, in the same order, and
+// deliberately NOT a second, looser opinion about them. A branch this
+// returns false for is still listed, marked unacceptable; see
+// queueCandidates for why listing it is the point.
+//
+// The approve count is not part of this: a branch with no live approve is
+// not in the queue at all, so every branch reaching this predicate has
+// already cleared that bar.
+func acceptableNow(wb workbranchstore.WorkBranch) bool {
+	return wb.State == workbranchstore.StateReviewed &&
+		wb.Conflict == workbranchstore.ConflictNone &&
+		wb.UpstreamDrift == workbranchstore.DriftNone
+}
+
+// queueCandidates pages the whole candidate set the proposal queue is
+// computed over, across every enrolled repo: every state=reviewed branch,
+// plus every state=draft branch a conflicting target advance DEMOTED out of
+// review (conflict = 'reset').
+//
+// # Why draft is scanned at all (loam-u84g)
+//
+// This used to scan state=reviewed alone, and ListProposals then dropped any
+// candidate carrying a conflict or upstream drift. Both halves of that hid a
+// branch the operator needed to see, and the first hid it beyond recovery:
+// docs/git-spec.md -> "Target Advances & Catch-Up" resets a reviewed branch
+// to draft on a conflicting advance, and deliberately does NOT stale its
+// verdicts at that moment ("no round opens there"). So a branch could -- and
+// on forgejo_admin/loam wb-88c455 did -- hold a non-stale approve while
+// sitting in draft, which is a state no listing this system offers looks at:
+// the proposal queue scanned only reviewed, and `work list` defaults to
+// --state reviewable. An approved P1 fix missed a release inside that gap
+// and nothing anywhere reported it as blocked, skipped, or even present.
+//
+// conflict = 'reset' is exactly and only the demoted set. MarkWorkBranchConflicted
+// (internal/db/queries/work_branches.sql) writes 'reset' when and only when it
+// moves a reviewable/reviewed branch to draft; a branch that was already draft
+// gains 'flagged' instead. So this scan cannot pick up an ordinary in-progress
+// draft, and the approve-count filter in ListProposals would exclude one anyway
+// -- a branch that never reached review has no verdicts to count.
+//
+// # Why not a store-level filter
+//
+// ListFilter has no conflict column, and adding one would mean a new sqlc
+// query for a predicate this is the only caller of. The draft page is scanned
+// and filtered in Go instead, the same page-everything-then-filter shape
+// candidateScanPageSize's doc comment already justifies for the reviewed set.
+// The cost is one extra paged scan per queue load, bounded by the number of
+// open drafts.
+func (h *Handler) queueCandidates(ctx context.Context) ([]workbranchstore.WorkBranch, error) {
+	candidates, err := h.scanState(ctx, workbranchstore.StateReviewed)
+	if err != nil {
+		return nil, err
+	}
+	demoted, err := h.scanState(ctx, workbranchstore.StateDraft)
+	if err != nil {
+		return nil, err
+	}
+	for _, wb := range demoted {
+		if wb.Conflict == workbranchstore.ConflictReset {
+			candidates = append(candidates, wb)
+		}
+	}
+	return candidates, nil
+}
+
+// scanState pages the whole state=<state> set across every enrolled repo. It
+// stops on an empty page as well as on the total, so a store whose total and
+// page contents ever disagree cannot spin here forever -- the same
+// two-condition loop guard mirrorsync's pollSet uses.
+func (h *Handler) scanState(ctx context.Context, state workbranchstore.State) ([]workbranchstore.WorkBranch, error) {
 	var all []workbranchstore.WorkBranch
 	var offset int32
 	for {
-		page, total, err := h.workBranches.List(ctx, workbranchstore.ListFilter{State: workbranchstore.StateReviewed}, candidateScanPageSize, offset)
+		page, total, err := h.workBranches.List(ctx, workbranchstore.ListFilter{State: state}, candidateScanPageSize, offset)
 		if err != nil {
-			return nil, fmt.Errorf("listing reviewed work branches for the proposal queue: %w", err)
+			return nil, fmt.Errorf("listing %s work branches for the proposal queue: %w", state, err)
 		}
 		all = append(all, page...)
 		offset += int32(len(page))

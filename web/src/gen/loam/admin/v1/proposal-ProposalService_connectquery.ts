@@ -6,7 +6,9 @@ import { ProposalService } from "./proposal_pb";
 
 /**
  * Proposals awaiting an admin decision, across all repos, paginated. Each carries
- * its verdicts so the admin sees who approved without a second call.
+ * its verdicts so the admin sees who approved without a second call, and an
+ * `acceptable` flag: a branch with a live approve that something else blocks is
+ * listed and marked, not omitted (loam-u84g).
  *
  * @generated from rpc loam.admin.v1.ProposalService.ListProposals
  */

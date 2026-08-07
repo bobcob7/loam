@@ -177,19 +177,37 @@ branch back (`RequestReview`) — is the CLI's `WorkBranchService` in
 `loam.v1`, which the admin reaches as a superuser. Admin protos reuse `WorkBranch`, `Page`,
 and `PageInfo` from `loam.v1` (they import `loam/v1/common.proto`).
 
-A proposal is a **REVIEWED** work branch with ≥1 non-stale approve verdict awaiting an
-admin decision — either it has no upstream PR yet, or its existing PR's branch is behind
-the work branch (a conflict catch-up that has been re-reviewed; see `docs/git-spec.md` →
-Target Advances & Catch-Up).
+A proposal is a work branch with ≥1 non-stale approve verdict awaiting an admin decision.
+Its **membership test is a fact about the review**; whether it can be merged *right now* is
+a separate fact about the target and the forge, and travels as `Proposal.acceptable` rather
+than as absence from the list. An acceptable proposal is REVIEWED, unconflicted, undrifted,
+and either has no upstream PR yet or its existing PR's branch is behind the work branch (a
+conflict catch-up that has been re-reviewed; see `docs/git-spec.md` → Target Advances &
+Catch-Up).
 
 - `ListProposals(Page) → { Proposal[] proposals, PageInfo }` — proposals awaiting an admin
   decision, across all repos, paginated. Each `Proposal` is `{ WorkBranch, VerdictSummary[]
-  verdicts }` so the admin sees who approved without a second call.
+  verdicts, bool acceptable }` so the admin sees who approved, and whether the accept button
+  applies, without a second call.
 
-**Upstream drift is surfaced, not listed.** A work branch whose `loam/<name>` branch was
-edited upstream behind Loam's back does not belong in this queue — it is not awaiting an
-accept decision, and a clean fast-forward is reconciled automatically (`docs/sync-spec.md`
-→ Upstream Drift), which reopens a review round rather than producing a proposal. What the
+**Blocked is listed and marked, never dropped.** A branch that holds a live approve but
+cannot be accepted stays in this queue with `acceptable = false`; the console suppresses
+the accept button for it and reads the reason off the `WorkBranch` itself. This is the
+correction of a real and expensive omission (loam-u84g): the queue used to scan
+`state = reviewed` alone and then discard any candidate carrying a conflict or drift, so a
+branch demoted to `draft` by a conflicting target advance — which *deliberately* does not
+stale its verdicts — was absent from every listing Loam offers (the queue scanned only
+`reviewed`; `work list` defaults to `reviewable`). An operator working this queue merges
+what it offers, and an approved P1 fix missed the v0.0.8 release inside that gap: not
+skipped, not shown blocked, absent. Absence and blockage are not the same signal and only
+one of the two can be acted on. Nothing about the accept **gate** changed —
+`AcceptProposal` refuses exactly what it refused before, and `acceptable` is computed from
+that same predicate so the two cannot drift apart.
+
+**Upstream drift is surfaced, not listed as acceptable.** A work branch whose
+`loam/<name>` branch was edited upstream behind Loam's back is not awaiting an accept
+decision, and a clean fast-forward is reconciled automatically (`docs/sync-spec.md` →
+Upstream Drift), which reopens a review round rather than producing a proposal. What the
 admin must see is the case Loam refuses to guess at: `upstream_drift = diverged`, shown on
 the work branch alongside its conflict state and distinguishable from `flagged`/`reset`. Those two mean *the target moved, catch up*; this one means
 *someone rewrote the branch Loam pushed, and no fast-forward reconciles it* — a different
@@ -203,9 +221,12 @@ branch carries them: the proposal queue, `GetWorkBranch` behind the proposal det
 page, and `ListWorkBranches`. They are read-only — no request message sets either, the
 sync cycle is the only writer — and `UNSPECIFIED` never means "fine": `NONE` is a
 positive claim, so an unrecognized stored value surfaces as `UNSPECIFIED` rather than
-being rounded down to it. Before this feature `conflict` was server-internal, read only
-by `ListProposals`' exclusion and `AcceptProposal`'s precondition, so a branch Loam had
-demoted looked to every client exactly like one it had not.
+being rounded down to it — and the console applies the same reading when it decides
+whether to offer the accept button, so an unrecognized value withholds it. Before this
+feature `conflict` was server-internal, read only by `ListProposals`' filter (which
+loam-u84g replaced with the `acceptable` flag above) and `AcceptProposal`'s
+precondition, so a branch Loam had demoted looked to every client exactly like one it
+had not.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
   title/description, and records `pr_url` on the work branch. On a re-accept after a

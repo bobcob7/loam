@@ -166,6 +166,8 @@ func (h *acceptanceHarness) registerProposalSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^it is flagged as conflicted$`, h.stepItIsFlaggedAsConflicted)
 	sc.Step(`^the target branch advances with conflicting changes$`, h.stepTheTargetAdvancesWithConflictingChanges)
 	sc.Step(`^it no longer appears in the proposal queue$`, h.stepItNoLongerAppearsInTheProposalQueue)
+	sc.Step(`^it is still listed in the proposal queue, marked as not acceptable$`, h.stepItIsStillListedMarkedNotAcceptable)
+	sc.Step(`^accepting it is still rejected as a failed precondition$`, h.stepAcceptingItIsStillRejected)
 	sc.Step(`^the reason is recorded on the work branch$`, h.stepTheReasonIsRecordedOnTheWorkBranch)
 	sc.Step(`^the upstream PR is closed$`, h.stepTheUpstreamPRIsClosed)
 	sc.Step(`^the next sync sets the work branch to state "([^"]*)"$`, h.stepTheNextSyncSetsTheWorkBranchToState)
@@ -1574,6 +1576,58 @@ func (h *acceptanceHarness) stepItNoLongerAppearsInTheProposalQueue(ctx context.
 	}
 	if _, ok := proposalFor(proposals, world.repo(), world.workBranch); ok {
 		return fmt.Errorf("work branch %s/%s is still in the proposal queue", world.repo(), world.workBranch)
+	}
+	return nil
+}
+
+// stepItIsStillListedMarkedNotAcceptable is loam-u84g's acceptance
+// assertion, and it is deliberately the exact negation of the step above.
+//
+// A conflicting target advance demotes the branch to draft and leaves its
+// approve non-stale (docs/git-spec.md -> Target Advances & Catch-Up). This
+// queue used to DROP such a branch, and an operator cannot act on a row that
+// is not there: an approved P1 fix missed a release because the console
+// offered every proposal it knew of and this one was simply not among them.
+// The branch must therefore be PRESENT and marked, which is two separate
+// facts -- listing it while still claiming it is acceptable would be worse
+// than dropping it, since the admin would press a button the server refuses.
+//
+// world.queued is required first, exactly as the removal step requires it,
+// so "still listed" cannot pass on a branch that was never in the queue.
+func (h *acceptanceHarness) stepItIsStillListedMarkedNotAcceptable(ctx context.Context) error {
+	world := worldFrom(ctx)
+	if !world.queued {
+		return fmt.Errorf("this scenario never observed %s/%s in the proposal queue, so its presence now proves nothing was preserved", world.repo(), world.workBranch)
+	}
+	proposals, err := h.listProposals(ctx)
+	if err != nil {
+		return err
+	}
+	proposal, ok := proposalFor(proposals, world.repo(), world.workBranch)
+	if !ok {
+		return fmt.Errorf("work branch %s/%s dropped out of the proposal queue when its target conflicted; a demoted branch with a live approve must stay visible (%d queued)", world.repo(), world.workBranch, len(proposals))
+	}
+	if proposal.GetAcceptable() {
+		return fmt.Errorf("work branch %s/%s is listed as acceptable, but AcceptProposal refuses a demoted branch -- the console would offer a button that cannot work", world.repo(), world.workBranch)
+	}
+	if got := proposal.GetWorkBranch().GetConflict(); got != loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET {
+		return fmt.Errorf("queued proposal %s carries conflict %s, want RESET -- the reason the row is blocked must travel with it", world.workBranch, got)
+	}
+	return nil
+}
+
+// stepAcceptingItIsStillRejected proves listing the blocked branch widened
+// nothing: the accept gate answers exactly as it did when the branch was
+// hidden. Without this the scenario could be satisfied by a change that made
+// the queue honest and the gate lax at the same time.
+func (h *acceptanceHarness) stepAcceptingItIsStillRejected(ctx context.Context) error {
+	world := worldFrom(ctx)
+	_, err := acceptProposal(ctx, h.newProposalServiceClient(), world.repo(), world.workBranch)
+	if err == nil {
+		return fmt.Errorf("accepting demoted work branch %s/%s succeeded; it must stay refused", world.repo(), world.workBranch)
+	}
+	if got := connect.CodeOf(err); got != connect.CodeFailedPrecondition {
+		return fmt.Errorf("accepting demoted work branch %s/%s failed with %s, want failed_precondition: %w", world.repo(), world.workBranch, got, err)
 	}
 	return nil
 }

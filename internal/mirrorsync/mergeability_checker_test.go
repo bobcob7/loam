@@ -24,11 +24,15 @@ import (
 // TestCheckMergeability_ConflictingBranchIsFlagged plus
 // internal/workbranchstore's own MarkConflicted coverage, which is where
 // the reviewable/reviewed -> draft demotion and the conflict='reset' stamp
-// actually happen. admin-proposals.feature:71-75 "A conflicting target
-// advance removes a proposal from the queue" is NOT covered here at all:
-// the queue predicate lives in the proposal-listing query, not in this
-// package, and the scenario's "no longer appears in the proposal queue"
-// step needs an admin RPC round trip.
+// actually happen. admin-proposals.feature's "A conflicting target advance
+// blocks a proposal without hiding it" (renamed from "... removes a proposal
+// from the queue" by loam-u84g, which is also what changed the behaviour it
+// asserts) is NOT covered here at all: the queue predicate lives in the
+// proposal-listing query, not in this package, and its "still listed in the
+// proposal queue, marked as not acceptable" step needs an admin RPC round
+// trip. The scenario is quoted by NAME rather than by line number for the
+// obvious reason -- the line numbers this comment used to carry were wrong
+// long before the rename.
 //
 // The @wip tags on all three scenarios STAY. Nothing in this tree runs
 // godog yet -- the dependency is in go.mod but there is no step-definition

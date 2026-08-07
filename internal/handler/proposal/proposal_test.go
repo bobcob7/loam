@@ -3,6 +3,7 @@ package proposal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/bobcob7/loam/internal/forge"
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
@@ -407,13 +409,25 @@ func TestAcceptProposal_MissingFields_InvalidArgument(t *testing.T) {
 
 // listDeps seeds the queue with the given branches, each resolving to its
 // own repo name, and returns the deps so the test can override verdicts.
+//
+// The stub HONOURS filter.State rather than returning everything, because
+// ListProposals now issues two scans -- reviewed, then draft (queueCandidates,
+// loam-u84g) -- and a stub that ignored the filter would hand the same row to
+// both, so a reviewed-and-conflicted branch would appear twice and every
+// count assertion below would be measuring the stub rather than the handler.
 func listDeps(branches ...workbranchstore.WorkBranch) *testDeps {
 	d := newTestDeps()
 	d.workBranches.ListFunc = func(_ context.Context, filter workbranchstore.ListFilter, _, offset int32) ([]workbranchstore.WorkBranch, int64, error) {
-		if offset > 0 {
-			return nil, int64(len(branches)), nil
+		matching := make([]workbranchstore.WorkBranch, 0, len(branches))
+		for _, wb := range branches {
+			if wb.State == filter.State {
+				matching = append(matching, wb)
+			}
 		}
-		return branches, int64(len(branches)), nil
+		if offset > 0 {
+			return nil, int64(len(matching)), nil
+		}
+		return matching, int64(len(matching)), nil
 	}
 	return d
 }
@@ -450,21 +464,218 @@ func TestListProposals_OnlyBranchesWithACurrentApproveAreListed(t *testing.T) {
 	assert.Equal(t, uint32(1), resp.Msg.GetPageInfo().GetTotal(), "total counts proposals, not reviewed branches")
 }
 
-// TestListProposals_ConflictedBranchIsNotAProposal proves the conflict
-// clause of the predicate: a reviewed, approved branch flagged against its
-// target is not awaiting an admin decision -- it is awaiting a catch-up.
-func TestListProposals_ConflictedBranchIsNotAProposal(t *testing.T) {
+// TestListProposals_ConflictedBranchIsListedButNotAcceptable is the conflict
+// clause of the predicate, as loam-u84g rewrote it: a reviewed, approved
+// branch flagged against its target is awaiting a catch-up rather than an
+// admin decision, so the accept button must not be offered -- but it is
+// LISTED and marked, not dropped. It used to be dropped, and an operator
+// working this queue cannot act on what the queue does not mention.
+func TestListProposals_ConflictedBranchIsListedButNotAcceptable(t *testing.T) {
 	t.Parallel()
+	// The blocked branch carries a recorded PR whose accepted_tip MATCHES what
+	// the tip resolver returns, so it is "up to date" by proposalUpToDate's
+	// rule. That is deliberate: the up-to-date exclusion must NOT run for a
+	// blocked branch, and a fixture with no PR could not tell a handler that
+	// skips the check from one that runs it and gets `false` for free.
+	prURL, tip := "https://forge.example.com/acme/widgets/pulls/7", "unused-tip"
+	prNumber := int32(7)
 	conflicted := branchNamed("wb-conflicted", func(wb *workbranchstore.WorkBranch) {
 		wb.Conflict = workbranchstore.ConflictReset
+		wb.UpstreamPRURL = &prURL
+		wb.UpstreamPRNumber = &prNumber
+		wb.AcceptedTip = &tip
 	})
 	d := listDeps(branchNamed("wb-clean", nil), conflicted)
 	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
 	require.NoError(t, err)
-	require.Len(t, resp.Msg.GetProposals(), 1)
-	assert.Equal(t, "wb-clean", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
-	for _, call := range d.verdicts.CurrentRoundApproveCountCalls() {
-		assert.NotEqual(t, conflicted.ID, call.WorkBranchID, "a conflicted branch is not even a verdict candidate")
+	require.Len(t, resp.Msg.GetProposals(), 2)
+	byName := map[string]*adminv1.Proposal{}
+	for _, p := range resp.Msg.GetProposals() {
+		byName[p.GetWorkBranch().GetName()] = p
+	}
+	require.Contains(t, byName, "wb-conflicted")
+	assert.False(t, byName["wb-conflicted"].GetAcceptable(), "a conflicted branch is listed with the button suppressed")
+	assert.Equal(t, loamv1.WorkBranchConflict_WORK_BRANCH_CONFLICT_RESET, byName["wb-conflicted"].GetWorkBranch().GetConflict(),
+		"the reason travels on the work branch, which is what lets the console say WHY")
+	require.Contains(t, byName, "wb-clean")
+	assert.True(t, byName["wb-clean"].GetAcceptable(), "acceptable must not be false for every row -- otherwise the flag says nothing")
+	// The blocked branch never costs a live tip resolve: proposalUpToDate
+	// answers a question ("is its PR already caught up") that is meaningless
+	// for a branch nothing can accept.
+	for _, call := range d.tips.ResolveWorkBranchRefCalls() {
+		assert.NotEqual(t, "wb-conflicted", call.Name)
+	}
+}
+
+// TestListProposals_DemotedApprovedBranchIsListed is loam-u84g's
+// reproduction, in the shape the live incident had it.
+//
+// A conflicting target advance demotes a REVIEWED branch to DRAFT and flags
+// it conflict='reset' in one statement (workbranchstore.MarkConflicted,
+// docs/git-spec.md -> "Target Advances & Catch-Up"). It deliberately does NOT
+// open a round, so the approve that was already cast stays in the current
+// round and stays NON-STALE -- CurrentRoundApproveCount still returns 1. The
+// branch is therefore approved, live, and was in state 'draft': scanned by
+// nothing (this queue looked only at 'reviewed', `work list` defaults to
+// 'reviewable'), so it was absent from every listing in the system. That is
+// how the approved fix on forgejo_admin/loam wb-88c455 missed v0.0.8.
+//
+// The invariant this pins is the one the bead asks for and is stated
+// positively so it cannot be satisfied by an empty queue: a branch with a
+// non-stale approve is PRESENT here, whatever its state.
+func TestListProposals_DemotedApprovedBranchIsListed(t *testing.T) {
+	t.Parallel()
+	demoted := branchNamed("wb-88c455", func(wb *workbranchstore.WorkBranch) {
+		wb.State = workbranchstore.StateDraft
+		wb.Conflict = workbranchstore.ConflictReset
+	})
+	d := listDeps(demoted)
+	// Two verdicts in the same round, one approve and one disapprove, so this
+	// fixture can tell "the branch holds a live approve" from "the branch holds
+	// a live verdict". A single-verdict fixture proves neither.
+	d.verdicts.ListFunc = func(_ context.Context, _ uuid.UUID) ([]reviewstore.VerdictRecord, error) {
+		return []reviewstore.VerdictRecord{
+			approve("jim-gettys-59-reviewer", 3, true),
+			verdict("ada-2-reviewer", reviewstore.OutcomeDisapprove, 3, true),
+		}, nil
+	}
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetProposals(), 1, "a non-stale approve must never be absent from this queue")
+	got := resp.Msg.GetProposals()[0]
+	assert.Equal(t, "wb-88c455", got.GetWorkBranch().GetName())
+	assert.Equal(t, loamv1.WorkBranchState_WORK_BRANCH_STATE_DRAFT, got.GetWorkBranch().GetState())
+	assert.False(t, got.GetAcceptable(), "demoted out of reviewed: AcceptProposal would refuse it, so the button must be suppressed")
+	assert.Equal(t, uint32(1), resp.Msg.GetPageInfo().GetTotal())
+	assert.Len(t, got.GetVerdicts(), 2, "both current-round verdicts travel, so the admin sees the disapprove too")
+}
+
+// TestListProposals_OrdinaryDraftIsNotScannedIntoTheQueue is the negative
+// half of the above, and the reason queueCandidates filters the draft page on
+// conflict='reset' rather than taking every draft. An in-progress branch
+// nobody has submitted is not a proposal, and widening the scan until it
+// became one would replace an invisible queue with an unreadable one.
+//
+// It is asserted through a draft that WOULD pass the approve bar if it were
+// scanned, so the exclusion has to come from the conflict filter rather than
+// from the branch having no verdicts.
+func TestListProposals_OrdinaryDraftIsNotScannedIntoTheQueue(t *testing.T) {
+	t.Parallel()
+	plainDraft := branchNamed("wb-in-progress", func(wb *workbranchstore.WorkBranch) {
+		wb.State = workbranchstore.StateDraft
+		wb.Conflict = workbranchstore.ConflictNone
+	})
+	merelyFlagged := branchNamed("wb-flagged-draft", func(wb *workbranchstore.WorkBranch) {
+		wb.State = workbranchstore.StateDraft
+		wb.Conflict = workbranchstore.ConflictFlagged
+	})
+	d := listDeps(plainDraft, merelyFlagged)
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	assert.Empty(t, resp.Msg.GetProposals(),
+		"only conflict='reset' means demoted; 'flagged' is a draft that was never in review, and 'none' is ordinary work")
+}
+
+// TestListProposals_AcceptableIsOnTheWireAsProtojsonRendersIt pins the JSON
+// key and the omission rule the OTHER readers of this response depend on.
+//
+// Two consumers decode this by hand rather than through the generated types:
+// `cmd/demoenv`'s check-proposals (which `task test:e2e:golden` and
+// `task demo:m5` invoke, and which deliberately restates the contract instead
+// of importing the protos, exactly as its attributionFooter does) and the
+// console. Neither would fail to COMPILE if the field were renamed; they would
+// silently decode `acceptable` as false, which reads as "blocked" and would
+// hide every proposal's accept button with no error anywhere. This test is the
+// compile error they cannot have.
+//
+// The omission is asserted as well as the name: protojson drops a false bool
+// entirely, so an unacceptable proposal arrives with NO key. That is the shape
+// demoenv's sampleBlockedQueue encodes, and it is only safe because absent and
+// false mean the same thing here -- which is true by construction and worth
+// pinning, since a future `json_name` or an emit-defaults marshaler option
+// would change it.
+func TestListProposals_AcceptableIsOnTheWireAsProtojsonRendersIt(t *testing.T) {
+	t.Parallel()
+	blocked := branchNamed("wb-blocked", func(wb *workbranchstore.WorkBranch) {
+		wb.State = workbranchstore.StateDraft
+		wb.Conflict = workbranchstore.ConflictReset
+	})
+	d := listDeps(branchNamed("wb-clean", nil), blocked)
+	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
+	require.NoError(t, err)
+	encoded, err := protojson.Marshal(resp.Msg)
+	require.NoError(t, err)
+	var doc struct {
+		Proposals []struct {
+			WorkBranch struct {
+				Name string `json:"name"`
+			} `json:"workBranch"`
+			Acceptable bool `json:"acceptable"`
+		} `json:"proposals"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &doc))
+	require.Len(t, doc.Proposals, 2)
+	byName := map[string]bool{}
+	for _, p := range doc.Proposals {
+		byName[p.WorkBranch.Name] = p.Acceptable
+	}
+	assert.True(t, byName["wb-clean"], `the key must be exactly "acceptable"; a rename decodes as false and silently hides every accept button`)
+	assert.False(t, byName["wb-blocked"])
+	assert.NotContains(t, string(encoded), `"acceptable":false`,
+		"protojson omits a false bool, so demoenv's decoder must read ABSENT as blocked -- if this ever emits the key, that assumption needs revisiting, not the decoder")
+	assert.Contains(t, string(encoded), `"acceptable":true`)
+}
+
+// TestAcceptableNow_MatchesTheAcceptGate pins acceptableNow clause by clause,
+// as a unit, because two of its three clauses are NOT independently reachable
+// through ListProposals: queueCandidates only ever hands it a reviewed branch
+// or a draft one carrying conflict='reset', so the state clause is masked by
+// the conflict clause on every path the RPC can take today. Asserting it only
+// through the RPC would leave that clause unfalsifiable -- a mutation removing
+// it survives -- and the clause is the one that has to keep holding if the
+// candidate scan is ever widened again.
+//
+// It is written against the same three preconditions AcceptProposal enforces
+// (proposal.go), so a change to one that is not made to the other shows up
+// here as a disagreement rather than as an admin pressing a button the server
+// refuses.
+func TestAcceptableNow_MatchesTheAcceptGate(t *testing.T) {
+	t.Parallel()
+	base := func(mutate func(*workbranchstore.WorkBranch)) workbranchstore.WorkBranch {
+		wb := workbranchstore.WorkBranch{
+			State:         workbranchstore.StateReviewed,
+			Conflict:      workbranchstore.ConflictNone,
+			UpstreamDrift: workbranchstore.DriftNone,
+		}
+		mutate(&wb)
+		return wb
+	}
+	tests := map[string]struct {
+		wb   workbranchstore.WorkBranch
+		want bool
+	}{
+		"reviewed, clean, no drift": {base(func(*workbranchstore.WorkBranch) {}), true},
+		"demoted to draft, nothing else wrong": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.State = workbranchstore.StateDraft }), false,
+		},
+		"sent back to reviewable, nothing else wrong": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.State = workbranchstore.StateReviewable }), false,
+		},
+		"reviewed but flagged": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.Conflict = workbranchstore.ConflictFlagged }), false,
+		},
+		"reviewed but conflict-reset": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.Conflict = workbranchstore.ConflictReset }), false,
+		},
+		"reviewed but diverged upstream": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.UpstreamDrift = workbranchstore.DriftDiverged }), false,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, acceptableNow(tt.wb))
+		})
 	}
 }
 
@@ -645,18 +856,27 @@ func TestListProposals_ScansEveryCandidatePage(t *testing.T) {
 	assert.Equal(t, "wb-page-two", resp.Msg.GetProposals()[1].GetWorkBranch().GetName())
 }
 
-// TestListProposals_FiltersOnReviewedState proves the candidate query asks
-// the store for reviewed branches rather than pulling every work branch in
-// the system and discarding most of them in Go.
-func TestListProposals_FiltersOnReviewedState(t *testing.T) {
+// TestListProposals_ScansReviewedAndDraftStates proves the candidate query
+// asks the store for the two states the queue is defined over rather than
+// pulling every work branch in the system and discarding most of them in Go.
+// Draft is scanned for the demoted branches alone (queueCandidates,
+// loam-u84g); reviewable, complete, and closed are never scanned at all.
+func TestListProposals_ScansReviewedAndDraftStates(t *testing.T) {
 	t.Parallel()
 	d := newTestDeps()
 	_, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
 	require.NoError(t, err)
 	calls := d.workBranches.ListCalls()
 	require.NotEmpty(t, calls)
-	assert.Equal(t, workbranchstore.StateReviewed, calls[0].Filter.State)
-	assert.Nil(t, calls[0].Filter.RepoID, "the queue spans every enrolled repo")
+	scanned := map[workbranchstore.State]bool{}
+	for _, call := range calls {
+		scanned[call.Filter.State] = true
+		assert.Nil(t, call.Filter.RepoID, "the queue spans every enrolled repo")
+	}
+	assert.Equal(t, map[workbranchstore.State]bool{
+		workbranchstore.StateReviewed: true,
+		workbranchstore.StateDraft:    true,
+	}, scanned)
 }
 
 // TestListProposals_NotAdmin_PermissionDenied proves the queue is not
@@ -902,22 +1122,31 @@ func TestAcceptProposal_UpstreamDrift_FailedPrecondition(t *testing.T) {
 	assert.Empty(t, d.accepter.AcceptProposalCalls())
 }
 
-// TestListProposals_DriftedBranchIsNotAProposal proves the drift clause of
-// the predicate (docs/web-spec.md -> "Upstream drift is surfaced, not
-// listed"): a reviewed, approved, unconflicted branch whose upstream branch
-// was rewritten is not awaiting an admin decision, because AcceptProposal
-// refuses it -- listing it would offer a button that cannot work.
-func TestListProposals_DriftedBranchIsNotAProposal(t *testing.T) {
+// TestListProposals_DriftedBranchIsListedButNotAcceptable is the drift clause
+// of the predicate (docs/web-spec.md -> "Upstream drift is surfaced, not
+// listed"), as loam-u84g rewrote it. AcceptProposal still refuses a diverged
+// branch, so the button is still suppressed -- but "surfaced" is now literal:
+// the row is present with `upstream_drift = DIVERGED` on it, which is what
+// docs/web-spec.md already claimed the proposal queue carried and a filtered
+// queue could never actually deliver.
+func TestListProposals_DriftedBranchIsListedButNotAcceptable(t *testing.T) {
 	t.Parallel()
 	drifted := branchNamed("wb-drifted", func(wb *workbranchstore.WorkBranch) {
 		wb.UpstreamDrift = workbranchstore.DriftDiverged
 	})
-	require.Equal(t, workbranchstore.ConflictNone, drifted.Conflict, "the excluded branch must be excluded for its drift alone")
+	require.Equal(t, workbranchstore.ConflictNone, drifted.Conflict, "the marked branch must be marked for its drift alone")
 	d := listDeps(branchNamed("wb-clean", nil), drifted)
 	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
 	require.NoError(t, err)
-	require.Len(t, resp.Msg.GetProposals(), 1)
-	assert.Equal(t, "wb-clean", resp.Msg.GetProposals()[0].GetWorkBranch().GetName())
+	require.Len(t, resp.Msg.GetProposals(), 2)
+	byName := map[string]*adminv1.Proposal{}
+	for _, p := range resp.Msg.GetProposals() {
+		byName[p.GetWorkBranch().GetName()] = p
+	}
+	require.Contains(t, byName, "wb-drifted")
+	assert.False(t, byName["wb-drifted"].GetAcceptable())
+	assert.Equal(t, loamv1.UpstreamDrift_UPSTREAM_DRIFT_DIVERGED, byName["wb-drifted"].GetWorkBranch().GetUpstreamDrift())
+	assert.True(t, byName["wb-clean"].GetAcceptable())
 }
 
 // TestProposalWorkBranchCarriesConflictAndDrift is the surfacing half of

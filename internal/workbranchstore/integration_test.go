@@ -477,6 +477,63 @@ func TestMarkConflicted_FromReviewed_DemotesToResetDraft(t *testing.T) {
 	assert.Equal(t, StateDraft, wb.State, "reviewed is ALSO reset to draft, same as reviewable")
 }
 
+// TestSetTitleDescription_OnReviewedBranch_LeavesItReviewed is loam-u84g's
+// EXCLUSION test: it rules out the hypothesis that put the bead's name on
+// `work set`.
+//
+// wb-88c455 was found holding a non-stale approve while sitting in 'draft',
+// and the leading theory was that `loam work set` -- the author's last
+// recorded action, appending gate evidence to the description -- resets an
+// already-REVIEWED branch's state. A reviewer had separately established
+// that `set` on a REVIEWABLE branch keeps it reviewable, which left the
+// reviewed case untested and the theory alive.
+//
+// It is false. SetWorkBranchTitleDescription's UPDATE names title,
+// description, and updated_at and nothing else; its only guard is `state NOT
+// IN ('complete','closed')`, which is a filter on which rows may be edited,
+// not a write to state. This asserts that against the real schema, from
+// REVIEWED and from REVIEWABLE, so the two halves of the claim live in one
+// place: `set` never moves a branch. The state observed in production came
+// from MarkConflicted instead (see the two tests above), which is a
+// specified transition.
+func TestSetTitleDescription_OnReviewedBranch_LeavesItReviewed(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, repoID := newTestStore(t)
+	wb, err := store.Create(ctx, repoID, "wb-set-after-verdict", "main", "grace-hopper-3-author")
+	require.NoError(t, err)
+	wb, err = store.SetTitleDescription(ctx, wb.ID, "Add login", "Adds a login form")
+	require.NoError(t, err)
+	wb, err = store.UpdateState(ctx, wb.ID, StateReviewable)
+	require.NoError(t, err)
+	edited, err := store.SetTitleDescription(ctx, wb.ID, "Add login", "Adds a login form, with tests")
+	require.NoError(t, err)
+	assert.Equal(t, StateReviewable, edited.State, "known-safe half: set on a reviewable branch keeps it reviewable")
+	wb, err = store.UpdateState(ctx, wb.ID, StateReviewed)
+	require.NoError(t, err)
+	require.Equal(t, StateReviewed, wb.State)
+	edited, err = store.SetTitleDescription(ctx, wb.ID, "Add login", "Adds a login form.\n\nGates: green.")
+	require.NoError(t, err, "docs/cli-spec.md's State gates table allows `set` in reviewed")
+	assert.Equal(t, StateReviewed, edited.State, "THE assertion: `set` after a verdict must not demote the branch")
+	assert.Equal(t, ConflictNone, edited.Conflict, "and must not invent a conflict flag either")
+	require.NotNil(t, edited.Description)
+	assert.Equal(t, "Add login", derefString(edited.Title))
+	assert.Equal(t, "Adds a login form.\n\nGates: green.", derefString(edited.Description),
+		"the edit itself must still land -- a test that only checked state would pass on a no-op")
+	readBack, err := store.Get(ctx, wb.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateReviewed, readBack.State, "and it is durable, not just what the RETURNING clause reported")
+}
+
+// derefString returns *s, or "" if s is nil, for assertions on the store's
+// nullable text columns.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // TestMarkConflicted_Idempotent_OnAlreadyFlaggedDraft proves calling
 // MarkConflicted twice on a still-conflicting draft branch is a benign
 // no-op the second time, never ErrIllegalTransition -- the mergeability

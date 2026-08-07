@@ -49,6 +49,17 @@
   border-radius: var(--radius-md);
 }
 
+/* The reason the Accept button is absent (loam-u84g). It sits where the
+   button would be, because "no button and no explanation" is the shape that
+   made the original bug expensive. */
+.blockedNotice {
+  padding: var(--space-3) var(--space-4);
+  margin-block-end: var(--space-4);
+  background-color: var(--color-surface-raised);
+  border-inline-start: var(--space-1) solid var(--color-warning-fg);
+  border-radius: var(--radius-md);
+}
+
 .actions {
   display: flex;
   gap: var(--space-3);

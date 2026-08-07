@@ -23,6 +23,16 @@
   font-size: var(--text-xs);
 }
 
+.blockedList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.clear {
+  color: var(--color-text-faint);
+}
+
 .pager {
   margin-block-start: var(--space-4);
 }

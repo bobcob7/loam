@@ -1143,13 +1143,21 @@ tasks:
         fi
         echo "upstream $target_branch advanced $before_ref -> $advanced_ref (a real push straight to Forgejo)"
         echo ""
-        echo "=== step 12/17: one live sync tick reacts -- the accepted proposal is reset to draft, and accepting it again is refused ==="
+        echo "=== step 12/17: one live sync tick reacts -- the accepted proposal is reset to draft, stays VISIBLE but unacceptable, and accepting it again is refused ==="
         wait_for_conflict "$proposal_wb" reset "the accepted proposal was demoted: conflict 'reset'"
         wait_for_state "$proposal_wb" draft "the accepted proposal was reset to draft"
         queue_2="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
         echo "$queue_2"
-        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch leaves the proposal queue" \
-          -count 0 -deny-names "$proposal_wb"
+        # loam-u84g: this asserted `-count 0 -deny-names` until the demoted
+        # branch was found to be invisible to every listing Loam offers while
+        # still holding a non-stale approve -- an approved P1 fix missed a
+        # release inside that gap. It stays in the queue now, marked
+        # unacceptable, and BOTH halves are asserted: presence alone would pass
+        # against a server that also offered the accept button, which is worse
+        # than the absence this replaced.
+        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch stays in the proposal queue, marked unacceptable" \
+          -count 1 -want-names "$proposal_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_DRAFT -acceptable false
         if reject_out="$(proposal_rpc AcceptProposal "{\"repo\":\"$repo_identifier\",\"work_branch\":\"$proposal_wb\"}" 2>&1)"; then
           echo "$reject_out"
           echo "FAIL: AcceptProposal accepted a conflict-reset draft branch" >&2
@@ -3835,11 +3843,16 @@ tasks:
         assert_equal "the draft branch was NOT demoted -- it was already draft" \
           "$(psql_scalar "SELECT state FROM work_branches WHERE name = '$draft_wb';")" "draft"
         echo ""
-        echo "--- the proposal has left the admin's queue, and the upstream PR is untouched ---"
+        echo "--- the proposal is still in the admin's queue but no longer acceptable, and the upstream PR is untouched ---"
+        echo "    (loam-u84g: it used to LEAVE the queue here. A demoted branch keeps its non-stale approve"
+        echo "     by design, and 'draft' is a state no default listing looks at, so leaving made it invisible"
+        echo "     rather than blocked -- and an operator can only act on the second of those.)"
         queue_2="$(proposal_rpc ListProposals '{"page":{"limit":50}}')"
         echo "$queue_2"
-        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch leaves the proposal queue" \
-          -count 0 -deny-names "$proposal_wb"
+        printf '%s' "$queue_2" | "$demoenv_bin" check-proposals -label "a conflict-reset branch stays in the proposal queue, marked unacceptable" \
+          -count 1 -want-names "$proposal_wb" \
+          -select-name "$proposal_wb" -state WORK_BRANCH_STATE_DRAFT -acceptable false \
+          -approver "$reviewer_identifier" -round 1
         echo ""
         echo "--- and accepting it now is refused. The refusal names its STATE, not its conflict flag, and that is"
         echo "    correct: MarkConflicted demotes a reviewed branch in the SAME statement that flags it, so a"
