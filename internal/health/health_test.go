@@ -15,6 +15,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/bobcob7/loam/internal/telemetry"
 )
 
 func testLogger() *slog.Logger {
@@ -300,4 +307,165 @@ func TestReadiness_PassesADeadlineToItsChecks(t *testing.T) {
 	require.Equal(t, http.StatusOK, get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz").Code)
 	assert.True(t, pingDeadline, "the pool ping must run under the handler's own deadline")
 	assert.True(t, schemaDeadline, "the schema check must run under the handler's own deadline")
+}
+
+// probeMeter builds a real SDK MeterProvider over a manual reader, so these
+// tests read the metric back the way a collector would rather than asserting
+// that a mock was called.
+func probeMeter(t *testing.T) (metric.MeterProvider, *sdkmetric.ManualReader) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { require.NoError(t, mp.Shutdown(context.Background())) })
+	return mp, reader
+}
+
+// readinessOutcomes collects durationMetric and returns how many
+// observations landed against each outcome, plus the sum of one of them, so
+// a test can assert both that a probe was counted and that a real duration
+// was recorded rather than a zero.
+func readinessOutcomes(t *testing.T, reader *sdkmetric.ManualReader) map[string]uint64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &rm))
+	counts := map[string]uint64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != durationMetric {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			require.True(t, ok, "%s must be a float64 histogram", durationMetric)
+			for _, dp := range hist.DataPoints {
+				outcome, found := dp.Attributes.Value(attribute.Key(outcomeAttribute))
+				require.True(t, found, "every observation must carry %s", outcomeAttribute)
+				counts[outcome.AsString()] += dp.Count
+			}
+		}
+	}
+	return counts
+}
+
+// TestReadiness_MarksBothChecksAsProbes is the load-bearing half of
+// loam-om77 asserted at the layer that makes the decision.
+//
+// BOTH collaborators are checked, not just the ping, and that is the point:
+// each of them issues an unheadered database statement (Pool.Ping's ";" and
+// migrations' hand-written schema SELECT), so each was producing its own
+// parentless postgres.unnamed root on every poll. Marking only the ping
+// would have halved the noise and looked like a fix.
+func TestReadiness_MarksBothChecksAsProbes(t *testing.T) {
+	t.Parallel()
+	var pingMarked, schemaMarked bool
+	pinger := &PingerMock{PingFunc: func(ctx context.Context) error {
+		pingMarked = telemetry.IsProbe(ctx)
+		return nil
+	}}
+	schema := &SchemaCheckerMock{CheckSchemaFunc: func(ctx context.Context) error {
+		schemaMarked = telemetry.IsProbe(ctx)
+		return nil
+	}}
+	require.Equal(t, http.StatusOK, get(t, NewReadiness(pinger, schema, nil, testLogger()), "/readyz").Code)
+	assert.True(t, pingMarked, "the pool ping must run under a probe-marked context")
+	assert.True(t, schemaMarked, "the schema check must run under a probe-marked context too: it is a database query of its own")
+}
+
+// TestReadiness_RecordsEveryProbeIncludingTheHealthyOnes is the answer to
+// the objection that sank "just stop tracing health checks": if the only
+// evidence a readiness check ever happened is a span emitted when it FAILS,
+// then a working system and a deleted instrumentation look identical, and
+// nothing can be alerted on.
+//
+// The healthy row is therefore the important one. The two failing rows prove
+// the same metric survives the paths that return early, which is exactly
+// where a hand-rolled record-on-success would have been forgotten.
+func TestReadiness_RecordsEveryProbeIncludingTheHealthyOnes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		pinger      *PingerMock
+		schema      *SchemaCheckerMock
+		wantOutcome string
+		wantStatus  int
+	}{
+		{
+			name: "healthy", pinger: okPinger(), schema: okSchema(),
+			wantOutcome: readyOutcome, wantStatus: http.StatusOK,
+		},
+		{
+			name:        "database unreachable",
+			pinger:      &PingerMock{PingFunc: func(context.Context) error { return errors.New("connection refused") }},
+			schema:      okSchema(),
+			wantOutcome: databaseReason, wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:        "migrations not current",
+			pinger:      okPinger(),
+			schema:      &SchemaCheckerMock{CheckSchemaFunc: func(context.Context) error { return errors.New("behind") }},
+			wantOutcome: migrationsReason, wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mp, reader := probeMeter(t)
+			rec := get(t, NewReadiness(tt.pinger, tt.schema, mp, testLogger()), "/readyz")
+			require.Equal(t, tt.wantStatus, rec.Code)
+			assert.Equal(t, map[string]uint64{tt.wantOutcome: 1}, readinessOutcomes(t, reader),
+				"every probe must be recorded exactly once, under the outcome it actually had")
+		})
+	}
+}
+
+// TestReadiness_BrokenPoolKeepsSignallingForAsLongAsItIsBroken is the
+// failure case loam-om77 is required not to have made worse, driven the way
+// an orchestrator drives it: repeatedly, while the database stays down.
+//
+// The old behaviour produced a span per probe and the noise was the
+// complaint. The new behaviour must still produce a rising, countable signal
+// -- not one span at the moment of breakage and then silence, which is what
+// a naive "only report state changes" fix would give and which is unusable
+// once the first alert has fired.
+func TestReadiness_BrokenPoolKeepsSignallingForAsLongAsItIsBroken(t *testing.T) {
+	t.Parallel()
+	mp, reader := probeMeter(t)
+	down := &PingerMock{PingFunc: func(context.Context) error { return errors.New("connection refused") }}
+	readiness := NewReadiness(down, okSchema(), mp, testLogger())
+	const probes = 5
+	for range probes {
+		require.Equal(t, http.StatusServiceUnavailable, get(t, readiness, "/readyz").Code)
+	}
+	assert.Equal(t, map[string]uint64{databaseReason: uint64(probes)}, readinessOutcomes(t, reader),
+		"a database that stays down must keep producing signal, not fall silent after the first probe")
+}
+
+// TestReadiness_RecoveryIsVisibleInTheMetric is the other half of the alarm
+// contract: an operator has to be able to see the instance come BACK. With
+// the trace gone, this metric is the only thing that reports it.
+func TestReadiness_RecoveryIsVisibleInTheMetric(t *testing.T) {
+	t.Parallel()
+	mp, reader := probeMeter(t)
+	var healthy bool
+	pinger := &PingerMock{PingFunc: func(context.Context) error {
+		if healthy {
+			return nil
+		}
+		return errors.New("connection refused")
+	}}
+	readiness := NewReadiness(pinger, okSchema(), mp, testLogger())
+	require.Equal(t, http.StatusServiceUnavailable, get(t, readiness, "/readyz").Code)
+	healthy = true
+	require.Equal(t, http.StatusOK, get(t, readiness, "/readyz").Code)
+	assert.Equal(t, map[string]uint64{databaseReason: 1, readyOutcome: 1}, readinessOutcomes(t, reader),
+		"the metric must distinguish the failing probe from the recovered one")
+}
+
+// TestNewReadiness_ToleratesNoMeterProvider keeps observability from being a
+// dependency of serving: a process wired without a meter still answers
+// /readyz correctly. This is the path every other test in this file takes,
+// and the path production takes whenever LOAM_OTEL_ENDPOINT is unset.
+func TestNewReadiness_ToleratesNoMeterProvider(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, http.StatusOK, get(t, NewReadiness(okPinger(), okSchema(), nil, testLogger()), "/readyz").Code)
+	assert.Equal(t, http.StatusOK, get(t, NewReadiness(okPinger(), okSchema(), metricnoop.NewMeterProvider(), testLogger()), "/readyz").Code)
 }
