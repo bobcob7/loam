@@ -29,7 +29,7 @@ func (fakeConnect) Search() SearchClient         { return nil }
 func (fakeConnect) Meta() MetaClient             { return nil }
 
 func newTestDeps() *Deps {
-	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil, nil)
+	return NewDeps(testLogger(), &ConfigMock{}, &OutputEncoderMock{}, &ErrorMapperMock{}, &WorkspaceResolverMock{}, fakeConnect{}, nil, nil, nil)
 }
 
 func TestRouterDispatch_NoArgs_ReturnsUsageError(t *testing.T) {

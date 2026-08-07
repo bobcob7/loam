@@ -20,6 +20,7 @@ type Deps struct {
 	connect     ConnectClient
 	cloner      gitCloner
 	stdin       io.Reader
+	gitRefs     gitRefs
 }
 
 // NewDeps constructs a Deps from its collaborators. Every field is required
@@ -31,8 +32,17 @@ type Deps struct {
 // read a body from it, `loam work set` and `loam work comment` (see
 // commands_work.go's readStdin) -- tests that never dispatch either may
 // also pass nil.
-func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader) *Deps {
-	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin}
+//
+// refs is a third such exception, with one difference worth stating
+// because loam-hwru is precisely about not hiding things: `clone`, `work
+// diff` and `work show` all use it, and each one of them treats a nil refs
+// as "the commit identification is unavailable" and SAYS SO in its output
+// (refs_error / the clone's own error), rather than omitting the SHAs
+// silently. Production always supplies the real one -- see
+// NewProductionDeps -- so that path exists for this package's tests, not
+// for the binary.
+func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader, refs gitRefs) *Deps {
+	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin, gitRefs: refs}
 }
 
 // NewErrorMapper builds the real ErrorMapper (see errormapper.go). Exported
@@ -106,7 +116,7 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 			return nil, reportConstructionError(encoder, err)
 		}
 	}
-	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in), nil
+	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in, newGitRefs()), nil
 }
 
 // configForArgs picks the config-loading strategy from the top-level

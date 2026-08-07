@@ -11,7 +11,7 @@ import (
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
 )
 
-//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver StagingArea gitLookup gitCloner ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
+//go:generate go tool moq -out moq_test.go . Config OutputEncoder ErrorMapper WorkspaceResolver StagingArea gitLookup gitCloner gitRefs ConnectClient WorkBranchClient RepoClient GraphClient SearchClient MetaClient
 
 // Config exposes the LOAM_* environment configuration every command may
 // need (see docs/cli-spec.md -> Environment Variables). Implemented by
@@ -213,6 +213,51 @@ type gitCloner interface {
 	// branch.<name>.remote/merge across with the rename, so the branch
 	// keeps tracking the reserved ref it was cloned from.
 	RenameBranch(ctx context.Context, dest, from, to string) error
+}
+
+// gitRefs resolves the commit SHAs that IDENTIFY a work branch's diff, and
+// fetches the one ref a single-branch clone is missing to make plain `git
+// diff` work in it (loam-hwru). Defined here, consumer-side, so clone.go's
+// and commands_work_read.go's tests can mock it; execGitRefs in gitrefs.go
+// is the real implementation.
+//
+// Everything on it exists to answer one question in a way that can be
+// CHECKED: which commit is this diff of, and which commit is it against.
+// Before loam-hwru neither `loam clone` nor `loam work diff` answered
+// either, and all three of that bead's failure modes were the same defect
+// -- a diff of the wrong range, or of the wrong tip, reported as a
+// well-formed diff with nothing in the output to contradict it.
+type gitRefs interface {
+	// Fetch runs `git -C dest fetch --no-tags origin <refspec>...`.
+	// `loam clone` uses it to bring the work branch's TARGET down as
+	// refs/remotes/origin/<target>, which `git clone --single-branch` did
+	// not, and without which `git diff origin/main...HEAD` -- the command
+	// every reviewer reaches for first -- fails with "unknown revision".
+	Fetch(ctx context.Context, dest string, refspecs ...string) error
+	// RevParse resolves rev to its full commit SHA in the working copy
+	// containing dir (dir may be "" for the process's own working
+	// directory, which git resolves upward from exactly as it does for
+	// `-C`). err is non-nil when dir is not inside a working copy at all,
+	// or rev does not name a commit in it.
+	RevParse(ctx context.Context, dir, rev string) (string, error)
+	// MergeBase returns the best common ancestor of a and b in the working
+	// copy containing dir -- the commit a three-dot diff range actually
+	// starts at. err is non-nil when the two share no common ancestor.
+	MergeBase(ctx context.Context, dir, a, b string) (string, error)
+	// CountCommitsAhead returns how many commits the working copy at dir
+	// has on HEAD that base does not. err is non-nil when base names an
+	// object dir's repository does not have -- a genuinely different
+	// answer from zero, and one callers must not collapse into "nothing
+	// unpushed".
+	CountCommitsAhead(ctx context.Context, dir, base string) (int, error)
+	// LsRemote returns the SHA the remote at url currently advertises for
+	// each of refs, keyed by full ref name, carrying headers as
+	// http.extraHeader config (see identityHeaders -- the /git/* endpoint
+	// 403s a request without them). A ref the remote does not advertise is
+	// absent from the map rather than an error. This asks the SERVER what
+	// it holds; it deliberately does not read the caller's own
+	// remote-tracking refs, which are only as current as the last fetch.
+	LsRemote(ctx context.Context, url string, headers, refs []string) (map[string]string, error)
 }
 
 // WorkBranchClient is the consumer-side seam for the WorkBranchService RPCs

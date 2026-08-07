@@ -87,7 +87,7 @@ func replyDeps(srv *replyServer, ws WorkspaceResolver, stdin string, encoded *an
 	cfg := &ConfigMock{IdentifierFunc: func() string { return testAuthor }}
 	connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader(stdin))
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader(stdin), nil)
 }
 
 // runReply runs one `work reply` invocation as a fresh process would.

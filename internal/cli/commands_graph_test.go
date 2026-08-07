@@ -22,7 +22,7 @@ import (
 func graphTestDeps(client GraphClient, ws WorkspaceResolver, encoded *any) *Deps {
 	connectClient := &ConnectClientMock{GraphFunc: func() GraphClient { return client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, nil)
+	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, nil, nil)
 }
 
 // resolvingWorkspace is a WorkspaceResolverMock whose ResolveRepo succeeds

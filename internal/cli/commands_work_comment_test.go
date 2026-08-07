@@ -104,7 +104,7 @@ func commentDeps(workspaceRoot, agent string, srv *commentServer, stdin string, 
 	cfg := &ConfigMock{IdentifierFunc: func() string { return agent }}
 	connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, agent), connectClient, nil, strings.NewReader(stdin))
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, agent), connectClient, nil, strings.NewReader(stdin), nil)
 }
 
 // runComment runs one `work comment` invocation exactly as a fresh process
@@ -311,7 +311,7 @@ func runCommentAsync(ctx context.Context, workspaceRoot, agent string, srv *comm
 		connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 		var encoded any
 		encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }}
-		deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, agent), connectClient, nil, stdin)
+		deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, agent), connectClient, nil, stdin, nil)
 		err := runWorkComment(ctx, deps, args)
 		out <- struct {
 			encoded any
@@ -381,7 +381,7 @@ func TestRunWorkComment_FlagOnlyModes_NilStdinDoesNotPanic(t *testing.T) {
 			connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 			var encoded any
 			encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }}
-			deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, testReviewer), connectClient, nil, nil)
+			deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), stagingWorkspace(workspaceRoot, testReviewer), connectClient, nil, nil, nil)
 			var runErr error
 			assert.NotPanics(t, func() { runErr = runWorkComment(t.Context(), deps, tt.args) })
 			require.NoError(t, runErr)
@@ -647,7 +647,7 @@ func TestRunWorkComment_UnopenableStagingArea_PropagatesTheClassification(t *tes
 	cfg := &ConfigMock{IdentifierFunc: func() string { return testReviewer }}
 	connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { encoded = v; return nil }}
-	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader("a comment"))
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader("a comment"), nil)
 	err := runWorkComment(t.Context(), deps, explicitArgs())
 	require.ErrorIs(t, err, errStagingArea)
 	assert.Nil(t, encoded)
@@ -854,6 +854,7 @@ func TestRunWorkComment_List_NeverReadsStdin(t *testing.T) {
 		&ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return newCommentServer().client }},
 		nil,
 		iotest.ErrReader(errors.New("stdin must not be read by --list")),
+		nil,
 	)
 	require.NoError(t, runWorkComment(t.Context(), deps, explicitArgs("--list")))
 	assert.NotNil(t, encoded)

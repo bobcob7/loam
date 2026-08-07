@@ -20,7 +20,7 @@ import (
 func instructionsTestDeps(client MetaClient, encoded *any) *Deps {
 	connectClient := &ConnectClientMock{MetaFunc: func() MetaClient { return client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil, nil)
 }
 
 // whoamiTestDeps wires a Deps for a `whoami` test from the four identity
@@ -36,7 +36,7 @@ func whoamiTestDeps(name, id, role, identifier string, encoded *any) *Deps {
 		IdentifierFunc: func() string { return identifier },
 	}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, fakeConnect{}, nil, nil)
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, fakeConnect{}, nil, nil, nil)
 }
 
 // --- whoami ---
@@ -145,7 +145,7 @@ func TestRunWhoami_MakesNoServerCall(t *testing.T) {
 		IdentifierFunc: func() string { return "ada-lovelace-7-reviewer" },
 	}
 	encoder := &OutputEncoderMock{EncodeFunc: func(any) error { return nil }}
-	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil, nil)
 
 	require.NoError(t, runWhoami(t.Context(), deps, nil))
 	assert.Empty(t, connectClient.MetaCalls())
@@ -169,7 +169,7 @@ func whoamiVerifyTestDeps(client MetaClient, name, id, role, identifier string, 
 	}
 	connectClient := &ConnectClientMock{MetaFunc: func() MetaClient { return client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil, nil)
 }
 
 // TestRunWhoami_Verify_NoServerURL_IsUsageError proves --verify checks
@@ -196,7 +196,7 @@ func TestRunWhoami_Verify_NoServerURL_IsUsageError(t *testing.T) {
 		},
 	}
 	encoder := &OutputEncoderMock{EncodeFunc: func(any) error { return nil }}
-	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil)
+	deps := NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, nil, nil, nil)
 
 	err := runWhoami(t.Context(), deps, []string{"--verify"})
 

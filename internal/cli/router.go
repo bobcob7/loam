@@ -108,7 +108,7 @@ func commandTree() map[string]*command {
 			"request-review": {summary: "Request review of a work branch", run: runWorkRequestReview, newFlags: flaglessCommand("work request-review")},
 			"list":           {summary: "List work branches", run: runWorkList, newFlags: func() *pflag.FlagSet { fs, _ := newWorkListFlags(); return fs }},
 			"show":           {summary: "Show a work branch's metadata", run: runWorkShow, newFlags: flaglessCommand("work show")},
-			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff, newFlags: flaglessCommand("work diff")},
+			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff, newFlags: func() *pflag.FlagSet { fs, _ := newWorkDiffFlags(); return fs }},
 			"comments":       {summary: "Fetch comment threads or staged comments", run: runWorkComments, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }},
 			"verdicts":       {summary: "List verdicts on a work branch", run: runWorkVerdicts, newFlags: flaglessCommand("work verdicts")},
 			"comment":        {summary: "Stage a review comment", run: runWorkComment, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }},
