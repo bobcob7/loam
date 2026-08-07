@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bobcob7/loam/internal/forge"
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 type validateTokenRequest struct {
@@ -256,14 +257,14 @@ func (c *Client) ValidateToken(ctx context.Context, host, token string) error {
 // upstreamURL is never interpolated into an error raw, and a parse
 // failure is never %w-wrapped: *url.Error's Error() renders as
 // `parse "<raw url>": <reason>`, so either would leak exactly what
-// redactUserinfo below exists to prevent (loam-giq.12, mirroring
+// internal/urlredact exists to prevent (loam-giq.12, mirroring
 // Forgejo.CheckRepo's identical rule — internal/forge/forgejo_git.go).
 func (c *Client) CheckRepo(ctx context.Context, upstreamURL string) error {
 	u, err := url.Parse(upstreamURL)
 	if err != nil {
 		return errors.New("checking repo: parsing upstream URL: invalid URL")
 	}
-	redacted := redactUserinfo(u)
+	redacted := urlredact.URL(u)
 	if u.Host != c.host {
 		return fmt.Errorf("checking repo %s: upstream host %q does not match the bound credential's host %q: %w", redacted, u.Host, c.host, errInvalidUpstream)
 	}
@@ -274,25 +275,6 @@ func (c *Client) CheckRepo(ctx context.Context, upstreamURL string) error {
 		return fmt.Errorf("checking repo %s: %w", redacted, errNoWriteAccess)
 	}
 	return nil
-}
-
-// redactUserinfo reconstructs u's string form with any embedded userinfo
-// (user, or user:password) cleared, rather than string-replacing the
-// password component — which fails for the empty-password PAT form
-// "https://<token>@host/path" (no ":" for a naive replace to find). Safe
-// to render in an error message or log line.
-//
-// This is a package-local copy of internal/forge/forgejo_git.go's
-// identically-behaved helper of the same name (itself a copy of
-// internal/handler/repoadmin/handler.go's) — neither is exported, so
-// fakeforge cannot import either. This is now the third copy; loam-ldx is
-// the precedent for when duplication of a security-relevant helper stops
-// being acceptable, so a fourth call site should prompt extracting a
-// shared one.
-func redactUserinfo(u *url.URL) string {
-	redacted := *u
-	redacted.User = nil
-	return redacted.String()
 }
 
 // probeInfoRefs issues the smart-HTTP ref advertisement request for
