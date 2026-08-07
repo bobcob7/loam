@@ -89,7 +89,7 @@ var commandCatalog = newCatalog([]catalogEntry{
 // source instead of a second hand-typed copy next to it.
 func newCatalog(entries []catalogEntry) []catalogEntry {
 	for i := range entries {
-		entries[i].synopsis = cmdspec.Compose(cmdspec.Synopsis[entries[i].name], cmdspec.StdinNote[entries[i].name])
+		entries[i].synopsis = cmdspec.Compose(cmdspec.Synopsis[entries[i].name], cmdspec.Flags[entries[i].name], cmdspec.StdinNote[entries[i].name])
 	}
 	return entries
 }

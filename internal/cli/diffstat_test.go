@@ -129,6 +129,47 @@ func TestPathFromDiffGitLine(t *testing.T) {
 	}
 }
 
+// TestPathFromDiffGitLine_EqualHalvesScanBeatsTheLastSeparator is the
+// review's finding: pathFromDiffGitLine's equal-halves scan and
+// computeDiffStat's `+++ b/` override MASK EACH OTHER. For every ordinary
+// diff both routes give the same answer, so deleting either one changes
+// nothing observable -- the same `" b/"`-in-path class the `rename to`
+// branch turned out to have, one level down.
+//
+// This is the one shape that separates them: a plain (non-rename) change to
+// a path that itself contains `" b/"`. The equal-halves scan finds the
+// correct split because both halves match; the last-separator fallback
+// underneath it does not. Asserting on pathFromDiffGitLine DIRECTLY is what
+// makes this a test of the scan rather than of the `+++` override, which
+// would otherwise supply the right answer through computeDiffStat no matter
+// what this function returned.
+func TestPathFromDiffGitLine_EqualHalvesScanBeatsTheLastSeparator(t *testing.T) {
+	t.Parallel()
+	const path = "docs/section b/notes.md"
+	rest := "a/" + path + " b/" + path
+	require.NotEqual(t, path, rest[strings.LastIndex(rest, " b/")+3:], "precondition: the last-separator fallback gets this wrong, so the equal-halves scan is what is under test")
+	assert.Equal(t, path, pathFromDiffGitLine(rest))
+}
+
+// TestComputeDiffStat_PlusPlusPlusHeaderNamesTheFileIndependently is the
+// other half of the masking pair. Here the `diff --git` line is
+// deliberately UNRECOVERABLE -- a rename whose destination contains
+// `" b/"`, with no `rename to` line, which is what git emits for a rename
+// that also changed content -- so the only route to the right name is the
+// `+++ b/` override. Without this, deleting that branch changes nothing:
+// the header fallback would answer for every case the other tests cover.
+func TestComputeDiffStat_PlusPlusPlusHeaderNamesTheFileIndependently(t *testing.T) {
+	t.Parallel()
+	const dst = "docs/section b/notes.md"
+	header := "a/notes.md b/" + dst
+	require.NotEqual(t, dst, pathFromDiffGitLine(header), "precondition: the diff --git line alone cannot name this file, so the +++ header is what is under test")
+	diff := "diff --git " + header + "\nsimilarity index 80%\n--- a/notes.md\n+++ b/" + dst + "\n@@ -1 +1 @@\n-x\n+y\n"
+	stat := computeDiffStat(diff)
+	require.Len(t, stat.Files, 1)
+	assert.Equal(t, dst, stat.Files[0].Path)
+	assert.Equal(t, diffStatFile{Path: dst, Insertions: 1, Deletions: 1}, stat.Files[0])
+}
+
 // TestComputeDiffStat_EmptyDiff_IsZeroFilesNotNil pins that nothing changed
 // encodes as an empty list rather than null, matching every other list this
 // CLI returns.

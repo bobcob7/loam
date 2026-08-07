@@ -23,21 +23,34 @@ func TestTryHelp_WorkStart_UsageLine_IsTrue(t *testing.T) {
 	assert.NotContains(t, text, "[flags]", "work start defines no flags; its usage line must not claim it does")
 }
 
-// TestTryHelp_EveryLeaf_FlagsTokenOnlyWhenFlagsDefined is acceptance
+// TestTryHelp_EveryLeaf_FlagShapeOnlyWhenFlagsDefined is acceptance
 // criterion 2, widened past the one reported command: no leaf in
-// commandTree() may have its usage line say "[flags]" unless its own
-// newFlags() FlagSet actually registers at least one flag.
-func TestTryHelp_EveryLeaf_FlagsTokenOnlyWhenFlagsDefined(t *testing.T) {
+// commandTree() may have its usage line claim flags unless its own
+// newFlags() FlagSet actually registers at least one.
+//
+// Since loam-hwru the usage line spells the flags out rather than printing
+// a bare "[flags]" token, so this asserts on the usage LINE, not on the
+// whole help text: the flag list further down renders every flag's name
+// whether or not the usage line does, and a test searching the whole text
+// for "--stat" would pass on a usage line that omitted it entirely. That
+// is the same "what does the fixture make indistinguishable" trap this
+// change has already hit twice.
+func TestTryHelp_EveryLeaf_FlagShapeOnlyWhenFlagsDefined(t *testing.T) {
 	t.Parallel()
 	for leaf, fs := range leafFlagSets(commandTree()) {
 		args := strings.Fields(leaf)
 		args = append(args, "--help")
 		text, ok := TryHelp(args)
 		require.True(t, ok, "command %q", leaf)
-		hasFlagsToken := strings.Contains(text, "[flags]")
-		assert.Equal(t, fs.HasFlags(), hasFlagsToken,
-			"command %q: usage line's \"[flags]\" token (present=%v) must match whether it actually defines flags (has=%v)",
-			leaf, hasFlagsToken, fs.HasFlags())
+		usage := strings.SplitN(text, "\n", 2)[0]
+		if !fs.HasFlags() {
+			assert.NotContains(t, usage, "--", "command %q defines no flags; its usage line must not claim any", leaf)
+			assert.NotContains(t, usage, "[flags]", "command %q defines no flags; its usage line must not claim any", leaf)
+			continue
+		}
+		fs.VisitAll(func(f *pflag.Flag) {
+			assert.Contains(t, usage, "--"+f.Name, "command %q registers --%s, which must appear in its usage line, not only in the flag list below it", leaf, f.Name)
+		})
 	}
 }
 

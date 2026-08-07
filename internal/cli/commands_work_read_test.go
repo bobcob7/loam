@@ -922,6 +922,47 @@ func TestRunWorkDiff_LsRemoteFailure_ReportsWhyRatherThanOmitting(t *testing.T) 
 	assert.Contains(t, out.LocalCheck, "not checked")
 }
 
+// TestRunWorkDiff_RemoteAdvertisesNeitherRef_SaysSoRatherThanHalfNaming
+// covers remoteTips' third failure branch, which the other two do not
+// reach: ls-remote SUCCEEDS but the remote does not advertise one of the
+// refs. Without this the branch is dead as far as the suite is concerned,
+// and the observable result -- a `range` built from a half-empty pair, or
+// silently absent -- is exactly the unfalsifiable artifact this bead is
+// about. Both directions are covered, since a missing target and a missing
+// head are different server states.
+func TestRunWorkDiff_RemoteAdvertisesNeitherRef_SaysSoRatherThanHalfNaming(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		present string
+	}{
+		{"target advertised, work branch missing", "refs/heads/main"},
+		{"work branch advertised, target missing", refnames.WorkBranch(testWorkBranch)},
+		{"neither advertised", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			refs := &gitRefsMock{
+				LsRemoteFunc: func(context.Context, string, []string, []string) (map[string]string, error) {
+					if tt.present == "" {
+						return map[string]string{}, nil
+					}
+					return map[string]string{tt.present: testServerHeadSHA}, nil
+				},
+			}
+			var encoded any
+			deps := diffDeps(diffClient("main", "patch"), noResolveWorkspace(), refs, &encoded)
+			require.NoError(t, runWorkDiff(t.Context(), deps, []string{testRepo, testWorkBranch}))
+			out, ok := encoded.(workDiffOutput)
+			require.True(t, ok)
+			assert.Empty(t, out.Range, "a range must never be built from a half-known pair")
+			assert.Contains(t, out.RefsError, "does not advertise", "an incompletely identified diff must say so")
+			assert.Contains(t, out.LocalCheck, "not checked", "with no server tip there is nothing to compare a local HEAD against")
+		})
+	}
+}
+
 // TestRunWorkDiff_Stat_SummarizesTheSamePatch pins --stat, whose absence
 // was loam-hwru's cheapest failure: agents typed it, got `unknown flag`,
 // exit 2, and fell back to piping 100KB of escaped JSON through jq.

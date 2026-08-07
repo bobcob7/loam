@@ -92,6 +92,25 @@ func TestExecGitRefs_Fetch_MakesPlainGitDiffAndLogWorkAgainstTheBase(t *testing.
 	assert.Equal(t, "wb-1 commit", log, "the range must contain exactly the branch's own commit -- a base guessed too far back would include main's too")
 }
 
+// TestExecGitRefs_Fetch_DoesNotDragTheRemotesTagsAlong pins the --no-tags
+// flag, which nothing else exercises. git's default is to follow tags
+// reachable from what it fetches, so a clone that asked for ONE target ref
+// would otherwise acquire the mirror's whole tag namespace -- the real
+// mirror this runs against carries v0.0.1 through v0.0.8. That is not a
+// correctness bug, but it is a silent cost on every clone, and a flag no
+// test covers is a flag the next edit deletes.
+func TestExecGitRefs_Fetch_DoesNotDragTheRemotesTagsAlong(t *testing.T) {
+	t.Parallel()
+	dest, upstream := singleBranchCloneOfWB1(t)
+	mustRunGit(t, upstream, "tag", "v9.9.9", "refs/heads/main")
+	require.NotEmpty(t, mustRunGit(t, upstream, "tag", "--list"), "precondition: the upstream must carry a tag for this to prove anything")
+
+	require.NoError(t, execGitRefs{}.Fetch(t.Context(), dest, "+refs/heads/main:refs/remotes/origin/main"))
+
+	assert.Empty(t, mustRunGit(t, dest, "tag", "--list"), "a fetch for one ref must not pull the remote's tags in behind it")
+	assert.NotEmpty(t, mustRunGit(t, dest, "rev-parse", "refs/remotes/origin/main"), "and it must still have fetched the ref it was asked for")
+}
+
 // TestExecGitRefs_MergeBase_IsTheCommitTheBranchWasCutFrom pins that
 // MergeBase answers with the fork point, which is what `clone` reports as
 // base_sha -- NOT the target's tip, which is a different commit whenever

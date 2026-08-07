@@ -106,10 +106,20 @@ func (execGitRefs) CountCommitsAhead(ctx context.Context, dir, base string) (int
 // here, so an agent invoking `work diff` from inside a clone bootstrapped
 // under a different identity would authenticate as that identity without
 // anything in the output saying so. git-config(1) documents that setting
-// http.extraHeader to the empty string RESETS the accumulated list, so this
-// guarantees the request carries exactly the headers this call was given
-// and nothing inherited. Verified against real git by
-// TestExecGitRefs_LsRemote_SendsOnlyTheHeadersItWasGiven.
+// http.extraHeader to the empty string RESETS the accumulated list, so the
+// request carries exactly the headers this call was given. Verified against
+// real git by TestExecGitRefs_LsRemote_SendsOnlyTheHeadersItWasGiven.
+//
+// That reset covers http.extraHeader AND NOTHING ELSE, which is worth
+// stating because the discovery it closes is general and this fix is not.
+// url.<base>.insteadOf, http.proxy and credential.helper are all still read
+// from whatever repository the working directory happens to sit in, and
+// insteadOf is the worse of the three: it rewrites the URL, so an inherited
+// one would silently send this request somewhere other than the server the
+// SHAs are being attributed to. There is no empty-string reset for those --
+// closing them needs config isolation of the kind internal/gitrun.Env
+// already gives the server side -- so it is tracked as loam-54ze rather
+// than half-done here.
 //
 // A ref the remote does not advertise is simply absent from the result,
 // not an error -- callers distinguish "missing" from "present" themselves.

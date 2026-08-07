@@ -612,8 +612,10 @@ and carries the identification above as a short header.
 clone that holds commits the server does not have, it would otherwise return a well-formed
 diff of an older state with no error and no warning — silently omitting the caller's most
 recent work. It therefore **refuses** (exit `2`) in that case, naming both tips, before
-fetching the diff at all. `--allow-unpushed` overrides it, and taking that override is
-recorded in `local_check`. The check runs only when the caller is inside a clone of that
+fetching the diff. It cannot refuse before *every* request — it needs the branch's target
+(`GetWorkBranch`) and the server's tip (`ls-remote`) to have something to compare against
+— but no diff is ever fetched, so there is no almost-right artifact to misread.
+`--allow-unpushed` overrides it, and taking that override is recorded in `local_check`. The check runs only when the caller is inside a clone of that
 same repo and work branch; every other situation reports why it was skipped rather than
 guessing.
 

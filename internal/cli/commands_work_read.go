@@ -532,8 +532,12 @@ func (o workDiffOutput) humanText() string {
 // It calls GetWorkBranch before GetWorkBranchDiff, which it did not before
 // loam-hwru. The extra request buys the branch's TARGET, without which
 // neither endpoint of the range can be named -- and naming them is the fix.
-// The unpushed check runs BEFORE the diff is fetched, so the refusal costs
-// nothing and cannot be mistaken for a property of the diff that came back.
+//
+// The unpushed check runs BEFORE THE DIFF IS FETCHED -- not before every
+// request, which it could not: it needs GetWorkBranch's target and
+// ls-remote's tip to have anything to compare against. What the ordering
+// buys is that no diff is ever retrieved when the answer would be stale, so
+// there is no almost-right artifact for a caller to read past the error.
 func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
 	fs, f := newWorkDiffFlags()
 	positional, err := parseCommandArgs(fs, args)

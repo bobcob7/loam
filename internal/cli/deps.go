@@ -33,14 +33,23 @@ type Deps struct {
 // commands_work.go's readStdin) -- tests that never dispatch either may
 // also pass nil.
 //
-// refs is a third such exception, with one difference worth stating
-// because loam-hwru is precisely about not hiding things: `clone`, `work
-// diff` and `work show` all use it, and each one of them treats a nil refs
-// as "the commit identification is unavailable" and SAYS SO in its output
-// (refs_error / the clone's own error), rather than omitting the SHAs
-// silently. Production always supplies the real one -- see
-// NewProductionDeps -- so that path exists for this package's tests, not
-// for the binary.
+// refs is a third such exception, used by `clone`, `work diff` and `work
+// show`. What a nil refs means differs by command, and the difference is
+// stated here rather than generalized because loam-hwru is precisely about
+// not asserting a uniformity that does not hold:
+//
+//   - `clone` FAILS. A clone with no base ref is the state that bead was
+//     filed about, so it cannot be produced quietly.
+//   - `work diff` reports refs_error and a "not checked" local_check. Its
+//     artifact is the thing being identified, so an unidentifiable one has
+//     to say so.
+//   - `work show` omits target_sha/head_sha SILENTLY. Its own answer is
+//     complete without them, and there is no nil refs in the binary to
+//     report on -- see NewProductionDeps, which always supplies the real
+//     one. Were that guard ever reachable in production it would be the
+//     wrong behaviour and would need a refs_error like `work diff`'s; it
+//     is written the way it is so this package's many existing `work show`
+//     tests need not each construct a git double.
 func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader, refs gitRefs) *Deps {
 	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin, gitRefs: refs}
 }
