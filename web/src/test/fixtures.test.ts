@@ -8,6 +8,7 @@ import {
 } from "../gen/loam/v1/common_pb";
 import { IngestKind, IngestStatus, SyncState } from "../gen/loam/admin/v1/repo_admin_pb";
 import { expectNoUnspecifiedEnums, generatedFiles, messagesDeclaringEnumFields } from "./enumGuard";
+import * as fixtureModule from "./fixtures";
 import {
   blockedWorkBranchFixture,
   enrolledRepoFixture,
@@ -46,15 +47,16 @@ import {
 
 /**
  * Messages that declare an enum field and deliberately have no fixture
- * builder. Each needs a reason, and `keeps its reasons true` below fails if an
- * entry stops being a message that declares an enum field at all.
+ * builder. Each needs a reason; `accounts for every message declaring an enum
+ * field` below is the equality that fails if an entry stops applying.
  */
 const notFixtured: Readonly<Record<string, string>> = {
   "loam.v1.ListWorkBranchesRequest":
     "A request, not a payload the console renders, and the SPA never builds one -- " +
-    "ListWorkBranches is a CLI/agent RPC. Its `state` is an `optional` filter whose " +
-    "unset state MEANS 'no filter', so a builder here would have to opt out of the " +
-    "guard on its only enum field.",
+    "ListWorkBranches is a CLI/agent RPC with no call site under web/src outside " +
+    "gen/. Its `optional state` is NOT an unfiltered default either: " +
+    "workbranch.proto documents 'Defaults to REVIEWABLE when unset', so unset is a " +
+    "server-side choice this console never makes.",
   "loam.admin.v1.ListIngestJobsRequest":
     "Built by the Jobs screen itself (src/routes/Jobs.tsx), not by a fixture. Its " +
     "`status` is an `optional` filter and unset is the intended value for 'all " +
@@ -76,15 +78,68 @@ describe("fixture builders", () => {
   );
 });
 
+/**
+ * `fixtureBuilders` is the sweep's only entry point, so an entry going missing
+ * silently un-sweeps a message. That is the enumerated-guard defect this bead
+ * exists to kill, one layer up from where the guard applies it -- and it bit:
+ * deleting the `Proposal` or `EnrolledRepo` entry SURVIVED the whole suite,
+ * because neither message declares an enum field of its own and so neither
+ * appears on either side of the coverage equality. With the Proposal entry
+ * gone, a `proposalFixture` embedding a bare `create(WorkBranchSchema, {…})`
+ * stopped failing the sweep entirely.
+ *
+ * So the array is derived against, rather than trusted. Builders are
+ * discovered by CALLING every exported function and keeping the ones that
+ * return a protobuf message -- no naming convention, so a builder named
+ * anything at all is still found.
+ */
+describe("fixture registry", () => {
+  /** Exported functions that, called with no arguments, produce a message. */
+  const exportedBuilders = Object.entries(fixtureModule).filter(([, value]) => {
+    if (typeof value !== "function") return false;
+    try {
+      const built: unknown = (value as () => unknown)();
+      return typeof built === "object" && built !== null && "$typeName" in built;
+    } catch {
+      return false;
+    }
+  });
+
+  it("finds the exported builders by calling them, not by trusting their names", () => {
+    // Without this the two assertions below are vacuous: a probe that matched
+    // nothing would make "every export is registered" trivially true.
+    expect(exportedBuilders.length).toBeGreaterThan(0);
+  });
+
+  it("sweeps every builder this module exports, so forgetting to register one is impossible", () => {
+    const registered = new Set<unknown>(fixtureBuilders.map((entry) => entry.build));
+    const unregistered = exportedBuilders.filter(([, fn]) => !registered.has(fn)).map(([name]) => name);
+    expect(unregistered, "an exported fixture builder that fixtureBuilders does not sweep").toEqual([]);
+  });
+
+  it("registers nothing this module does not export, so an entry cannot outlive its builder", () => {
+    // The other half of the pincer. Deleting an entry AND its exported builder
+    // passes here -- and breaks compilation in every route test that imports
+    // it, which is why these builders are the ones the route tests use.
+    const exported = new Set<unknown>(exportedBuilders.map(([, fn]) => fn));
+    const orphaned = fixtureBuilders.filter((entry) => !exported.has(entry.build));
+    expect(orphaned.map((entry) => entry.schema.typeName)).toEqual([]);
+  });
+});
+
 describe("fixture coverage", () => {
   const declaring = messagesDeclaringEnumFields(generatedFiles()).map((message) => message.typeName);
   const built = new Set(fixtureBuilders.map((entry) => entry.schema.typeName));
 
-  it("finds the messages that can carry the defect by walking src/gen, not by a list", () => {
-    // Pinned as a COUNT, not as names: the names are what must be free to
-    // move. A count that changes is a prompt to look, and the two assertions
-    // below are what actually decide whether the change is covered.
-    expect(declaring.length).toBeGreaterThan(0);
+  it("names each message that can carry the defect exactly once", () => {
+    // Deliberately pins NO count and NO names. A count literal would be the
+    // same self-staling defect the guard exists to remove, and it would add
+    // nothing: the equality below already fails on any change to `declaring`
+    // that is not covered, which is the only change worth stopping.
+    //
+    // What this does check is that `declaring` is a set: a duplicate typeName
+    // would make the equality below compare the wrong shape and could mask a
+    // genuinely uncovered message.
     expect(new Set(declaring).size).toBe(declaring.length);
   });
 
@@ -134,8 +189,13 @@ describe("fixture faithfulness", () => {
     expect(syncStatusFixture().error).toBe("");
   });
 
-  it("enrolledRepoFixture carries a full SyncStatus, not a partial one", () => {
-    expect(enrolledRepoFixture().sync?.state).toBe(SyncState.IDLE);
+  it("enrolledRepoFixture carries a COMPLETE SyncStatus, not a partial one", () => {
+    // Compared against the nested builder whole, not spot-checked on `state`.
+    // `state` is the one field a bare `{ state }` partial still sets, so the
+    // spot-check PASSED under exactly the mutation this test is named for --
+    // it was killed incidentally, by a Repos.test.tsx assertion that happens
+    // to read `lastSyncedAt`. Equality cannot drift as SyncStatus grows.
+    expect(enrolledRepoFixture().sync).toEqual(syncStatusFixture());
   });
 
   it("ingestJobFixture is a completed full ingest", () => {

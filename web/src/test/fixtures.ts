@@ -1,4 +1,10 @@
-import { create, type DescMessage, type Message, type MessageInitShape } from "@bufbuild/protobuf";
+import {
+  create,
+  type DescMessage,
+  type Message,
+  type MessageInitShape,
+  type MessageShape,
+} from "@bufbuild/protobuf";
 import {
   BlockedWorkBranchSchema,
   EnrolledRepoSchema,
@@ -185,30 +191,54 @@ export interface FixtureBuilder {
   readonly build: () => Message;
 }
 
-const builder = <Desc extends DescMessage>(schema: Desc, build: () => Message): FixtureBuilder => ({
-  schema,
-  build,
-});
+/**
+ * Pairs a builder with its schema. `build` is stored BY IDENTITY -- the
+ * exported function itself, never a `() => fooFixture()` wrapper -- because
+ * that identity is what `fixtures.test.ts` matches against this module's
+ * exports. A wrapper would be a fresh closure and would defeat the check.
+ *
+ * The `MessageShape<Desc>` return type also makes a mis-paired registration
+ * (`builder(SyncStatusSchema, workBranchFixture)`) a compile error rather
+ * than a silent sweep of the wrong descriptor.
+ */
+const builder = <Desc extends DescMessage>(
+  schema: Desc,
+  build: () => MessageShape<Desc>,
+): FixtureBuilder => ({ schema, build });
 
 /**
  * Every builder above, so `fixtures.test.ts` can sweep them all.
  *
- * THIS IS NOT THE GUARD'S COVERAGE LIST, and the distinction is the point. It
- * is a list of builders that EXIST -- you cannot register one you did not
- * write, so it cannot claim coverage it does not have. What decides whether
- * the set is sufficient is derived, not typed: `fixtures.test.ts` discovers
- * every message in the generated descriptors that declares an enum field and
- * fails if one has neither a builder here nor a written-down reason for not
- * needing one. Adding an enum field to a message a builder covers fails via
- * the sweep; adding a whole new message with an enum fails via that coverage
- * check. Neither needs this array edited to notice.
+ * THIS ARRAY IS NOT TRUSTED, and that is the point -- an unchecked registry is
+ * the enumerated guard this bead exists to kill, displaced one layer up. The
+ * earlier claim here ("you cannot register a builder you did not write") only
+ * covered ADDING. Removal was the hole: `ProposalSchema` and
+ * `EnrolledRepoSchema` declare no enum field of their own, so deleting either
+ * line sat outside the coverage equality on both sides and SURVIVED the whole
+ * suite -- while silently un-sweeping the container whose embedded WorkBranch
+ * and SyncStatus are exactly where the omission hides.
+ *
+ * So the array is now checked against this module's own exports, in both
+ * directions, and the two ways of breaking it are both closed:
+ *
+ *  - delete an entry and leave the builder exported -> the builder is
+ *    unregistered, and `fixtures.test.ts` fails naming it;
+ *  - delete the entry AND the exported builder -> the route tests that import
+ *    it stop compiling, because these are the builders they use.
+ *
+ * What decides whether the SET of builders is sufficient is separately
+ * derived: `fixtures.test.ts` discovers every message in the generated
+ * descriptors that declares an enum field and fails if one has neither a
+ * builder here nor a written-down reason. Adding an enum field to a covered
+ * message fails via the sweep; adding a new enum-carrying message fails via
+ * that equality. Neither needs this array edited to notice.
  */
 export const fixtureBuilders: readonly FixtureBuilder[] = [
-  builder(WorkBranchSchema, () => workBranchFixture()),
-  builder(VerdictSummarySchema, () => verdictSummaryFixture()),
-  builder(ProposalSchema, () => proposalFixture()),
-  builder(SyncStatusSchema, () => syncStatusFixture()),
-  builder(EnrolledRepoSchema, () => enrolledRepoFixture()),
-  builder(IngestJobSchema, () => ingestJobFixture()),
-  builder(BlockedWorkBranchSchema, () => blockedWorkBranchFixture()),
+  builder(WorkBranchSchema, workBranchFixture),
+  builder(VerdictSummarySchema, verdictSummaryFixture),
+  builder(ProposalSchema, proposalFixture),
+  builder(SyncStatusSchema, syncStatusFixture),
+  builder(EnrolledRepoSchema, enrolledRepoFixture),
+  builder(IngestJobSchema, ingestJobFixture),
+  builder(BlockedWorkBranchSchema, blockedWorkBranchFixture),
 ];
