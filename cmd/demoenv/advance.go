@@ -119,6 +119,19 @@ func control(ctx context.Context, baseURL, path string, body map[string]any) err
 	return nil
 }
 
+// NOTE ON REDACTION HERE: the failure paths below render gitURL through
+// urlredact.URLString, which does NOT supply a missing scheme -- so a
+// scheme-less "-git-url" ("token@host/owner/repo.git") is returned with
+// its credential intact (urlredact's package doc, and
+// TestURLStringDoesNotSupplyASchemeWhichIsWhyHostExists, spell out why).
+// The deleted local copy this now calls had the identical hole, so
+// nothing regressed, and urlredact.Host is not a drop-in: it collapses to
+// the bare authority and these messages want the repo path. Closing it
+// properly means validating -git-url at the flag, which is a behavioural
+// change and belongs in its own commit. Recorded here rather than left to
+// be rediscovered: this is a demo binary, and that is the whole blast
+// radius.
+//
 // remoteTip resolves branch's current SHA upstream with a real
 // authenticated `git ls-remote`, the same probe forge.Forgejo's own
 // CheckRepo uses. Reading it from upstream rather than from the mirror is

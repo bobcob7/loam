@@ -50,6 +50,36 @@ func TestSchemelessUserinfoParsesAsAPath(t *testing.T) {
 	assert.Contains(t, u.Path, sentinelToken, "the credential is live, sitting in Path")
 }
 
+// TestURLStringDoesNotSupplyASchemeWhichIsWhyHostExists pins the boundary
+// between the two string-taking entry points, on the one input where they
+// disagree and where getting it wrong leaks a credential.
+//
+// [URLString] does NOT prefix a scheme. On a scheme-less string net/url
+// parses the whole thing as a path, so there is no userinfo to clear and
+// the credential comes back VERBATIM. That is not a defect in URLString --
+// it is a URL renderer, and its production callers hand it output of
+// internal/forge's apiBaseURL, which has already prefixed "https://" --
+// but it is a loaded gun for anyone who reaches for the nearest-looking
+// function with a host-shaped string in hand. [Host] is the one that
+// supplies the scheme, and this test is the executable statement of which
+// to reach for.
+//
+// It was written because a review pointed out that the corpus used to
+// verify the cmd/demoenv absorption could not have caught this: the two
+// implementations are line-identical, so on this input both return the
+// credential and the corpus scores agreement. A large consistency check
+// between two copies says nothing about whether either is correct.
+func TestURLStringDoesNotSupplyASchemeWhichIsWhyHostExists(t *testing.T) {
+	t.Parallel()
+	const schemeless = sentinelToken + "@git.example.com/owner/repo.git"
+	assert.Contains(t, URLString(schemeless), sentinelToken,
+		"URLString does not supply a scheme, so a scheme-less string keeps its credential -- reach for Host, not this")
+	assert.NotContains(t, Host(schemeless), sentinelToken,
+		"Host supplies the scheme before parsing, which is the whole reason it exists")
+	assert.Contains(t, Host(schemeless), "git.example.com",
+		"positive control: the host itself must survive")
+}
+
 // TestURLAndURLStringStripUserinfo pins the two structural entry points on
 // the shape that defeats a password-only redaction: an empty-password PAT
 // URL, where there is no ":" for a naive string replace to find.
