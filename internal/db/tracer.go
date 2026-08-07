@@ -230,6 +230,22 @@ func (t *queryTracer) endProbeQuery(ctx context.Context, probe probeQuery, data 
 	if data.Err == nil {
 		return
 	}
+	// BOTH timestamps are explicit, which is what makes the deferred span's
+	// duration the QUERY's duration rather than the query plus however long
+	// this method took to build a span. pgx calls TraceQueryEnd when the
+	// query is done, so that is the end; everything after this line --
+	// tracer.Start, the attribute set, recordOutcome -- is bookkeeping that
+	// happened afterwards and must not be charged to the database.
+	//
+	// The gap is normally sub-microsecond and no diagnosis turns on it. It
+	// is written this way because the alternative is only correct by
+	// accident: a GC pause or a descheduled goroutine between here and
+	// span.End() would silently inflate the recorded duration of the one
+	// span this path emits, which is a failure span someone is reading
+	// precisely to find out how slow the database got. It also matches
+	// TraceAcquireEnd exactly, which this design claims to mirror; that
+	// method captures `ended` before building for the same reason.
+	ended := time.Now()
 	_, span := t.tracer.Start(ctx, spanNamePrefix+probe.name,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(probe.started),
@@ -243,7 +259,7 @@ func (t *queryTracer) endProbeQuery(ctx context.Context, probe probeQuery, data 
 		),
 	)
 	recordOutcome(span, data.CommandTag, data.Err)
-	span.End()
+	span.End(trace.WithTimestamp(ended))
 }
 
 // probeAttribute flags a span as having come from a health probe rather than
