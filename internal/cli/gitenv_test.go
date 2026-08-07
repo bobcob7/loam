@@ -632,3 +632,81 @@ func TestExecGitRefs_LsRemote_ResetsAGlobalExtraHeader(t *testing.T) {
 	assert.Equal(t, []string{"3"}, captured.Values("Loam-Agent-Id"))
 	assert.Equal(t, []string{"author"}, captured.Values("Loam-Agent-Role"))
 }
+
+// TestExecGitCloner_Clone_ResetsAGlobalExtraHeader is the wire-level
+// counterpart to Clone's leading empty --config, and the sibling of
+// LsRemote's ResetsAGlobalExtraHeader. It closes the last declared residual
+// on `loam clone` (loam-54ze round 2).
+//
+// The hostile header lives in GIT_CONFIG_GLOBAL because that is the layer
+// detachment deliberately does NOT reach -- so the reset is the only thing
+// that can be doing the work, and a fixture that poisoned the enclosing
+// repository instead would pass on detachment alone and prove nothing.
+//
+// BEFORE (no leading reset): the initial upload-pack GET carried
+// Loam-Agent-Name twice, GLOBAL-ATTACKER first, and git accumulates rather
+// than replaces -- so `loam clone` authenticated its own bootstrap as the
+// attacker. AFTER: exactly the caller's three.
+//
+// Deliberately no t.Parallel(): t.Setenv is process-global.
+func TestExecGitCloner_Clone_ResetsAGlobalExtraHeader(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(globalConfig,
+		[]byte("[http]\n\textraHeader = Loam-Agent-Name: GLOBAL-ATTACKER\n\textraHeader = Loam-Agent-Id: 999\n\textraHeader = Loam-Agent-Role: reviewer\n"), 0o600))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("HOME", t.TempDir())
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	headers := []string{"Loam-Agent-Name: grace-hopper", "Loam-Agent-Id: 3", "Loam-Agent-Role: author"}
+
+	err := execGitCloner{}.Clone(t.Context(), srv.URL+"/git/bobcob7/doc-server.git", "main", filepath.Join(t.TempDir(), "doc-server"), headers)
+
+	require.Error(t, err, "the stub is not a real smart-HTTP backend, so clone must fail -- what matters is what its FIRST request carried")
+	require.NotNil(t, captured, "git must have sent the upload-pack info/refs GET before failing")
+	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"), "`loam clone` must bootstrap as the agent running it, never as a global config's identity")
+	assert.Equal(t, []string{"3"}, captured.Values("Loam-Agent-Id"))
+	assert.Equal(t, []string{"author"}, captured.Values("Loam-Agent-Role"))
+}
+
+// TestExecGitCloner_Clone_ResetPersistsForLaterOperations pins the
+// behaviour change the reset brings beyond the initial fetch, because it is
+// a change and should fail loudly if it ever stops holding. --config
+// persists, so the clone's own later fetches and pushes carry the reset
+// too: an agent's clone asserts that agent's identity and nothing the
+// user's global config adds.
+//
+// Asserted on the WIRE, from inside the clone, rather than by reading
+// `config --get-all` -- which cannot show reset semantics at all.
+//
+// Deliberately no t.Parallel(): t.Setenv is process-global.
+func TestExecGitCloner_Clone_ResetPersistsForLaterOperations(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(globalConfig,
+		[]byte("[http]\n\textraHeader = Loam-Agent-Name: GLOBAL-ATTACKER\n"), 0o600))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("HOME", t.TempDir())
+	upstream := bareRepoWithMarkerCommit(t, "INTENDED-UPSTREAM")
+	dest := filepath.Join(t.TempDir(), "doc-server")
+	require.NoError(t, execGitCloner{}.Clone(t.Context(), "file://"+upstream, "main", dest, []string{"Loam-Agent-Name: grace-hopper"}))
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	// A later operation run from INSIDE the clone, reading the clone's own
+	// persisted config -- the shape every plain `git fetch`/`git push` an
+	// agent runs afterward takes.
+	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.URL+"/git/bobcob7/doc-server.git")
+
+	require.NotNil(t, captured, "git must have reached the server")
+	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"),
+		"the persisted reset must keep a global http.extraHeader out of the clone's later operations too")
+}

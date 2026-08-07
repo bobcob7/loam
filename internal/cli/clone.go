@@ -338,8 +338,35 @@ func newGitCloner() gitCloner { return execGitCloner{} }
 // url.insteadOf included, and would silently redirect the very first
 // request to a host loam never named. Detachment neutralises that channel
 // along with GIT_DIR and the rest.
+// The LEADING empty `--config http.extraHeader=` is the same reset
+// execGitRefs.LsRemote uses, for the same reason and against the same layer
+// (loam-54ze round 2). Detachment closes the enclosing repository; it does
+// not close the user's own ~/.gitconfig, which this package deliberately
+// keeps honouring. Measured on git 2.50.1 against a header-logging server,
+// with a global http.extraHeader carrying "Loam-Agent-Name: GLOBAL-ATTACKER":
+// without the reset the initial fetch sent [GLOBAL-ATTACKER real] and git
+// accumulates rather than replaces, so the attacker's identity arrived
+// FIRST and won; with it, [real].
+//
+// The trust-domain argument that protects the rest of the user's config
+// does not reach this key, and that asymmetry is deliberate rather than an
+// oversight. That argument is about not clobbering settings loam has no
+// opinion about -- http.proxy, http.sslCAInfo, core.autocrlf, LFS filters,
+// each of which decides whether the clone works at all or what it contains.
+// Loam-Agent-* is not one of those: it is loam's own identity assertion,
+// the thing the entire authorisation model is keyed on, and the reset
+// clears ONLY that key, leaving proxy, CA and filters untouched.
+//
+// One consequence beyond the initial fetch, verified rather than assumed:
+// --config persists, so the clone's .git/config carries the empty entry
+// ahead of the three real ones, and every LATER fetch and push from that
+// clone is reset the same way (measured: an operation from inside the clone
+// sent [real], not [GLOBAL-ATTACKER real]). That is the wanted behaviour --
+// an agent's clone should assert that agent's identity and nothing else --
+// but it is a behaviour change beyond this one request, so it is stated
+// here rather than left to be discovered.
 func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, headers []string) error {
-	args := []string{"clone", "--branch", branch, "--single-branch"}
+	args := []string{"clone", "--branch", branch, "--single-branch", "--config", "http.extraHeader="}
 	for _, h := range headers {
 		args = append(args, "--config", "http.extraHeader="+h)
 	}
