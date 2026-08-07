@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // controlTimeout bounds each control-API call. The force-push runs a real
@@ -131,22 +132,11 @@ func remoteTip(ctx context.Context, gitURL, branch string) (string, error) {
 	cmd.Env = append(cmd.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("ls-remote %s %s: %w: %s", redact(gitURL), branch, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("ls-remote %s %s: %w: %s", urlredact.URLString(gitURL), branch, err, strings.TrimSpace(string(out)))
 	}
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	if len(fields) < 2 {
-		return "", fmt.Errorf("ls-remote %s returned no ref for %s", redact(gitURL), branch)
+		return "", fmt.Errorf("ls-remote %s returned no ref for %s", urlredact.URLString(gitURL), branch)
 	}
 	return fields[0], nil
-}
-
-// redact strips userinfo from a URL before it appears in an error, so a
-// failure never prints the forge token into the demo's own transcript.
-func redact(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "<unparseable url>"
-	}
-	u.User = nil
-	return u.String()
 }

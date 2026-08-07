@@ -6,16 +6,30 @@
 //
 // # Why this is shared rather than duplicated
 //
-// It was duplicated. redactUserinfo existed three times -- in
+// It was duplicated NINE WAYS. redactUserinfo existed three times -- in
 // internal/handler/repoadmin, internal/forge and internal/fakeforge --
 // each copy added by a different change, none of which could see the
-// other two. loam-9h1e then added four more functions in the same problem
-// space to internal/forge alone while fixing a P1 credential disclosure
-// that existed precisely because ONE call path did not redact where its
-// neighbours did. Duplicated security-critical logic means the next
-// hardening lands in some of the copies and nobody can tell which
-// (loam-051m; loam-ldx is the precedent for when duplication of a
-// security-relevant helper stops being acceptable).
+// other two, and the third copy's own comment said that its arrival was
+// the moment to extract a shared one. loam-9h1e then added four more
+// functions in the same problem space to internal/forge alone while
+// fixing a P1 credential disclosure that existed precisely because ONE
+// call path did not redact where its neighbours did. internal/gittransport
+// already had a fifth under a different name (scrubSecrets), cmd/demoenv a
+// sixth (redact, URLString line for line but for a hyphen), and
+// internal/handler/credential a seventh (redactToken, Scrub with one
+// secret). The last two were found only by looking for them AFTER the
+// other seven had been consolidated -- the bead that called this three
+// copies was itself an undercount.
+//
+// Duplicated security-critical logic means the next hardening lands in
+// some of the copies and nobody can tell which. It also HIDES COVERAGE
+// HOLES, measured rather than argued: before the extraction, reintroducing
+// the leak into internal/fakeforge's own copy left that package's 119
+// tests entirely green while the same mutation killed named tests in
+// internal/forge and internal/handler/repoadmin. One function means one
+// mutation reaches every call site (loam-051m; loam-ldx is the precedent
+// for when duplication of a security-relevant helper stops being
+// acceptable).
 //
 // # The trap this package exists to carry
 //
@@ -64,12 +78,20 @@ import (
 // and therefore could not be inspected for an embedded credential.
 const unparseableURLPlaceholder = "<unparseable-url>"
 
-// redactedMarker replaces a credential wherever [Scrub] finds one.
-// Nothing in this repository asserts on its shape -- the tests for
-// redaction assert on the ABSENCE of the secret, deliberately, so this
-// marker stays free to change (see internal/forge's userinfo_leak_test.go
-// for why that is the design and not an omission).
-const redactedMarker = "[REDACTED]"
+// Marker replaces a credential wherever [Scrub] finds one.
+//
+// NO LEAK TEST MAY ASSERT ON THIS. The redaction tests assert on the
+// ABSENCE of the secret, deliberately, so the marker stays free to change
+// shape while a leak always fails (see internal/forge's
+// userinfo_leak_test.go for why that is the design and not an omission).
+//
+// It is exported for the opposite case, which is legitimate and which
+// internal/handler/credential's tests need: a POSITIVE CONTROL asserting
+// that a redacted message is the one that reached the log, rather than an
+// empty string that would pass an absence check vacuously. One exported
+// name is better than the second string literal that used to sit in that
+// package under a comment promising it was "deliberately the same one".
+const Marker = "[REDACTED]"
 
 // URL reconstructs u's string form with any embedded userinfo (user, or
 // user:password) cleared, rather than string-replacing the password
@@ -158,11 +180,12 @@ func Secrets(u *url.URL) []string {
 }
 
 // Scrub returns s with every non-empty entry of secrets replaced by
-// redactedMarker. The empty-string guard is load-bearing rather than
+// [Marker]. The empty-string guard is load-bearing rather than
 // defensive tidiness: strings.ReplaceAll(s, "", marker) splices the marker
 // between every rune of s, which would mangle an unrelated message beyond
-// reading (the same trap internal/handler/credential's redactToken
-// documents for itself).
+// reading. This guard is why internal/handler/credential's redactToken,
+// whose whole body was an early return for that case plus one
+// ReplaceAll, could be absorbed here without changing what it did.
 //
 // It is variadic so both original call shapes reach it unchanged: a
 // caller holding a []string from [Secrets] spreads it, and a caller
@@ -174,7 +197,7 @@ func Scrub(s string, secrets ...string) string {
 		if secret == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, secret, redactedMarker)
+		s = strings.ReplaceAll(s, secret, Marker)
 	}
 	return s
 }

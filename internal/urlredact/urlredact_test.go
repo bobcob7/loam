@@ -93,8 +93,10 @@ func TestUserinfoSecretsCoversBothPositions(t *testing.T) {
 
 // TestScrubUserinfoEmptySecretIsANoOp pins the guard that stops
 // strings.ReplaceAll(s, "", marker) from splicing the marker between every
-// rune of an unrelated message -- the same trap internal/handler/credential
-// documents for its own redactToken.
+// rune of an unrelated message. internal/handler/credential's redactToken
+// was an early return for exactly this case plus one ReplaceAll, which is
+// why absorbing it here changed nothing. Its own no-op test was this test
+// under another name, so it was removed rather than duplicated.
 func TestScrubUserinfoEmptySecretIsANoOp(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "connection refused", Scrub("connection refused", ""))
