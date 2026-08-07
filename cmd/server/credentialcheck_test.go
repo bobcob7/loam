@@ -31,7 +31,11 @@ func TestVerifyStoredCredentialsDecrypt_NoCredentials_SucceedsWithoutLookup(t *t
 
 // TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError proves
 // a failure enumerating hosts (a genuine database problem, distinct from a
-// decryption failure) is reported rather than swallowed.
+// decryption failure) is reported rather than swallowed -- and reported as
+// what it is. ListStatuses decrypts nothing at all, so a failure here can
+// never be evidence about LOAM_ENCRYPTION_KEY, and the message must not let
+// an operator read it that way: the recovery they would reach for costs
+// them every stored forge token.
 func TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("connection reset")
@@ -43,6 +47,8 @@ func TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError(t *test
 	err := verifyStoredCredentialsDecrypt(t.Context(), lister, &forgeCredentialLookupMock{}, testLogger())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
+	assert.Contains(t, err.Error(), "do NOT touch the key")
+	assert.NotContains(t, err.Error(), "does not match")
 }
 
 // TestVerifyStoredCredentialsDecrypt_HostWithoutToken_SkipsLookup proves a
@@ -164,4 +170,106 @@ func TestVerifyStoredCredentialsDecrypt_NotFoundRace_IsSkippedNotFatal(t *testin
 	}
 	err := verifyStoredCredentialsDecrypt(t.Context(), lister, lookup, testLogger())
 	assert.NoError(t, err)
+}
+
+// TestVerifyStoredCredentialsDecrypt_NoTokenRace_IsSkippedNotFatal is the
+// sibling exception: the row still exists but its token_ciphertext was
+// cleared between ListStatuses (which said HasToken) and GetByHost (which
+// answers ErrNoToken). Like ErrNotFound this is a lost race with nothing
+// left to verify -- there is no ciphertext for any key to be wrong about --
+// and it must not be reported as a key mismatch.
+func TestVerifyStoredCredentialsDecrypt_NoTokenRace_IsSkippedNotFatal(t *testing.T) {
+	t.Parallel()
+	lister := &credentialListerMock{
+		ListStatusesFunc: func(ctx context.Context) ([]credentialstore.CredentialStatus, error) {
+			return []credentialstore.CredentialStatus{{Host: "forgejo.example.com", HasToken: true}}, nil
+		},
+	}
+	lookup := &forgeCredentialLookupMock{
+		GetByHostFunc: func(ctx context.Context, host string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{}, credentialstore.ErrNoToken
+		},
+	}
+	err := verifyStoredCredentialsDecrypt(t.Context(), lister, lookup, testLogger())
+	assert.NoError(t, err)
+}
+
+// TestVerifyStoredCredentialsDecrypt_ReadFailure_IsNotBlamedOnTheKey is
+// this bead's central proof at the unit level. GetByHost reads THEN
+// decrypts, and a failure of the read half says nothing about
+// LOAM_ENCRYPTION_KEY -- but every non-ErrNotFound error used to be
+// reported as a key mismatch anyway, justified by a comment claiming
+// startup had already proven Postgres reachable. pgxpool is lazy, so it had
+// proven no such thing.
+//
+// The mismatch is expensive in one direction only: a key that "does not
+// match" reads as a key that is LOST (it cannot be rotated in place and no
+// database backup covers it), and the documented recovery from that is
+// deleting every credentials row and re-entering every forge token. So a
+// read failure must say so, and must actively tell the operator to leave
+// the key alone.
+func TestVerifyStoredCredentialsDecrypt_ReadFailure_IsNotBlamedOnTheKey(t *testing.T) {
+	t.Parallel()
+	const badHost = "forgejo.example.com"
+	// Deliberately does NOT repeat the host. credentialstore's own
+	// wrapping does include it, which is exactly how an earlier version of
+	// this test passed while the message's own format string named no host
+	// at all -- the assertion was reading the wrapped error, not the
+	// sentence being tested.
+	readErr := errors.New("acquiring connection: vector type not found in the database")
+	// The first listing enumerates hosts and succeeds -- it is served from
+	// a connection the pool already had. Every later call is the probe,
+	// and by then the pool can no longer open one. The mock records its
+	// own calls, so this needs no state of its own.
+	lister := &credentialListerMock{}
+	lister.ListStatusesFunc = func(ctx context.Context) ([]credentialstore.CredentialStatus, error) {
+		if len(lister.ListStatusesCalls()) == 1 {
+			return []credentialstore.CredentialStatus{{Host: badHost, HasToken: true}}, nil
+		}
+		return nil, readErr
+	}
+	lookup := &forgeCredentialLookupMock{
+		GetByHostFunc: func(ctx context.Context, host string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{}, readErr
+		},
+	}
+	err := verifyStoredCredentialsDecrypt(t.Context(), lister, lookup, testLogger())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, readErr)
+	assert.NotContains(t, err.Error(), "LOAM_ENCRYPTION_KEY does not match",
+		"a database that cannot serve a plain, non-decrypting read is not evidence about the encryption key")
+	assert.Contains(t, err.Error(), "vector type not found in the database",
+		"the operator has to be able to see the failure that actually happened")
+	assert.Contains(t, err.Error(), "do NOT touch the key",
+		"the expensive mistake this failure invites is acting on the key, so the message has to head it off")
+	assert.Contains(t, err.Error(), badHost, "the failing host is still worth naming")
+	assert.Len(t, lister.ListStatusesCalls(), 2,
+		"the read failure must be established by re-reading the same rows without decrypting, not assumed")
+}
+
+// TestVerifyStoredCredentialsDecrypt_DecryptFailureWithAHealthyRead_StillNamesTheKey
+// is the guard on the other side: the fix must not make the check timid.
+// When the plain re-read succeeds, reading demonstrably works, the decrypt
+// is what failed, and the key diagnosis is earned rather than assumed --
+// which is the whole point of loam-0ab's check and must survive this
+// change.
+func TestVerifyStoredCredentialsDecrypt_DecryptFailureWithAHealthyRead_StillNamesTheKey(t *testing.T) {
+	t.Parallel()
+	const badHost = "forgejo.wrongkey.example.com"
+	decryptErr := errors.New("crypto: decryption failed: cipher: message authentication failed")
+	lister := &credentialListerMock{
+		ListStatusesFunc: func(ctx context.Context) ([]credentialstore.CredentialStatus, error) {
+			return []credentialstore.CredentialStatus{{Host: badHost, HasToken: true}}, nil
+		},
+	}
+	lookup := &forgeCredentialLookupMock{
+		GetByHostFunc: func(ctx context.Context, host string) (credentialstore.Credential, error) {
+			return credentialstore.Credential{}, decryptErr
+		},
+	}
+	err := verifyStoredCredentialsDecrypt(t.Context(), lister, lookup, testLogger())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, decryptErr)
+	assert.Contains(t, err.Error(), "LOAM_ENCRYPTION_KEY does not match")
+	assert.Contains(t, err.Error(), badHost)
 }

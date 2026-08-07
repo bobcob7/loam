@@ -170,6 +170,11 @@ announcing its listener; the lines worth knowing on sight are
 variable — the message names which) and anything mentioning
 `LOAM_ENCRYPTION_KEY does not match` (the non-rotatable key, above).
 
+Read that last one carefully rather than on sight: a message saying the
+database is *not serving reads* and to leave the key alone is a different
+failure with a different, much cheaper fix, and Troubleshooting below has
+both.
+
 **What `/readyz` does not tell you.** It deliberately excludes the sync
 scheduler, the ingest pool, the embedder and the forge — see
 `docs/deployment-spec.md` → "The Readiness Caveat", which explains how to check
@@ -421,11 +426,38 @@ Restore the right key. If it is gone, `docs/deployment-spec.md` → "The
 coupling: `LOAM_ENCRYPTION_KEY`" has the recovery procedure, and it involves
 re-entering every forge token.
 
+> **Read the rest of that line before you act on it.** The recovery above is
+> irreversible and it is the most expensive thing in this document, so the
+> server now earns that sentence before printing it: it says the key does not
+> match *only* after re-reading the same rows without decrypting them and
+> having that succeed. If the database itself could not serve the read, you
+> get a different message that says so explicitly and tells you to leave the
+> key alone — for example:
+>
+> ```
+> reading the stored credential for host forgejo.example.com failed, and so
+>  did a plain re-read that decrypts nothing (... vector type not found in
+>  the database) -- the database is not serving reads, which is NOT evidence
+>  about LOAM_ENCRYPTION_KEY: repair the database and restart, and do NOT
+>  touch the key: ...
+> ```
+>
+> Older builds printed the `does not match` sentence for *any* failure to
+> read the row, including a database fault that had nothing to do with the
+> key. If you are on an image that predates this and you have not confirmed
+> the database is healthy, confirm that first — the key is far more likely to
+> be fine than the message suggests.
+
 **`/readyz` stays 503** — check `docker compose ... logs loam` and
 `... logs postgres`. Most often the database is still migrating (wait), or
 `LOAM_DB_PASSWORD` was changed after the first `up` (the Postgres image only
 consumes it when it initialises an empty data directory, so loam is now sending
-a password the database never adopted).
+a password the database never adopted). Two of the reasons in the 503 body are
+worth telling apart: `not ready: database unreachable` means loam could not get
+a connection to Postgres at all (down, wrong host, wrong password), while
+`not ready: pgvector extension missing or not on the search_path` means
+Postgres answered fine and the *extension* is the problem — see the two vector
+entries at the end of this section.
 
 **Ingest jobs never leave `queued`** — that is the embedder, not loam. Check
 `LOAM_EMBEDDER_URL` is reachable *from inside the container*
@@ -435,6 +467,40 @@ a password the database never adopted).
 **Anything involving `type "vector" does not exist`** — you are not running
 pgvector. `deploy/docker-compose.yml` pins `pgvector/pgvector:pg16`; plain
 `postgres` cannot run loam's migrations and is not supported.
+
+**`vector type not found in the database`** — the same problem, one layer up,
+and worth its own entry because it is a *different string* and grepping this
+file for the one you actually saw is how you got here. Postgres says
+`type "vector" does not exist`; the pgvector client library loam uses says
+`vector type not found in the database`. Both mean the extension is not there,
+or is not on the connection's `search_path`.
+
+Two things about *when* you see it are worth knowing, because neither is
+obvious:
+
+- **It can appear long after a clean start.** loam registers the vector types
+  on every connection its pool opens, not just the first, so a server that has
+  been up for days starts failing the moment it has to open a fresh connection
+  — after a Postgres restart, a failover, an idle connection expiring — into a
+  database that has lost the extension. Nothing about the loam container
+  changed; do not go looking there.
+- **It is not an encryption-key problem**, however much the message it used to
+  produce looked like one. See the boxed note above.
+
+Confirm it directly, and re-create it if it is genuinely gone:
+
+```sh
+docker compose -f deploy/docker-compose.yml exec postgres \
+  psql -U "${LOAM_DB_USER:-loam}" -d "${LOAM_DB_NAME:-loam}" -c "SELECT to_regtype('vector');"
+# empty result -> the extension is missing from THIS database
+docker compose -f deploy/docker-compose.yml exec postgres \
+  psql -U "${LOAM_DB_USER:-loam}" -d "${LOAM_DB_NAME:-loam}" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+The usual cause is a `pg_dump` restored into a database where the extension
+was never created, or a restore onto a plain `postgres` image. Note that
+`to_regtype` resolves through `search_path`, so an extension installed into a
+schema loam's connections do not search reads exactly like a missing one.
 
 ---
 

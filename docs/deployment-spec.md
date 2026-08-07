@@ -86,6 +86,19 @@ Three things worth being explicit about, since the chart's comments only hint at
   `secret.keys.databaseUrl`'s DSN describe the same credential from two sides.
   A mismatch doesn't fail to apply — it surfaces later, as `/readyz` reporting
   `database unreachable` with an authentication error in the log.
+- **`/readyz` has a second database reason, and it is not a networking problem.**
+  `not ready: pgvector extension missing or not on the search_path` means Postgres
+  is up, reachable and authenticating, and what failed is the pgvector type
+  registration loam performs on **every connection its pool opens** — so this can
+  appear on a pod that has been ready for days, the first time it has to open a
+  fresh connection (a Postgres restart, a failover, an idle connection expiring)
+  into a database that has lost the extension. A restored `pg_dump` without
+  `CREATE EXTENSION vector`, or a failover onto a plain `postgres` image, are the
+  usual causes; a `search_path` that does not reach the schema the extension was
+  installed into looks identical. `SELECT to_regtype('vector');` returning empty
+  confirms it. Restarting the pod does not help, and it is **not** an
+  `LOAM_ENCRYPTION_KEY` problem — see "The coupling: `LOAM_ENCRYPTION_KEY`" below
+  for why that distinction is worth this much text.
 - **`LOAM_DATA_DIR` is set twice** (image `ENV` default, ConfigMap override) and both
   currently agree on `/var/lib/loam`. If you ever need to change it, change both, plus
   the PVC mount path — nothing checks these three stay in sync.
@@ -226,6 +239,18 @@ corrupt)` for the first offending host. This is deliberate — see that file's o
 comment on why a static misconfiguration like this is treated as fail-fast rather
 than a `/readyz` degradation (a single-replica MVP has no other instance to route
 around, and a wrong key never fixes itself on a bare restart).
+
+**Before you start the recovery below, confirm the message you actually have.**
+That check only prints `LOAM_ENCRYPTION_KEY does not match` after re-reading the
+same rows *without decrypting them* and having that read succeed — so the sentence
+now means the row was readable and the ciphertext would not open, not merely that
+something went wrong near the credentials table. A database that cannot serve the
+read at all reports a different failure, says the database is not serving reads,
+and tells you explicitly to leave the key alone (the pgvector case above is the
+common way to get there). The recovery below is irreversible and costs you every
+stored forge token; a build predating this distinction printed the key sentence
+for *any* read failure, so if you are on an older image, verify the database is
+healthy before acting on it.
 
 **Recovery path** (re-entering every forge credential, as the epic anticipates,
 plus the one step that check forces first):
