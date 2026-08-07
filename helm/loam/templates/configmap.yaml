@@ -36,7 +36,7 @@ data:
   creates no exporter at all. See values.yaml's config.otel* comments.
   */ -}}
   {{- /*
-  `if ne (toString ...) ""` and NOT `with`, uniformly across all three.
+  `if ne (toString ...) ""` and NOT `with`, uniformly across all four.
   `with` skips its body for ANY falsy value, and for
   config.otelSampleRatio the number 0 is falsy while being a perfectly
   meaningful setting ("silence traces, keep metrics" -- see
@@ -44,7 +44,7 @@ data:
   nothing and internal/config would then apply its 0.1 default: an
   operator's explicit setting silently replaced by a different one,
   which is the exact class of failure loam-uwus was filed for. The other
-  two keys would be safe under `with`; they use the same form anyway so
+  three keys would be safe under `with`; they use the same form anyway so
   that nobody "tidies" the odd one out back into the trap.
   */ -}}
   {{- if ne (toString .Values.config.otelEndpoint) "" }}
@@ -55,6 +55,9 @@ data:
   {{- end }}
   {{- if ne (toString .Values.config.otelSampleRatio) "" }}
   LOAM_OTEL_SAMPLE_RATIO: {{ .Values.config.otelSampleRatio | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.config.otelDbAcquireThreshold) "" }}
+  LOAM_OTEL_DB_ACQUIRE_THRESHOLD: {{ .Values.config.otelDbAcquireThreshold | quote }}
   {{- end }}
   {{- if .Values.postgres.enabled }}
   # Discrete Postgres DSN parts (internal/config's resolveDatabaseURL,

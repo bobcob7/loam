@@ -189,11 +189,11 @@ services:
       LOAM_PR_ATTRIBUTION: ${LOAM_PR_ATTRIBUTION:-true}
       LOAM_SYNC_INTERVAL: ${LOAM_SYNC_INTERVAL:-60s}
       # ---- OpenTelemetry, off by default -------------------------------
-      # All three default to EMPTY, and empty is genuinely "unset" here:
-      # internal/config's lookupDefault and parseFloatEnv treat a variable
-      # that is present-but-empty exactly as one that is absent
-      # (internal/config/env.go), so these three lines change nothing at
-      # all until you fill one in. That is why they are set unconditionally
+      # All four default to EMPTY, and empty is genuinely "unset" here:
+      # internal/config's lookupDefault, parseFloatEnv and parseDurationEnv
+      # treat a variable that is present-but-empty exactly as one that is
+      # absent (internal/config/env.go), so these four lines change nothing
+      # at all until you fill one in. That is why they are set unconditionally
       # rather than commented out -- a name that appears in this file is a
       # name internal/deploycheck's TestComposeSetsOnlyRealConfigVariables
       # checks against internal/config's source, so a rename on the Go side
@@ -215,6 +215,13 @@ services:
       # silences traces while metrics keep being pushed (see
       # ../docs/server-spec.md). To stop both, clear the endpoint above.
       LOAM_OTEL_SAMPLE_RATIO: ${LOAM_OTEL_SAMPLE_RATIO:-}
+      # A Go duration; empty means internal/config's 50ms. The minimum
+      # pgxpool acquire wait that earns its own span. LOWER IT to see a
+      # chronically saturated pool whose waits sit just under the default
+      # -- that is the case the variable exists for, and the default is
+      # exactly what hides it. A FAILED acquire is always recorded whatever
+      # this says, so raising it never silences pool exhaustion.
+      LOAM_OTEL_DB_ACQUIRE_THRESHOLD: ${LOAM_OTEL_DB_ACQUIRE_THRESHOLD:-}
     ports:
       # Bound to LOOPBACK by default, and that is a security decision, not
       # a convenience one: loam's MVP has NO agent authentication. Identity

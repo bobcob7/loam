@@ -71,7 +71,7 @@ reads like a networking problem.
 collector; nothing scrapes loam. There is no `/metrics` endpoint and one is
 not planned — `/healthz` and `/readyz` are the only unauthenticated routes
 (see Health, below), a property the router enforces in code, and a scrape
-endpoint would need a third exemption to it. All three `LOAM_OTEL_*`
+endpoint would need a third exemption to it. All four `LOAM_OTEL_*`
 variables are optional, and with `LOAM_OTEL_ENDPOINT` unset the process does
 no telemetry work at all.
 

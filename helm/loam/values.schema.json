@@ -119,6 +119,11 @@
             { "type": "number", "minimum": 0, "maximum": 1 },
             { "type": "string", "pattern": "^$|^(0(\\.[0-9]+)?|1(\\.0+)?)$" }
           ]
+        },
+        "otelDbAcquireThreshold": {
+          "description": "LOAM_OTEL_DB_ACQUIRE_THRESHOLD, a Go duration. Empty (the default) means internal/config's own 50ms -- the minimum pgxpool acquire wait that earns a span of its own. Lower it when a chronically saturated pool's waits are hiding under the default, which is the one case the variable exists for and the case the chart could not reach at all until loam-wu10. The pattern is syncInterval's with an empty alternative added, and like that one it is a SHAPE check, not a range check: it catches the bare \"50\" with no unit that time.ParseDuration rejects, and it happens to also reject the negative durations internal/config rejects at startup, which is the cheaper place to learn it. It deliberately does not try to exclude \"0s\" -- span EVERY acquire is a meaningful setting here, not a mistake. Note the pattern is very slightly stricter than time.ParseDuration, which accepts a unitless \"0\"; write \"0s\".",
+          "type": "string",
+          "pattern": "^$|^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
         }
       }
     },
