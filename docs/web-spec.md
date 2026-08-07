@@ -221,9 +221,12 @@ branch carries them: the proposal queue, `GetWorkBranch` behind the proposal det
 page, and `ListWorkBranches`. They are read-only — no request message sets either, the
 sync cycle is the only writer — and `UNSPECIFIED` never means "fine": `NONE` is a
 positive claim, so an unrecognized stored value surfaces as `UNSPECIFIED` rather than
-being rounded down to it. Before this feature `conflict` was server-internal, read only
-by `ListProposals`' exclusion and `AcceptProposal`'s precondition, so a branch Loam had
-demoted looked to every client exactly like one it had not.
+being rounded down to it — and the console applies the same reading when it decides
+whether to offer the accept button, so an unrecognized value withholds it. Before this
+feature `conflict` was server-internal, read only by `ListProposals`' filter (which
+loam-u84g replaced with the `acceptable` flag above) and `AcceptProposal`'s
+precondition, so a branch Loam had demoted looked to every client exactly like one it
+had not.
 - `AcceptProposal(repo, work_branch) → { string pr_url, string upstream_branch }` — creates
   the upstream PR on the forge with a generated branch name and the work branch's
   title/description, and records `pr_url` on the work branch. On a re-accept after a

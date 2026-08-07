@@ -38,12 +38,29 @@ const defaultListLimit = 100
 // wrong, not merely approximate: a page of 100 reviewed branches of which 3
 // are proposals would return 3 rows and a next-page offset of 100, so the
 // admin would page through mostly-empty pages and PageInfo.total would
-// report reviewed branches rather than proposals. Scanning is affordable
-// because the candidate set is bounded by "reviewed, or demoted out of
-// reviewed by a conflicting advance, and not yet decided" (queueCandidates),
-// which is exactly the queue the admin is looking at; the same page-
-// everything-then-filter shape mirrorsync.StorePRPoller's pollSet uses, and
-// for the same reason.
+// report reviewed branches rather than proposals. The same
+// page-everything-then-filter shape mirrorsync.StorePRPoller's pollSet uses,
+// and for the same reason.
+//
+// # What this actually costs now (loam-u84g)
+//
+// The honest statement is about the SCAN, not the candidate set, and they are
+// no longer the same thing. queueCandidates pages TWO states: reviewed, which
+// is bounded by "approved and not yet decided" and is exactly the queue the
+// admin is looking at; and draft, which is bounded by nothing — it is every
+// work branch anyone has started and not yet submitted, the least bounded
+// state in the system. Only the `conflict = 'reset'` subset of that second
+// page survives into the candidate set, so the queue stays small, but the
+// READ does not: a repo with a thousand open drafts pages a thousand rows per
+// queue load to find the handful that were demoted.
+//
+// That is accepted rather than overlooked, on two grounds. The scan is already
+// per-request and uncached for the reviewed set, so this changes the constant
+// and not the shape; and the alternative — a conflict column on ListFilter and
+// a new sqlc query — buys a narrower read for the one caller that wants it at
+// the cost of a filter field every other List caller must now ignore. If the
+// draft population ever makes this the wrong trade, the fix is that filter,
+// and this comment is where to start.
 const candidateScanPageSize = 200
 
 // Handler implements adminv1connect.ProposalServiceHandler.

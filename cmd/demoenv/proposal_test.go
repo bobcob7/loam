@@ -18,6 +18,27 @@ const sampleQueue = `{
       "workBranch": {"repo":"loam-demo/doc-server","name":"wb-abc123","target":"main","title":"T",
                      "description":"D","state":"WORK_BRANCH_STATE_REVIEWED","author":"ada-lovelace-1-author",
                      "upstreamPrUrl":"http://forge.invalid/loam-demo/doc-server/pulls/1"},
+      "verdicts": [{"reviewer":"grace-hopper-2-reviewer","outcome":"VERDICT_OUTCOME_APPROVE","round":2}],
+      "acceptable": true
+    }
+  ],
+  "pageInfo": {"total": 1}
+}`
+
+// sampleBlockedQueue is the response loam-u84g's whole reason for existing
+// produces: a branch a conflicting target advance demoted to draft, still
+// holding its non-stale approve, listed with `acceptable = false`.
+//
+// The `acceptable` key is ABSENT, not `false`, because protojson omits a
+// zero-valued bool -- which is precisely the shape a decoder must get right,
+// since "absent" and "not acceptable" have to mean the same thing here and
+// the safe reading is the one that suppresses the button.
+const sampleBlockedQueue = `{
+  "proposals": [
+    {
+      "workBranch": {"repo":"loam-demo/doc-server","name":"wb-abc123","target":"main","title":"T",
+                     "description":"D","state":"WORK_BRANCH_STATE_DRAFT","author":"ada-lovelace-1-author",
+                     "conflict":"WORK_BRANCH_CONFLICT_RESET"},
       "verdicts": [{"reviewer":"grace-hopper-2-reviewer","outcome":"VERDICT_OUTCOME_APPROVE","round":2}]
     }
   ],
@@ -107,6 +128,47 @@ func TestCheckProposals_AStaleApproveIsRejected(t *testing.T) {
 func TestCheckProposals_SelectionRequiresAName(t *testing.T) {
 	t.Parallel()
 	err := checkProposals(t, sampleQueue, "-state", "WORK_BRANCH_STATE_REVIEWED")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 assertion(s) failed")
+}
+
+// TestCheckProposals_AcceptableIsAssertableBothWays is loam-u84g's demo
+// assertion. The demoted branch STAYS in the queue now, so presence alone no
+// longer distinguishes "listed and blocked" from "listed and offered" -- and
+// the second of those is a worse bug than the absence this bead fixed, since
+// the admin would press a button AcceptProposal refuses. Both directions are
+// asserted so neither can be satisfied by a checker that always answers one.
+func TestCheckProposals_AcceptableIsAssertableBothWays(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, checkProposals(t, sampleBlockedQueue,
+		"-count", "1", "-want-names", "wb-abc123",
+		"-select-name", "wb-abc123", "-state", "WORK_BRANCH_STATE_DRAFT", "-acceptable", "false",
+		"-approver", "grace-hopper-2-reviewer", "-round", "2"),
+		"a demoted branch is listed, unacceptable, and still carries its non-stale approve")
+	require.NoError(t, checkProposals(t, sampleQueue, "-select-name", "wb-abc123", "-acceptable", "true"))
+	require.Error(t, checkProposals(t, sampleBlockedQueue, "-select-name", "wb-abc123", "-acceptable", "true"),
+		"an absent `acceptable` key means false, not \"no opinion\"")
+	require.Error(t, checkProposals(t, sampleQueue, "-select-name", "wb-abc123", "-acceptable", "false"))
+}
+
+// TestCheckProposals_AcceptableRejectsANonBoolean guards the reason
+// -acceptable is a tri-state STRING rather than a bool flag, the same reason
+// runCheckVerdicts' -stale is: a bool flag defaults to false, so a typo in
+// the demo script would silently downgrade "assert this is not acceptable"
+// into "assert nothing" -- and pass.
+func TestCheckProposals_AcceptableRejectsANonBoolean(t *testing.T) {
+	t.Parallel()
+	err := checkProposals(t, sampleQueue, "-select-name", "wb-abc123", "-acceptable", "yes")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 assertion(s) failed")
+}
+
+// TestCheckProposals_AcceptableRequiresAName pins -acceptable into the same
+// selection gate its siblings sit behind: it addresses ONE row, and the queue
+// spans every enrolled repo.
+func TestCheckProposals_AcceptableRequiresAName(t *testing.T) {
+	t.Parallel()
+	err := checkProposals(t, sampleQueue, "-acceptable", "true")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "1 assertion(s) failed")
 }

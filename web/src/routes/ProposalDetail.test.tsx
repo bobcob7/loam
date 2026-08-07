@@ -37,6 +37,14 @@ const closePath = "/loam.admin.v1.ProposalService/CloseWorkBranch";
 const repo = "acme/widgets";
 const workBranch = "wb-9c2f1a";
 
+// conflict and upstreamDrift are spelled out rather than omitted, and that is
+// a FAITHFULNESS fix, not padding (loam-u84g). Both are `NONE = 1` in the
+// schema, so protojson emits them on every healthy branch; a real server
+// cannot send this message without them, because the columns are NOT NULL
+// under a CHECK constraint and `workBranchToProto` maps every stored value.
+// Omitting them made the fixture decode as `UNSPECIFIED`, which the accept
+// gate treats as "not evidence the branch merges cleanly" -- the same reading
+// `conflictToProto` gives it server-side and for the same stated reason.
 const workBranchFixture = (overrides: RouteBody = {}): RouteBody => ({
   repo,
   name: workBranch,
@@ -45,6 +53,8 @@ const workBranchFixture = (overrides: RouteBody = {}): RouteBody => ({
   description: "Adds a search index for the widgets package.",
   state: "WORK_BRANCH_STATE_REVIEWED",
   author: "widget-writer-1-worker",
+  conflict: "WORK_BRANCH_CONFLICT_NONE",
+  upstreamDrift: "UPSTREAM_DRIFT_NONE",
   ...overrides,
 });
 
@@ -633,14 +643,55 @@ describe("ProposalDetail: AcceptProposal", () => {
     const dialog = screen.getByRole("dialog", { name: "Accept proposal" });
     await user.click(within(dialog).getByRole("button", { name: "Accept" }));
     const banner = await within(dialog).findByRole("alert");
-    expect(
-      within(banner).getByText(
-        "This proposal needs at least one non-stale approve verdict before it can be accepted.",
-      ),
-    ).toBeInTheDocument();
+    // The sentence names the LIKELY cause and the recovery; it must not assert
+    // a single one. AcceptProposal has four preconditions, and claiming the
+    // approve bar outright was false for every branch loam-u84g is about --
+    // those carry a non-stale approve and are refused for something else.
+    expect(within(banner).getByText(/usual cause is no non-stale approve verdict/i)).toBeInTheDocument();
+    expect(within(banner).getByText(/conflict, upstream drift, or a state change/i)).toBeInTheDocument();
     expect(within(dialog).queryByText("SOME RAW SERVER TEXT NEVER SHOWN")).not.toBeInTheDocument();
     // The dialog stays open on failure so the admin can read the error and retry or cancel.
     expect(screen.getByRole("dialog", { name: "Accept proposal" })).toBeInTheDocument();
+  });
+
+  // loam-u84g. Proposals.tsx is the ONLY link into this screen, so listing
+  // blocked branches in the queue is exactly what makes this page reachable for
+  // a branch AcceptProposal refuses. Suppressing the button is therefore part
+  // of the same change, not a separate polish item: shipping the listing alone
+  // would move loam-giq.11's "a button that cannot work" here.
+  it.each([
+    [
+      "demoted out of REVIEWED by a conflicting target advance",
+      { state: "WORK_BRANCH_STATE_DRAFT", conflict: "WORK_BRANCH_CONFLICT_RESET" },
+      /draft, not reviewed/i,
+    ],
+    [
+      "reviewed but flagged against its target",
+      { conflict: "WORK_BRANCH_CONFLICT_FLAGGED" },
+      /must be caught up and re-reviewed/i,
+    ],
+    [
+      "reviewed but diverged upstream",
+      { upstreamDrift: "UPSTREAM_DRIFT_DIVERGED" },
+      /reconcile the upstream branch by hand/i,
+    ],
+  ])("suppresses the Accept action and says why when the branch is %s", async (_label, wbOverrides, wantMessage) => {
+    const { routes } = stubFetch(baseRoutes());
+    routes[workBranchPath] = ok({ workBranch: workBranchFixture(wbOverrides) });
+    await renderLoaded();
+    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    // "No button" without a reason is the shape that made the original bug
+    // expensive, so the absence must be explained, not merely performed.
+    expect(screen.getByText(wantMessage)).toBeInTheDocument();
+  });
+
+  it("still offers Accept on a reviewed, unconflicted, undrifted branch", async () => {
+    stubFetch(baseRoutes());
+    await renderLoaded();
+    // The negative control for the three cases above: "suppress the button"
+    // must not be satisfiable by never rendering it.
+    expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    expect(screen.queryByText(/Cannot be accepted right now/i)).not.toBeInTheDocument();
   });
 
   it("does not show the Accept action when the work branch already has an upstream PR", async () => {
