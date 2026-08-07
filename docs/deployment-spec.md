@@ -54,6 +54,7 @@ This table adds the deployment angle: where each value comes from in
 | `LOAM_OTEL_ENDPOINT` | no | no | — (telemetry off) | `config.otelEndpoint` (values.yaml), **empty by default** — empty means the key is not emitted into the ConfigMap at all and the server creates no exporter. There is no `LOAM_OTEL_ENABLED`; this is the switch |
 | `LOAM_OTEL_SERVICE_NAME` | no | no | `loam` | `config.otelServiceName` (values.yaml), empty by default |
 | `LOAM_OTEL_SAMPLE_RATIO` | no | no | `0.1` | `config.otelSampleRatio` (values.yaml), empty by default. `0` is a legitimate value and **not** an off switch — it silences traces while metrics keep being pushed |
+| `LOAM_OTEL_DB_ACQUIRE_THRESHOLD` | no | no | `50ms` | `config.otelDbAcquireThreshold` (values.yaml), empty by default. Added to the chart by loam-wu10, one release **after** `internal/config` grew the variable: until then the deployment was pinned at 50ms, which is the exact value that hides the saturated pool the knob exists to investigate |
 
 Three things worth being explicit about, since the chart's comments only hint at them:
 

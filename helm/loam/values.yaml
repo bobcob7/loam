@@ -166,9 +166,10 @@ config:
   postgresUser: loam
   postgresDb: loam
 
-  # ---- OpenTelemetry (loam-p56y shipped the reader, loam-uwus the wiring)
+  # ---- OpenTelemetry (loam-p56y shipped the reader, loam-uwus the wiring,
+  # loam-9v9s added the fourth key and loam-wu10 the chart's route to it)
   #
-  # All three are OPTIONAL and default to EMPTY, and empty here means the
+  # All four are OPTIONAL and default to EMPTY, and empty here means the
   # key is not emitted into the loam-config ConfigMap at all
   # (templates/configmap.yaml wraps each in an `if`). So a release that
   # sets none of them renders byte-for-byte what this chart rendered
@@ -176,9 +177,10 @@ config:
   # internal/deploycheck does not check it; `helm template` does.
   #
   # internal/config would tolerate the keys being emitted as empty strings
-  # anyway (its lookupDefault/parseFloatEnv treat set-but-empty exactly as
-  # unset, internal/config/env.go), so the `if` is about keeping the
-  # rendered manifest honest, not about correctness of the loader.
+  # anyway (its lookupDefault, parseFloatEnv and parseDurationEnv all treat
+  # set-but-empty exactly as unset, internal/config/env.go), so the `if` is
+  # about keeping the rendered manifest honest, not about correctness of the
+  # loader.
 
   # LOAM_OTEL_ENDPOINT. The collector's OTLP base URL, and the ONLY enable
   # switch loam has -- there is deliberately no LOAM_OTEL_ENABLED, see
@@ -215,6 +217,35 @@ config:
   # valuesObject author writing 0.25 and one writing "0.25" both mean the
   # same thing and neither should get a render error.
   otelSampleRatio: ""
+  # LOAM_OTEL_DB_ACQUIRE_THRESHOLD, a Go duration. Empty => internal/config's
+  # own default of 50ms. How long a pgxpool acquire must take before
+  # internal/db gives it a span of its own; below it an acquire is a free
+  # hand-off from an idle pool and is not worth one span per query.
+  #
+  # THE CASE THIS EXISTS FOR IS THE ONE THE DEFAULT HIDES: a chronically
+  # saturated pool whose waits sit just under 50ms reports nothing at all,
+  # and the only way to see it is to lower this. That is precisely why the
+  # chart having no route to it (loam-wu10) was worse than an ordinary
+  # missing knob -- the deployment was pinned at 50ms exactly when an
+  # operator most needed to move it.
+  #
+  # Setting it high silences the SLOW-acquire signal but never the
+  # pool-exhaustion one: a FAILED acquire is always recorded regardless
+  # (internal/config's Config.OTelDBAcquireThreshold). Negative durations
+  # are rejected at startup; the schema's pattern rejects them at render.
+  #
+  # "0s" DOES NOT MEAN "SPAN EVERY ACQUIRE". It is accepted, and it is
+  # indistinguishable from leaving this empty: internal/db's newQueryTracer
+  # collapses any non-positive threshold back to its own 50ms default
+  # (internal/db/config.go's AcquireSpanThreshold comment gives the reason
+  # -- pgxpool acquires a connection for every query, so a zero meaning "no
+  # threshold" would silently double the span count of any process that
+  # left the field unset). Tracing every acquire is not something this knob
+  # can express; wanting it is a change in internal/db. Called out here
+  # because "set it to zero to see everything" is the first thing an
+  # operator with a hidden slow pool would try, and it fails by looking
+  # exactly like success.
+  otelDbAcquireThreshold: ""
 
 persistence:
   # LOAM_DATA_DIR's backing volume. This is NOT a cache: it holds the git

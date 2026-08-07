@@ -119,6 +119,11 @@
             { "type": "number", "minimum": 0, "maximum": 1 },
             { "type": "string", "pattern": "^$|^(0(\\.[0-9]+)?|1(\\.0+)?)$" }
           ]
+        },
+        "otelDbAcquireThreshold": {
+          "description": "LOAM_OTEL_DB_ACQUIRE_THRESHOLD, a Go duration. Empty (the default) means internal/config's own 50ms -- the minimum pgxpool acquire wait that earns a span of its own. Lower it when a chronically saturated pool's waits are hiding under the default, which is the one case the variable exists for and the case the chart could not reach at all until loam-wu10. \"0s\" IS ACCEPTED AND IS NOT 'SPAN EVERY ACQUIRE': it is indistinguishable from leaving this empty. internal/config parses it to a zero duration, and internal/db's newQueryTracer collapses any non-positive threshold back to its own 50ms default (internal/db/config.go's AcquireSpanThreshold comment explains why -- pgxpool acquires a connection for every query, so a zero meaning 'no threshold' would silently double the process's span count for anyone who left the field unset, and internal/db/tracer_test.go pins the behaviour by name). Tracing EVERY acquire is not expressible through this knob at all; asking for it is a change in internal/db, not a value here. The pattern is syncInterval's with an empty alternative added, and like that one it is a SHAPE check, not a range check: it catches the bare \"50\" with no unit that time.ParseDuration rejects, and it happens to also reject the negative durations internal/config rejects at startup, which is the cheaper place to learn it. \"0s\" is deliberately NOT excluded even though it is a no-op, because internal/config accepts it: a schema refusing a value the loader takes would be a new chart/loader divergence, which is the exact defect class loam-wu10 exists to remove. Note the pattern is very slightly stricter than time.ParseDuration, which accepts a unitless \"0\"; write \"0s\".",
+          "type": "string",
+          "pattern": "^$|^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
         }
       }
     },
@@ -137,7 +142,11 @@
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "host": { "type": "string", "minLength": 1 },
-        "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+        "annotations": {
+          "description": "OPEN deliberately, and one of the five exceptions docs/deployment-spec.md enumerates. Ingress annotations are a verbatim passthrough of an arbitrary, controller-defined namespace -- nginx, cert-manager, external-dns and any future controller each mint their own keys -- so a restatement here would reject valid input the day a consumer adopts a controller this chart has never heard of. Values are constrained to strings, which is what Kubernetes itself requires of an annotation value; only the key set is free. Note what openness costs, since loam-wu10 made it explicit: internal/deploycheck's TestHelmSchemaDeclaresEveryValuesKeyTheTemplatesRead stops checking at an open node, so nothing guards values keys beneath this one. That is acceptable here precisely because there are none to guard -- templates/ingress.yaml consumes the whole map with toYaml and never names a key inside it.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
       }
     },
     "terminationGracePeriodSeconds": {
