@@ -470,8 +470,18 @@ func TestListProposals_OnlyBranchesWithACurrentApproveAreListed(t *testing.T) {
 // working this queue cannot act on what the queue does not mention.
 func TestListProposals_ConflictedBranchIsListedButNotAcceptable(t *testing.T) {
 	t.Parallel()
+	// The blocked branch carries a recorded PR whose accepted_tip MATCHES what
+	// the tip resolver returns, so it is "up to date" by proposalUpToDate's
+	// rule. That is deliberate: the up-to-date exclusion must NOT run for a
+	// blocked branch, and a fixture with no PR could not tell a handler that
+	// skips the check from one that runs it and gets `false` for free.
+	prURL, tip := "https://forge.example.com/acme/widgets/pulls/7", "unused-tip"
+	prNumber := int32(7)
 	conflicted := branchNamed("wb-conflicted", func(wb *workbranchstore.WorkBranch) {
 		wb.Conflict = workbranchstore.ConflictReset
+		wb.UpstreamPRURL = &prURL
+		wb.UpstreamPRNumber = &prNumber
+		wb.AcceptedTip = &tip
 	})
 	d := listDeps(branchNamed("wb-clean", nil), conflicted)
 	resp, err := d.handler().ListProposals(adminCtx(t), connect.NewRequest(&adminv1.ListProposalsRequest{}))
@@ -562,6 +572,59 @@ func TestListProposals_OrdinaryDraftIsNotScannedIntoTheQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, resp.Msg.GetProposals(),
 		"only conflict='reset' means demoted; 'flagged' is a draft that was never in review, and 'none' is ordinary work")
+}
+
+// TestAcceptableNow_MatchesTheAcceptGate pins acceptableNow clause by clause,
+// as a unit, because two of its three clauses are NOT independently reachable
+// through ListProposals: queueCandidates only ever hands it a reviewed branch
+// or a draft one carrying conflict='reset', so the state clause is masked by
+// the conflict clause on every path the RPC can take today. Asserting it only
+// through the RPC would leave that clause unfalsifiable -- a mutation removing
+// it survives -- and the clause is the one that has to keep holding if the
+// candidate scan is ever widened again.
+//
+// It is written against the same three preconditions AcceptProposal enforces
+// (proposal.go), so a change to one that is not made to the other shows up
+// here as a disagreement rather than as an admin pressing a button the server
+// refuses.
+func TestAcceptableNow_MatchesTheAcceptGate(t *testing.T) {
+	t.Parallel()
+	base := func(mutate func(*workbranchstore.WorkBranch)) workbranchstore.WorkBranch {
+		wb := workbranchstore.WorkBranch{
+			State:         workbranchstore.StateReviewed,
+			Conflict:      workbranchstore.ConflictNone,
+			UpstreamDrift: workbranchstore.DriftNone,
+		}
+		mutate(&wb)
+		return wb
+	}
+	tests := map[string]struct {
+		wb   workbranchstore.WorkBranch
+		want bool
+	}{
+		"reviewed, clean, no drift": {base(func(*workbranchstore.WorkBranch) {}), true},
+		"demoted to draft, nothing else wrong": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.State = workbranchstore.StateDraft }), false,
+		},
+		"sent back to reviewable, nothing else wrong": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.State = workbranchstore.StateReviewable }), false,
+		},
+		"reviewed but flagged": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.Conflict = workbranchstore.ConflictFlagged }), false,
+		},
+		"reviewed but conflict-reset": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.Conflict = workbranchstore.ConflictReset }), false,
+		},
+		"reviewed but diverged upstream": {
+			base(func(wb *workbranchstore.WorkBranch) { wb.UpstreamDrift = workbranchstore.DriftDiverged }), false,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, acceptableNow(tt.wb))
+		})
+	}
 }
 
 // TestListProposals_CarriesCurrentRoundVerdictsOnly pins the Proposal

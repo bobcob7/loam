@@ -237,6 +237,16 @@ advance — notices before any agent does. The behavior, as it shapes transport:
     act on the branch in the meantime regardless — acceptance gates independently on
     `state = reviewed` **and** `conflict = none`, and a demoted branch fails both.
     A `draft` branch just gains the flag. Resolved as loam-di9q.
+  - **The demoted branch must stay VISIBLE.** "Nothing can act on it" was read, once, as
+    licence to drop it from the admin's proposal queue, and the combination is a silent
+    hole: the branch holds a non-stale approve, sits in `draft`, and `draft` is a state
+    no default listing looks at (the queue scanned `reviewed`; `loam work list` defaults
+    to `--state reviewable`). An approved P1 fix missed the v0.0.8 release that way, and
+    the operator's only route to it was `work show` by exact name, which requires already
+    suspecting. `ProposalService.ListProposals` therefore lists such a branch with
+    `acceptable = false` rather than omitting it (`docs/web-spec.md` → ProposalService).
+    Gating and hiding are different decisions and only the first one is wanted here.
+    Resolved as loam-u84g.
 - A flagged branch recovers **by push**: when an agent pushes commits that bring the
   branch up to date (its history contains the current target tip), the server clears the
   flag, and a conflict-reset branch flips **directly back to `reviewable`** — no
