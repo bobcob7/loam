@@ -106,8 +106,8 @@ func TestScrubUserinfoEmptySecretIsANoOp(t *testing.T) {
 
 // TestScrubReplacesTheLongestFormFirst pins the ordering [Secrets]
 // promises: scrubbing the combined "user:password" wire form before its
-// components is what stops a half-redacted remnant ("alice:[REDACTED]"
-// versus "[REDACTED]") from being left behind.
+// components is what stops a half-redacted remnant -- the username left
+// standing beside a masked password -- from being left behind.
 func TestScrubReplacesTheLongestFormFirst(t *testing.T) {
 	t.Parallel()
 	u := &url.URL{Scheme: "https", User: url.UserPassword("alice", sentinelToken), Host: "forge.example.invalid"}
