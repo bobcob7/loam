@@ -88,24 +88,23 @@ describe("fixture coverage", () => {
     expect(new Set(declaring).size).toBe(declaring.length);
   });
 
-  it("has a builder or a written reason for every message declaring an enum field", () => {
-    const uncovered = declaring.filter((name) => !built.has(name) && notFixtured[name] === undefined);
-    expect(uncovered, "new enum-carrying message: add a fixture builder or a notFixtured reason").toEqual(
-      [],
-    );
-  });
-
-  it("keeps its reasons true: every notFixtured entry still declares an enum field", () => {
-    // Doubles as the glob's own sanity check: these names span both proto
-    // packages, so a `generatedFiles()` that silently matched nothing (an
-    // empty `declaring`, which would make the coverage check above vacuously
-    // pass) fails here instead.
-    const stale = Object.keys(notFixtured).filter((name) => !declaring.includes(name));
-    expect(stale, "notFixtured names messages that no longer declare an enum field").toEqual([]);
-  });
-
-  it("keeps notFixtured and the builders disjoint", () => {
-    expect(Object.keys(notFixtured).filter((name) => built.has(name))).toEqual([]);
+  it("accounts for every message declaring an enum field, by builder or by written reason", () => {
+    // Stated as an EQUALITY, not as "nothing is uncovered". The subset form
+    // (`uncovered).toEqual([])`) is vacuous while everything happens to be
+    // covered -- deleting the check entirely would pass -- so it would report
+    // coverage without testing for it, which is the exact failure mode this
+    // bead exists to avoid one layer up. Equality fails in both directions: a
+    // new enum-carrying message with no builder, AND a notFixtured entry that
+    // has quietly stopped applying.
+    //
+    // It doubles as the glob's own sanity check, because these names span
+    // both proto packages: a `generatedFiles()` that matched nothing yields an
+    // empty `declaring` and fails here rather than passing everything.
+    const withoutBuilder = declaring.filter((name) => !built.has(name)).sort();
+    expect(
+      withoutBuilder,
+      "add a fixture builder, or a notFixtured reason, for each new enum-carrying message",
+    ).toEqual(Object.keys(notFixtured).sort());
   });
 });
 
