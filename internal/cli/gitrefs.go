@@ -97,29 +97,27 @@ func (execGitRefs) CountCommitsAhead(ctx context.Context, dir, base string) (int
 // as fresh as the last fetch, and the question this answers is what the
 // SERVER will diff, not what this clone last heard about it.
 //
-// The first `-c` is an EMPTY http.extraHeader, and it is load-bearing.
-// Unlike `git clone` (which creates a fresh repository and reads no
-// enclosing one), `ls-remote` performs ordinary repository discovery from
-// the working directory -- and the working directory this runs in is
-// normally an agent's Loam clone, whose config holds ITS OWN three
-// Loam-Agent-* extraHeaders. Those would be sent ahead of the ones passed
-// here, so an agent invoking `work diff` from inside a clone bootstrapped
-// under a different identity would authenticate as that identity without
-// anything in the output saying so. git-config(1) documents that setting
-// http.extraHeader to the empty string RESETS the accumulated list, so the
-// request carries exactly the headers this call was given. Verified against
-// real git by TestExecGitRefs_LsRemote_SendsOnlyTheHeadersItWasGiven.
+// It runs DETACHED -- see gitenv.go for the rule and the mechanism. Unlike
+// `git clone` (which establishes a fresh repository and reads no enclosing
+// one), `ls-remote` performs ordinary repository discovery from the working
+// directory, and the working directory this runs in is normally an agent's
+// Loam clone. Everything that clone's config declares would otherwise apply
+// to THIS request: its own three Loam-Agent-* http.extraHeaders (sent ahead
+// of the ones passed here, since git accumulates that key rather than
+// replacing it, so an agent invoking `work diff` from a clone bootstrapped
+// under another identity authenticated as that identity), its
+// url.<base>.insteadOf (which rewrites the URL before any header matters),
+// its credential.helper, its http.proxy. Running with GIT_DIR pointed at a
+// path that does not exist means none of it is read at all. Verified
+// against real git by TestExecGitRefs_LsRemote_IgnoresEnclosingRepoInsteadOf
+// and its two siblings.
 //
-// That reset covers http.extraHeader AND NOTHING ELSE, which is worth
-// stating because the discovery it closes is general and this fix is not.
-// url.<base>.insteadOf, http.proxy and credential.helper are all still read
-// from whatever repository the working directory happens to sit in, and
-// insteadOf is the worse of the three: it rewrites the URL, so an inherited
-// one would silently send this request somewhere other than the server the
-// SHAs are being attributed to. There is no empty-string reset for those --
-// closing them needs config isolation of the kind internal/gitrun.Env
-// already gives the server side -- so it is tracked as loam-54ze rather
-// than half-done here.
+// The EMPTY leading `-c http.extraHeader=` is kept even though detachment
+// already makes the enclosing clone unreadable, and not as decoration: git
+// still reads the USER's ~/.gitconfig and /etc/gitconfig here (deliberately
+// -- gitenv.go argues why), and the empty-string reset is what git-config(1)
+// documents as clearing an accumulated http.extraHeader from those layers
+// too. It is the one defence that covers a layer detachment does not.
 //
 // A ref the remote does not advertise is simply absent from the result,
 // not an error -- callers distinguish "missing" from "present" themselves.
@@ -131,7 +129,7 @@ func (execGitRefs) LsRemote(ctx context.Context, url string, headers, refs []str
 	}
 	args = append(args, "ls-remote", url)
 	args = append(args, refs...)
-	out, err := runGitOutput(ctx, "", args...)
+	out, err := runDetachedGitOutput(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,9 +144,14 @@ func (execGitRefs) LsRemote(ctx context.Context, url string, headers, refs []str
 	return shas, nil
 }
 
-// runGitOutput runs `git -C dir <args...>` (or `git <args...>` when dir is
-// empty, e.g. LsRemote, which addresses a URL and needs no working copy)
-// and returns its STDOUT.
+// runGitOutput runs `git -C dir <args...>` and returns its STDOUT.
+//
+// dir == "" means the CALLER's own working copy, resolved by git's ordinary
+// upward discovery -- RevParse(ctx, "", "HEAD") asking "what is checked out
+// where I am standing". It does NOT mean "no repository": that is
+// runDetachedGitOutput, and conflating the two into one empty-string
+// sentinel is how `ls-remote` came to read the enclosing clone's config in
+// the first place.
 //
 // It is a separate helper from clone.go's runGitCommand, which merges
 // stdout into the same buffer as stderr: that is right for a command run
@@ -160,12 +163,33 @@ func runGitOutput(ctx context.Context, dir string, args ...string) (string, erro
 	if dir != "" {
 		fullArgs = append([]string{"-C", dir}, args...)
 	}
+	return gitOutput(ctx, gitSubprocessEnv(""), args, fullArgs)
+}
+
+// runDetachedGitOutput runs `git <args...>` with no repository in scope at
+// all -- see gitenv.go. For LsRemote, which addresses a URL and must not
+// inherit anything from whatever clone the caller happens to be standing
+// in.
+func runDetachedGitOutput(ctx context.Context, args ...string) (string, error) {
+	gitDir, cleanup, err := gitDetached()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	return gitOutput(ctx, gitSubprocessEnv(gitDir), args, args)
+}
+
+// gitOutput is the shared body of the two helpers above. reportArgs is what
+// a failure names (the caller's own arguments, without this package's
+// addressing flags); fullArgs is what git actually receives.
+func gitOutput(ctx context.Context, env []string, reportArgs, fullArgs []string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(stderr.Bytes()))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(reportArgs, " "), err, bytes.TrimSpace(stderr.Bytes()))
 	}
 	return stdout.String(), nil
 }

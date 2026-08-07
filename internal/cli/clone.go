@@ -327,13 +327,24 @@ func newGitCloner() gitCloner { return execGitCloner{} }
 // by TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig), so the
 // clone's later fetches/pushes still carry the same headers with no
 // separate write.
+//
+// It runs DETACHED (see gitenv.go). `git clone` reads no ENCLOSING
+// repository -- verified against git 2.50.1: an enclosing url.insteadOf,
+// http.extraHeader and core.hooksPath are all ignored -- so unlike LsRemote
+// this is not closing the reported defect. What it closes is the other half
+// of the same boundary: an AMBIENT GIT_CONFIG_PARAMETERS (which a parent
+// git sets on every child it spawns, so a `loam clone` run from a hook or
+// an alias inherits one) carries arbitrary config into this clone,
+// url.insteadOf included, and would silently redirect the very first
+// request to a host loam never named. Detachment neutralises that channel
+// along with GIT_DIR and the rest.
 func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, headers []string) error {
 	args := []string{"clone", "--branch", branch, "--single-branch"}
 	for _, h := range headers {
 		args = append(args, "--config", "http.extraHeader="+h)
 	}
 	args = append(args, url, dest)
-	return runGitCommand(ctx, "", args...)
+	return runDetachedGitCommand(ctx, args...)
 }
 
 // SetConfig implements gitCloner via `git -C dest config key value`.
@@ -351,21 +362,46 @@ func (execGitCloner) RenameBranch(ctx context.Context, dest, from, to string) er
 	return runGitCommand(ctx, dest, "branch", "-m", from, to)
 }
 
-// runGitCommand runs `git -C dir <args...>` (or `git <args...>` when dir is
-// empty, e.g. Clone, whose destination does not exist yet). err wraps the
-// process's combined stdout+stderr so callers can surface git's own reason
-// for a failure (a missing remote branch, an unreachable URL, ...).
+// runGitCommand runs `git -C dir <args...>`, run purely for its effect. err
+// wraps the process's combined stdout+stderr so callers can surface git's
+// own reason for a failure (a missing remote branch, an unreachable URL,
+// ...).
+//
+// dir == "" means the CALLER's own working copy, exactly as it does for
+// gitrefs.go's runGitOutput -- an invocation that must read NO repository
+// is runDetachedGitCommand instead.
 func runGitCommand(ctx context.Context, dir string, args ...string) error {
 	fullArgs := args
 	if dir != "" {
 		fullArgs = append([]string{"-C", dir}, args...)
 	}
+	return gitCombined(ctx, gitSubprocessEnv(""), args, fullArgs)
+}
+
+// runDetachedGitCommand runs `git <args...>` with no repository in scope at
+// all -- see gitenv.go. For Clone, whose destination does not exist yet and
+// which must inherit nothing from whatever repository the caller happens to
+// be standing in.
+func runDetachedGitCommand(ctx context.Context, args ...string) error {
+	gitDir, cleanup, err := gitDetached()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return gitCombined(ctx, gitSubprocessEnv(gitDir), args, args)
+}
+
+// gitCombined is the shared body of the two helpers above. reportArgs is
+// what a failure names (the caller's own arguments, without this package's
+// addressing flags); fullArgs is what git actually receives.
+func gitCombined(ctx context.Context, env []string, reportArgs, fullArgs []string) error {
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(out.Bytes()))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(reportArgs, " "), err, bytes.TrimSpace(out.Bytes()))
 	}
 	return nil
 }
