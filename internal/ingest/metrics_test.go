@@ -27,8 +27,10 @@ func claimMeter(t *testing.T) (*sdkmetric.MeterProvider, *sdkmetric.ManualReader
 // claimCounts collects reader and returns the claim-cycle counter's value
 // per outcome. A missing instrument returns an empty map rather than
 // failing, so a caller can assert "nothing was recorded" -- which is a real
-// expectation here, since a Pool built without WithMeterProvider is the
-// production default until cmd/server wires one.
+// expectation here, since every Pool built without WithMeterProvider holds
+// no counter at all. cmd/server does pass the option (see WithMeterProvider's
+// COMPOSITION ROOT note), but every other construction site in this package
+// and its tests does not.
 func claimCounts(ctx context.Context, t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -85,11 +87,13 @@ func TestRecordClaim_SeparatesAllFourOutcomes(t *testing.T) {
 	}, claimCounts(ctx, t, reader))
 }
 
-// TestRecordClaim_WithoutAMeterProviderIsANoOp pins the DEFAULT
-// construction, which is not a hypothetical: NewPool is called without
-// WithMeterProvider by cmd/server today and by every test in this package,
-// so a recordClaim that dereferenced a nil counter would take the server
-// down on its first poll -- five seconds after boot.
+// TestRecordClaim_WithoutAMeterProviderIsANoOp pins the OPTION-LESS
+// construction, which is not a hypothetical even though cmd/server now does
+// pass a provider: every other NewPool call in this package and its tests
+// omits the option, and any future caller may. A recordClaim that
+// dereferenced a nil counter would then panic on the very first claim --
+// inside work(), where it would be swallowed by recoverWorkerPanic and cost
+// that worker permanently rather than crashing loudly.
 func TestRecordClaim_WithoutAMeterProviderIsANoOp(t *testing.T) {
 	t.Parallel()
 	pool := NewPool(testLogger(), nil, &OrchestratorMock{}, 1)

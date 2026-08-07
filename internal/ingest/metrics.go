@@ -101,13 +101,18 @@ const (
 // hands out upstream's no-op MeterProvider when telemetry is disabled, so
 // the normal disabled path records into nothing rather than branching.
 //
-// COMPOSITION ROOT: cmd/server/main.go already resolves
+// COMPOSITION ROOT: cmd/server/main.go resolves
 // telemetryProvider.MeterProvider() into cfg.MeterProvider (it is what
-// /readyz's metric is built from) on the line before it constructs this
-// pool, so wiring is `ingest.WithMeterProvider(cfg.MeterProvider)` appended
-// to the existing ingest.NewPool call. loam-gp7m's author did not own
-// cmd/server and left that one line to whoever does; until it lands, the
-// counter is created but never fed by the server binary.
+// /readyz's metric is built from) a few lines above where it constructs
+// this pool, and passes it here as
+// `ingest.WithMeterProvider(cfg.MeterProvider)`. THE SERVER BINARY
+// THEREFORE FEEDS THIS COUNTER TODAY -- loam-gp7m wired it, because
+// suppressing the idle claim loop's spans while nothing reached a
+// collector would have been a net observability regression rather than a
+// fix. cmd/server's TestServer_IngestClaimCounterReachesTheCollector
+// drives the real binary against a real OTLP receiver and asserts these
+// data points arrive, so an edit that drops that argument fails a test
+// rather than silently going dark.
 func WithMeterProvider(mp metric.MeterProvider) Option {
 	return func(p *Pool) {
 		if mp == nil {

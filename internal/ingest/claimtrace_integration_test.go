@@ -43,8 +43,9 @@ const probeSpanAttribute = "loam.probe"
 // unnamedSpanName is internal/db's spanNamePrefix + unnamedQuery, likewise
 // unexported there. Every statement this file provokes is hand-written SQL
 // with no sqlc `-- name:` header, so they ALL land on this one name -- which
-// is the whole reason the assertions below discriminate by row count and by
-// attribute rather than by name.
+// is why the assertions below turn on span COUNT, on the probe attribute,
+// and on what a neighbouring phase proved, rather than on any span name
+// telling one statement from another.
 const unnamedSpanName = "postgres.unnamed"
 
 // newTracedTestPool is newTestPool (integration_test.go) with a recording
@@ -116,13 +117,31 @@ func spanNames(recorder *tracetest.SpanRecorder) []string {
 }
 
 // returnedRows returns each recorded span's db.response.returned_rows,
-// sorted. This is the ONLY discriminator available between the statements of
-// one claim: internal/db deliberately records no db.query.text, and every
-// statement here is unheadered, so all of them share one span name. The two
-// halves of a claim have distinguishable row-count signatures --
-// begin/select/rollback is {0,1,0} and update/update/commit is {1,1,0} --
-// which is what lets an assertion say WHICH three statements were traced
-// rather than merely how many.
+// SORTED. It is a readability aid, not the discriminator -- and saying so is
+// the point of this comment, because an earlier version of it claimed the
+// opposite and the claim was false.
+//
+// WHAT IT CANNOT DO. internal/db deliberately records no db.query.text and
+// every statement here is unheadered, so all of them share the span name
+// postgres.unnamed and the row count is the only per-span detail left. But
+// it is a multiset of three small integers: it cannot tell the two UPDATEs
+// apart from each other or from the SELECT, nor Begin from COMMIT from
+// Rollback. It admits ANY three-statement subset with two 1-row statements
+// and one 0-row statement -- nine of them -- of which the write half is one.
+// Review demonstrated this with a compiling mutant that marked from after
+// the first UPDATE, silencing the sync_state write and the COMMIT: the
+// traced set became Begin(0)+SELECT(1)+UPDATE(1), which sorts to {0,1,1}
+// exactly as UPDATE(1)+UPDATE(1)+COMMIT(0) does, and this assertion did not
+// notice.
+//
+// WHAT ACTUALLY PINS THE WRITE HALF is the pair of facts either side of it:
+// PHASE 1 establishes that Begin, the SELECT and the Rollback are silent on
+// an idle tick, and Begin and the SELECT are issued BEFORE the outcome is
+// knowable -- so nothing can trace them on a work tick while keeping them
+// silent on an idle one. Given "idle is silent" and "exactly three spans on
+// a work tick", the three can only be the write half. That argument is
+// carried by PHASE 1 plus the span-count assertion, and this function only
+// makes the resulting failure message legible.
 func returnedRows(t *testing.T, recorder *tracetest.SpanRecorder) []int64 {
 	t.Helper()
 	var rows []int64
@@ -172,9 +191,12 @@ func attrKeys(attrs []attribute.KeyValue) []string {
 //	B. A claim that FINDS WORK is still traced, and traced as its WRITE
 //	   half. Kills the per-tick marker -- the failure mode the bead calls
 //	   worse than the bug -- which would take a successful claim dark and
-//	   would be invisible in exactly the direction nobody checks. The row
-//	   count signature is what makes this an assertion about which
-//	   statements survived rather than about how many.
+//	   would be invisible in exactly the direction nobody checks. This is
+//	   the ONLY control that catches that mutant. What identifies the three
+//	   spans as the write half is not their row counts (see returnedRows
+//	   for the mutant those miss) but PHASE 1 above: Begin and the SELECT
+//	   run before the outcome is knowable, so nothing can trace them here
+//	   while keeping them silent there.
 //	C. A claim whose probe-marked SELECT FAILS still produces a span, and
 //	   that span carries loam.probe=true. Kills the blanket suppression --
 //	   the one thing telemetry.WithProbe's doc comment says is worse than
@@ -222,10 +244,17 @@ func TestClaim_IdleQueueIsSilentButWorkAndFailureAreNot(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, claimed, "a queued job must be claimable")
 	require.Equal(t, jobID, job.ID)
+	// THIS is the assertion that pins the write half, in concert with PHASE
+	// 1: Begin and the SELECT cannot be traced here while staying silent
+	// there, because they run before the outcome is knowable. So "idle
+	// silent" plus "exactly three" leaves only update+update+commit.
 	assert.Equal(t, []string{unnamedSpanName, unnamedSpanName, unnamedSpanName}, spanNames(recorder),
 		"a work-finding claim must still trace its write half: both UPDATEs and the COMMIT; got %v", spanNames(recorder))
+	// A legibility check, NOT a discriminator -- see returnedRows for the
+	// mutant it fails to notice. It is kept because it costs nothing and
+	// makes a real failure readable.
 	assert.Equal(t, []int64{0, 1, 1}, returnedRows(t, recorder),
-		"the three surviving spans must be update(1 row) + update(1 row) + commit(0 rows). {0,1,0} would mean the IDLE half was traced and the write half suppressed -- the exact inversion of this fix")
+		"the three surviving spans should read update(1 row) + update(1 row) + commit(0 rows)")
 	for _, span := range recorder.Ended() {
 		assert.NotContains(t, attrKeys(span.Attributes()), probeSpanAttribute,
 			"a claim that found work is not a probe and must not be labelled as one")
