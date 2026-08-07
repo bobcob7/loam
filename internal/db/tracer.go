@@ -13,6 +13,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/bobcob7/loam/internal/telemetry"
 )
 
 // tracerName is the instrumentation scope every span from this package
@@ -101,9 +103,16 @@ func newQueryTracer(tp trace.TracerProvider, acquireThreshold time.Duration) *qu
 // sqlc query rather than the statement text (see queryName), and returns the
 // context pgx threads through to TraceQueryEnd.
 //
+// UNLESS the caller marked ctx with telemetry.WithProbe, in which case it
+// opens no span and instead stashes what TraceQueryEnd would need to build
+// one retrospectively. See probeQuery.
+//
 // data.Args is deliberately not read here. See queryTracer's doc comment.
 func (t *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	name := queryName(data.SQL)
+	if telemetry.IsProbe(ctx) {
+		return context.WithValue(ctx, probeQueryKey{}, probeQuery{name: name, started: time.Now()})
+	}
 	ctx, _ = t.tracer.Start(ctx, spanNamePrefix+name,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -113,6 +122,91 @@ func (t *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 	)
 	return ctx
 }
+
+// probeQueryKey is the private context key carrying a probe query's pending
+// span material from TraceQueryStart to TraceQueryEnd.
+type probeQueryKey struct{}
+
+// probeQuery is what TraceQueryStart records instead of starting a span when
+// the caller marked the context as a health probe (telemetry.WithProbe).
+//
+// # WHY THIS EXISTS: 34,000 ROOT TRACES A DAY FROM AN IDLE REPLICA
+//
+// Measured in production right after v0.0.8, not predicted. /readyz is
+// polled every ~5s and performs TWO unheadered database operations per poll
+// -- pgxpool.Pool.Ping's bare ";" and internal/db/migrations' hand-written
+// `SELECT version, dirty FROM schema_migrations` -- so each poll produced
+// TWO spans, both named postgres.unnamed by queryName's deliberate fallback.
+// Neither had a parent, because internal/server's RegisterUnauthenticated
+// does not instrument the health endpoints, so both arrived as ROOTS. At the
+// deployed sample ratio of 1.0 that is ~17k polls and ~34k root traces per
+// day from a replica doing nothing at all, drowning the traces someone
+// actually opened Tempo to find.
+//
+// # THE SPAN IS DEFERRED, NOT DELETED
+//
+// Suppressing the probe outright was the obvious fix and is the wrong one: a
+// pool that has gone bad would then produce NOTHING, and "no span" is
+// indistinguishable from "no traffic" and from "instrumentation removed".
+// The failure case is the entire reason a health check is instrumented.
+//
+// So the span is built RETROSPECTIVELY in TraceQueryEnd, once the outcome is
+// known, and only when the operation FAILED -- the same shape, and for the
+// same reason, as TraceAcquireEnd's threshold span above it. The healthy
+// probe costs one context value and one time.Now(); the sick probe still
+// produces a postgres.unnamed root carrying its SQLSTATE and its true
+// duration, backdated to when the query actually started.
+//
+// # AND THE HEALTHY CASE IS NOT SILENT EITHER
+//
+// internal/health records the probe's outcome and duration as a METRIC on
+// every poll, ready or not. That is the instrument this question wanted all
+// along: "can I reach the database" is a per-interval yes/no, which is a
+// time series, not a trace. A trace answers "what happened in THIS request",
+// and every one of these 34k requests had the same answer.
+//
+// # NAMING WOULD NOT HAVE FIXED IT
+//
+// Giving Ping a sqlc-style name would make the spans identifiable and would
+// not remove a single one of them; the volume is the cost. queryName's
+// constant fallback stays a constant (see unnamedQuery for why the statement
+// text must never become a span name).
+type probeQuery struct {
+	name    string
+	started time.Time
+}
+
+// endProbeQuery closes out a query that TraceQueryStart declined to trace:
+// nothing at all when it succeeded, and a backdated span when it did not.
+//
+// The span is started from ctx, which for a health probe carries no parent,
+// so a failure still surfaces as a root trace -- exactly as it did before
+// loam-om77, and now as the ONLY postgres.unnamed root in the stream rather
+// than as one of 34,000.
+func (t *queryTracer) endProbeQuery(ctx context.Context, probe probeQuery, data pgx.TraceQueryEndData) {
+	if data.Err == nil {
+		return
+	}
+	_, span := t.tracer.Start(ctx, spanNamePrefix+probe.name,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(probe.started),
+		trace.WithAttributes(
+			semconv.DBSystemNamePostgreSQL,
+			semconv.DBOperationName(probe.name),
+			// The one thing that distinguishes this root from a genuine
+			// unheadered query by a real caller, which was the OTHER half of
+			// the reported problem: a reader had no way to tell them apart.
+			attribute.Bool(probeAttribute, true),
+		),
+	)
+	recordOutcome(span, data.CommandTag, data.Err)
+	span.End()
+}
+
+// probeAttribute flags a span as having come from a health probe rather than
+// from work someone asked for. Only failures carry it, since a healthy probe
+// emits no span at all.
+const probeAttribute = "loam.probe"
 
 // TraceQueryEnd closes the span TraceQueryStart opened, recording the row
 // count on success and the SQLSTATE on failure -- never the error message.
@@ -124,7 +218,20 @@ func (t *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 // caller in this tree goes through sqlc-generated code, which always
 // `defer rows.Close()`s, so that path does not exist today; a hand-written
 // pool.Query would be the way to introduce it.
+//
+// THE PROBE BRANCH IS LOAD-BEARING, NOT AN OPTIMISATION. It keys off the
+// value TraceQueryStart stored, not off telemetry.IsProbe, so the two halves
+// are exactly paired: whatever Start did, End undoes. Take the branch away
+// and the fallthrough is silently destructive rather than merely wrong --
+// trace.SpanFromContext would return the caller's OWN enclosing span (or the
+// no-op span when there is none), and this method would stamp a database
+// row count on it and END IT, truncating a live parent trace. Any future
+// early-return added to TraceQueryStart owes End the same treatment.
 func (t *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if probe, ok := ctx.Value(probeQueryKey{}).(probeQuery); ok {
+		t.endProbeQuery(ctx, probe, data)
+		return
+	}
 	span := trace.SpanFromContext(ctx)
 	recordOutcome(span, data.CommandTag, data.Err)
 	span.End()
@@ -205,6 +312,18 @@ func (t *queryTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ 
 // traced, so "no acquire span" means "fast or not instrumented" rather than
 // "fast". TestQueryTracer_AcquireSpanOnlyWhenSlowOrFailed pins both halves
 // so the distinction is at least asserted somewhere.
+//
+// # THIS METHOD DELIBERATELY IGNORES telemetry.IsProbe
+//
+// loam-om77 taught the query path to stay quiet for health probes, and the
+// symmetric-looking change here would be wrong. Acquire is ALREADY silent in
+// the healthy case -- a probe against a working pool takes a free connection
+// in microseconds and emits nothing -- so it contributes none of the volume
+// that bead was about. What it does emit is a saturated or dead pool, which
+// on the probe path is the single most valuable span this tracer produces:
+// it is the first thing to break when the pool goes bad, and it breaks
+// BEFORE any query runs, so nothing downstream would report it. Suppressing
+// it to match the query path would trade the one signal for consistency.
 func (t *queryTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, data pgxpool.TraceAcquireEndData) {
 	started, ok := ctx.Value(acquireStartKey{}).(time.Time)
 	if !ok {
