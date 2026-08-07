@@ -49,13 +49,26 @@
 // with no injection seam is a different question from a provider global, and
 // why keeping it out of New is what preserves the inertness proof below.
 //
-// Worth stating plainly, because it is the reason the exception is worth
-// taking at all: against an unreachable collector, otel.Handle is the ONLY
-// report of a failed flush. sdktrace's batch processor runs its final drain
-// on its own goroutine and hands the export error to otel.Handle rather than
-// returning it, so Provider.Shutdown below returns nil for a flush that sent
-// nothing. Without a handler installed, telemetry fails in plain text or not
-// at all.
+// Worth stating precisely, because it is the reason the exception is worth
+// taking at all, and because the imprecise version of it understates the
+// problem: against an unreachable collector, otel.Handle is the ONLY report
+// of a failed SPAN flush, and Provider.Shutdown's error actively points
+// somewhere else.
+//
+// Measured against the pinned go.opentelemetry.io/otel/sdk v1.44.0, with a
+// 30s ShutdownTimeout so nothing was cut short by the bound: otel.Handle
+// received exactly one error, the traces export failure, while
+// Provider.Shutdown returned "failed to upload metrics: ...". The trace
+// shutdown hook contributes NOTHING. batch_span_processor.go:126 starts the
+// drain on its own goroutine; drainQueue hands its export error to
+// otel.Handle (lines 379 and 385) and returns nothing at all; Shutdown
+// (lines 161-189) returns only bsp.e.Shutdown(ctx) -- the exporter's own
+// teardown, which succeeds -- or ctx.Err(). So Shutdown is non-nil here only
+// because the METRIC pipeline failed separately, and an operator reading that
+// error is told about metrics while the dropped spans go unmentioned.
+//
+// Without a handler installed, then, telemetry does not merely fail in plain
+// text: the one failure that IS reported names the wrong signal.
 //
 // # Disabled must be genuinely inert
 //

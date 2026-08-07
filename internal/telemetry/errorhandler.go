@@ -89,16 +89,43 @@ func (h slogErrorHandler) Handle(err error) {
 // it in a subprocess (see errorhandler_test.go), which is what keeps the
 // mutation out of this package's own test binary.
 //
-// # What this does NOT cover
+// # What this does NOT cover, and on exactly what grounds
 //
 // The SDK has a SECOND non-JSON stderr sink: go.opentelemetry.io/otel's
-// internal logr logger, replaceable via otel.SetLogger, used by global.Error /
-// Warn / Info. At its default verbosity only Error-level calls print, and
-// every Error-level call site linked into this binary is in the OTLP
-// exporters' parsing of OTEL_EXPORTER_OTLP_* environment variables -- which
-// loam's deployment does not set. It is therefore unreachable here today
-// rather than merely unlikely, and closing it would promote github.com/go-logr/logr
-// to a direct dependency for a path nothing takes. Reported rather than fixed.
+// internal logr logger, replaceable via otel.SetLogger, whose default is stdr
+// over the standard log package. At its default verbosity global.Warn and
+// global.Info are already silent -- but a dozen global.Error call sites live
+// in go.opentelemetry.io/otel/sdk/metric alone (meter.go, view.go,
+// pipeline.go, manual_reader.go, periodic_reader.go, env.go), and it would be
+// wrong to write them off as exporter env-parsing noise. They fall into two
+// groups, and both are closed today for reasons that can be CHECKED rather
+// than assumed:
+//
+//   - The env-driven ones (sdk/metric's env.go, the exporters' otlpconfig and
+//     envconfig) fire only on a malformed OTEL_* variable, and helm/loam
+//     cannot deliver one. The pod's whole environment is envFrom on the single
+//     loam-config ConfigMap, whose data block is a closed enumeration of
+//     LOAM_* keys, plus an explicit env list of LOAM_* secretKeyRefs. There is
+//     no extraEnv and no free-form passthrough anywhere in the chart. That is
+//     the same property that made loam-wu10 a hard render failure rather than
+//     a silent ignore: a variable the chart does not enumerate cannot reach
+//     the process at all.
+//   - The rest -- an unknown or unregistered async observer, a view that
+//     cannot be applied, a duplicate reader registration -- need metric
+//     INSTRUMENTS, views, or a second reader. This package creates exactly one
+//     PeriodicReader and registers no instrument, and nothing else in the tree
+//     touches a MeterProvider yet.
+//
+// The second group has a known expiry, so this deferral should not be
+// inherited as permanent. errUnregObserver (sdk/metric's meter.go:586 and
+// :617, reached from observer.ObserveFloat64 / ObserveInt64) becomes reachable
+// the moment async instruments exist -- which is loam-e9vh, the
+// metrics-instrumentation bead. Whoever lands e9vh inherits this: registering
+// the first observable callback re-opens a plain-text stderr path this file
+// does not close, and shutting it needs otel.SetLogger with
+// logr.FromSlogHandler, promoting github.com/go-logr/logr from indirect to
+// direct. Deferred here because that dependency buys nothing while every call
+// site above is unreachable -- not because the sites are few.
 //
 // It is safe to call more than once (cmd/server's acceptance harness runs the
 // whole startup sequence repeatedly in one process); otel.SetErrorHandler is
