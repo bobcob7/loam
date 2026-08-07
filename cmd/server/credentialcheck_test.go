@@ -31,7 +31,11 @@ func TestVerifyStoredCredentialsDecrypt_NoCredentials_SucceedsWithoutLookup(t *t
 
 // TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError proves
 // a failure enumerating hosts (a genuine database problem, distinct from a
-// decryption failure) is reported rather than swallowed.
+// decryption failure) is reported rather than swallowed -- and reported as
+// what it is. ListStatuses decrypts nothing at all, so a failure here can
+// never be evidence about LOAM_ENCRYPTION_KEY, and the message must not let
+// an operator read it that way: the recovery they would reach for costs
+// them every stored forge token.
 func TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("connection reset")
@@ -43,6 +47,8 @@ func TestVerifyStoredCredentialsDecrypt_ListingFails_ReturnsWrappedError(t *test
 	err := verifyStoredCredentialsDecrypt(t.Context(), lister, &forgeCredentialLookupMock{}, testLogger())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
+	assert.Contains(t, err.Error(), "do NOT touch the key")
+	assert.NotContains(t, err.Error(), "does not match")
 }
 
 // TestVerifyStoredCredentialsDecrypt_HostWithoutToken_SkipsLookup proves a

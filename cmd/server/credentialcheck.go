@@ -164,7 +164,7 @@ func verifyEncryptionKeyAgainstStoredCredentials(ctx context.Context, cfg config
 func verifyStoredCredentialsDecrypt(ctx context.Context, lister credentialLister, lookup forgeCredentialLookup, logger *slog.Logger) error {
 	statuses, err := lister.ListStatuses(ctx)
 	if err != nil {
-		return fmt.Errorf("listing stored credentials to verify LOAM_ENCRYPTION_KEY: %w", err)
+		return fmt.Errorf("listing stored credentials failed before LOAM_ENCRYPTION_KEY could be checked against any of them -- this read decrypts nothing, so it is NOT evidence about the key: repair the database and restart, and do NOT touch the key: %w", err)
 	}
 	for _, status := range statuses {
 		if !status.HasToken {
