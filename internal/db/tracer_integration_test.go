@@ -44,6 +44,7 @@ import (
 
 	"github.com/bobcob7/loam/internal/db/gen"
 	"github.com/bobcob7/loam/internal/db/migrations"
+	"github.com/bobcob7/loam/internal/telemetry"
 	"github.com/bobcob7/loam/internal/testdb"
 )
 
@@ -407,4 +408,102 @@ func TestQueryTracer_AcquireSpanOnRealPoolExhaustion(t *testing.T) {
 	for _, s := range recorder.Ended() {
 		assert.NotEqual(t, "postgres."+unnamedQuery, s.Name(), "no query span should exist for a query that never reached the server")
 	}
+}
+
+// TestQueryTracer_HealthProbeIsSilentUntilItIsNot is loam-om77 proven
+// against a real pgx, a real pool and a real Postgres, rather than against
+// this package's own types.
+//
+// The unit tests call TraceQueryStart and TraceQueryEnd directly, which
+// assumes the very thing most likely to be wrong: that the context marked
+// away up in internal/health's HTTP handler is still the context pgx hands
+// the tracer, after pgxpool has acquired a connection and pgx has derived
+// its own contexts along the way. A context VALUE surviving that path is a
+// property of pgx, not of this package, and nothing but an integration test
+// can observe it.
+//
+// The three phases are the whole argument for the design: the healthy probe
+// is silent, the failing probe is not, and an unmarked query alongside them
+// is untouched.
+func TestQueryTracer_HealthProbeIsSilentUntilItIsNot(t *testing.T) {
+	t.Parallel()
+	ctx := context.WithoutCancel(t.Context())
+	pool, _, recorder := tracedPool(ctx, t)
+	probeCtx := telemetry.WithProbe(ctx)
+
+	// PHASE 1 -- the 121,000-spans-a-day case. Pool.Ping is exactly what
+	// /readyz calls, and its bare ";" is the statement that produced the
+	// production roots.
+	require.NoError(t, pool.Ping(probeCtx))
+	require.NoError(t, pool.Ping(probeCtx))
+	assert.Empty(t, spanNames(recorder),
+		"a healthy health probe must leave no span at all; got %v", spanNames(recorder))
+
+	// PHASE 2 -- the case the whole design exists to preserve. A real
+	// server-side failure on a probe-marked query: the database is
+	// reachable, the connection is fine, and the statement fails. That is
+	// the shape of the pgvector-extension-missing failure /readyz's
+	// databaseFailureReason exists to diagnose.
+	_, err := pool.Exec(probeCtx, "SELECT 1/0")
+	require.Error(t, err)
+	span := findSpan(t, recorder, spanNamePrefix+unnamedQuery)
+	assert.Equal(t, codes.Error, span.Status().Code)
+	attrs := map[string]any{}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value.AsInterface()
+	}
+	assert.Equal(t, "22012", attrs["db.response.status_code"],
+		"the real SQLSTATE for division_by_zero must survive onto the deferred span")
+	assert.Equal(t, true, attrs[probeAttribute],
+		"a probe failure must be labelled, so a reader can tell it from a genuine unheadered query")
+	assert.NotContains(t, strings.Join(allSpanText(span), " "), "1/0",
+		"the deferred span must not start carrying statement text")
+	recorder.Reset()
+
+	// PHASE 3 -- the guard against overreach. The SAME pool, the SAME
+	// connection, an unmarked context: still traced on success. A fix that
+	// suppressed by pool, by connection or by statement shape rather than by
+	// the caller's own marker would fail here.
+	_, err = pool.Exec(ctx, "SELECT 1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{spanNamePrefix + unnamedQuery}, spanNames(recorder),
+		"an unmarked query must still be traced even though a probe just ran on the same pool")
+	assert.NotContains(t, attrMap(findSpan(t, recorder, spanNamePrefix+unnamedQuery).Attributes()), probeAttribute)
+}
+
+// TestQueryTracer_ProbeMarkerNeverSuppressesTheAcquireFailure is why
+// TraceAcquireEnd deliberately does not consult telemetry.IsProbe, checked
+// against a pool that genuinely cannot connect rather than against a comment.
+//
+// It also pins a real asymmetry that is easy to get wrong when reasoning
+// about this change: when the database is UNREACHABLE, there is no query
+// span to defer, because pgx never gets far enough to trace a query. The
+// acquire fails first. So if the probe marker had been extended to the
+// acquire path "for consistency", a totally dead database would have
+// produced NO span whatsoever from the probe -- which is precisely the
+// outcome loam-om77 was required not to cause.
+func TestQueryTracer_ProbeMarkerNeverSuppressesTheAcquireFailure(t *testing.T) {
+	t.Parallel()
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	t.Cleanup(func() { assert.NoError(t, tp.Shutdown(context.Background())) })
+	// Port 1 is reserved and refuses immediately, so this is a connect
+	// failure rather than a timeout, and needs no container.
+	poolCfg, err := newPoolConfig(Config{
+		DatabaseURL:    "postgres://loam:loam@127.0.0.1:1/loam?sslmode=disable",
+		TracerProvider: tp,
+	})
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(context.WithoutCancel(t.Context()), poolCfg)
+	require.NoError(t, err, "pgxpool is lazy: constructing a pool at a dead address must succeed")
+	t.Cleanup(pool.Close)
+	require.Error(t, pool.Ping(telemetry.WithProbe(context.WithoutCancel(t.Context()))))
+	acquire := findSpan(t, recorder, spanNamePrefix+"acquire")
+	assert.Equal(t, codes.Error, acquire.Status().Code,
+		"a probe against a dead database must still produce the acquire failure span")
+	assert.NotContains(t, spanNames(recorder), spanNamePrefix+unnamedQuery,
+		"and no query span, because pgx never reached the query -- which is exactly why the acquire span must survive the marker")
 }
