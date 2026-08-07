@@ -21,6 +21,7 @@ import (
 	adminv1 "github.com/bobcob7/loam/internal/gen/loam/admin/v1"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // testToken is the plaintext every leak assertion in this file hunts for.
@@ -393,7 +394,7 @@ func TestSetUpstreamToken_ForgeErrorEchoingTheTokenLeaksItNowhere(t *testing.T) 
 	assert.NotContains(t, err.Error(), testToken, "the token must never reach the error returned to the caller")
 	logged := d.buf.String()
 	require.NotEmpty(t, logged, "ErrorMapper must have logged the unmapped error -- if it did not, this test proves nothing about log leaks")
-	assert.Contains(t, logged, redactedMarker,
+	assert.Contains(t, logged, urlredact.Marker,
 		"positive control: the log line must be the one carrying the redacted forge message, so the absence assertion below is about the right bytes")
 	assert.NotContains(t, logged, testToken, "the token must never reach a log line")
 }
@@ -414,7 +415,7 @@ func TestSetUpstreamToken_StoreErrorEchoingTheTokenLeaksItNowhere(t *testing.T) 
 	assert.NotContains(t, err.Error(), testToken)
 	logged := d.buf.String()
 	require.NotEmpty(t, logged)
-	assert.Contains(t, logged, redactedMarker, "positive control: the redacted store message is what reached the log")
+	assert.Contains(t, logged, urlredact.Marker, "positive control: the redacted store message is what reached the log")
 	assert.NotContains(t, logged, testToken)
 }
 
@@ -434,7 +435,7 @@ func TestSetUpstreamToken_VerdictWriteErrorEchoingTheTokenLeaksItNowhere(t *test
 	assert.NotContains(t, err.Error(), testToken)
 	logged := d.buf.String()
 	require.NotEmpty(t, logged)
-	assert.Contains(t, logged, redactedMarker)
+	assert.Contains(t, logged, urlredact.Marker)
 	assert.NotContains(t, logged, testToken)
 }
 
@@ -488,17 +489,9 @@ func TestRedactedErrorKeepsNoUnredactedCopyInItsChain(t *testing.T) {
 	redacted := redactErr(original, testToken)
 	require.NotNil(t, redacted)
 	assert.NotContains(t, redacted.Error(), testToken)
-	assert.Contains(t, redacted.Error(), redactedMarker)
+	assert.Contains(t, redacted.Error(), urlredact.Marker)
 	assert.Nil(t, errors.Unwrap(redacted), "the redacted error must not wrap the original -- the plaintext would be one Unwrap away")
 	assert.NotContains(t, fmt.Sprintf("%+v", redacted), testToken)
-}
-
-// TestRedactTokenEmptyTokenIsANoOp pins the guard that stops
-// strings.ReplaceAll(s, "", marker) from splicing the marker between every
-// rune of an unrelated message.
-func TestRedactTokenEmptyTokenIsANoOp(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "connection refused", redactToken("connection refused", ""))
 }
 
 // ---------------------------------------------------------------------

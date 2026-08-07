@@ -16,13 +16,8 @@ import (
 	"github.com/bobcob7/loam/internal/gen/loam/admin/v1/adminv1connect"
 	"github.com/bobcob7/loam/internal/handler"
 	"github.com/bobcob7/loam/internal/httpauth"
+	"github.com/bobcob7/loam/internal/urlredact"
 )
-
-// redactedMarker replaces every occurrence of a submitted token in any
-// string this package is about to return or log. The literal value is
-// deliberately the same one internal/gittransport's scrubSecrets uses, so
-// an operator grepping logs for a leak sees one marker, not two.
-const redactedMarker = "[REDACTED]"
 
 // Handler implements adminv1connect.CredentialServiceHandler.
 type Handler struct {
@@ -266,17 +261,6 @@ func requireAdmin(ctx context.Context, operation string) error {
 	return fmt.Errorf("%s requires the admin superuser: %w", operation, handler.ErrPermissionDenied)
 }
 
-// redactToken returns s with every occurrence of token replaced by
-// redactedMarker, the same construction internal/gittransport's
-// scrubSecrets uses on git's output and argv. An empty token is a no-op:
-// replacing "" would otherwise splice the marker between every rune.
-func redactToken(s, token string) string {
-	if token == "" {
-		return s
-	}
-	return strings.ReplaceAll(s, token, redactedMarker)
-}
-
 // redactErr returns an error carrying err's message with every occurrence
 // of token redacted, for the paths where the message must survive (it is
 // logged by handler.ErrorMapper, which cannot know what a caller embedded
@@ -293,7 +277,7 @@ func redactErr(err error, token string) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(redactToken(err.Error(), token))
+	return errors.New(urlredact.Scrub(err.Error(), token))
 }
 
 // statusToProto converts a store CredentialStatus to its proto form. The

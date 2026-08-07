@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/bobcob7/loam/internal/urlredact"
 )
 
 // controlTimeout bounds each control-API call. The force-push runs a real
@@ -118,6 +119,19 @@ func control(ctx context.Context, baseURL, path string, body map[string]any) err
 	return nil
 }
 
+// NOTE ON REDACTION HERE: the failure paths below render gitURL through
+// urlredact.URLString, which does NOT supply a missing scheme -- so a
+// scheme-less "-git-url" ("token@host/owner/repo.git") is returned with
+// its credential intact (urlredact's package doc, and
+// TestURLStringDoesNotSupplyASchemeWhichIsWhyHostExists, spell out why).
+// The deleted local copy this now calls had the identical hole, so
+// nothing regressed, and urlredact.Host is not a drop-in: it collapses to
+// the bare authority and these messages want the repo path. Closing it
+// properly means validating -git-url at the flag, which is a behavioural
+// change and belongs in its own commit. Recorded here rather than left to
+// be rediscovered: this is a demo binary, and that is the whole blast
+// radius.
+//
 // remoteTip resolves branch's current SHA upstream with a real
 // authenticated `git ls-remote`, the same probe forge.Forgejo's own
 // CheckRepo uses. Reading it from upstream rather than from the mirror is
@@ -131,22 +145,11 @@ func remoteTip(ctx context.Context, gitURL, branch string) (string, error) {
 	cmd.Env = append(cmd.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("ls-remote %s %s: %w: %s", redact(gitURL), branch, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("ls-remote %s %s: %w: %s", urlredact.URLString(gitURL), branch, err, strings.TrimSpace(string(out)))
 	}
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	if len(fields) < 2 {
-		return "", fmt.Errorf("ls-remote %s returned no ref for %s", redact(gitURL), branch)
+		return "", fmt.Errorf("ls-remote %s returned no ref for %s", urlredact.URLString(gitURL), branch)
 	}
 	return fields[0], nil
-}
-
-// redact strips userinfo from a URL before it appears in an error, so a
-// failure never prints the forge token into the demo's own transcript.
-func redact(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "<unparseable url>"
-	}
-	u.User = nil
-	return u.String()
 }

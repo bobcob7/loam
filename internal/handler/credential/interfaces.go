@@ -29,11 +29,11 @@
 //     not to make.
 //
 // Nothing anywhere in this package logs a token, and every error that
-// crosses a seam carrying one is passed through redactToken before it is
-// wrapped or returned (see credential.go) -- the same belt-and-braces
-// applied to output, argv, the returned error AND the log line that
-// internal/gittransport's scrubSecrets already establishes for the git
-// subprocess path.
+// crosses a seam carrying one is passed through urlredact.Scrub before it
+// is wrapped or returned (see credential.go's redactErr) -- the same
+// belt-and-braces applied to output, argv, the returned error AND the log
+// line that internal/gittransport already establishes for the git
+// subprocess path, through that same shared function.
 package credential
 
 import (

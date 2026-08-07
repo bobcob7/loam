@@ -202,7 +202,7 @@ func TestRun_ScrubsEveryFormOfTheSecret(t *testing.T) {
 	assert.NotContains(t, got, token, "the plaintext token must be redacted")
 	assert.NotContains(t, got, encoded, "the base64 payload must be redacted -- it decodes straight back to the token")
 	assert.NotContains(t, got, header, "the header line must be redacted via its base64 payload")
-	assert.Contains(t, got, "[REDACTED]")
+	assert.Contains(t, got, urlredact.Marker, "positive control: something was actually replaced, so the three NotContains above cannot pass on an emptied string")
 	assert.Contains(t, got, "fatal: could not read Username", "non-secret text must survive scrubbing")
 }
 
