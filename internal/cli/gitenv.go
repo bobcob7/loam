@@ -182,11 +182,41 @@ const detachedGitDirName = "loam-cli-no-repository"
 // lands in a repository this package creates. gitSubprocessEnv drops every
 // one of them.
 //
-// The charter is deliberately "anything ambient that changes what the
-// invocation DOES", not the narrower "variables that locate a repository"
-// an earlier draft used. That narrower charter is what hid GIT_TEMPLATE_DIR
-// (below) for a whole revision: it is not a locating variable, and under
-// the old wording it did not obviously belong.
+// The charter is NOT the narrow "variables that locate a repository" an
+// earlier draft used -- that is what hid GIT_TEMPLATE_DIR (below) for a
+// whole revision, since it is not a locating variable. Nor is it the
+// sweeping "anything ambient that changes what the invocation does" that
+// replaced it, which the list never actually satisfied. The line this list
+// draws, stated so it can be checked in both directions:
+//
+//	An ambient variable is denied when it can plant PERSISTENT state --
+//	above all executable code -- in an artifact loam MANUFACTURES, or
+//	silently redirect where loam's own traffic goes. It is NOT denied
+//	merely because it causes code to run as the user who already owns
+//	this process.
+//
+// That second sentence is the one doing the work, and it is why
+// GIT_ASKPASS is deliberately ABSENT despite being ambient and despite
+// executing arbitrary code. Verified on git 2.50.1 under full detachment
+// and the complete deny list: an ambient GIT_ASKPASS fired twice against a
+// 401 and its output reached the wire as an Authorization header. It is
+// still not denied, because it runs as the invoking user, with their
+// privileges, from their own environment, for the duration of one request
+// -- the same trust domain the `loam` binary itself was launched from, and
+// the same reason ~/.gitconfig is honoured. GIT_TEMPLATE_DIR is categorically
+// different: it writes an executable into a repository loam creates on the
+// user's behalf, which then runs on every later operation against that
+// repository, long after the ambient variable is gone. Persistence in a
+// loam-manufactured artifact is the boundary, not execution as such.
+//
+// (internal/forge does neutralise GIT_ASKPASS. That is not an inconsistency:
+// it runs SERVER-side, where the invoking "user" is the loam server process
+// holding every forge credential, so the trust argument above does not apply
+// and the same variable lands on the other side of the same line.)
+//
+// GIT_PROXY_COMMAND and GIT_SSH_COMMAND were checked and excluded on
+// reachability rather than trust: both execute code, but only for git:// and
+// ssh:// remotes, and loam addresses its server over HTTP(S) exclusively.
 //
 // GIT_TEMPLATE_DIR is the sharpest entry here and the only one that is
 // CODE EXECUTION rather than misdirection: `git clone` copies the named

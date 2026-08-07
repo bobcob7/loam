@@ -546,35 +546,51 @@ func TestExecGitCloner_Clone_IgnoresAmbientInitTemplateDirViaConfigParameters(t 
 	assert.NoFileExists(t, marker, "an ambient GIT_CONFIG_PARAMETERS carrying init.templatedir must never execute code during `loam clone`")
 }
 
-// TestExecGitCloner_Clone_IsDetachedFromTheEnclosingRepository closes the
-// gap the reviewer named: Clone_IgnoresAmbientGitConfigParameters passes on
-// the env-stripping alone, so reverting runDetachedGitCommand to
-// runGitCommand(ctx, "") at that call site would leave the suite green.
+// TestGitSubprocessEnv_DetachedGitDirPointsOutsideTheEnclosingRepository
+// pins gitSubprocessEnv, and NOT what its previous name and comment
+// claimed.
 //
-// `git clone` reads no enclosing repository, so there is no attack to
-// demonstrate here and this is a MECHANISM pin rather than a wire test: it
-// asserts the one observable difference detachment makes, which is that the
-// subprocess ran with GIT_DIR pointing at a path outside the enclosing
-// repository. Without it the assertion below sees the enclosing clone's own
-// git dir.
+// It was written as "the pin that makes reverting Clone to
+// runGitCommand(ctx, \"\") fail". It does not: the reviewer performed
+// exactly that revert and all four Clone tests passed, because this test
+// never calls Clone at all -- it constructs the environment itself.
+//
+// The honest finding is better than the claim, and it is why no such pin is
+// added instead: THAT GAP IS NOT CLOSABLE, because there is nothing to
+// observe. Both runGitCommand and runDetachedGitCommand strip GIT_DIR from
+// the environment; only the detached one then sets its own; and `git clone`
+// consults GIT_DIR for nothing -- it establishes its own repository at the
+// destination and reads no enclosing one. Measured on git 2.50.1 from
+// inside a repository carrying a hostile url.insteadOf, core.hooksPath and
+// http.extraHeader: cloning with and without a detached GIT_DIR produced
+// BYTE-IDENTICAL destination configs and identical behaviour.
+//
+// So Clone's use of the detached path is genuine belt-and-braces -- it
+// costs nothing, it is the right default for a call site that must read no
+// repository, and it would matter immediately if git ever changed its mind
+// about clone consulting GIT_DIR. What it is not is testable, and a test
+// claiming otherwise is worse than no test.
+//
+// What IS pinned here is the mechanism the detached path depends on: that
+// gitSubprocessEnv hands back a GIT_DIR outside whatever repository the
+// caller is standing in, and that nothing exists at it.
 //
 // Deliberately no t.Parallel(): t.Chdir is process-global.
-func TestExecGitCloner_Clone_IsDetachedFromTheEnclosingRepository(t *testing.T) {
+func TestGitSubprocessEnv_DetachedGitDirPointsOutsideTheEnclosingRepository(t *testing.T) {
 	enclosing := workingCopyWithMarkerCommit(t, "ENCLOSING")
 	t.Chdir(enclosing)
 
 	gitDir, cleanup, err := gitDetached()
 	require.NoError(t, err)
 	defer cleanup()
-	env := gitSubprocessEnv(gitDir)
 
 	var got string
-	for _, kv := range env {
+	for _, kv := range gitSubprocessEnv(gitDir) {
 		if name, value, _ := strings.Cut(kv, "="); name == "GIT_DIR" {
 			got = value
 		}
 	}
-	require.Equal(t, gitDir, got, "the detached invocation must carry its own GIT_DIR")
+	require.Equal(t, gitDir, got, "the detached environment must carry its own GIT_DIR")
 	assert.NotContains(t, got, enclosing, "and it must point outside the repository the caller is standing in")
 	assert.NoFileExists(t, got)
 }
@@ -709,4 +725,63 @@ func TestExecGitCloner_Clone_ResetPersistsForLaterOperations(t *testing.T) {
 	require.NotNil(t, captured, "git must have reached the server")
 	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"),
 		"the persisted reset must keep a global http.extraHeader out of the clone's later operations too")
+}
+
+// TestExecGitCloner_Clone_ResetDoesNotBlockHeadersAddedAfterward pins the
+// documented cost-and-workaround of Clone's persisted reset (see Clone's
+// doc comment), so the documentation cannot quietly become false.
+//
+// The cost is real: a LEGITIMATE global http.extraHeader -- a corporate
+// gateway token, a routing header -- is dropped from the clone's later
+// operations along with any hostile one, and presents as an unexplained
+// network failure with nothing implicating loam. The workaround is to
+// re-add it to the clone's own config, which lands it AFTER the reset in
+// the clone's own multi-valued list.
+//
+// Both halves are asserted in one test deliberately, because the pair is
+// the claim: dropped before, present after, with loam's identity surviving
+// throughout. Asserting only the second half would pass even if the reset
+// had stopped working.
+//
+// The recording server captures ALL headers, not just Loam-*. That is not
+// incidental: a fixture that filtered for loam's own headers could not see
+// X-Corp-Route at all, and its absence would read as "not sent" whether or
+// not it was -- the same filtered-instrument false negative this bead's
+// review has now hit three times.
+//
+// Deliberately no t.Parallel(): t.Setenv is process-global.
+func TestExecGitCloner_Clone_ResetDoesNotBlockHeadersAddedAfterward(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(globalConfig,
+		[]byte("[http]\n\textraHeader = X-Corp-Route: eu-west\n"), 0o600))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("HOME", t.TempDir())
+	upstream := bareRepoWithMarkerCommit(t, "INTENDED-UPSTREAM")
+	dest := filepath.Join(t.TempDir(), "doc-server")
+	require.NoError(t, execGitCloner{}.Clone(t.Context(), "file://"+upstream, "main", dest, []string{"Loam-Agent-Name: grace-hopper"}))
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.URL+"/git/bobcob7/doc-server.git")
+	require.NotNil(t, captured, "git must have reached the server")
+	assert.Empty(t, captured.Values("X-Corp-Route"),
+		"the documented COST: a legitimate global header is dropped from the clone's operations too")
+	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"))
+
+	// The documented workaround, verbatim: re-add it to the clone's own
+	// config, where it lands after the reset.
+	require.NoError(t, execGitCloner{}.AddConfig(t.Context(), dest, "http.extraHeader", "X-Corp-Route: eu-west"))
+	captured = nil
+	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.URL+"/git/bobcob7/doc-server.git")
+
+	require.NotNil(t, captured)
+	assert.Equal(t, []string{"eu-west"}, captured.Values("X-Corp-Route"),
+		"the documented WORKAROUND: a header re-added to the clone's own config lands after the reset and survives")
+	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"),
+		"and loam's own identity must still be the only one asserted")
 }

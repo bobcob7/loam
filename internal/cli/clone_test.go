@@ -518,7 +518,13 @@ func TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig(t *testing.T) {
 	// assertion by folding the reset into it:
 	//
 	//  1. mustRunGit TrimSpaces, so a leading blank line is gone before
-	//     Split ever runs.
+	//     Split ever runs. Note this hides the entry ONLY BECAUSE IT IS
+	//     LEADING -- TrimSpace touches nothing in the middle. So if the
+	//     reset ever moved out of first position, the empty string WOULD
+	//     appear in the split and this assertion would break. That is a
+	//     FEATURE: a reset anywhere but first resets loam's own headers
+	//     too, which is the bug it exists to prevent. Do not "fix" such a
+	//     failure by trimming more tolerantly; fix the ordering.
 	//  2. `config --get-all` would not be evidence anyway: it dumps every
 	//     value including the empty one and never applies reset SEMANTICS.
 	//

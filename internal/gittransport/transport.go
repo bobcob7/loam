@@ -414,13 +414,32 @@ var inheritedRepoVars = map[string]struct{}{
 	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
 	"GIT_CONFIG":                       {},
 	// GIT_TEMPLATE_DIR does not locate anything -- it decides what
-	// executable code lands in a repository this package CREATES. `git
-	// clone` copies the named directory's hooks/ into the new repository
-	// and runs post-checkout out of it, so an ambient value is arbitrary
-	// code execution on Clone, under this package's otherwise-complete
-	// isolation (measured on git 2.50.1). It is listed here rather than
-	// left to the "locating" charter because that charter is what hid it
-	// in internal/cli for a revision; see gitenv.go's own note.
+	// executable code lands in a repository this package CREATES, and on
+	// THIS side that is not a one-shot problem the way "code execution on
+	// Clone" would suggest. Clone here is `clone --mirror` into a
+	// LONG-LIVED bare mirror that internal/mirrorsync then fetches into on
+	// every scheduled tick, forever.
+	//
+	// Measured on git 2.50.1 against exactly that shape. post-checkout does
+	// NOT fire, because a bare clone checks out no tree -- but
+	// reference-transaction fires instead, four times during the clone, and
+	// the hooks are COPIED INTO THE MIRROR'S hooks/ DIRECTORY, where they
+	// persist. A later fetch into that mirror fired them again with
+	// GIT_TEMPLATE_DIR no longer set anywhere in the environment.
+	//
+	// So the accurate statement is PERMANENT CODE EXECUTION INSIDE THE LOAM
+	// SERVER, planted once by one ambient variable at enrollment time and
+	// re-executed on every sync of that repo thereafter, by a server process
+	// that has every forge credential this instance holds. That is the
+	// sharpest thing on either deny list, and it is why this variable is
+	// listed here rather than left to the "locating" charter -- that
+	// charter is what hid it in internal/cli for a revision; see gitenv.go.
+	//
+	// It also gives the "fetch uses dest's own hooks" residual real weight
+	// on this side: internal/cli's Fetch runs against a clone made two
+	// lines earlier, but THIS package's mirror is the dest of every fetch
+	// for the life of the repo, so anything that ever lands in its hooks/
+	// stays live indefinitely.
 	"GIT_TEMPLATE_DIR": {},
 }
 

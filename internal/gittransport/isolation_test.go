@@ -267,56 +267,53 @@ func TestTransport_LsRemoteIgnoresAmbientGitDir(t *testing.T) {
 }
 
 // TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable pins the
-// deny list as a list, so removing an entry is a test failure rather than a
-// silent regression, and pins that unrelated variables survive -- this
-// package's environment is deliberately os.Environ() plus overrides (see
-// internal/gitrun's package doc on why that base model is right here), so
-// over-filtering would be its own defect.
+// deny list against a HARDCODED LITERAL, and that is the entire point of
+// how it is written.
 //
-// It exercises the helper DIRECTLY, so it is adequate only as a PAIR with
-// TestTransport_GitEnvCarriesExactlyOneGitDir: this one keeps passing if
-// gitEnv stops calling dropInheritedRepoVars at all, and that one is what
-// catches it. Neither name says so on its own, hence this note.
+// The previous version built its input with `for name := range
+// inheritedRepoVars` and then checked membership against that same map. It
+// could not fail: deleting an entry removed it from the input and from the
+// expectation together, and the `assert.Len` on the survivors moved in
+// lockstep too. Deleting GIT_TEMPLATE_DIR left it GREEN. Assertion and
+// subject shared a code path, so no deletion from the server-side deny list
+// was detectable by any test in this package -- while the internal/cli
+// sibling, which spells its list out, caught exactly that mutation.
+//
+// The round-2 note about this test being "adequate only as a pair with
+// TestTransport_GitEnvCarriesExactlyOneGitDir" was true about WIRING and
+// silent about MEMBERSHIP, which made the hole harder to spot rather than
+// easier. Both are now covered: the literal below catches a deletion, and
+// the sibling catches gitEnv ceasing to call this at all.
+//
+// Keeping the two lists in sync is a manual obligation, deliberately: an
+// automated cross-check would reintroduce the shared code path that caused
+// this.
 func TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable(t *testing.T) {
 	t.Parallel()
+	mustDrop := []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_TEMPLATE_DIR",
+	}
 	environ := []string{"PATH=/usr/bin", "HTTPS_PROXY=http://proxy.example"}
-	for name := range inheritedRepoVars {
+	for _, name := range mustDrop {
 		environ = append(environ, name+"=/some/hostile/path")
 	}
 
 	filtered := dropInheritedRepoVars(environ)
 
+	surviving := make(map[string]struct{}, len(filtered))
 	for _, kv := range filtered {
 		name, _, _ := strings.Cut(kv, "=")
-		_, hostile := inheritedRepoVars[name]
-		assert.False(t, hostile, "%s locates a repository and must never be inherited", name)
+		surviving[name] = struct{}{}
 	}
-	assert.Len(t, filtered, 2, "only the two unrelated entries should survive")
-}
-
-// TestTransport_GitEnvCarriesExactlyOneGitDir pins that gitEnv's own GIT_DIR
-// is the ONLY one, rather than an override appended after an inherited
-// entry. exec.Cmd resolves duplicates last-wins, so an append alone would
-// happen to work -- a single entry is what makes it true independently of
-// that, and the count is what would catch GIT_DIR being dropped from
-// inheritedRepoVars.
-//
-// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
-// ancestor.
-func TestTransport_GitEnvCarriesExactlyOneGitDir(t *testing.T) {
-	t.Setenv("GIT_DIR", "/an/inherited/repository/.git")
-	home := t.TempDir()
-
-	var got []string
-	for _, kv := range gitEnv(home, "") {
-		if name, value, _ := strings.Cut(kv, "="); name == "GIT_DIR" {
-			got = append(got, value)
-		}
+	for _, name := range mustDrop {
+		_, stillThere := surviving[name]
+		assert.False(t, stillThere, "%s must be dropped -- it relocates a repository or plants executable code, and must never be inherited", name)
 	}
-
-	require.Len(t, got, 1, "exactly one GIT_DIR must survive")
-	assert.Equal(t, filepath.Join(home, "unused-git-dir"), got[0])
-	assert.NoFileExists(t, got[0], "the GIT_DIR gitEnv names must not exist, or git would discover a repository there")
+	assert.Len(t, filtered, 2, "only the two unrelated entries should survive -- this package's env is os.Environ() plus overrides, so over-filtering is its own defect")
+	assert.Contains(t, surviving, "HTTPS_PROXY", "a real network git invocation legitimately wants the host's proxy configuration")
 }
 
 // newHitCountingServer returns an HTTP server's URL and a func reporting how

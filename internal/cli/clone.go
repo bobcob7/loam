@@ -328,16 +328,31 @@ func newGitCloner() gitCloner { return execGitCloner{} }
 // clone's later fetches/pushes still carry the same headers with no
 // separate write.
 //
-// It runs DETACHED (see gitenv.go). `git clone` reads no ENCLOSING
-// repository -- verified against git 2.50.1: an enclosing url.insteadOf,
-// http.extraHeader and core.hooksPath are all ignored -- so unlike LsRemote
-// this is not closing the reported defect. What it closes is the other half
-// of the same boundary: an AMBIENT GIT_CONFIG_PARAMETERS (which a parent
-// git sets on every child it spawns, so a `loam clone` run from a hook or
-// an alias inherits one) carries arbitrary config into this clone,
-// url.insteadOf included, and would silently redirect the very first
-// request to a host loam never named. Detachment neutralises that channel
-// along with GIT_DIR and the rest.
+// It runs DETACHED (see gitenv.go), and the two halves of that do very
+// different amounts of work -- worth separating, because one is load-bearing
+// and the other is not:
+//
+//   - The ENVIRONMENT STRIPPING is load-bearing. An ambient
+//     GIT_CONFIG_PARAMETERS -- which git sets on the children of an alias,
+//     so a `loam clone` invoked that way inherits one -- carries arbitrary
+//     config into this clone, url.insteadOf included, and would silently
+//     redirect the very first request to a host loam never named. It also
+//     carried init.templatedir, which was CODE EXECUTION. GIT_TEMPLATE_DIR
+//     is the same execution by a shorter route. All are stripped, and all
+//     are pinned by tests.
+//   - The detached GIT_DIR itself is BELT-AND-BRACES, and deliberately not
+//     pinned, because there is nothing to observe. `git clone` establishes
+//     its own repository at the destination and consults GIT_DIR for
+//     nothing, and it reads no enclosing repository either (verified on git
+//     2.50.1: an enclosing url.insteadOf, core.hooksPath and
+//     http.extraHeader are all ignored). Cloning with and without the
+//     detached GIT_DIR, from inside a repository carrying all three,
+//     produced byte-identical destination configs. It is kept because it is
+//     free and it is the right default for a call site that must read no
+//     repository -- not because it closes anything today. See
+//     TestGitSubprocessEnv_DetachedGitDirPointsOutsideTheEnclosingRepository
+//     for why no test claims otherwise.
+//
 // The LEADING empty `--config http.extraHeader=` is the same reset
 // execGitRefs.LsRemote uses, for the same reason and against the same layer
 // (loam-54ze round 2). Detachment closes the enclosing repository; it does
@@ -361,10 +376,27 @@ func newGitCloner() gitCloner { return execGitCloner{} }
 // --config persists, so the clone's .git/config carries the empty entry
 // ahead of the three real ones, and every LATER fetch and push from that
 // clone is reset the same way (measured: an operation from inside the clone
-// sent [real], not [GLOBAL-ATTACKER real]). That is the wanted behaviour --
-// an agent's clone should assert that agent's identity and nothing else --
-// but it is a behaviour change beyond this one request, so it is stated
-// here rather than left to be discovered.
+// sent [real], not [GLOBAL-ATTACKER real]).
+//
+// That persistence is the MORE valuable half, not a side effect: it is what
+// protects the plain `git push` an agent runs by hand, which is exactly the
+// path that bypasses loam's own header construction entirely and would
+// otherwise carry whatever the user's global config prepends.
+//
+// IT HAS A COST, and it is stated here because its symptom points nowhere
+// near loam. A LEGITIMATE global http.extraHeader -- a corporate gateway
+// token, a routing header -- is silently dropped from a loam clone's
+// operations too, and presents as an unexplained network failure with
+// nothing implicating loam. Measured against a header-logging server: with
+// a global "X-Corp-Route: eu-west" set, an operation from inside a loam
+// clone sent only Loam-Agent-Name, and X-Corp-Route was absent.
+//
+// The workaround is verified and is one command: re-add the header to the
+// CLONE's own config (`git -C <clone> config --add http.extraHeader
+// "X-Corp-Route: eu-west"`). Because the reset lives at the head of the
+// clone's own multi-valued list, anything added afterward lands AFTER it
+// and survives -- measured, both X-Corp-Route and loam's identity arrived
+// on the wire together.
 func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, headers []string) error {
 	args := []string{"clone", "--branch", branch, "--single-branch", "--config", "http.extraHeader="}
 	for _, h := range headers {
