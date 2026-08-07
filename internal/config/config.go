@@ -226,7 +226,8 @@ func loadOptional(cfg *Config) error {
 	return nil
 }
 
-// loadTelemetry reads the three OTel variables (loam-p56y). All three are
+// loadTelemetry reads the four OTel variables (loam-p56y, plus
+// LOAM_OTEL_DB_ACQUIRE_THRESHOLD from loam-9v9s). All four are
 // OPTIONAL, via lookupDefault, and that is a structural requirement rather
 // than a preference: internal/deploycheck's
 // TestComposeEnvironmentSatisfiesConfigLoad RUNS this loader against

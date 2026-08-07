@@ -233,6 +233,18 @@ config:
   # pool-exhaustion one: a FAILED acquire is always recorded regardless
   # (internal/config's Config.OTelDBAcquireThreshold). Negative durations
   # are rejected at startup; the schema's pattern rejects them at render.
+  #
+  # "0s" DOES NOT MEAN "SPAN EVERY ACQUIRE". It is accepted, and it is
+  # indistinguishable from leaving this empty: internal/db's newQueryTracer
+  # collapses any non-positive threshold back to its own 50ms default
+  # (internal/db/config.go's AcquireSpanThreshold comment gives the reason
+  # -- pgxpool acquires a connection for every query, so a zero meaning "no
+  # threshold" would silently double the span count of any process that
+  # left the field unset). Tracing every acquire is not something this knob
+  # can express; wanting it is a change in internal/db. Called out here
+  # because "set it to zero to see everything" is the first thing an
+  # operator with a hidden slow pool would try, and it fails by looking
+  # exactly like success.
   otelDbAcquireThreshold: ""
 
 persistence:

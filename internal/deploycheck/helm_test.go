@@ -223,16 +223,41 @@ func TestHelmValuesSchemaExists(t *testing.T) {
 	// declared without additionalProperties reopens its entire subtree to
 	// typos, and a count-based check would need a magic slack number that
 	// goes stale the first time a legitimately free-form map is added.
-	// Declaring `true` is a perfectly acceptable answer here -- the test
-	// asks only that openness be a DECISION recorded in the file, not an
-	// omission.
+	// Declaring an open answer is still perfectly acceptable here -- the
+	// test asks that openness be a DECISION recorded in the file, not an
+	// omission -- but since loam-wu10 it must be recorded in PROSE as well
+	// as in a boolean, and that second half is not decoration. An open node
+	// is an escape hatch out of
+	// TestHelmSchemaDeclaresEveryValuesKeyTheTemplatesRead below, which
+	// treats reaching one as the key being accounted for: that is right for
+	// a real Kubernetes-API passthrough and a hole for anything else. A
+	// review of this branch found the hatch reachable in TWO LINES for any
+	// of the chart's closed objects -- setting persistence.additional
+	// Properties to true and deleting persistence.properties.size left the
+	// whole package green, silently un-guarding that subtree.
+	//
+	// Requiring a description does not make that impossible; nothing in a
+	// unit test can stop a determined edit, and this guards rot rather than
+	// adversaries. What it does is make the edit cost a SENTENCE, and a
+	// sentence is the thing a reviewer actually reads. It costs nothing
+	// today: the chart's genuine passthroughs are the five
+	// docs/deployment-spec.md already enumerates and justifies one by one,
+	// so each of them has an argument to state. An object with no argument
+	// available -- image, namespace, secret, postgres, persistence,
+	// ingress, config, all of which mirror a finite vocabulary this chart
+	// defines itself -- has nothing to write in it, which is the point.
 	var walk func(path string, node map[string]any)
 	walk = func(path string, node map[string]any) {
 		properties, hasProperties := node["properties"].(map[string]any)
 		if node["type"] == "object" || hasProperties {
-			_, declared := node["additionalProperties"]
+			additional, declared := node["additionalProperties"]
 			assert.True(t, declared,
 				"values.schema.json's %s is an object that does not declare additionalProperties, so every unknown key beneath it is accepted and silently discarded -- the exact loam-uwus failure. Set it to false, or to a schema, or explicitly to true if openness is intended.", path)
+			if declared && additional != false {
+				description, _ := node["description"].(string)
+				assert.NotEmpty(t, description,
+					"values.schema.json's %s is OPEN to unknown keys and does not say why. Openness here is not just laxer validation: it is an escape hatch out of TestHelmSchemaDeclaresEveryValuesKeyTheTemplatesRead, which stops checking at an open node, so every values key beneath %s becomes unguarded. That is correct for a verbatim passthrough of somebody else's API and wrong for a vocabulary this chart defines itself. Write the argument in a description, or close it.", path, path)
+			}
 		}
 		for name, child := range properties {
 			if sub, ok := child.(map[string]any); ok {
@@ -407,9 +432,11 @@ func resolveSchemaRef(t *testing.T, root, node map[string]any) map[string]any {
 //
 // which is verbatim the error loam-wu10 was filed with. Verified by
 // mutation rather than argued: deleting ONLY the schema entry, leaving the
-// template and values.yaml intact, left all seven pre-existing tests
+// template and values.yaml intact, left every other test in this package
 // passing and `helm template --set config.otelDbAcquireThreshold=5ms`
-// failing. Since loam-uwus closed the schema, a forgotten declaration is no
+// failing. (Deliberately not "all N of them". A test count written into a
+// comment is the same construct as the key list this branch deleted --
+// nothing regenerates it and nothing fails when it goes stale.) Since loam-uwus closed the schema, a forgotten declaration is no
 // longer a silent no-op -- it is a chart the operator cannot render. Louder,
 // but still discovered by the wrong person at the wrong moment.
 //

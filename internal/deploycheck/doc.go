@@ -88,6 +88,44 @@
 //     which is a policy in the same sense as the list in
 //     TestMustSetVariablesHaveNoWorkingDefault: not derivable from anything.
 //
+// A THIRD LINK IN THE SAME CHAIN, AND ONE CLASS THIS PACKAGE CANNOT REACH
+// AT ALL (loam-wu10).
+//
+// The chart guard above checks that a template NAMES every variable
+// internal/config reads. That is one link of four, and the two after it
+// were unchecked: a template can read .Values.config.foo that
+// values.schema.json does not declare, or that values.yaml never defaults.
+// Since loam-uwus closed the schema, the first of those is no longer a
+// silent no-op -- it is a chart the operator CANNOT RENDER, failing with
+// `at '/config': additional properties 'foo' not allowed`. Louder, but
+// still landing on the consumer at render time rather than the author at
+// commit time. TestHelmSchemaDeclaresEveryValuesKeyTheTemplatesRead,
+// TestHelmDefaultValuesDefineEveryKeyTheTemplatesRead and their reverse,
+// TestEveryHelmValueIsReadBySomeTemplate, close the loop with the same
+// discovered-both-sides shape as everything else here.
+//
+// The lesson worth writing down is the one about the guard that WORKED.
+// loam-wu10 was filed because helm/loam could not carry
+// LOAM_OTEL_DB_ACQUIRE_THRESHOLD, and the obvious reading is that
+// TestHelmChartCanCarryEveryConfigVariable missed it. IT DID NOT. It caught
+// it, correctly, and sat red on main for a day while several agents each
+// spent a checkout proving the failure was pre-existing rather than theirs.
+// What it could not do was fire on either branch that caused it: loam-9v9s
+// added the variable to internal/config on a branch cut before helm_test.go
+// existed, loam-uwus added helm_test.go on a branch where internal/config
+// did not yet read that variable, and both were legitimately green. The
+// contradiction did not exist in any single tree until the second merge.
+//
+// SO NO TEST IN THIS PACKAGE CAN PREVENT THAT CLASS, and adding one is
+// wasted work. A semantic merge conflict is invisible to a gate that tests
+// branches instead of merge results; the fix is a merge queue or a
+// post-merge gate, which is CI topology and not a Go file. That is filed
+// separately as loam-2x89. What this package CAN do -- and now does -- is
+// make the red arrive on the first branch to introduce the contradiction
+// wherever the two halves are visible from one tree, which is why the three
+// new tests above are worth having even though they could not have caught
+// the bug that prompted them.
+//
 // It lives in internal/ rather than under deploy/ so that deploy/ stays what
 // it looks like -- a directory of YAML -- and so `go build ./...` has a
 // normal package to build rather than a test-only directory.
