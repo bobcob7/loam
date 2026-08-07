@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // --- scaffolding ---
@@ -636,34 +638,386 @@ func TestRunWorkReadCommands_TooManyPositionals_ExitUsage(t *testing.T) {
 	}
 }
 
+// TestRunWorkShow_SurfacesTheCommitsARoundTwoReviewerNeeds closes the
+// bead's second item. `show` reported round.number but NOT the commit the
+// previous round ended at -- the one piece of state a re-review needs to
+// scope itself. One reviewer carried it forward by hand across three
+// rounds; a reviewer without notes could not scope at all.
+func TestRunWorkShow_SurfacesTheCommitsARoundTwoReviewerNeeds(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			wb := &loamv1.WorkBranch{Repo: req.Msg.GetRepo(), Name: req.Msg.GetWorkBranch(), Target: "main"}
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: wb}), nil
+		},
+		ListVerdictsFunc: noVerdictsFunc,
+	}
+	var encoded any
+	deps := diffDeps(client, noResolveWorkspace(), advertisingRefs(), &encoded)
+	require.NoError(t, runWorkShow(t.Context(), deps, []string{testRepo, testWorkBranch}))
+	out, ok := encoded.(workShowOutput)
+	require.True(t, ok)
+	assert.Equal(t, testTargetSHA, out.TargetSHA)
+	assert.Equal(t, testServerHeadSHA, out.HeadSHA)
+	assert.Empty(t, out.RefsError)
+}
+
+// TestRunWorkShow_RefsFailure_IsReportedButNotFatal pins the difference
+// from `work diff`: `show`'s own answer is complete without the SHAs, so a
+// failure to obtain them is stated, not raised -- but never merely omitted.
+func TestRunWorkShow_RefsFailure_IsReportedButNotFatal(t *testing.T) {
+	t.Parallel()
+	client := &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			wb := &loamv1.WorkBranch{Repo: req.Msg.GetRepo(), Name: req.Msg.GetWorkBranch(), Target: "main"}
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: wb}), nil
+		},
+		ListVerdictsFunc: noVerdictsFunc,
+	}
+	refs := &gitRefsMock{
+		LsRemoteFunc: func(context.Context, string, []string, []string) (map[string]string, error) {
+			return nil, errors.New("dial tcp: connection refused")
+		},
+	}
+	var encoded any
+	require.NoError(t, runWorkShow(t.Context(), diffDeps(client, noResolveWorkspace(), refs, &encoded), []string{testRepo, testWorkBranch}))
+	out, ok := encoded.(workShowOutput)
+	require.True(t, ok)
+	assert.Empty(t, out.HeadSHA)
+	assert.Contains(t, out.RefsError, "connection refused")
+}
+
 // --- work diff ---
+
+// The two commits the diff fixtures below place in the server's mirror,
+// plus a third that exists only in the caller's clone. All three are
+// distinct so no assertion can pass by conflating them.
+const (
+	testTargetSHA     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testServerHeadSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testLocalHeadSHA  = "cccccccccccccccccccccccccccccccccccccccc"
+)
+
+// diffClient builds a WorkBranchClientMock answering the two RPCs `work
+// diff` makes: GetWorkBranch (for the target) and GetWorkBranchDiff.
+func diffClient(target, diff string) *WorkBranchClientMock {
+	return &WorkBranchClientMock{
+		GetWorkBranchFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+			wb := &loamv1.WorkBranch{Repo: req.Msg.GetRepo(), Name: req.Msg.GetWorkBranch(), Target: target}
+			return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: wb}), nil
+		},
+		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+			return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: diff}), nil
+		},
+	}
+}
+
+// advertisingRefs is a gitRefs double whose LsRemote reports the fixture
+// tips for whatever refs it is asked about.
+func advertisingRefs() *gitRefsMock {
+	return &gitRefsMock{
+		LsRemoteFunc: func(_ context.Context, _ string, _, refs []string) (map[string]string, error) {
+			shas := map[string]string{}
+			for _, ref := range refs {
+				if strings.HasPrefix(ref, refnames.ReservedNamespace) {
+					shas[ref] = testServerHeadSHA
+					continue
+				}
+				shas[ref] = testTargetSHA
+			}
+			return shas, nil
+		},
+	}
+}
+
+// cloneWorkspace is a WorkspaceResolverMock that reports the caller IS
+// standing in a clone of repo with workBranch checked out -- the
+// precondition for the unpushed-commit check to run at all.
+func cloneWorkspace(repo, workBranch string) *WorkspaceResolverMock {
+	return &WorkspaceResolverMock{
+		ResolveRepoFunc:       func() (string, error) { return repo, nil },
+		ResolveWorkBranchFunc: func() (string, error) { return workBranch, nil },
+	}
+}
+
+// diffDeps is workTestDeps with a gitRefs double wired in -- `work diff`'s
+// only new collaborator -- and a Config carrying the server URL and agent
+// identity, which `work diff` now needs to address the git endpoint.
+func diffDeps(client WorkBranchClient, ws WorkspaceResolver, refs gitRefs, encoded *any) *Deps {
+	deps := workTestDeps(client, ws, "", encoded)
+	deps.gitRefs = refs
+	deps.config = cloneTestConfig("https://loam.example")
+	return deps
+}
 
 func TestRunWorkDiff_Success_EncodesTheDiffAsAField(t *testing.T) {
 	t.Parallel()
 	var captured *loamv1.GetWorkBranchDiffRequest
-	client := &WorkBranchClientMock{
-		GetWorkBranchDiffFunc: func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
-			captured = req.Msg
-			return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: "--- a/auth.go\n+++ b/auth.go\n"}), nil
-		},
+	client := diffClient("main", "--- a/auth.go\n+++ b/auth.go\n")
+	client.GetWorkBranchDiffFunc = func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+		captured = req.Msg
+		return connect.NewResponse(&loamv1.GetWorkBranchDiffResponse{Diff: "--- a/auth.go\n+++ b/auth.go\n"}), nil
 	}
 	var encoded any
-	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	err := runWorkDiff(t.Context(), diffDeps(client, noResolveWorkspace(), advertisingRefs(), &encoded), []string{testRepo, testWorkBranch})
 	require.NoError(t, err)
 	require.NotNil(t, captured)
 	assert.Equal(t, testWorkBranch, captured.GetWorkBranch())
-	assert.JSONEq(t, `{"diff":"--- a/auth.go\n+++ b/auth.go\n"}`, jsonOf(t, encoded))
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Equal(t, "--- a/auth.go\n+++ b/auth.go\n", out.Diff)
+	assert.Equal(t, diffFormatPatch, out.Format)
+}
+
+// TestRunWorkDiff_NamesTheCommitsItWasComputedFrom is loam-hwru's headline
+// fix. A bare diff is unfalsifiable: an author cannot tell it excludes an
+// unpushed commit and a reviewer cannot tell it covers the range they were
+// asked to review. Naming both endpoints makes the same output
+// self-checking, and the range is spelled so it can be re-run verbatim.
+func TestRunWorkDiff_NamesTheCommitsItWasComputedFrom(t *testing.T) {
+	t.Parallel()
+	refs := advertisingRefs()
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), noResolveWorkspace(), refs, &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Equal(t, "main", out.Target)
+	assert.Equal(t, testTargetSHA, out.TargetSHA)
+	assert.Equal(t, testServerHeadSHA, out.HeadSHA)
+	assert.Equal(t, testTargetSHA+"..."+testServerHeadSHA, out.Range, "three dots: the range starts at the merge base, matching internal/gitdiff")
+	assert.Empty(t, out.RefsError)
+	require.Len(t, refs.LsRemoteCalls(), 1)
+	assert.Equal(t, []string{"refs/heads/main", refnames.WorkBranch(testWorkBranch)}, refs.LsRemoteCalls()[0].Refs)
+	assert.Equal(t, "https://loam.example/git/bobcob7/doc-server.git", refs.LsRemoteCalls()[0].URL)
+}
+
+// TestRunWorkDiff_RefusesWhenTheCloneHoldsUnpushedCommits closes the third
+// failure mode: `work diff` reflects the PUSHED branch, so calling it
+// before pushing returned a well-formed diff of an older state. It must now
+// refuse -- and refuse BEFORE fetching the diff, so there is no
+// almost-right artifact to misread.
+func TestRunWorkDiff_RefusesWhenTheCloneHoldsUnpushedCommits(t *testing.T) {
+	t.Parallel()
+	client := diffClient("main", "stale patch")
+	refs := advertisingRefs()
+	refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testLocalHeadSHA, nil }
+	refs.CountCommitsAheadFunc = func(context.Context, string, string) (int, error) { return 2, nil }
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(client, cloneWorkspace(testRepo, testWorkBranch), refs, &encoded), nil)
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded, "a refusal must encode nothing, least of all a stale diff")
+	assert.Contains(t, err.Error(), testLocalHeadSHA)
+	assert.Contains(t, err.Error(), testServerHeadSHA, "both tips must be named so the author can see which commit is missing")
+	assert.Empty(t, client.GetWorkBranchDiffCalls(), "the refusal must come before the diff is fetched")
+}
+
+// TestRunWorkDiff_AllowUnpushed_ProceedsAndSaysSo pins the escape hatch,
+// and that taking it is RECORDED rather than silent.
+func TestRunWorkDiff_AllowUnpushed_ProceedsAndSaysSo(t *testing.T) {
+	t.Parallel()
+	refs := advertisingRefs()
+	refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testLocalHeadSHA, nil }
+	refs.CountCommitsAheadFunc = func(context.Context, string, string) (int, error) { return 2, nil }
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), cloneWorkspace(testRepo, testWorkBranch), refs, &encoded), []string{"--allow-unpushed"})
+	require.NoError(t, err)
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Equal(t, testLocalHeadSHA, out.LocalHeadSHA)
+	assert.Contains(t, out.LocalCheck, "2 local commit(s) are not on the server")
+}
+
+// TestRunWorkDiff_LocalHeadMatchesServerTip_SaysSoExplicitly is the other
+// half: the check must report success in words, not by staying silent.
+// "we did not check" and "we checked and it was fine" are different
+// answers, and an absent field cannot tell them apart.
+func TestRunWorkDiff_LocalHeadMatchesServerTip_SaysSoExplicitly(t *testing.T) {
+	t.Parallel()
+	refs := advertisingRefs()
+	refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testServerHeadSHA, nil }
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), cloneWorkspace(testRepo, testWorkBranch), refs, &encoded), nil)
+	require.NoError(t, err)
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Equal(t, testServerHeadSHA, out.LocalHeadSHA)
+	assert.Equal(t, "local HEAD matches the server's tip", out.LocalCheck)
+	assert.Empty(t, refs.CountCommitsAheadCalls(), "equal SHAs need no commit count")
+}
+
+// TestRunWorkDiff_OutsideAClone_ReportsThatTheCheckWasSkipped pins that a
+// reviewer running `work diff` from anywhere still gets a stated outcome,
+// naming the reason no local comparison was possible.
+func TestRunWorkDiff_OutsideAClone_ReportsThatTheCheckWasSkipped(t *testing.T) {
+	t.Parallel()
+	refs := advertisingRefs()
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), noResolveWorkspace(), refs, &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err)
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Empty(t, out.LocalHeadSHA)
+	assert.Contains(t, out.LocalCheck, "not checked: not inside a clone")
+	assert.Empty(t, refs.RevParseCalls(), "no local git fact may be read outside the matching clone")
+}
+
+// TestRunWorkDiff_DifferentCloneCheckedOut_DoesNotCompareAgainstIt guards
+// the case that would produce a confidently wrong answer: standing in some
+// OTHER clone, whose HEAD has nothing to do with this work branch.
+//
+// The two halves of insideCloneOf are exercised SEPARATELY on purpose. A
+// single fixture differing in both repo and branch would pass even if one
+// of the two checks were deleted -- the other would still catch it -- which
+// is precisely the "what do the fixtures make indistinguishable" trap. The
+// same-branch-name case is not contrived either: work-branch names are
+// randomly generated per repo, but an agent running several repos' clones
+// side by side is the ordinary shape here.
+func TestRunWorkDiff_DifferentCloneCheckedOut_DoesNotCompareAgainstIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		repo       string
+		workBranch string
+	}{
+		{"different repo, same branch name", "someone-else/other-repo", testWorkBranch},
+		{"same repo, different branch", testRepo, "wb-different"},
+		{"neither matches", "someone-else/other-repo", "wb-different"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			refs := advertisingRefs()
+			refs.RevParseFunc = func(context.Context, string, string) (string, error) { return testLocalHeadSHA, nil }
+			var encoded any
+			ws := cloneWorkspace(tt.repo, tt.workBranch)
+			err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), ws, refs, &encoded), []string{testRepo, testWorkBranch})
+			require.NoError(t, err)
+			out, ok := encoded.(workDiffOutput)
+			require.True(t, ok)
+			assert.Empty(t, out.LocalHeadSHA)
+			assert.Empty(t, refs.RevParseCalls(), "no local git fact may be read from a clone that is not this work branch's")
+		})
+	}
+}
+
+// TestRunWorkDiff_LsRemoteFailure_ReportsWhyRatherThanOmitting pins that an
+// unidentifiable diff SAYS it is unidentifiable. Omitting the SHAs silently
+// would restore exactly the unfalsifiable artifact this bead is about.
+func TestRunWorkDiff_LsRemoteFailure_ReportsWhyRatherThanOmitting(t *testing.T) {
+	t.Parallel()
+	refs := &gitRefsMock{
+		LsRemoteFunc: func(context.Context, string, []string, []string) (map[string]string, error) {
+			return nil, errors.New("fatal: could not read Username")
+		},
+	}
+	var encoded any
+	err := runWorkDiff(t.Context(), diffDeps(diffClient("main", "patch"), noResolveWorkspace(), refs, &encoded), []string{testRepo, testWorkBranch})
+	require.NoError(t, err, "an unidentifiable diff is still a diff; the failure is reported, not fatal")
+	out, ok := encoded.(workDiffOutput)
+	require.True(t, ok)
+	assert.Empty(t, out.Range)
+	assert.Contains(t, out.RefsError, "could not read Username")
+	assert.Contains(t, out.LocalCheck, "not checked")
+}
+
+// TestRunWorkDiff_RemoteAdvertisesNeitherRef_SaysSoRatherThanHalfNaming
+// covers remoteTips' third failure branch, which the other two do not
+// reach: ls-remote SUCCEEDS but the remote does not advertise one of the
+// refs. Without this the branch is dead as far as the suite is concerned,
+// and the observable result -- a `range` built from a half-empty pair, or
+// silently absent -- is exactly the unfalsifiable artifact this bead is
+// about. Both directions are covered, since a missing target and a missing
+// head are different server states.
+func TestRunWorkDiff_RemoteAdvertisesNeitherRef_SaysSoRatherThanHalfNaming(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		present string
+	}{
+		{"target advertised, work branch missing", "refs/heads/main"},
+		{"work branch advertised, target missing", refnames.WorkBranch(testWorkBranch)},
+		{"neither advertised", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			refs := &gitRefsMock{
+				LsRemoteFunc: func(context.Context, string, []string, []string) (map[string]string, error) {
+					if tt.present == "" {
+						return map[string]string{}, nil
+					}
+					return map[string]string{tt.present: testServerHeadSHA}, nil
+				},
+			}
+			var encoded any
+			deps := diffDeps(diffClient("main", "patch"), noResolveWorkspace(), refs, &encoded)
+			require.NoError(t, runWorkDiff(t.Context(), deps, []string{testRepo, testWorkBranch}))
+			out, ok := encoded.(workDiffOutput)
+			require.True(t, ok)
+			assert.Empty(t, out.Range, "a range must never be built from a half-known pair")
+			assert.Contains(t, out.RefsError, "does not advertise", "an incompletely identified diff must say so")
+			assert.Contains(t, out.LocalCheck, "not checked", "with no server tip there is nothing to compare a local HEAD against")
+		})
+	}
+}
+
+// TestRunWorkDiff_Stat_SummarizesTheSamePatch pins --stat, whose absence
+// was loam-hwru's cheapest failure: agents typed it, got `unknown flag`,
+// exit 2, and fell back to piping 100KB of escaped JSON through jq.
+func TestRunWorkDiff_Stat_SummarizesTheSamePatch(t *testing.T) {
+	t.Parallel()
+	patch := "diff --git a/auth.go b/auth.go\n--- a/auth.go\n+++ b/auth.go\n@@ -1,2 +1,3 @@\n ctx\n-old\n+new\n+extra\n"
+	for _, args := range [][]string{{"--stat"}, {"--format=stat"}, {"--stat", "--format=stat"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+			var encoded any
+			deps := diffDeps(diffClient("main", patch), noResolveWorkspace(), advertisingRefs(), &encoded)
+			require.NoError(t, runWorkDiff(t.Context(), deps, append([]string{testRepo, testWorkBranch}, args...)))
+			out, ok := encoded.(workDiffOutput)
+			require.True(t, ok)
+			assert.Empty(t, out.Diff, "stat mode replaces the patch rather than accompanying it")
+			require.NotNil(t, out.Stat)
+			assert.Equal(t, 1, out.Stat.FilesChanged)
+			assert.Equal(t, 2, out.Stat.Insertions)
+			assert.Equal(t, 1, out.Stat.Deletions)
+			assert.Equal(t, "auth.go", out.Stat.Files[0].Path)
+		})
+	}
+}
+
+// TestRunWorkDiff_StatAndFormatContradict_ExitsUsage pins that the two
+// spellings disagreeing is a refusal, not a silent precedence rule.
+func TestRunWorkDiff_StatAndFormatContradict_ExitsUsage(t *testing.T) {
+	t.Parallel()
+	var encoded any
+	deps := diffDeps(diffClient("main", "patch"), noResolveWorkspace(), advertisingRefs(), &encoded)
+	err := runWorkDiff(t.Context(), deps, []string{testRepo, testWorkBranch, "--stat", "--format=patch"})
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
+}
+
+func TestRunWorkDiff_UnknownFormat_ExitsUsage(t *testing.T) {
+	t.Parallel()
+	var encoded any
+	deps := diffDeps(diffClient("main", "patch"), noResolveWorkspace(), advertisingRefs(), &encoded)
+	err := runWorkDiff(t.Context(), deps, []string{testRepo, testWorkBranch, "--format=name-only"})
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded)
 }
 
 func TestRunWorkDiff_NotFound_ExitsThree(t *testing.T) {
 	t.Parallel()
 	client := &WorkBranchClientMock{
-		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+		GetWorkBranchFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
 			return nil, notFoundError()
 		},
 	}
 	var encoded any
-	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	err := runWorkDiff(t.Context(), diffDeps(client, noResolveWorkspace(), advertisingRefs(), &encoded), []string{testRepo, testWorkBranch})
 	require.Error(t, err)
 	assert.Equal(t, 3, newErrorMapper().ExitCode(err))
 	assert.Nil(t, encoded)
@@ -680,13 +1034,12 @@ func TestRunWorkDiff_NotFound_ExitsThree(t *testing.T) {
 func TestRunWorkDiff_MissingMirrorRef_ExitsTwoAsPreconditionFailed(t *testing.T) {
 	t.Parallel()
 	const message = "computing diff for work branch bobcob7/doc-server/wb-9c2f1a: ref missing"
-	client := &WorkBranchClientMock{
-		GetWorkBranchDiffFunc: func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
-			return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(message))
-		},
+	client := diffClient("main", "")
+	client.GetWorkBranchDiffFunc = func(context.Context, *connect.Request[loamv1.GetWorkBranchDiffRequest]) (*connect.Response[loamv1.GetWorkBranchDiffResponse], error) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(message))
 	}
 	var encoded any
-	err := runWorkDiff(t.Context(), workTestDeps(client, noResolveWorkspace(), "", &encoded), []string{testRepo, testWorkBranch})
+	err := runWorkDiff(t.Context(), diffDeps(client, noResolveWorkspace(), advertisingRefs(), &encoded), []string{testRepo, testWorkBranch})
 	require.Error(t, err)
 	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
 	ce := mapCommandError(err)

@@ -1196,6 +1196,320 @@ func (mock *gitClonerMock) SetConfigCalls() []struct {
 	return calls
 }
 
+// Ensure, that gitRefsMock does implement gitRefs.
+// If this is not the case, regenerate this file with moq.
+var _ gitRefs = &gitRefsMock{}
+
+// gitRefsMock is a mock implementation of gitRefs.
+//
+//	func TestSomethingThatUsesgitRefs(t *testing.T) {
+//
+//		// make and configure a mocked gitRefs
+//		mockedgitRefs := &gitRefsMock{
+//			CountCommitsAheadFunc: func(ctx context.Context, dir string, base string) (int, error) {
+//				panic("mock out the CountCommitsAhead method")
+//			},
+//			FetchFunc: func(ctx context.Context, dest string, refspecs ...string) error {
+//				panic("mock out the Fetch method")
+//			},
+//			LsRemoteFunc: func(ctx context.Context, url string, headers []string, refs []string) (map[string]string, error) {
+//				panic("mock out the LsRemote method")
+//			},
+//			MergeBaseFunc: func(ctx context.Context, dir string, a string, b string) (string, error) {
+//				panic("mock out the MergeBase method")
+//			},
+//			RevParseFunc: func(ctx context.Context, dir string, rev string) (string, error) {
+//				panic("mock out the RevParse method")
+//			},
+//		}
+//
+//		// use mockedgitRefs in code that requires gitRefs
+//		// and then make assertions.
+//
+//	}
+type gitRefsMock struct {
+	// CountCommitsAheadFunc mocks the CountCommitsAhead method.
+	CountCommitsAheadFunc func(ctx context.Context, dir string, base string) (int, error)
+
+	// FetchFunc mocks the Fetch method.
+	FetchFunc func(ctx context.Context, dest string, refspecs ...string) error
+
+	// LsRemoteFunc mocks the LsRemote method.
+	LsRemoteFunc func(ctx context.Context, url string, headers []string, refs []string) (map[string]string, error)
+
+	// MergeBaseFunc mocks the MergeBase method.
+	MergeBaseFunc func(ctx context.Context, dir string, a string, b string) (string, error)
+
+	// RevParseFunc mocks the RevParse method.
+	RevParseFunc func(ctx context.Context, dir string, rev string) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// CountCommitsAhead holds details about calls to the CountCommitsAhead method.
+		CountCommitsAhead []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dir is the dir argument value.
+			Dir string
+			// Base is the base argument value.
+			Base string
+		}
+		// Fetch holds details about calls to the Fetch method.
+		Fetch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dest is the dest argument value.
+			Dest string
+			// Refspecs is the refspecs argument value.
+			Refspecs []string
+		}
+		// LsRemote holds details about calls to the LsRemote method.
+		LsRemote []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// URL is the url argument value.
+			URL string
+			// Headers is the headers argument value.
+			Headers []string
+			// Refs is the refs argument value.
+			Refs []string
+		}
+		// MergeBase holds details about calls to the MergeBase method.
+		MergeBase []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dir is the dir argument value.
+			Dir string
+			// A is the a argument value.
+			A string
+			// B is the b argument value.
+			B string
+		}
+		// RevParse holds details about calls to the RevParse method.
+		RevParse []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Dir is the dir argument value.
+			Dir string
+			// Rev is the rev argument value.
+			Rev string
+		}
+	}
+	lockCountCommitsAhead sync.RWMutex
+	lockFetch             sync.RWMutex
+	lockLsRemote          sync.RWMutex
+	lockMergeBase         sync.RWMutex
+	lockRevParse          sync.RWMutex
+}
+
+// CountCommitsAhead calls CountCommitsAheadFunc.
+func (mock *gitRefsMock) CountCommitsAhead(ctx context.Context, dir string, base string) (int, error) {
+	if mock.CountCommitsAheadFunc == nil {
+		panic("gitRefsMock.CountCommitsAheadFunc: method is nil but gitRefs.CountCommitsAhead was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Dir  string
+		Base string
+	}{
+		Ctx:  ctx,
+		Dir:  dir,
+		Base: base,
+	}
+	mock.lockCountCommitsAhead.Lock()
+	mock.calls.CountCommitsAhead = append(mock.calls.CountCommitsAhead, callInfo)
+	mock.lockCountCommitsAhead.Unlock()
+	return mock.CountCommitsAheadFunc(ctx, dir, base)
+}
+
+// CountCommitsAheadCalls gets all the calls that were made to CountCommitsAhead.
+// Check the length with:
+//
+//	len(mockedgitRefs.CountCommitsAheadCalls())
+func (mock *gitRefsMock) CountCommitsAheadCalls() []struct {
+	Ctx  context.Context
+	Dir  string
+	Base string
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Dir  string
+		Base string
+	}
+	mock.lockCountCommitsAhead.RLock()
+	calls = mock.calls.CountCommitsAhead
+	mock.lockCountCommitsAhead.RUnlock()
+	return calls
+}
+
+// Fetch calls FetchFunc.
+func (mock *gitRefsMock) Fetch(ctx context.Context, dest string, refspecs ...string) error {
+	if mock.FetchFunc == nil {
+		panic("gitRefsMock.FetchFunc: method is nil but gitRefs.Fetch was just called")
+	}
+	callInfo := struct {
+		Ctx      context.Context
+		Dest     string
+		Refspecs []string
+	}{
+		Ctx:      ctx,
+		Dest:     dest,
+		Refspecs: refspecs,
+	}
+	mock.lockFetch.Lock()
+	mock.calls.Fetch = append(mock.calls.Fetch, callInfo)
+	mock.lockFetch.Unlock()
+	return mock.FetchFunc(ctx, dest, refspecs...)
+}
+
+// FetchCalls gets all the calls that were made to Fetch.
+// Check the length with:
+//
+//	len(mockedgitRefs.FetchCalls())
+func (mock *gitRefsMock) FetchCalls() []struct {
+	Ctx      context.Context
+	Dest     string
+	Refspecs []string
+} {
+	var calls []struct {
+		Ctx      context.Context
+		Dest     string
+		Refspecs []string
+	}
+	mock.lockFetch.RLock()
+	calls = mock.calls.Fetch
+	mock.lockFetch.RUnlock()
+	return calls
+}
+
+// LsRemote calls LsRemoteFunc.
+func (mock *gitRefsMock) LsRemote(ctx context.Context, url string, headers []string, refs []string) (map[string]string, error) {
+	if mock.LsRemoteFunc == nil {
+		panic("gitRefsMock.LsRemoteFunc: method is nil but gitRefs.LsRemote was just called")
+	}
+	callInfo := struct {
+		Ctx     context.Context
+		URL     string
+		Headers []string
+		Refs    []string
+	}{
+		Ctx:     ctx,
+		URL:     url,
+		Headers: headers,
+		Refs:    refs,
+	}
+	mock.lockLsRemote.Lock()
+	mock.calls.LsRemote = append(mock.calls.LsRemote, callInfo)
+	mock.lockLsRemote.Unlock()
+	return mock.LsRemoteFunc(ctx, url, headers, refs)
+}
+
+// LsRemoteCalls gets all the calls that were made to LsRemote.
+// Check the length with:
+//
+//	len(mockedgitRefs.LsRemoteCalls())
+func (mock *gitRefsMock) LsRemoteCalls() []struct {
+	Ctx     context.Context
+	URL     string
+	Headers []string
+	Refs    []string
+} {
+	var calls []struct {
+		Ctx     context.Context
+		URL     string
+		Headers []string
+		Refs    []string
+	}
+	mock.lockLsRemote.RLock()
+	calls = mock.calls.LsRemote
+	mock.lockLsRemote.RUnlock()
+	return calls
+}
+
+// MergeBase calls MergeBaseFunc.
+func (mock *gitRefsMock) MergeBase(ctx context.Context, dir string, a string, b string) (string, error) {
+	if mock.MergeBaseFunc == nil {
+		panic("gitRefsMock.MergeBaseFunc: method is nil but gitRefs.MergeBase was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Dir string
+		A   string
+		B   string
+	}{
+		Ctx: ctx,
+		Dir: dir,
+		A:   a,
+		B:   b,
+	}
+	mock.lockMergeBase.Lock()
+	mock.calls.MergeBase = append(mock.calls.MergeBase, callInfo)
+	mock.lockMergeBase.Unlock()
+	return mock.MergeBaseFunc(ctx, dir, a, b)
+}
+
+// MergeBaseCalls gets all the calls that were made to MergeBase.
+// Check the length with:
+//
+//	len(mockedgitRefs.MergeBaseCalls())
+func (mock *gitRefsMock) MergeBaseCalls() []struct {
+	Ctx context.Context
+	Dir string
+	A   string
+	B   string
+} {
+	var calls []struct {
+		Ctx context.Context
+		Dir string
+		A   string
+		B   string
+	}
+	mock.lockMergeBase.RLock()
+	calls = mock.calls.MergeBase
+	mock.lockMergeBase.RUnlock()
+	return calls
+}
+
+// RevParse calls RevParseFunc.
+func (mock *gitRefsMock) RevParse(ctx context.Context, dir string, rev string) (string, error) {
+	if mock.RevParseFunc == nil {
+		panic("gitRefsMock.RevParseFunc: method is nil but gitRefs.RevParse was just called")
+	}
+	callInfo := struct {
+		Ctx context.Context
+		Dir string
+		Rev string
+	}{
+		Ctx: ctx,
+		Dir: dir,
+		Rev: rev,
+	}
+	mock.lockRevParse.Lock()
+	mock.calls.RevParse = append(mock.calls.RevParse, callInfo)
+	mock.lockRevParse.Unlock()
+	return mock.RevParseFunc(ctx, dir, rev)
+}
+
+// RevParseCalls gets all the calls that were made to RevParse.
+// Check the length with:
+//
+//	len(mockedgitRefs.RevParseCalls())
+func (mock *gitRefsMock) RevParseCalls() []struct {
+	Ctx context.Context
+	Dir string
+	Rev string
+} {
+	var calls []struct {
+		Ctx context.Context
+		Dir string
+		Rev string
+	}
+	mock.lockRevParse.RLock()
+	calls = mock.calls.RevParse
+	mock.lockRevParse.RUnlock()
+	return calls
+}
+
 // Ensure, that ConnectClientMock does implement ConnectClient.
 // If this is not the case, regenerate this file with moq.
 var _ ConnectClient = &ConnectClientMock{}

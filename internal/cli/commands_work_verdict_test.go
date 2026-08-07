@@ -93,7 +93,7 @@ func verdictDepsWithWorkspace(ws WorkspaceResolver, srv *verdictServer, encoded 
 	cfg := &ConfigMock{IdentifierFunc: func() string { return testReviewer }}
 	connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return srv.client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, nil)
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), ws, connectClient, nil, nil, nil)
 }
 
 // runVerdict runs one `work verdict` invocation as a fresh process would:

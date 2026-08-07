@@ -19,7 +19,7 @@ import (
 func searchTestDeps(client SearchClient, ws WorkspaceResolver, encoded *any) *Deps {
 	connectClient := &ConnectClientMock{SearchFunc: func() SearchClient { return client }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, nil)
+	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, nil, nil)
 }
 
 // --- success shape ---

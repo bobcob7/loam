@@ -182,8 +182,9 @@ func TestNewEncoder_JSON_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	enc := newEncoder("json", &buf)
-	require.NoError(t, enc.Encode(workDiffOutput{Diff: "--- a/x\n+++ b/x\n"}))
-	assert.JSONEq(t, `{"diff":"--- a/x\n+++ b/x\n"}`, buf.String())
+	out := workDiffOutput{Repo: "g/r", WorkBranch: "wb-1", Target: "main", Format: diffFormatPatch, LocalCheck: "local HEAD matches the server's tip", Diff: "--- a/x\n+++ b/x\n"}
+	require.NoError(t, enc.Encode(out))
+	assert.JSONEq(t, `{"repo":"g/r","work_branch":"wb-1","target":"main","format":"patch","local_check":"local HEAD matches the server's tip","diff":"--- a/x\n+++ b/x\n"}`, buf.String())
 }
 
 func TestNewEncoder_YAML_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
@@ -200,8 +201,8 @@ func TestNewEncoder_XML_WorkDiffOutput_KeepsWrappedShape(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	enc := newEncoder("xml", &buf)
-	require.NoError(t, enc.Encode(workDiffOutput{Diff: "x"}))
-	assert.Equal(t, "<response><diff>x</diff></response>\n", buf.String())
+	require.NoError(t, enc.Encode(workDiffOutput{Repo: "g/r", WorkBranch: "wb-1", Target: "main", Format: diffFormatPatch, LocalCheck: "checked", Diff: "x"}))
+	assert.Equal(t, "<response><diff>x</diff><format>patch</format><local_check>checked</local_check><repo>g/r</repo><target>main</target><work_branch>wb-1</work_branch></response>\n", buf.String())
 }
 
 func TestNewEncoder_EachFormat_WrittenToProvidedWriter(t *testing.T) {

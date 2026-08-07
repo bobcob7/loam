@@ -45,6 +45,7 @@ type command struct {
 	run         handlerFunc
 	newFlags    func() *pflag.FlagSet
 	synopsis    string
+	flags       string
 	stdinNote   string
 	subcommands map[string]*command
 }
@@ -108,7 +109,7 @@ func commandTree() map[string]*command {
 			"request-review": {summary: "Request review of a work branch", run: runWorkRequestReview, newFlags: flaglessCommand("work request-review")},
 			"list":           {summary: "List work branches", run: runWorkList, newFlags: func() *pflag.FlagSet { fs, _ := newWorkListFlags(); return fs }},
 			"show":           {summary: "Show a work branch's metadata", run: runWorkShow, newFlags: flaglessCommand("work show")},
-			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff, newFlags: flaglessCommand("work diff")},
+			"diff":           {summary: "Show a work branch's diff", run: runWorkDiff, newFlags: func() *pflag.FlagSet { fs, _ := newWorkDiffFlags(); return fs }},
 			"comments":       {summary: "Fetch comment threads or staged comments", run: runWorkComments, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentsFlags(); return fs }},
 			"verdicts":       {summary: "List verdicts on a work branch", run: runWorkVerdicts, newFlags: flaglessCommand("work verdicts")},
 			"comment":        {summary: "Stage a review comment", run: runWorkComment, newFlags: func() *pflag.FlagSet { fs, _ := newWorkCommentFlags(); return fs }},
@@ -128,21 +129,24 @@ func commandTree() map[string]*command {
 	return tree
 }
 
-// applySynopsis fills in every leaf's synopsis and stdinNote fields from
-// cmdspec.Synopsis/cmdspec.StdinNote, keyed by the exact same name Dispatch
-// and leafCommandKeys already use for that leaf -- a bare name at the top
-// level, "<group> <sub>" nested under a group -- so there is no second
-// hand-typed key anywhere in this package for that name to drift against.
+// applySynopsis fills in every leaf's synopsis, flags and stdinNote fields
+// from cmdspec.Synopsis/cmdspec.Flags/cmdspec.StdinNote, keyed by the exact
+// same name Dispatch and leafCommandKeys already use for that leaf -- a
+// bare name at the top level, "<group> <sub>" nested under a group -- so
+// there is no second hand-typed key anywhere in this package for that name
+// to drift against.
 func applySynopsis(tree map[string]*command) {
 	for name, cmd := range tree {
 		if cmd.subcommands == nil {
 			cmd.synopsis = cmdspec.Synopsis[name]
+			cmd.flags = cmdspec.Flags[name]
 			cmd.stdinNote = cmdspec.StdinNote[name]
 			continue
 		}
 		for sub, subcmd := range cmd.subcommands {
 			full := name + " " + sub
 			subcmd.synopsis = cmdspec.Synopsis[full]
+			subcmd.flags = cmdspec.Flags[full]
 			subcmd.stdinNote = cmdspec.StdinNote[full]
 		}
 	}

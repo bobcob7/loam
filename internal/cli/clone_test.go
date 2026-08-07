@@ -79,10 +79,49 @@ func cloneTestConfig(serverURL string) *ConfigMock {
 // RepoService.GetRepo response, cloner is the gitCloner double, and encoded
 // captures whatever the handler encodes on success.
 func cloneTestDeps(cfg Config, getRepo func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error), cloner gitCloner, encoded *any) *Deps {
+	return cloneTestDepsWithRefs(cfg, getRepo, cloner, okGetWorkBranch("main"), okCloneRefs(), encoded)
+}
+
+// cloneTestDepsWithRefs is cloneTestDeps with the two collaborators
+// loam-hwru added to `clone` -- WorkBranchService.GetWorkBranch (which
+// names the branch's target) and gitRefs (which fetches that target and
+// resolves the range) -- under the test's own control.
+func cloneTestDepsWithRefs(cfg Config, getRepo func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error), cloner gitCloner, getWorkBranch func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error), refs gitRefs, encoded *any) *Deps {
 	repoClient := &RepoClientMock{GetRepoFunc: getRepo}
-	connectClient := &ConnectClientMock{RepoFunc: func() RepoClient { return repoClient }}
+	workBranchClient := &WorkBranchClientMock{GetWorkBranchFunc: getWorkBranch}
+	connectClient := &ConnectClientMock{
+		RepoFunc:       func() RepoClient { return repoClient },
+		WorkBranchFunc: func() WorkBranchClient { return workBranchClient },
+	}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, cloner, nil)
+	return NewDeps(testLogger(), cfg, encoder, newErrorMapper(), &WorkspaceResolverMock{}, connectClient, cloner, nil, refs)
+}
+
+// okGetWorkBranch stubs GetWorkBranch with a work branch whose target is
+// target -- the one field `clone` reads from it.
+func okGetWorkBranch(target string) func(context.Context, *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+	return func(_ context.Context, req *connect.Request[loamv1.GetWorkBranchRequest]) (*connect.Response[loamv1.GetWorkBranchResponse], error) {
+		wb := &loamv1.WorkBranch{Repo: req.Msg.GetRepo(), Name: req.Msg.GetWorkBranch(), Target: target}
+		return connect.NewResponse(&loamv1.GetWorkBranchResponse{WorkBranch: wb}), nil
+	}
+}
+
+// cloneTestBaseSHA and cloneTestHeadSHA are the two commits okCloneRefs
+// reports, distinct from each other so a test cannot pass by conflating
+// "the merge base" with "HEAD".
+const (
+	cloneTestBaseSHA = "1111111111111111111111111111111111111111"
+	cloneTestHeadSHA = "2222222222222222222222222222222222222222"
+)
+
+// okCloneRefs is a gitRefs double for which every operation `clone` performs
+// succeeds.
+func okCloneRefs() *gitRefsMock {
+	return &gitRefsMock{
+		FetchFunc:     func(context.Context, string, ...string) error { return nil },
+		RevParseFunc:  func(context.Context, string, string) (string, error) { return cloneTestHeadSHA, nil },
+		MergeBaseFunc: func(context.Context, string, string, string) (string, error) { return cloneTestBaseSHA, nil },
+	}
 }
 
 func okGetRepo(repo string) func(context.Context, *connect.Request[loamv1.GetRepoRequest]) (*connect.Response[loamv1.GetRepoResponse], error) {
@@ -139,9 +178,11 @@ func TestRunCloneCommand_Success(t *testing.T) {
 	// was cloned at.
 	assert.Equal(t, "remote.origin.push", cloner.SetConfigCalls()[2].Key)
 	assert.Equal(t, "refs/heads/wb-*:refs/heads/loam-reserved/wb-*", cloner.SetConfigCalls()[2].Value)
-	require.Len(t, cloner.AddConfigCalls(), 1, "remote.origin.fetch, appended never replaced")
+	require.Len(t, cloner.AddConfigCalls(), 2, "remote.origin.fetch, appended never replaced -- once for the reserved namespace, once for the target branch")
 	assert.Equal(t, "remote.origin.fetch", cloner.AddConfigCalls()[0].Key)
 	assert.Equal(t, "+refs/heads/loam-reserved/*:refs/remotes/origin/*", cloner.AddConfigCalls()[0].Value)
+	assert.Equal(t, "remote.origin.fetch", cloner.AddConfigCalls()[1].Key)
+	assert.Equal(t, "+refs/heads/main:refs/remotes/origin/main", cloner.AddConfigCalls()[1].Value, "the target's refspec must be PERSISTED, not only fetched once, or origin/main silently ages as main moves")
 
 	require.Len(t, cloner.RenameBranchCalls(), 1, "the cloned branch must be renamed back to its bare name")
 	assert.Equal(t, "loam-reserved/wb-9c2f1a", cloner.RenameBranchCalls()[0].From)
@@ -149,7 +190,67 @@ func TestRunCloneCommand_Success(t *testing.T) {
 
 	out, ok := encoded.(cloneOutput)
 	require.True(t, ok, "clone must encode a cloneOutput")
-	assert.Equal(t, cloneOutput{Repo: "bobcob7/doc-server", Path: "./doc-server", Branch: "wb-9c2f1a"}, out)
+	assert.Equal(t, cloneOutput{
+		Repo:    "bobcob7/doc-server",
+		Path:    "./doc-server",
+		Branch:  "wb-9c2f1a",
+		Target:  "main",
+		BaseSHA: cloneTestBaseSHA,
+		HeadSHA: cloneTestHeadSHA,
+	}, out)
+}
+
+// TestRunCloneCommand_FetchesTheTargetBranchIntoTheClone is loam-hwru's
+// primary fix, asserted on the collaborator rather than on the output: the
+// clone must actively FETCH refs/heads/<target> into
+// refs/remotes/origin/<target>. Asserting only that base_sha came back
+// would not distinguish "the target ref is in the clone" from "the mock
+// answered a merge-base question" -- so this pins the fetch itself, and
+// TestExecGitRefs_Fetch_MakesTheTargetRefPresentInASingleBranchClone below
+// pins the same thing against a REAL git.
+func TestRunCloneCommand_FetchesTheTargetBranchIntoTheClone(t *testing.T) {
+	t.Parallel()
+	cloner := okCloner()
+	refs := okCloneRefs()
+	var encoded any
+	deps := cloneTestDepsWithRefs(cloneTestConfig("https://loam.example"), okGetRepo("bobcob7/doc-server"), cloner, okGetWorkBranch("release-2"), refs, &encoded)
+
+	require.NoError(t, runCloneCommand(t.Context(), deps, "bobcob7/doc-server", "wb-9c2f1a"))
+
+	require.Len(t, refs.FetchCalls(), 1, "the target branch must be fetched, not merely configured")
+	assert.Equal(t, "./doc-server", refs.FetchCalls()[0].Dest)
+	assert.Equal(t, []string{"+refs/heads/release-2:refs/remotes/origin/release-2"}, refs.FetchCalls()[0].Refspecs)
+	require.Len(t, refs.MergeBaseCalls(), 1)
+	assert.Equal(t, "refs/remotes/origin/release-2", refs.MergeBaseCalls()[0].A)
+	assert.Equal(t, "HEAD", refs.MergeBaseCalls()[0].B, "base_sha must be the MERGE BASE, not the target's tip")
+}
+
+// TestRunCloneCommand_TargetFetchFailure_FailsTheClone pins that a clone
+// which cannot obtain its base ref is an ERROR, not a clone that quietly
+// lacks one. The whole bead exists because the missing ref was silent.
+func TestRunCloneCommand_TargetFetchFailure_FailsTheClone(t *testing.T) {
+	t.Parallel()
+	refs := okCloneRefs()
+	refs.FetchFunc = func(context.Context, string, ...string) error {
+		return errors.New("could not read from remote repository")
+	}
+	var encoded any
+	deps := cloneTestDepsWithRefs(cloneTestConfig("https://loam.example"), okGetRepo("bobcob7/doc-server"), okCloner(), okGetWorkBranch("main"), refs, &encoded)
+
+	err := runCloneCommand(t.Context(), deps, "bobcob7/doc-server", "wb-9c2f1a")
+	require.Error(t, err)
+	assert.Equal(t, 2, newErrorMapper().ExitCode(err))
+	assert.Nil(t, encoded, "a clone missing its base ref must not report success")
+}
+
+// okCloner is a gitCloner double for which every bootstrap step succeeds.
+func okCloner() *gitClonerMock {
+	return &gitClonerMock{
+		CloneFunc:        func(context.Context, string, string, string, []string) error { return nil },
+		SetConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		AddConfigFunc:    func(context.Context, string, string, string) error { return nil },
+		RenameBranchFunc: func(context.Context, string, string, string) error { return nil },
+	}
 }
 
 // TestRunCloneCommand_TargetBranch_ClonedAtItsOwnRefAndNeverRenamed is the

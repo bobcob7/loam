@@ -23,7 +23,7 @@ import (
 func workTestDeps(workBranch WorkBranchClient, ws WorkspaceResolver, stdin string, encoded *any) *Deps {
 	connectClient := &ConnectClientMock{WorkBranchFunc: func() WorkBranchClient { return workBranch }}
 	encoder := &OutputEncoderMock{EncodeFunc: func(v any) error { *encoded = v; return nil }}
-	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader(stdin))
+	return NewDeps(testLogger(), &ConfigMock{}, encoder, newErrorMapper(), ws, connectClient, nil, strings.NewReader(stdin), nil)
 }
 
 // noResolveWorkspace is a WorkspaceResolverMock whose ResolveRepo/

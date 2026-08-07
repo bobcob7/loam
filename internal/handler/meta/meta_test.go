@@ -274,7 +274,7 @@ func TestGetInstructions_SpecificCommand_ReturnsOnlyThatEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetCommands(), 1)
 	assert.Equal(t, "graph def", resp.Msg.GetCommands()[0].GetName())
-	assert.Equal(t, "<target>", resp.Msg.GetCommands()[0].GetSynopsis(), "the narrowed entry must carry the argument shape, not just the summary (loam-hi5o.4)")
+	assert.Equal(t, "<target> [--repo <repo>] [--file <path>] [--limit <n>] [--all]", resp.Msg.GetCommands()[0].GetSynopsis(), "the narrowed entry must carry the argument shape -- positionals AND flags, since `instructions` is the surface an agent orients from and a flag missing here is a flag it never learns (loam-hi5o.4, loam-hwru)")
 }
 
 // TestGetInstructions_UnknownCommand_ReturnsNotFound proves an unrecognized

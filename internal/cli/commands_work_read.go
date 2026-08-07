@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/pflag"
 
 	loamv1 "github.com/bobcob7/loam/internal/gen/loam/v1"
+	"github.com/bobcob7/loam/internal/refnames"
 )
 
 // The work-branch READ commands: `work list`, `work show`, `work diff`,
@@ -241,6 +243,25 @@ type workShowOutput struct {
 	// convention above -- a zeroed object would be a fabrication under a
 	// different name (loam-0pj.10).
 	LatestVerdict *workShowVerdictOutput `json:"latest_verdict,omitempty"`
+	// TargetSHA and HeadSHA are the tips the server's mirror currently
+	// holds for Target and for this work branch -- the two endpoints of
+	// the range `work diff` reports (loam-hwru).
+	//
+	// `show` already reported round.number but NOT the commit the previous
+	// round ended at, and that commit is the single piece of state a
+	// round-2 re-review needs to scope itself to what changed since. One
+	// reviewer carried it forward by hand in its own notes across three
+	// rounds; a reviewer without notes could not scope a re-review at all.
+	// Adding it here means the state lives where the reviewer already
+	// looks.
+	TargetSHA string `json:"target_sha,omitempty"`
+	HeadSHA   string `json:"head_sha,omitempty"`
+	// RefsError carries the reason the two SHAs above are absent when they
+	// are, so "the server could not be asked" never renders identically to
+	// "there was nothing to report". Unlike `work diff`, a failure here is
+	// never fatal: the metadata `show` exists to return is complete
+	// without it.
+	RefsError string `json:"refs_error,omitempty"`
 }
 
 // workShowVerdictOutput is workShowOutput's latest_verdict shape. All four
@@ -352,17 +373,117 @@ func runWorkShow(ctx context.Context, deps *Deps, args []string) error {
 			Stale:    latest.GetStale(),
 		}
 	}
+	if deps.gitRefs != nil {
+		tips := remoteTips(ctx, deps, repo, out.Target, workBranch)
+		out.TargetSHA, out.HeadSHA, out.RefsError = tips.target, tips.head, tips.err
+	}
 	return deps.encoder.Encode(out)
 }
 
 // --- work diff ---
 
+// The two --format values `work diff` accepts.
+const (
+	diffFormatPatch = "patch"
+	diffFormatStat  = "stat"
+)
+
+// workDiffFlags holds the parsed values of `work diff`'s three flags.
+type workDiffFlags struct {
+	format        *string
+	stat          *bool
+	allowUnpushed *bool
+}
+
+// newWorkDiffFlags builds the pflag.FlagSet for `loam work diff [repo]
+// [work-branch] [--format <patch|stat>] [--stat] [--allow-unpushed]` (see
+// docs/cli-spec.md -> diff), plus the parsed values.
+//
+// --stat is a redundant spelling of --format=stat and exists because it is
+// what callers actually type: loam-hwru records agent after agent reaching
+// for `loam work diff --stat` and getting `unknown flag: --stat`, exit 2.
+// A command whose documented role is a mandatory verification step should
+// not reject the obvious spelling of its most useful mode.
+func newWorkDiffFlags() (*pflag.FlagSet, *workDiffFlags) {
+	fs := newFlagSet("work diff")
+	f := &workDiffFlags{
+		format:        fs.String("format", diffFormatPatch, "patch (the full unified diff) or stat (which files changed, and by how much)"),
+		stat:          fs.Bool("stat", false, "shorthand for --format=stat"),
+		allowUnpushed: fs.Bool("allow-unpushed", false, "return the server's diff even when this clone holds commits the server does not"),
+	}
+	return fs, f
+}
+
+// resolveDiffFormat reconciles --format and --stat. Passing both is fine
+// when they agree and a usage error when they contradict each other:
+// silently letting one win would be this command answering a question the
+// caller did not ask, which is the whole defect class loam-hwru is about.
+// fs.Changed distinguishes "--format was given as patch" from "--format
+// defaulted to patch", which is what makes a bare --stat legal.
+func resolveDiffFormat(fs *pflag.FlagSet, f *workDiffFlags) (string, error) {
+	format := *f.format
+	if *f.stat {
+		if fs.Changed("format") && format != diffFormatStat {
+			return "", newUsageCLIError(fmt.Sprintf("work diff: --stat and --format=%s contradict each other; pass one or the other", format), nil)
+		}
+		format = diffFormatStat
+	}
+	if format != diffFormatPatch && format != diffFormatStat {
+		return "", newUsageCLIError(fmt.Sprintf("work diff: --format %q is not one of %q or %q", format, diffFormatPatch, diffFormatStat), nil)
+	}
+	return format, nil
+}
+
 // workDiffOutput wraps the unified diff in a field rather than printing it
 // bare, so the response is a document in the active LOAM_OUTPUT_FORMAT like
 // every other command's (docs/cli-spec.md -> diff: "as a field in the active
 // LOAM_OUTPUT_FORMAT (e.g. { "diff": "…" } for JSON)").
+//
+// Everything above Diff was added by loam-hwru, and the reason is the same
+// one that motivates cloneOutput's SHAs: `work diff` is the command the
+// workflow makes a MANDATORY verification step, and until now it produced a
+// bare artifact that could not be checked against anything. Two agents in
+// one session called it before pushing and got a well-formed diff of an
+// older state -- one watched the file it had just fixed be simply absent --
+// with no error, no warning, and nothing in the output to reveal it. A
+// range and two SHAs make the same output self-checking: an author compares
+// LocalHeadSHA to HeadSHA, and a reviewer compares HeadSHA to whatever the
+// author said it pushed.
 type workDiffOutput struct {
-	Diff string `json:"diff"`
+	Repo       string `json:"repo"`
+	WorkBranch string `json:"work_branch"`
+	Target     string `json:"target"`
+	// Range is the revision range the SERVER computed this diff over,
+	// spelled so it can be re-run verbatim in any clone that has both
+	// commits: `git diff <target_sha>...<head_sha>`. Three dots, matching
+	// internal/gitdiff -- the diff starts at the MERGE BASE of the two, not
+	// at TargetSHA itself, which is why both endpoints are named rather
+	// than a single "base".
+	Range string `json:"range,omitempty"`
+	// TargetSHA is the tip of Target in the server's mirror.
+	TargetSHA string `json:"target_sha,omitempty"`
+	// HeadSHA is the tip of this work branch in the server's mirror -- the
+	// commit the diff below is OF. It is read from the remote, not from a
+	// local remote-tracking ref, which would only be as fresh as the last
+	// fetch.
+	HeadSHA string `json:"head_sha,omitempty"`
+	// LocalHeadSHA is the caller's own HEAD, present only when the caller
+	// is inside a clone of THIS repo on THIS work branch. Equal to HeadSHA
+	// means the diff covers everything committed locally.
+	LocalHeadSHA string `json:"local_head_sha,omitempty"`
+	// LocalCheck states, in words, what comparing the two produced --
+	// including every reason the comparison could not be made. It is never
+	// omitted: "we did not check" and "we checked and it was fine" are
+	// different answers, and an absent field cannot tell them apart.
+	LocalCheck string `json:"local_check"`
+	// RefsError carries the reason the SHAs above are missing, when they
+	// are. Present instead of, never alongside, a silent omission.
+	RefsError string `json:"refs_error,omitempty"`
+	Format    string `json:"format"`
+	// Diff is the unified diff, present for --format=patch.
+	Diff string `json:"diff,omitempty"`
+	// Stat is the derived summary, present for --format=stat. See diffStat.
+	Stat *diffStat `json:"stat,omitempty"`
 }
 
 // humanText implements the humanText interface (encoder.go): in human
@@ -370,12 +491,52 @@ type workDiffOutput struct {
 // an indented "diff: ..." field, so it can be read directly or piped to a
 // pager instead of requiring the caller to unwrap the JSON first. See
 // loam-hi5o.1.
+//
+// That verbatim rendering is preserved exactly for --format=patch: a header
+// line prepended to a patch is a header line that ends up in whatever the
+// patch is piped into. --format=stat is not a patch and is not pipeable
+// into anything, so it carries the identification loam-hwru added -- which
+// is a large part of why stat is the better default for a verification
+// step. Under every other output format both modes carry it.
+//
+// THIS ASYMMETRY IS DEFENSIBLE BUT STRICTLY WORSE THAN THE OPTION IT WAS
+// CHOSEN OVER, and that is recorded here rather than left as a preference,
+// because the mode it leaves unidentified is the one a human reads directly
+// -- the exact gap loam-hwru exists to close, surviving in the one place the
+// fix did not reach.
+//
+// The better answer is STDERR: stdout stays byte-for-byte the patch (so
+// loam-hi5o.1's verbatim contract and `git apply` both still hold), while
+// the range and both SHAs go to stderr, where a human sees them, a pipe
+// does not, and `2>/dev/null` suppresses them. It was not considered when
+// this was written; a reviewer raised it afterwards.
+//
+// What stands in the way is structural, not deep, and is stated as a fact
+// about the current design rather than as a justification: OutputEncoder
+// (encoder.go) holds a SINGLE writer, and every command in this package
+// shares it, so there is no second stream for a command to reach. Giving it
+// one is a small seam change -- not a rewrite -- and whoever makes it
+// should treat this comment as the argument for doing so, not as a defence
+// of what is here.
 func (o workDiffOutput) humanText() string {
-	return o.Diff
+	if o.Stat == nil {
+		return o.Diff
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s  range %s\n", o.Repo, o.WorkBranch, o.Range)
+	fmt.Fprintf(&b, "  target %s %s\n", o.Target, o.TargetSHA)
+	fmt.Fprintf(&b, "  head   %s\n", o.HeadSHA)
+	fmt.Fprintf(&b, "  local  %s\n", o.LocalCheck)
+	if o.RefsError != "" {
+		fmt.Fprintf(&b, "  refs   %s\n", o.RefsError)
+	}
+	b.WriteString("\n")
+	b.WriteString(humanDiffStat(*o.Stat))
+	return b.String()
 }
 
-// runWorkDiff implements `loam work diff [repo] [work-branch]`
-// (docs/cli-spec.md -> diff).
+// runWorkDiff implements `loam work diff [repo] [work-branch] [--format
+// <patch|stat>] [--stat] [--allow-unpushed]` (docs/cli-spec.md -> diff).
 //
 // Beyond the documented exit 3 (no such work branch) and exit 2
 // (unresolvable identifier), GetWorkBranchDiff can answer
@@ -387,8 +548,18 @@ func (o workDiffOutput) humanText() string {
 // maps it to precondition_failed / exit 2 carrying the server's own
 // message, reported honestly rather than suppressed: a fabricated empty
 // diff would read as "no changes".
+//
+// It calls GetWorkBranch before GetWorkBranchDiff, which it did not before
+// loam-hwru. The extra request buys the branch's TARGET, without which
+// neither endpoint of the range can be named -- and naming them is the fix.
+//
+// The unpushed check runs BEFORE THE DIFF IS FETCHED -- not before every
+// request, which it could not: it needs GetWorkBranch's target and
+// ls-remote's tip to have anything to compare against. What the ordering
+// buys is that no diff is ever retrieved when the answer would be stale, so
+// there is no almost-right artifact for a caller to read past the error.
 func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
-	fs := newFlagSet("work diff")
+	fs, f := newWorkDiffFlags()
 	positional, err := parseCommandArgs(fs, args)
 	if err != nil {
 		return newUsageError(err.Error())
@@ -396,15 +567,158 @@ func runWorkDiff(ctx context.Context, deps *Deps, args []string) error {
 	if err := requireWorkBranchArgs("work diff", positional); err != nil {
 		return err
 	}
+	format, err := resolveDiffFormat(fs, f)
+	if err != nil {
+		return err
+	}
 	repo, workBranch, err := resolveWorkBranchIdentity(deps.workspace, positional)
 	if err != nil {
 		return err
 	}
+	wbResp, err := deps.connect.WorkBranch().GetWorkBranch(ctx, connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: repo, WorkBranch: workBranch}))
+	if err != nil {
+		return fmt.Errorf("resolving work branch %s/%s before diffing it: %w", repo, workBranch, err)
+	}
+	out := workDiffOutput{Repo: repo, WorkBranch: workBranch, Target: wbResp.Msg.GetWorkBranch().GetTarget(), Format: format}
+	tips := remoteTips(ctx, deps, repo, out.Target, workBranch)
+	out.TargetSHA, out.HeadSHA, out.RefsError = tips.target, tips.head, tips.err
+	if out.TargetSHA != "" && out.HeadSHA != "" {
+		out.Range = out.TargetSHA + "..." + out.HeadSHA
+	}
+	local, err := checkLocalCommitsPushed(ctx, deps, repo, workBranch, out.HeadSHA, *f.allowUnpushed)
+	if err != nil {
+		return err
+	}
+	out.LocalHeadSHA, out.LocalCheck = local.sha, local.summary
 	resp, err := deps.connect.WorkBranch().GetWorkBranchDiff(ctx, connect.NewRequest(&loamv1.GetWorkBranchDiffRequest{Repo: repo, WorkBranch: workBranch}))
 	if err != nil {
 		return fmt.Errorf("fetching diff for work branch %s/%s: %w", repo, workBranch, err)
 	}
-	return deps.encoder.Encode(workDiffOutput{Diff: resp.Msg.GetDiff()})
+	if format == diffFormatStat {
+		stat := computeDiffStat(resp.Msg.GetDiff())
+		out.Stat = &stat
+	} else {
+		out.Diff = resp.Msg.GetDiff()
+	}
+	return deps.encoder.Encode(out)
+}
+
+// branchTips is what the server currently holds for a work branch and its
+// target. err is a MESSAGE rather than an error value because it travels
+// into the response as refs_error: failing to identify the commits does not
+// make the diff unavailable, it makes it unverifiable, and the honest
+// report of that is a diff that says so -- not a hard failure, and above
+// all not a silent omission.
+type branchTips struct {
+	target string
+	head   string
+	err    string
+}
+
+// remoteTips asks the git endpoint what it currently advertises for the
+// target branch and the work branch.
+//
+// It asks the SERVER, over the same /git/<group>/<repo>.git URL `loam
+// clone` uses and with the same identity headers, rather than reading any
+// local state. That is the point: these two SHAs are what the server's own
+// diff is computed from (internal/gitdiff runs `git diff <target>...<name>`
+// against the mirror those refs live in), so they identify the artifact
+// being returned rather than describing the caller's guess about it.
+func remoteTips(ctx context.Context, deps *Deps, repo, target, workBranch string) branchTips {
+	if deps.gitRefs == nil {
+		return branchTips{err: "no git ref resolver configured, so the commits this diff is computed from cannot be identified"}
+	}
+	if target == "" {
+		return branchTips{err: fmt.Sprintf("work branch %s/%s reports no target branch, so the range cannot be named", repo, workBranch)}
+	}
+	group, name, ok := splitRepo(repo)
+	if !ok {
+		return branchTips{err: fmt.Sprintf("repo %q is not shaped like <group>/<repo_name>, so its git endpoint cannot be addressed", repo)}
+	}
+	targetRef, headRef := "refs/heads/"+target, refnames.WorkBranch(workBranch)
+	url := cloneURL(deps.config.ServerURL(), group, name)
+	shas, err := deps.gitRefs.LsRemote(ctx, url, identityHeaders(deps.config), []string{targetRef, headRef})
+	if err != nil {
+		return branchTips{err: fmt.Sprintf("listing %s and %s on %s failed: %s", targetRef, headRef, url, err)}
+	}
+	tips := branchTips{target: shas[targetRef], head: shas[headRef]}
+	if tips.target == "" || tips.head == "" {
+		tips.err = fmt.Sprintf("%s does not advertise %s and %s, so the range cannot be named", url, targetRef, headRef)
+	}
+	return tips
+}
+
+// localCheck is the outcome of comparing the caller's own checkout against
+// what the server holds. summary is always set -- see workDiffOutput.LocalCheck.
+type localCheck struct {
+	sha     string
+	summary string
+}
+
+// checkLocalCommitsPushed refuses `work diff` when the caller is sitting in
+// a clone of this very work branch that holds commits the server does not.
+//
+// This is loam-hwru's third failure mode, and it was reported twice in one
+// session: `work diff` reflects the PUSHED branch, and calling it before
+// pushing returns a well-formed diff of an older state with no error, no
+// warning, and nothing in the output to reveal it. The bead observes the
+// check was one `git rev-list --count` away -- this is that check, against
+// the tip read from the remote rather than against @{u}, which is only as
+// current as the last fetch and could itself be behind.
+//
+// It REFUSES rather than warns. A warning on a command whose entire role is
+// verification is a warning that gets read after the diff it was supposed
+// to qualify; and every one of the ways this can be a false alarm (a
+// reviewer's clone being BEHIND, a detached HEAD, some other repository
+// entirely) resolves to "no refusal" below rather than to a refusal that
+// has to be overridden. --allow-unpushed exists for the deliberate case:
+// reviewing what the server actually has while holding local work.
+func checkLocalCommitsPushed(ctx context.Context, deps *Deps, repo, workBranch, head string, allowUnpushed bool) (localCheck, error) {
+	if deps.gitRefs == nil || head == "" {
+		return localCheck{summary: "not checked: the server's tip for this work branch could not be identified"}, nil
+	}
+	if !insideCloneOf(deps.workspace, repo, workBranch) {
+		return localCheck{summary: fmt.Sprintf("not checked: not inside a clone of %s on branch %s", repo, workBranch)}, nil
+	}
+	sha, err := deps.gitRefs.RevParse(ctx, "", "HEAD")
+	if err != nil {
+		return localCheck{summary: fmt.Sprintf("not checked: resolving local HEAD failed: %s", err)}, nil
+	}
+	if sha == head {
+		return localCheck{sha: sha, summary: "local HEAD matches the server's tip"}, nil
+	}
+	ahead, err := deps.gitRefs.CountCommitsAhead(ctx, "", head)
+	if err != nil {
+		return localCheck{sha: sha, summary: fmt.Sprintf("inconclusive: the server's tip %s is not in this clone's object store (fetch and retry): %s", head, err)}, nil
+	}
+	if ahead == 0 {
+		return localCheck{sha: sha, summary: fmt.Sprintf("local HEAD %s is behind the server's tip %s; the diff covers everything you have committed", sha, head)}, nil
+	}
+	if !allowUnpushed {
+		return localCheck{}, newPreconditionFailedError(fmt.Sprintf(
+			"work diff would report the server's copy of %s (%s), but this clone's HEAD (%s) has %d commit(s) the server does not have, so the diff would silently omit them; run `git push` first, or pass --allow-unpushed to diff the server's copy anyway",
+			workBranch, head, sha, ahead), nil)
+	}
+	return localCheck{sha: sha, summary: fmt.Sprintf("WARNING: %d local commit(s) are not on the server; this diff omits them (--allow-unpushed)", ahead)}, nil
+}
+
+// insideCloneOf reports whether the caller's working directory is inside a
+// clone of repo with workBranch checked out.
+//
+// Both halves are required before any local git fact is compared against
+// the server's: workspace inference resolves the repo from the clone's
+// origin URL and the branch from its checked-out ref, so agreeing on both
+// is what rules out comparing the server's tip for one branch against the
+// HEAD of some unrelated repository the caller happens to be standing in --
+// which would produce exactly the kind of confidently wrong answer this
+// whole change exists to prevent.
+func insideCloneOf(ws WorkspaceResolver, repo, workBranch string) bool {
+	inferredRepo, err := ws.ResolveRepo()
+	if err != nil || inferredRepo != repo {
+		return false
+	}
+	inferredBranch, err := ws.ResolveWorkBranch()
+	return err == nil && inferredBranch == workBranch
 }
 
 // --- work comments ---

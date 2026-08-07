@@ -15,10 +15,50 @@ import (
 
 // cloneOutput is the JSON success shape for `loam clone` (see
 // docs/cli-spec.md -> clone).
+//
+// Target/BaseSHA/HeadSHA were added by loam-hwru, and they are not
+// decoration. Before it, a clone reported only where it put the files: no
+// origin/<target>, no merge base, and no record anywhere of the commit the
+// branch was cut from. `git diff origin/main...HEAD` failed with "unknown
+// revision", and the natural recovery -- eyeball `git log` and guess where
+// the branch starts -- produces a diff that LOOKS right whether the guess
+// was right or not. Too far back and a reviewer reviews other people's
+// merged work as the author's; too far forward and it silently skips
+// commits. Naming the three commits here means the guess is never
+// necessary and, if someone guesses anyway, it can be contradicted.
 type cloneOutput struct {
 	Repo   string `json:"repo"`
 	Path   string `json:"path"`
 	Branch string `json:"branch"`
+	// Target is the branch Branch is diffed and merged against -- `main`
+	// for a work branch created by `work start ... main`, and Branch
+	// itself when a target branch was cloned directly.
+	Target string `json:"target"`
+	// BaseSHA is the merge base of Target and Branch: the commit this
+	// branch's changes actually start from, and the left endpoint of the
+	// three-dot range both `loam work diff` and `git diff
+	// origin/<target>...HEAD` compute.
+	BaseSHA string `json:"base_sha"`
+	// HeadSHA is the cloned checkout's HEAD.
+	HeadSHA string `json:"head_sha"`
+}
+
+// humanText implements the humanText interface (encoder.go): `loam clone`'s
+// human rendering names the two commands that work in the clone it just
+// made. loam-hwru's own bead calls this out as its third fix -- `loam work
+// diff` existed the whole time and reviewers found it only AFTER
+// reconstructing the base by hand, because nothing in the clone's output
+// mentioned it.
+func (o cloneOutput) humanText() string {
+	return fmt.Sprintf("Cloned %s at %s into %s\n"+
+		"  target:   %s\n"+
+		"  base:     %s (merge base of %s and %s)\n"+
+		"  head:     %s\n"+
+		"\n"+
+		"Diff this branch against its target with either of:\n"+
+		"  git diff origin/%s...HEAD\n"+
+		"  loam work diff %s %s\n",
+		o.Repo, o.Branch, o.Path, o.Target, o.BaseSHA, o.Target, o.Branch, o.HeadSHA, o.Target, o.Repo, o.Branch)
 }
 
 // runCloneCommand implements `loam clone <repo> <branch>`'s body, once
@@ -67,7 +107,100 @@ func runCloneCommand(ctx context.Context, deps *Deps, repo, branch string) error
 	if err := bootstrapWorkBranchRefspecs(ctx, deps.cloner, dest); err != nil {
 		return fmt.Errorf("bootstrapping work-branch refspecs in %s: %w", dest, err)
 	}
-	return deps.encoder.Encode(cloneOutput{Repo: repo, Path: dest, Branch: branch})
+	target, err := targetBranchFor(ctx, deps, repo, branch, cloneBranch)
+	if err != nil {
+		return err
+	}
+	if err := bootstrapTargetRef(ctx, deps, dest, branch, target); err != nil {
+		return err
+	}
+	base, head, err := cloneRange(ctx, deps.gitRefs, dest, target)
+	if err != nil {
+		return err
+	}
+	return deps.encoder.Encode(cloneOutput{Repo: repo, Path: dest, Branch: branch, Target: target, BaseSHA: base, HeadSHA: head})
+}
+
+// targetBranchFor resolves the branch this clone should be diffed against.
+// A TARGET branch cloned directly is its own target -- there is nothing
+// above it -- so that case answers without a request. Anything else is a
+// work branch, and its target is registry state, not something to infer
+// from the name: GetWorkBranch owns the answer, exactly as
+// cloneBranchFor consults GetRepo's target_branches rather than
+// pattern-matching. cloneBranch is passed in rather than recomputed so the
+// two decisions cannot drift apart.
+func targetBranchFor(ctx context.Context, deps *Deps, repo, branch, cloneBranch string) (string, error) {
+	if cloneBranch == branch {
+		return branch, nil
+	}
+	resp, err := deps.connect.WorkBranch().GetWorkBranch(ctx, connect.NewRequest(&loamv1.GetWorkBranchRequest{Repo: repo, WorkBranch: branch}))
+	if err != nil {
+		return "", fmt.Errorf("resolving the target branch of work branch %s/%s: %w", repo, branch, err)
+	}
+	target := resp.Msg.GetWorkBranch().GetTarget()
+	if target == "" {
+		return "", fmt.Errorf("work branch %s/%s reports no target branch, so its base commit cannot be identified", repo, branch)
+	}
+	return target, nil
+}
+
+// bootstrapTargetRef brings the target branch down as
+// refs/remotes/origin/<target> and registers the refspec that keeps it
+// current, so PLAIN git works in the clone from here on:
+//
+//	git diff origin/<target>...HEAD
+//	git log origin/<target>..HEAD
+//
+// This is loam-hwru's primary fix. `git clone --single-branch` fetches
+// exactly one ref, and refnames.ClientFetchRefspec (bootstrapWorkBranchRefspecs
+// above) adds only the RESERVED namespace -- work branches. Neither covers
+// refs/heads/<target>, so before this the clone had no origin/main at all.
+//
+// Both halves are written, not just the fetch: without the config line the
+// ref lands once and then silently ages as the target moves, which would
+// trade a loud "unknown revision" for a quiet wrong answer -- the exact
+// exchange this bead exists to refuse. AddConfig (not SetConfig) for the
+// same reason bootstrapWorkBranchRefspecs uses it: remote.origin.fetch is
+// multi-valued and already holds two entries by this point.
+//
+// A failure here is fatal to the clone rather than a warning. A clone that
+// silently lacks its base ref is the state the bead was filed about, and
+// "mostly cloned" is not a state worth handing back.
+func bootstrapTargetRef(ctx context.Context, deps *Deps, dest, branch, target string) error {
+	if target == branch {
+		return nil
+	}
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", target, target)
+	if err := deps.cloner.AddConfig(ctx, dest, "remote.origin.fetch", refspec); err != nil {
+		return fmt.Errorf("adding the target-branch fetch refspec %s in %s: %w", refspec, dest, err)
+	}
+	if deps.gitRefs == nil {
+		return fmt.Errorf("fetching target branch %s into %s: no git ref resolver configured", target, dest)
+	}
+	if err := deps.gitRefs.Fetch(ctx, dest, refspec); err != nil {
+		return newPreconditionFailedError(fmt.Sprintf("fetching target branch %s into %s: %s", target, dest, err), err)
+	}
+	return nil
+}
+
+// cloneRange resolves the two commits cloneOutput reports: HEAD, and the
+// merge base of origin/<target> and HEAD. The merge base -- not
+// origin/<target>'s tip -- is what `git diff origin/<target>...HEAD`
+// actually starts from, and reporting the tip under the name "base" would
+// be a subtler version of the same wrong answer this bead is about.
+func cloneRange(ctx context.Context, refs gitRefs, dest, target string) (base, head string, err error) {
+	if refs == nil {
+		return "", "", fmt.Errorf("identifying the cloned range in %s: no git ref resolver configured", dest)
+	}
+	head, err = refs.RevParse(ctx, dest, "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("resolving HEAD in %s: %w", dest, err)
+	}
+	base, err = refs.MergeBase(ctx, dest, "refs/remotes/origin/"+target, "HEAD")
+	if err != nil {
+		return "", "", newPreconditionFailedError(fmt.Sprintf("finding the merge base of origin/%s and HEAD in %s: %s", target, dest, err), err)
+	}
+	return base, head, nil
 }
 
 // cloneBranchFor decides how `git clone --branch` must spell branch. A

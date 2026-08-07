@@ -20,6 +20,7 @@ type Deps struct {
 	connect     ConnectClient
 	cloner      gitCloner
 	stdin       io.Reader
+	gitRefs     gitRefs
 }
 
 // NewDeps constructs a Deps from its collaborators. Every field is required
@@ -31,8 +32,26 @@ type Deps struct {
 // read a body from it, `loam work set` and `loam work comment` (see
 // commands_work.go's readStdin) -- tests that never dispatch either may
 // also pass nil.
-func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader) *Deps {
-	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin}
+//
+// refs is a third such exception, used by `clone`, `work diff` and `work
+// show`. What a nil refs means differs by command, and the difference is
+// stated here rather than generalized because loam-hwru is precisely about
+// not asserting a uniformity that does not hold:
+//
+//   - `clone` FAILS. A clone with no base ref is the state that bead was
+//     filed about, so it cannot be produced quietly.
+//   - `work diff` reports refs_error and a "not checked" local_check. Its
+//     artifact is the thing being identified, so an unidentifiable one has
+//     to say so.
+//   - `work show` omits target_sha/head_sha SILENTLY. Its own answer is
+//     complete without them, and there is no nil refs in the binary to
+//     report on -- see NewProductionDeps, which always supplies the real
+//     one. Were that guard ever reachable in production it would be the
+//     wrong behaviour and would need a refs_error like `work diff`'s; it
+//     is written the way it is so this package's many existing `work show`
+//     tests need not each construct a git double.
+func NewDeps(logger *slog.Logger, cfg Config, encoder OutputEncoder, errorMapper ErrorMapper, workspace WorkspaceResolver, connect ConnectClient, cloner gitCloner, stdin io.Reader, refs gitRefs) *Deps {
+	return &Deps{logger: logger, config: cfg, encoder: encoder, errorMapper: errorMapper, workspace: workspace, connect: connect, cloner: cloner, stdin: stdin, gitRefs: refs}
 }
 
 // NewErrorMapper builds the real ErrorMapper (see errormapper.go). Exported
@@ -106,7 +125,7 @@ func NewProductionDeps(logger *slog.Logger, httpClient connect.HTTPClient, out i
 			return nil, reportConstructionError(encoder, err)
 		}
 	}
-	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in), nil
+	return NewDeps(logger, cfg, encoder, newErrorMapper(), workspace, connectClient, newGitCloner(), in, newGitRefs()), nil
 }
 
 // configForArgs picks the config-loading strategy from the top-level

@@ -122,28 +122,50 @@ func tryGroupHelp(name string, group *command, rest []string) (string, bool) {
 // exactly the order docs/cli-spec.md's own synopsis lines use (e.g. line
 // 351: "`loam work set [repo] [work-branch] [--title <title>]` (optional
 // description read from stdin)"): the command's real positional synopsis
-// (from cmd.synopsis, see router.go's applySynopsis), then a trailing
-// "[flags]" token if and only if fs actually registers at least one flag
-// (loam-hi5o.4 acceptance criterion 2 -- a flagless command like `work
-// start` must never claim "[flags]"), then -- LAST, after flags, never
-// before -- a parenthetical stdin note (cmd.stdinNote) for the few
-// commands that read one. Putting the note before "[flags]" (an earlier
-// version of this function did) made the printed line read as if the note
-// were still positional arguments and left "[flags]" trailing prose,
-// which is exactly the kind of un-copyable usage line this bead exists to
+// (from cmd.synopsis, see router.go's applySynopsis), then its flag shape
+// if and only if fs actually registers at least one flag (loam-hi5o.4
+// acceptance criterion 2 -- a flagless command like `work start` must
+// never claim to take flags), then -- LAST, after flags, never before --
+// a parenthetical stdin note (cmd.stdinNote) for the few commands that
+// read one. Putting the note before the flags (an earlier version of this
+// function did) made the printed line read as if the note were still
+// positional arguments and left the flag token trailing prose, which is
+// exactly the kind of un-copyable usage line loam-hi5o.4 exists to
 // eliminate -- so the ordering here is load-bearing, not cosmetic.
-func leafUsageLine(name, synopsis, stdinNote string, fs *pflag.FlagSet) string {
+//
+// Since loam-hwru the flag shape is the command's REAL one (cmd.flags,
+// from cmdspec.Flags) rather than a bare "[flags]" token. The token was
+// not wrong, but it left the usage line un-copyable for precisely the
+// commands worth copying, and it is the same text `loam instructions` now
+// serves -- from the same map, kept honest against this FlagSet by
+// TestFlags_CmdspecMatchesEveryRealFlagSet. fs still decides WHETHER any
+// flag shape is printed, so a leaf registering no flags cannot claim one
+// even if the map grew a stray entry.
+func leafUsageLine(name, synopsis, flags, stdinNote string, fs *pflag.FlagSet) string {
 	usage := "Usage: loam " + name
 	if synopsis != "" {
 		usage += " " + synopsis
 	}
 	if fs.HasFlags() {
-		usage += " [flags]"
+		usage += " " + flagShape(flags)
 	}
 	if stdinNote != "" {
 		usage += " (" + stdinNote + ")"
 	}
 	return usage
+}
+
+// flagShape returns the spelled-out flag shape, falling back to the
+// generic "[flags]" token when cmdspec carries no entry. The fallback is
+// unreachable in this binary -- the drift test requires an entry for every
+// leaf whose FlagSet has flags -- and exists so that a leaf added without
+// its cmdspec entry still prints a usage line that is merely vague rather
+// than one that silently omits the flags it accepts.
+func flagShape(flags string) string {
+	if flags == "" {
+		return "[flags]"
+	}
+	return flags
 }
 
 // tryLeafHelp handles one leaf command: help only when a help token
@@ -154,7 +176,7 @@ func tryLeafHelp(name string, cmd *command, rest []string) (string, bool) {
 	if !containsHelpToken(rest) {
 		return "", false
 	}
-	return renderLeafHelp(name, cmd.summary, cmd.synopsis, cmd.stdinNote, cmd.newFlags()), true
+	return renderLeafHelp(name, cmd.summary, cmd.synopsis, cmd.flags, cmd.stdinNote, cmd.newFlags()), true
 }
 
 // renderTopLevelHelp lists every top-level command (and, for a group, its
@@ -208,9 +230,9 @@ func renderGroupHelp(name string, group *command) string {
 // flags claiming it took some). Flag usage itself is still rendered
 // straight from fs, the same FlagSet the real handler parses with, for the
 // same non-drift reason as before this changed.
-func renderLeafHelp(name, summary, synopsis, stdinNote string, fs *pflag.FlagSet) string {
+func renderLeafHelp(name, summary, synopsis, flags, stdinNote string, fs *pflag.FlagSet) string {
 	var b strings.Builder
-	b.WriteString(leafUsageLine(name, synopsis, stdinNote, fs) + "\n\n")
+	b.WriteString(leafUsageLine(name, synopsis, flags, stdinNote, fs) + "\n\n")
 	b.WriteString(summary + "\n")
 	if usage := fs.FlagUsagesWrapped(0); usage != "" {
 		b.WriteString("\nFlags:\n" + usage)

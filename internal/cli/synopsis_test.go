@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"sort"
+	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,26 +16,122 @@ import (
 
 // synopsisByName walks tree (mirroring router_test.go's leafCommandKeys)
 // and returns every dispatchable leaf's full name mapped to its FULL
-// composed synopsis: cmd.synopsis and cmd.stdinNote (router.go's
+// composed synopsis: cmd.synopsis, cmd.flags and cmd.stdinNote (router.go's
 // applySynopsis) joined by cmdspec.Compose, the exact same rule
 // internal/handler/meta/catalog.go's newCatalog uses to build the value it
 // puts in the catalog. Composing here, rather than comparing cmd.synopsis
 // alone, is what makes the comparison in
 // TestSynopsis_CommandTreeMatchesMetaCatalog apples-to-apples for the
-// three commands that also read stdin (cmd.synopsis on its own is
+// commands that also take flags or read stdin (cmd.synopsis on its own is
 // positional-only; the catalog's entry.synopsis is always the composed
-// form, since the catalog has nowhere else to carry a stdin note).
+// form, since the catalog has nowhere else to carry either).
 func synopsisByName(tree map[string]*command) map[string]string {
 	out := make(map[string]string)
 	for name, cmd := range tree {
 		if cmd.subcommands == nil {
-			out[name] = cmdspec.Compose(cmd.synopsis, cmd.stdinNote)
+			out[name] = cmdspec.Compose(cmd.synopsis, cmd.flags, cmd.stdinNote)
 			continue
 		}
 		for sub, subcmd := range cmd.subcommands {
-			out[name+" "+sub] = cmdspec.Compose(subcmd.synopsis, subcmd.stdinNote)
+			out[name+" "+sub] = cmdspec.Compose(subcmd.synopsis, subcmd.flags, subcmd.stdinNote)
 		}
 	}
+	return out
+}
+
+// flagNamesIn extracts the long flag names ("--stat" -> "stat") from a
+// cmdspec.Flags value. It is deliberately a dumb scan for "--" prefixes
+// rather than a parser for the whole "[--x <y>]" grammar: what needs
+// checking is the NAME SET, and a scan that understood the grammar could
+// only agree or disagree with the grammar the map was hand-written in --
+// which is the thing under test.
+func flagNamesIn(shape string) map[string]bool {
+	names := make(map[string]bool)
+	for _, tok := range strings.FieldsFunc(shape, func(r rune) bool { return r == ' ' || r == '[' || r == ']' || r == '<' || r == '>' }) {
+		if after, ok := strings.CutPrefix(tok, "--"); ok && after != "" {
+			names[after] = true
+		}
+	}
+	return names
+}
+
+// flagNamesRegisteredBy returns the long flag names a leaf's real
+// pflag.FlagSet registers -- the same constructor its real handler parses
+// with (router.go's command.newFlags).
+func flagNamesRegisteredBy(fs *pflag.FlagSet) map[string]bool {
+	names := make(map[string]bool)
+	fs.VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
+	return names
+}
+
+// TestFlags_CmdspecMatchesEveryRealFlagSet is what makes cmdspec.Flags
+// acceptable at all.
+//
+// cmdspec's whole reason for existing is that a hand-written second copy of
+// a command's shape drifts from the real one, and Flags IS a hand-written
+// second copy -- of information the pflag.FlagSet already holds exactly.
+// The package could not simply read the FlagSet, because
+// internal/handler/meta (which serves `loam instructions`, the surface an
+// agent orients from) has no FlagSet and must not import internal/cli. So
+// the duplication is closed here instead, by failing the build on any
+// disagreement in either direction:
+//
+//   - a flag the CLI registers that cmdspec does not document -- which is
+//     the loam-hwru failure exactly: `--stat` existed in --help and was
+//     invisible to every agent reading `instructions`;
+//   - a flag cmdspec documents that the CLI does not register, i.e. a
+//     command an agent would be told to run and that would exit 2;
+//   - an entry for a leaf with no flags at all, or a missing entry for a
+//     leaf that has them.
+//
+// Only NAMES are compared. The value spelling ("<patch|stat>") is prose
+// aimed at a reader and has no machine-checkable counterpart; the name set
+// is the part an agent copies into a command line and the part that can be
+// wrong in a way that costs a round-trip.
+func TestFlags_CmdspecMatchesEveryRealFlagSet(t *testing.T) {
+	t.Parallel()
+	tree := commandTree()
+	leaves := leafCommandKeys(tree)
+	for name := range cmdspec.Flags {
+		assert.True(t, leaves[name], "internal/cmdspec.Flags names %q, which is not a dispatchable leaf in commandTree()", name)
+	}
+	forEachLeaf(tree, func(name string, cmd *command) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			registered := flagNamesRegisteredBy(cmd.newFlags())
+			documented := flagNamesIn(cmdspec.Flags[name])
+			if len(registered) == 0 {
+				assert.Empty(t, cmdspec.Flags[name], "%q registers no flags, so internal/cmdspec.Flags must have no entry for it", name)
+				return
+			}
+			require.NotEmpty(t, cmdspec.Flags[name], "%q registers flags (%v) but internal/cmdspec.Flags has no entry, so `loam instructions %q` would not mention them", name, sortedFlagNames(registered), name)
+			assert.Equal(t, sortedFlagNames(registered), sortedFlagNames(documented), "the flags %q registers and the flags internal/cmdspec.Flags documents for it disagree", name)
+		})
+	})
+}
+
+// forEachLeaf calls fn for every dispatchable leaf in tree, keyed the way
+// Dispatch keys it.
+func forEachLeaf(tree map[string]*command, fn func(name string, cmd *command)) {
+	for name, cmd := range tree {
+		if cmd.subcommands == nil {
+			fn(name, cmd)
+			continue
+		}
+		for sub, subcmd := range cmd.subcommands {
+			fn(name+" "+sub, subcmd)
+		}
+	}
+}
+
+// sortedFlagNames renders a name set as a sorted slice, so a failure
+// reports which flags differ rather than that two maps are unequal.
+func sortedFlagNames(names map[string]bool) []string {
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 
