@@ -68,6 +68,28 @@ func newRecordingServer(t *testing.T, status int) *recordingServer {
 	return rec
 }
 
+// headerValues returns the values of header name from the MOST RECENT
+// request, under the same lock the handler writes with. A test that reads a
+// plain captured-header variable across two requests races the handler
+// goroutine -- caught by -race on exactly this file, and the reason this
+// accessor exists rather than a bare package-level variable.
+func (r *recordingServer) headerValues(name string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.reqs) == 0 {
+		return nil
+	}
+	return r.reqs[len(r.reqs)-1].Header.Values(name)
+}
+
+// clear discards everything recorded so far, so a test can attribute the
+// next request unambiguously to the step that follows.
+func (r *recordingServer) clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reqs = nil
+}
+
 func (r *recordingServer) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -760,28 +782,23 @@ func TestExecGitCloner_Clone_ResetDoesNotBlockHeadersAddedAfterward(t *testing.T
 	upstream := bareRepoWithMarkerCommit(t, "INTENDED-UPSTREAM")
 	dest := filepath.Join(t.TempDir(), "doc-server")
 	require.NoError(t, execGitCloner{}.Clone(t.Context(), "file://"+upstream, "main", dest, []string{"Loam-Agent-Name: grace-hopper"}))
-	var captured http.Header
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		captured = r.Header.Clone()
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
+	srv := newRecordingServer(t, http.StatusNotFound)
 
-	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.URL+"/git/bobcob7/doc-server.git")
-	require.NotNil(t, captured, "git must have reached the server")
-	assert.Empty(t, captured.Values("X-Corp-Route"),
+	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.url+"/git/bobcob7/doc-server.git")
+	require.Positive(t, srv.count(), "git must have reached the server")
+	assert.Empty(t, srv.headerValues("X-Corp-Route"),
 		"the documented COST: a legitimate global header is dropped from the clone's operations too")
-	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"))
+	assert.Equal(t, []string{"grace-hopper"}, srv.headerValues("Loam-Agent-Name"))
 
 	// The documented workaround, verbatim: re-add it to the clone's own
 	// config, where it lands after the reset.
 	require.NoError(t, execGitCloner{}.AddConfig(t.Context(), dest, "http.extraHeader", "X-Corp-Route: eu-west"))
-	captured = nil
-	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.URL+"/git/bobcob7/doc-server.git")
+	srv.clear()
+	_, _ = runGitOutput(t.Context(), dest, "ls-remote", srv.url+"/git/bobcob7/doc-server.git")
 
-	require.NotNil(t, captured)
-	assert.Equal(t, []string{"eu-west"}, captured.Values("X-Corp-Route"),
+	require.Positive(t, srv.count())
+	assert.Equal(t, []string{"eu-west"}, srv.headerValues("X-Corp-Route"),
 		"the documented WORKAROUND: a header re-added to the clone's own config lands after the reset and survives")
-	assert.Equal(t, []string{"grace-hopper"}, captured.Values("Loam-Agent-Name"),
+	assert.Equal(t, []string{"grace-hopper"}, srv.headerValues("Loam-Agent-Name"),
 		"and loam's own identity must still be the only one asserted")
 }
