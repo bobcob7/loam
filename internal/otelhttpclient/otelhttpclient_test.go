@@ -93,7 +93,7 @@ func TestInstrument_NeverRecordsCredentials(t *testing.T) {
 			prepare: func(req *http.Request) { req.SetBasicAuth("loam", sentinel) },
 		},
 		{
-			name: "credential embedded in the URL userinfo, the redactUserinfo case",
+			name: "credential embedded in the URL userinfo, the urlredact.URL case",
 			prepare: func(req *http.Request) {
 				req.URL.User = url.User(sentinel)
 				req.Header.Set("Authorization", "token "+sentinel)
