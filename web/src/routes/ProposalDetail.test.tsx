@@ -1,7 +1,11 @@
+import { fromJson, type JsonObject } from "@bufbuild/protobuf";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppProviders } from "../App";
+import { ListVerdictsResponseSchema } from "../gen/loam/v1/workbranch_pb";
+import { WorkBranchSchema } from "../gen/loam/v1/common_pb";
+import { expectNoUnspecifiedEnums } from "../test/enumGuard";
 import { ProposalDetail } from "./ProposalDetail";
 
 /**
@@ -37,6 +41,15 @@ const closePath = "/loam.admin.v1.ProposalService/CloseWorkBranch";
 const repo = "acme/widgets";
 const workBranch = "wb-9c2f1a";
 
+// This suite's fixtures are raw protojson BODIES, not `create()` messages --
+// the screen is driven through a stubbed `fetch`, so what it receives is
+// whatever these objects serialise to. That makes the omission defect WORSE
+// here than anywhere else in the suite: `RouteBody` is `Record<string,
+// unknown>`, so `tsc` does not even check field NAMES, let alone presence.
+// That enum fields are set is asserted below in "ProposalDetail: protojson
+// fixtures", by decoding these bodies with the real schema and running the
+// same guard the create()-built fixtures get (loam-yhcz).
+//
 // conflict and upstreamDrift are spelled out rather than omitted, and that is
 // a FAITHFULNESS fix, not padding (loam-u84g). Both are `NONE = 1` in the
 // schema, so protojson emits them on every healthy branch; a real server
@@ -45,7 +58,7 @@ const workBranch = "wb-9c2f1a";
 // Omitting them made the fixture decode as `UNSPECIFIED`, which the accept
 // gate treats as "not evidence the branch merges cleanly" -- the same reading
 // `conflictToProto` gives it server-side and for the same stated reason.
-const workBranchFixture = (overrides: RouteBody = {}): RouteBody => ({
+const workBranchBody = (overrides: RouteBody = {}): RouteBody => ({
   repo,
   name: workBranch,
   target: "main",
@@ -104,7 +117,7 @@ const commentsSection = (): HTMLElement => {
 
 /** The full set of GET queries this screen fires, with sane defaults. */
 const baseRoutes = (): Record<string, Route> => ({
-  [workBranchPath]: ok({ workBranch: workBranchFixture() }),
+  [workBranchPath]: ok({ workBranch: workBranchBody() }),
   [diffPath]: ok({ diff: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new\n" }),
   [commentsPath]: ok(commentsFixture),
   [verdictsPath]: ok(verdictsFixture),
@@ -161,6 +174,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * The guard the create()-built fixtures get, applied to the protojson bodies
+ * this suite stubs `fetch` with.
+ *
+ * Decoding is the point: these objects never pass through `create()`, so
+ * nothing else in the suite would notice a body that omits `conflict` and
+ * therefore describes a branch the accept gate must refuse. `fromJson` is
+ * what the real transport does to them, so what is checked here is the
+ * message the screen actually sees.
+ *
+ * The `as JsonObject` casts assert nothing `fromJson` does not then verify:
+ * it rejects unknown fields, so these two tests also fail on a MISSPELLED key
+ * in a body -- something `RouteBody`'s `Record<string, unknown>` accepts
+ * silently and every other test in this file would read straight past.
+ */
+describe("ProposalDetail: protojson fixtures", () => {
+  it("leave no enum field at its UNSPECIFIED zero once decoded", () => {
+    expectNoUnspecifiedEnums(WorkBranchSchema, fromJson(WorkBranchSchema, workBranchBody() as JsonObject));
+  });
+
+  it("carry verdict outcomes the server could actually have sent", () => {
+    expectNoUnspecifiedEnums(
+      ListVerdictsResponseSchema,
+      fromJson(ListVerdictsResponseSchema, verdictsFixture as JsonObject),
+    );
+  });
+});
+
 describe("ProposalDetail: loading, not-found, error", () => {
   it("shows a loading state before the work branch query settles", () => {
     stubFetch(baseRoutes());
@@ -201,7 +242,7 @@ describe("ProposalDetail: loaded screen", () => {
     stubFetch({
       ...baseRoutes(),
       [workBranchPath]: ok({
-        workBranch: workBranchFixture({
+        workBranch: workBranchBody({
           conflict: "WORK_BRANCH_CONFLICT_NONE",
           upstreamDrift: "UPSTREAM_DRIFT_NONE",
         }),
@@ -221,7 +262,7 @@ describe("ProposalDetail: loaded screen", () => {
     stubFetch({
       ...baseRoutes(),
       [workBranchPath]: ok({
-        workBranch: workBranchFixture({
+        workBranch: workBranchBody({
           conflict: "WORK_BRANCH_CONFLICT_RESET",
           upstreamDrift: "UPSTREAM_DRIFT_DIVERGED",
         }),
@@ -240,7 +281,7 @@ describe("ProposalDetail: loaded screen", () => {
     stubFetch({
       ...baseRoutes(),
       [workBranchPath]: ok({
-        workBranch: workBranchFixture({
+        workBranch: workBranchBody({
           description: "## What changed\n\n- added the index\n- `task web:test` passes\n",
         }),
       }),
@@ -255,7 +296,7 @@ describe("ProposalDetail: loaded screen", () => {
     // visible element, and must not become an empty bordered box.
     stubFetch({
       ...baseRoutes(),
-      [workBranchPath]: ok({ workBranch: workBranchFixture({ description: "" }) }),
+      [workBranchPath]: ok({ workBranch: workBranchBody({ description: "" }) }),
     });
     await renderLoaded();
     const title = screen.getByRole("heading", { level: 1 });
@@ -269,7 +310,7 @@ describe("ProposalDetail: loaded screen", () => {
     stubFetch({
       ...baseRoutes(),
       [workBranchPath]: ok({
-        workBranch: workBranchFixture({
+        workBranch: workBranchBody({
           description: "<script>window.stolen = 1</script>\n\n[x](javascript:alert(1))",
         }),
       }),
@@ -677,7 +718,7 @@ describe("ProposalDetail: AcceptProposal", () => {
     ],
   ])("suppresses the Accept action and says why when the branch is %s", async (_label, wbOverrides, wantMessage) => {
     const { routes } = stubFetch(baseRoutes());
-    routes[workBranchPath] = ok({ workBranch: workBranchFixture(wbOverrides) });
+    routes[workBranchPath] = ok({ workBranch: workBranchBody(wbOverrides) });
     await renderLoaded();
     expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
     // "No button" without a reason is the shape that made the original bug
@@ -697,7 +738,7 @@ describe("ProposalDetail: AcceptProposal", () => {
   it("does not show the Accept action when the work branch already has an upstream PR", async () => {
     const { routes } = stubFetch(baseRoutes());
     routes[workBranchPath] = ok({
-      workBranch: workBranchFixture({ upstreamPrUrl: "https://forge.example/pr/7" }),
+      workBranch: workBranchBody({ upstreamPrUrl: "https://forge.example/pr/7" }),
     });
     await renderLoaded();
     expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
@@ -715,7 +756,7 @@ describe("ProposalDetail: CloseWorkBranch", () => {
       calls.push(url);
       if (url === closePath) {
         closeRequestBody = await readJsonBody(init);
-        return new Response(JSON.stringify({ workBranch: workBranchFixture({ state: "WORK_BRANCH_STATE_CLOSED" }) }), {
+        return new Response(JSON.stringify({ workBranch: workBranchBody({ state: "WORK_BRANCH_STATE_CLOSED" }) }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -775,7 +816,7 @@ describe("ProposalDetail: RequestReview", () => {
       if (url === requestReviewPath) {
         requestReviewBody = await readJsonBody(init);
         return new Response(
-          JSON.stringify({ workBranch: workBranchFixture({ state: "WORK_BRANCH_STATE_REVIEWABLE" }) }),
+          JSON.stringify({ workBranch: workBranchBody({ state: "WORK_BRANCH_STATE_REVIEWABLE" }) }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
