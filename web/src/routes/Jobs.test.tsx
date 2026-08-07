@@ -1,4 +1,3 @@
-import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, createRouterTransport, type Transport } from "@connectrpc/connect";
 import { TransportProvider } from "@connectrpc/connect-query";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -6,13 +5,9 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
-import {
-  IngestJobSchema,
-  IngestKind,
-  IngestStatus,
-  RepoAdminService,
-} from "../gen/loam/admin/v1/repo_admin_pb";
+import { IngestKind, IngestStatus, RepoAdminService } from "../gen/loam/admin/v1/repo_admin_pb";
 import { defaultPageLimit } from "../data/pagination";
+import { ingestJobFixture } from "../test/fixtures";
 import { createQueryClient } from "../queryClient";
 import {
   formatTimestamp,
@@ -69,22 +64,14 @@ afterEach(() => {
 });
 
 describe("jobsRefetchInterval", () => {
-  // Messages are built via create(Schema, {…}), not object literals
-  // (docs/web-frontend-spec.md); a plain object satisfies IngestJob's own
-  // fields but not the Message base type ($typeName etc.), so these fixtures
-  // go through create() like the rest of the app's request/response data.
-  const jobWithStatus = (status: IngestStatus) =>
-    create(IngestJobSchema, {
-      repo: "acme/widgets",
-      targetBranch: "main",
-      kind: IngestKind.FULL,
-      status,
-      attempts: 1,
-      error: "",
-      queuedAt: "2026-07-19T09:00:00Z",
-      startedAt: "2026-07-19T09:00:02Z",
-      finishedAt: "2026-07-19T09:01:00Z",
-    });
+  // Messages come from the shared builder, not object literals
+  // (docs/web-frontend-spec.md): a plain object satisfies IngestJob's own
+  // fields but not the Message base type ($typeName etc.), and -- the reason
+  // the builder rather than a local create() -- an IngestJob literal that
+  // omits `kind` or `status` type-checks and decodes as UNSPECIFIED. That is
+  // the omission src/test/fixtures.test.ts sweeps for, and it can only sweep
+  // what the tests actually use (loam-yhcz).
+  const jobWithStatus = (status: IngestStatus) => ingestJobFixture({ status });
 
   it("polls while a job is queued", () => {
     expect(jobsRefetchInterval([jobWithStatus(IngestStatus.QUEUED)])).toBe(jobsPollIntervalMs);
@@ -132,34 +119,24 @@ describe("jobRowKey", () => {
   // ONLY in `id`. This test proves both halves: the retired tuple key
   // genuinely collides on this pair, and `jobRowKey` (now keying on `id`)
   // does not.
-  const base = {
-    repo: "acme/widgets",
-    targetBranch: "main",
-    kind: IngestKind.FULL,
-    status: IngestStatus.RUNNING,
-    attempts: 1,
-    error: "",
-    queuedAt: "2026-07-20T10:00:00Z",
-    startedAt: "",
-    finishedAt: "",
-  };
+  const base = { status: IngestStatus.RUNNING, startedAt: "", finishedAt: "" };
   const oldTupleKey = (job: { repo: string; targetBranch: string; kind: IngestKind; queuedAt: string }): string =>
     `${job.repo}:${job.targetBranch}:${job.kind}:${job.queuedAt}`;
 
   it("collides under the retired repo:targetBranch:kind:queuedAt key when only id differs", () => {
-    const first = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
-    const second = create(IngestJobSchema, { ...base, id: "22222222-2222-2222-2222-222222222222" });
+    const first = ingestJobFixture({ ...base, id: "11111111-1111-1111-1111-111111111111" });
+    const second = ingestJobFixture({ ...base, id: "22222222-2222-2222-2222-222222222222" });
     expect(oldTupleKey(first)).toBe(oldTupleKey(second));
   });
 
   it("differs for two jobs that share everything except id", () => {
-    const first = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
-    const second = create(IngestJobSchema, { ...base, id: "22222222-2222-2222-2222-222222222222" });
+    const first = ingestJobFixture({ ...base, id: "11111111-1111-1111-1111-111111111111" });
+    const second = ingestJobFixture({ ...base, id: "22222222-2222-2222-2222-222222222222" });
     expect(jobRowKey(first)).not.toBe(jobRowKey(second));
   });
 
   it("returns the job's own id", () => {
-    const job = create(IngestJobSchema, { ...base, id: "11111111-1111-1111-1111-111111111111" });
+    const job = ingestJobFixture({ ...base, id: "11111111-1111-1111-1111-111111111111" });
     expect(jobRowKey(job)).toBe("11111111-1111-1111-1111-111111111111");
   });
 });
@@ -246,31 +223,23 @@ describe("Jobs", () => {
     // guards is that two same-repo jobs stay independently, correctly
     // labelled next to each other, which a fixture pair that already
     // differed by kind or repo would not meaningfully exercise.
-    const shared = {
-      repo: "acme/widgets",
-      targetBranch: "main",
-      kind: IngestKind.FULL,
-      attempts: 1,
-      error: "",
-      startedAt: "",
-      finishedAt: "",
-    };
+    const shared = { startedAt: "", finishedAt: "" };
     const transport = createRouterTransport((router) => {
       router.service(RepoAdminService, {
         listIngestJobs: () => ({
           jobs: [
-            {
+            ingestJobFixture({
               ...shared,
               id: "11111111-1111-1111-1111-111111111111",
               status: IngestStatus.RUNNING,
               queuedAt: "2026-07-20T10:00:00Z",
-            },
-            {
+            }),
+            ingestJobFixture({
               ...shared,
               id: "22222222-2222-2222-2222-222222222222",
               status: IngestStatus.SUCCEEDED,
               queuedAt: "2026-07-19T09:00:00Z",
-            },
+            }),
           ],
           pageInfo: { total: 2 },
         }),
@@ -289,17 +258,11 @@ describe("Jobs", () => {
       router.service(RepoAdminService, {
         listIngestJobs: () => ({
           jobs: [
-            {
-              repo: "acme/widgets",
-              targetBranch: "main",
-              kind: IngestKind.FULL,
+            ingestJobFixture({
               status: IngestStatus.RUNNING,
-              attempts: 1,
-              error: "",
-              queuedAt: "2026-07-20T10:00:00Z",
               startedAt: "2026-07-20T10:00:05Z",
               finishedAt: "",
-            },
+            }),
           ],
           pageInfo: { total: 1 },
         }),
@@ -315,17 +278,16 @@ describe("Jobs", () => {
       router.service(RepoAdminService, {
         listIngestJobs: () => ({
           jobs: [
-            {
+            ingestJobFixture({
               repo: "beta/service",
               targetBranch: "develop",
-              kind: IngestKind.FULL,
               status: IngestStatus.FAILED,
               attempts: 3,
               error: "clone failed: timeout",
               queuedAt: "2026-07-18T08:00:00Z",
               startedAt: "2026-07-18T08:00:05Z",
               finishedAt: "2026-07-18T08:05:00Z",
-            },
+            }),
           ],
           pageInfo: { total: 1 },
         }),
@@ -448,17 +410,14 @@ describe("Jobs", () => {
         listIngestJobs: () => ({ jobs, pageInfo: { total: jobs.length } }),
         reindexRepo: (req) => {
           reindexedRepo = req.repo;
-          const queued = {
+          const queued = ingestJobFixture({
             repo: req.repo,
-            targetBranch: "main",
-            kind: IngestKind.FULL,
             status: IngestStatus.QUEUED,
             attempts: 0,
-            error: "",
             queuedAt: "2026-07-27T00:00:00Z",
             startedAt: "",
             finishedAt: "",
-          };
+          });
           jobs = [queued];
           return { job: queued };
         },
@@ -535,17 +494,11 @@ describe("Jobs", () => {
           calls += 1;
           return {
             jobs: [
-              {
-                repo: "acme/widgets",
-                targetBranch: "main",
-                kind: IngestKind.FULL,
+              ingestJobFixture({
                 status: IngestStatus.RUNNING,
-                attempts: 1,
-                error: "",
-                queuedAt: "2026-07-20T10:00:00Z",
                 startedAt: "2026-07-20T10:00:05Z",
                 finishedAt: "",
-              },
+              }),
             ],
             pageInfo: { total: 1 },
           };
@@ -568,19 +521,7 @@ describe("Jobs", () => {
         listIngestJobs: () => {
           calls += 1;
           return {
-            jobs: [
-              {
-                repo: "acme/widgets",
-                targetBranch: "main",
-                kind: IngestKind.INCREMENTAL,
-                status: IngestStatus.SUCCEEDED,
-                attempts: 1,
-                error: "",
-                queuedAt: "2026-07-19T09:00:00Z",
-                startedAt: "2026-07-19T09:00:02Z",
-                finishedAt: "2026-07-19T09:01:00Z",
-              },
-            ],
+            jobs: [ingestJobFixture({ kind: IngestKind.INCREMENTAL })],
             pageInfo: { total: 1 },
           };
         },
