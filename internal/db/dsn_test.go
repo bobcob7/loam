@@ -2,8 +2,11 @@ package db
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,11 +31,20 @@ const poolMaxConns = 97
 
 // poolOnlyParams is every parameter pgxpool.ParseConfig consumes for itself
 // in the pgx version currently pinned in go.mod. It exists ONLY to give the
-// test below something to enumerate; MigrationDSN itself never sees this
+// tests below something to enumerate; MigrationDSN itself never sees this
 // list, and deliberately so -- see its doc comment. A future pgx that adds a
 // pool parameter is handled by the implementation without this list being
-// touched; the list going stale costs coverage of the new key, not
-// correctness.
+// touched.
+//
+// It is nonetheless a hand-written list, which in this repository is the
+// construct that has now failed three times by going stale unnoticed
+// (internal/deploycheck/doc.go records one that "let two mutations walk
+// straight through"; loam-wu10 deleted another). So it does not get to sit
+// here on the promise that staleness "only costs coverage":
+// TestPoolOnlyParamsMatchesPgx below derives the same set from pgxpool at
+// runtime and fails when the two disagree. A pgx upgrade that adds a pool
+// parameter turns into a red test naming the new key, not into a silently
+// under-covered table.
 var poolOnlyParams = []string{
 	"pool_max_conns",
 	"pool_min_conns",
@@ -41,6 +53,82 @@ var poolOnlyParams = []string{
 	"pool_max_conn_idle_time",
 	"pool_health_check_period",
 	"pool_max_conn_lifetime_jitter",
+}
+
+// TestPoolOnlyParamsMatchesPgx is what stops poolOnlyParams from rotting in
+// place. It does not read the list and check the list; it asks the linked
+// pgxpool, through the SAME helper MigrationDSN uses (poolOwnedKeys), which
+// keys it actually claims, and requires the answer to equal the table.
+//
+// The candidate keys are derived, not typed out again -- typing them out
+// again would just be a second copy of the list, failing only when someone
+// updated one copy. Every DSN-settable pool parameter corresponds to a
+// scalar field on pgxpool.Config (MaxConns -> pool_max_conns), so the
+// candidates are that struct's int32 and time.Duration fields, snake-cased
+// under a `pool_` prefix. Fields with no DSN parameter fall out on their own
+// rather than needing an exception list: PingTimeout is a real Config field
+// with no connection-string form, so pgxpool leaves `pool_ping_timeout` in
+// RuntimeParams and the probe simply does not count it. That self-pruning is
+// why this check needs no hand-maintained anything.
+//
+// What it costs if it drifts: pgx adds a pool parameter, this test names it
+// and goes red, and the fix is one line in poolOnlyParams plus the table
+// coverage that comes free with it. What it cannot catch is a new pool
+// parameter whose Config field is not a scalar or is not named after the
+// key -- there the check degrades to the old silence, no worse.
+func TestPoolOnlyParamsMatchesPgx(t *testing.T) {
+	t.Parallel()
+	var derived []string
+	cfgType := reflect.TypeFor[pgxpool.Config]()
+	for i := range cfgType.NumField() {
+		value, ok := probeValueForPoolField(cfgType.Field(i).Type)
+		if !ok {
+			continue
+		}
+		key := poolParamNameFor(cfgType.Field(i).Name)
+		dsn := "postgres://loam:secret@db.example.com:5432/loam?sslmode=disable&" + key + "=" + value
+		fullCfg, err := pgx.ParseConfig(dsn)
+		require.NoError(t, err, "probe DSN for %s must parse", key)
+		poolCfg, err := pgxpool.ParseConfig(dsn)
+		require.NoError(t, err, "probe DSN for %s must parse", key)
+		if _, owned := poolOwnedKeys(fullCfg, poolCfg)[key]; owned {
+			derived = append(derived, key)
+		}
+	}
+	require.NotEmpty(t, derived, "the probe found no pool parameters at all, which means it is broken, not that pgxpool stopped having any")
+	assert.ElementsMatch(t, poolOnlyParams, derived,
+		"poolOnlyParams has drifted from the pgx version in go.mod; add or remove the named keys (and their table cases) to match")
+}
+
+// probeValueForPoolField returns a connection-string value pgxpool would
+// accept for a Config field of this type, and whether the field is a
+// plausible DSN parameter at all. Only the two scalar kinds pgxpool parses
+// out of a connection string qualify; funcs, pointers and the unexported
+// bookkeeping bool are not parameters and are skipped.
+func probeValueForPoolField(fieldType reflect.Type) (string, bool) {
+	switch fieldType {
+	case reflect.TypeFor[time.Duration]():
+		return "30s", true
+	case reflect.TypeFor[int32]():
+		return "1", true
+	default:
+		return "", false
+	}
+}
+
+// poolParamNameFor converts a pgxpool.Config field name to the connection
+// string parameter pgxpool reads it from: MaxConnLifetimeJitter becomes
+// pool_max_conn_lifetime_jitter.
+func poolParamNameFor(field string) string {
+	var b strings.Builder
+	b.WriteString("pool")
+	for _, r := range field {
+		if unicode.IsUpper(r) {
+			b.WriteByte('_')
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
 
 // TestMigrationDSNStripsEveryPoolParameter is the regression proof for
