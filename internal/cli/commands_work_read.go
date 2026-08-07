@@ -498,6 +498,26 @@ type workDiffOutput struct {
 // into anything, so it carries the identification loam-hwru added -- which
 // is a large part of why stat is the better default for a verification
 // step. Under every other output format both modes carry it.
+//
+// THIS ASYMMETRY IS DEFENSIBLE BUT STRICTLY WORSE THAN THE OPTION IT WAS
+// CHOSEN OVER, and that is recorded here rather than left as a preference,
+// because the mode it leaves unidentified is the one a human reads directly
+// -- the exact gap loam-hwru exists to close, surviving in the one place the
+// fix did not reach.
+//
+// The better answer is STDERR: stdout stays byte-for-byte the patch (so
+// loam-hi5o.1's verbatim contract and `git apply` both still hold), while
+// the range and both SHAs go to stderr, where a human sees them, a pipe
+// does not, and `2>/dev/null` suppresses them. It was not considered when
+// this was written; a reviewer raised it afterwards.
+//
+// What stands in the way is structural, not deep, and is stated as a fact
+// about the current design rather than as a justification: OutputEncoder
+// (encoder.go) holds a SINGLE writer, and every command in this package
+// shares it, so there is no second stream for a command to reach. Giving it
+// one is a small seam change -- not a rewrite -- and whoever makes it
+// should treat this comment as the argument for doing so, not as a defence
+// of what is here.
 func (o workDiffOutput) humanText() string {
 	if o.Stat == nil {
 		return o.Diff
