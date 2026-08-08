@@ -191,9 +191,10 @@ const detachedGitDirName = "loam-cli-no-repository"
 //
 //	An ambient variable is denied when it can plant PERSISTENT state --
 //	above all executable code -- in an artifact loam MANUFACTURES, or
-//	silently redirect where loam's own traffic goes. It is NOT denied
-//	merely because it causes code to run as the user who already owns
-//	this process.
+//	silently redirect where loam's own traffic goes BY ACTING THROUGH
+//	GIT'S OWN REPOSITORY AND CONFIG MACHINERY. It is NOT denied merely
+//	because it causes code to run as the user who already owns this
+//	process, nor for being ordinary host network configuration.
 //
 // That second sentence is the one doing the work, and it is why
 // GIT_ASKPASS is deliberately ABSENT despite being ambient and despite
@@ -217,6 +218,19 @@ const detachedGitDirName = "loam-cli-no-repository"
 // GIT_PROXY_COMMAND and GIT_SSH_COMMAND were checked and excluded on
 // reachability rather than trust: both execute code, but only for git:// and
 // ssh:// remotes, and loam addresses its server over HTTP(S) exclusively.
+//
+// The "through git's own machinery" qualifier on the redirect limb is not
+// padding; without it the limb reads onto HTTPS_PROXY, which redirects
+// loam's traffic in the plainest sense and which this package deliberately
+// KEEPS (gitSubprocessEnv's own test asserts it survives). The difference is
+// provenance, and it is the same boundary the whole file rests on:
+// HTTPS_PROXY is standard host network configuration belonging to the user
+// who launched this process -- the same trust domain as ~/.gitconfig, and
+// the thing that makes `loam clone` work behind a corporate egress at all.
+// GIT_CONFIG_PARAMETERS and url.insteadOf redirect by injecting GIT config,
+// which is the channel a parent git or an enclosing repository can reach and
+// the user usually cannot see. Denying the first would break working setups
+// to defend against the user's own machine.
 //
 // GIT_TEMPLATE_DIR is the sharpest entry here and the only one that is
 // CODE EXECUTION rather than misdirection: `git clone` copies the named

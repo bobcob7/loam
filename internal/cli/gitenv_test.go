@@ -68,18 +68,29 @@ func newRecordingServer(t *testing.T, status int) *recordingServer {
 	return rec
 }
 
-// headerValues returns the values of header name from the MOST RECENT
-// request, under the same lock the handler writes with. A test that reads a
-// plain captured-header variable across two requests races the handler
-// goroutine -- caught by -race on exactly this file, and the reason this
-// accessor exists rather than a bare package-level variable.
+// headerValues returns the values of header name across EVERY request
+// recorded so far, under the same lock the handler writes with.
+//
+// Two deliberate choices, both earned on this bead:
+//
+//   - Locked, not a bare captured-header variable. A test that reads
+//     handler-written state across two requests races the handler goroutine
+//     -- caught by -race on exactly this file.
+//   - AGGREGATE, not last-request-only. An earlier version returned only the
+//     most recent request's values, which is unsafe for the NEGATIVE
+//     assertions that use it: "this header was absent" would hold if the
+//     header arrived on any request but the last, and the guard on request
+//     count is a Positive rather than an Equal. Aggregating makes absence
+//     mean absence, and clear() is what scopes it to a single phase. This is
+//     the same idiom authorizations() already used.
 func (r *recordingServer) headerValues(name string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.reqs) == 0 {
-		return nil
+	var got []string
+	for _, req := range r.reqs {
+		got = append(got, req.Header.Values(name)...)
 	}
-	return r.reqs[len(r.reqs)-1].Header.Values(name)
+	return got
 }
 
 // clear discards everything recorded so far, so a test can attribute the

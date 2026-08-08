@@ -279,11 +279,12 @@ func TestTransport_LsRemoteIgnoresAmbientGitDir(t *testing.T) {
 // was detectable by any test in this package -- while the internal/cli
 // sibling, which spells its list out, caught exactly that mutation.
 //
-// The round-2 note about this test being "adequate only as a pair with
-// TestTransport_GitEnvCarriesExactlyOneGitDir" was true about WIRING and
-// silent about MEMBERSHIP, which made the hole harder to spot rather than
-// easier. Both are now covered: the literal below catches a deletion, and
-// the sibling catches gitEnv ceasing to call this at all.
+// This test covers MEMBERSHIP only -- it calls dropInheritedRepoVars
+// directly, so it stays green if gitEnv stops calling it at all. WIRING is
+// TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment's job, and the
+// two are only adequate together. Round 3 briefly broke exactly that pair:
+// closing membership here, this same commit deleted the wiring sibling, and
+// the hole moved rather than closed.
 //
 // Keeping the two lists in sync is a manual obligation, deliberately: an
 // automated cross-check would reintroduce the shared code path that caused
@@ -314,6 +315,72 @@ func TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable(t *testing
 	}
 	assert.Len(t, filtered, 2, "only the two unrelated entries should survive -- this package's env is os.Environ() plus overrides, so over-filtering is its own defect")
 	assert.Contains(t, surviving, "HTTPS_PROXY", "a real network git invocation legitimately wants the host's proxy configuration")
+}
+
+// TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment is the WIRING
+// half of the pair described on TestDropInheritedRepoVars above, and it
+// exists in this exact shape because of how it was lost and what that
+// concealed.
+//
+// It replaces TestTransport_GitEnvCarriesExactlyOneGitDir, which round 3
+// deleted by accident while rewriting its neighbour -- leaving gitEnv's USE
+// of dropInheritedRepoVars untested while a comment still claimed the
+// sibling covered it. With that call removed, GIT_TEMPLATE_DIR came straight
+// back into the subprocess environment: the variable this package documents
+// as PERMANENT CODE EXECUTION inside a server process holding every forge
+// credential.
+//
+// Two lessons are built into the assertions below.
+//
+// First, GIT_DIR ALONE IS THE WRONG PROBE, even though it is the variable
+// the deleted test was named for. exec.Cmd resolves duplicate keys
+// last-wins, and gitEnv appends its own GIT_DIR after the inherited one, so
+// with the filtering removed GIT_DIR still RESOLVES correctly -- every
+// behavioural test stays green and a probe that looked only at GIT_DIR's
+// effective value would report nothing wrong. Only the COUNT sees past
+// that, which is what the deleted test's require.Len(got, 1) was doing.
+// That count is kept below, and the absence check is widened to the whole
+// list so no other entry has to rely on GIT_DIR as its proxy.
+//
+// Second, the expectation is a HARDCODED LITERAL rather than `for name :=
+// range inheritedRepoVars`. Building it from the subject is precisely the
+// defect round 2 found in this file's other test: a deletion would vanish
+// from input and expectation together. Keeping the two literals in sync is
+// a deliberate manual obligation.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment(t *testing.T) {
+	mustNotSurvive := []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_TEMPLATE_DIR",
+	}
+	for _, name := range mustNotSurvive {
+		t.Setenv(name, "/attacker/"+name)
+	}
+	home := t.TempDir()
+
+	env := gitEnv(home, "")
+
+	var gitDirs []string
+	inherited := make(map[string]string)
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if name == "GIT_DIR" {
+			gitDirs = append(gitDirs, value)
+			continue
+		}
+		if strings.HasPrefix(value, "/attacker/") {
+			inherited[name] = value
+		}
+	}
+
+	assert.Empty(t, inherited, "gitEnv must compose dropInheritedRepoVars into its environment -- every one of these relocates a repository or plants executable code")
+	require.Len(t, gitDirs, 1, "exactly one GIT_DIR must survive -- an inherited one merely OVERRIDDEN by append would still resolve correctly under last-wins, so the count is what sees the filtering being gone")
+	assert.Equal(t, filepath.Join(home, "unused-git-dir"), gitDirs[0])
+	assert.NoFileExists(t, gitDirs[0], "the GIT_DIR gitEnv names must not exist, or git would discover a repository there")
 }
 
 // newHitCountingServer returns an HTTP server's URL and a func reporting how
