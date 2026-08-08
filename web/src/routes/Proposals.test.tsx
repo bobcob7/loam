@@ -10,20 +10,17 @@ import { describe, expect, it } from "vitest";
 import { createQueryClient } from "../queryClient";
 import {
   ListProposalsResponseSchema,
-  ProposalSchema,
   ProposalService,
   type ListProposalsResponse,
 } from "../gen/loam/admin/v1/proposal_pb";
 import {
   PageInfoSchema,
   UpstreamDrift,
-  VerdictOutcome,
-  VerdictSummarySchema,
   WorkBranchConflict,
   WorkBranchState,
 } from "../gen/loam/v1/common_pb";
 import styles from "../components/StatusBadge.module.css";
-import { workBranchFixture } from "../test/fixtures";
+import { proposalFixture, verdictSummaryFixture, workBranchFixture } from "../test/fixtures";
 import { Proposals } from "./Proposals";
 
 /**
@@ -74,22 +71,10 @@ const badgeClass = (intent: "success" | "neutral" | "warning"): string => {
 const oneProposalResponse = (): ListProposalsResponse =>
   create(ListProposalsResponseSchema, {
     proposals: [
-      create(ProposalSchema, {
-        acceptable: true,
-        workBranch: workBranchFixture(),
+      proposalFixture({
         verdicts: [
-          create(VerdictSummarySchema, {
-            reviewer: "agent-1-reviewer",
-            outcome: VerdictOutcome.APPROVE,
-            stale: true,
-            round: 1,
-          }),
-          create(VerdictSummarySchema, {
-            reviewer: "agent-2-reviewer",
-            outcome: VerdictOutcome.APPROVE,
-            stale: false,
-            round: 2,
-          }),
+          verdictSummaryFixture({ reviewer: "agent-1-reviewer", stale: true, round: 1 }),
+          verdictSummaryFixture({ reviewer: "agent-2-reviewer", stale: false, round: 2 }),
         ],
       }),
     ],
@@ -182,19 +167,8 @@ describe("Proposals", () => {
         listProposals: () =>
           create(ListProposalsResponseSchema, {
             proposals: [
-              create(ProposalSchema, {
-                acceptable: true,
-                workBranch: workBranchFixture(),
-                verdicts: [
-                  create(VerdictSummarySchema, {
-                    reviewer: "agent-2-reviewer",
-                    outcome: VerdictOutcome.APPROVE,
-                    stale: false,
-                    round: 2,
-                  }),
-                ],
-              }),
-              create(ProposalSchema, {
+              proposalFixture(),
+              proposalFixture({
                 acceptable: false,
                 workBranch: workBranchFixture({
                   name: "wb-88c455",
@@ -203,14 +177,7 @@ describe("Proposals", () => {
                   conflict: WorkBranchConflict.RESET,
                   upstreamDrift: UpstreamDrift.DIVERGED,
                 }),
-                verdicts: [
-                  create(VerdictSummarySchema, {
-                    reviewer: "agent-1-reviewer",
-                    outcome: VerdictOutcome.APPROVE,
-                    stale: false,
-                    round: 3,
-                  }),
-                ],
+                verdicts: [verdictSummaryFixture({ reviewer: "agent-1-reviewer", round: 3 })],
               }),
             ],
             pageInfo: create(PageInfoSchema, { total: 2 }),
@@ -253,7 +220,7 @@ describe("Proposals", () => {
         listProposals: () =>
           create(ListProposalsResponseSchema, {
             proposals: [
-              create(ProposalSchema, {
+              proposalFixture({
                 acceptable: false,
                 workBranch: workBranchFixture({
                   name: "wb-1a2b3c",
@@ -285,7 +252,7 @@ describe("Proposals", () => {
         listProposals: () =>
           create(ListProposalsResponseSchema, {
             proposals: [
-              create(ProposalSchema, {
+              proposalFixture({
                 acceptable: false,
                 workBranch: workBranchFixture({
                   name: "wb-7d3e9f",

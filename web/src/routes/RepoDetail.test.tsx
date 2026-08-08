@@ -14,18 +14,17 @@ import {
 } from "../gen/loam/admin/v1/credential_pb";
 import { getRepo, listRepos } from "../gen/loam/admin/v1/repo_admin-RepoAdminService_connectquery";
 import {
-  EnrolledRepoSchema,
   GetRepoResponseSchema,
   RemovalBlockedSchema,
   RemoveRepoResponseSchema,
   RepoAdminService,
   SetTargetBranchesResponseSchema,
   SyncState,
-  SyncStatusSchema,
   type EnrolledRepo,
 } from "../gen/loam/admin/v1/repo_admin_pb";
 import { WorkBranchState } from "../gen/loam/v1/common_pb";
 import { createQueryClient } from "../queryClient";
+import { blockedWorkBranchFixture, enrolledRepoFixture, syncStatusFixture } from "../test/fixtures";
 import { RepoDetail } from "./RepoDetail";
 
 /**
@@ -42,18 +41,14 @@ import { RepoDetail } from "./RepoDetail";
 
 const defaultRepo = "acme/widgets";
 
-const enrolledRepo = (overrides: Partial<EnrolledRepo> = {}): EnrolledRepo =>
-  create(EnrolledRepoSchema, {
+const enrolledRepo = (overrides: Parameters<typeof enrolledRepoFixture>[0] = {}): EnrolledRepo =>
+  enrolledRepoFixture({
     repo: defaultRepo,
     upstreamUrl: "https://forge.example.com/acme/widgets.git",
     targetBranches: ["main", "develop"],
     indexedBranch: "main",
     ingestedRef: "abc123",
-    sync: create(SyncStatusSchema, {
-      state: SyncState.IDLE,
-      lastSyncedAt: "2026-07-20T00:00:00Z",
-      error: "",
-    }),
+    sync: syncStatusFixture({ lastSyncedAt: "2026-07-20T00:00:00Z" }),
     ...overrides,
   });
 
@@ -185,7 +180,7 @@ describe("RepoDetail — repo, sync, and credential status", () => {
         getRepo: async () =>
           create(GetRepoResponseSchema, {
             repo: enrolledRepo({
-              sync: create(SyncStatusSchema, {
+              sync: syncStatusFixture({
                 state: SyncState.ERROR,
                 lastSyncedAt: "",
                 error: "clone failed: authentication required",
@@ -437,8 +432,12 @@ describe("RepoDetail — RemoveRepo", () => {
               desc: RemovalBlockedSchema,
               value: {
                 blockers: [
-                  { name: "wb-aaa111", title: "Add retry logic", state: WorkBranchState.REVIEWABLE },
-                  { name: "wb-bbb222", title: "Fix flaky test", state: WorkBranchState.DRAFT },
+                  blockedWorkBranchFixture(),
+                  blockedWorkBranchFixture({
+                    name: "wb-bbb222",
+                    title: "Fix flaky test",
+                    state: WorkBranchState.DRAFT,
+                  }),
                 ],
               },
             },

@@ -7,37 +7,21 @@ import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import { AppProviders } from "../App";
 import {
-  EnrolledRepoSchema,
   ListReposResponseSchema,
   ProbeRepoResponseSchema,
   RepoAdminService,
   SyncState,
-  SyncStatusSchema,
   type EnrollRepoRequest,
   type EnrolledRepo,
 } from "../gen/loam/admin/v1/repo_admin_pb";
 import { PageInfoSchema } from "../gen/loam/v1/common_pb";
+import { enrolledRepoFixture as repoFixture, syncStatusFixture } from "../test/fixtures";
 import { Repos } from "./Repos";
 
 // Queried by role/label throughout: getByRole("link", { name }) only passes
 // for a real row link, getByRole("row"/"rowheader") only for real table
 // semantics, and toHaveFocus only for a genuinely focused element. None of
 // this could be faked by a getByTestId or a snapshot.
-
-const repoFixture = (overrides: Partial<EnrolledRepo> = {}): EnrolledRepo =>
-  create(EnrolledRepoSchema, {
-    repo: "acme/widgets",
-    upstreamUrl: "https://forge.example/acme/widgets",
-    targetBranches: ["main"],
-    indexedBranch: "main",
-    ingestedRef: "a1b2c3d",
-    sync: create(SyncStatusSchema, {
-      state: SyncState.IDLE,
-      lastSyncedAt: "2026-07-20T10:00:00Z",
-      error: "",
-    }),
-    ...overrides,
-  });
 
 interface RenderOptions {
   /** Seeds the fake service's repo list. Defaults to a single fixture repo. */
@@ -172,7 +156,7 @@ describe("listing repos", () => {
       listRepos: () => ({
         repos: [
           repoFixture({
-            sync: create(SyncStatusSchema, {
+            sync: syncStatusFixture({
               state: SyncState.ERROR,
               lastSyncedAt: "",
               error: "mirror unreachable",
@@ -198,7 +182,9 @@ describe("listing repos", () => {
   it("labels a currently-syncing repo distinctly from idle and error", async () => {
     renderRepos({
       listRepos: () => ({
-        repos: [repoFixture({ sync: create(SyncStatusSchema, { state: SyncState.SYNCING, lastSyncedAt: "", error: "" }) })],
+        repos: [
+          repoFixture({ sync: syncStatusFixture({ state: SyncState.SYNCING, lastSyncedAt: "", error: "" }) }),
+        ],
         total: 1,
       }),
     });
