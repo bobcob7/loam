@@ -268,13 +268,6 @@ func deleteRacingAConcurrentWriter(t *testing.T) bool {
 // rename frees that path first, so re-enrolling the same repo still works
 // and the RPC still reports success.
 //
-// TestDeleteRepo_FreesTheCanonicalPathEvenWhenTheDeleteCannotFinish is the
-// test that makes the rename-before-delete load-bearing rather than
-// decorative. With the delete unable to finish, a plain os.RemoveAll of the
-// mirror would fail partway and leave the canonical path occupied; the
-// rename frees that path first, so re-enrolling the same repo still works
-// and the RPC still reports success.
-//
 // IT USED TO SKIP UNDER ROOT, WHICH MEANT IT HAD NEVER RUN IN CI (loam-0nuo)
 // -- the gate is uid 0, and a skip and a pass are indistinguishable in
 // summary output. It now runs at every uid, because the delete is made to
@@ -326,11 +319,42 @@ func deleteRacingAConcurrentWriter(t *testing.T) bool {
 // IT IS A RACE, SO ITS DETERMINISM IS MEASURED RATHER THAN ASSUMED. With the
 // retry loop set to a SINGLE attempt -- i.e. asking how often the writer wins
 // on the first try -- 200 consecutive runs under -race passed at uid 0, 200
-// at uid 1000, and 200 on darwin/arm64: 600 for 600. The loop below therefore
-// exists as a VACUITY GUARD rather than as flake tolerance: if the writer
-// ever stops winning, the test fails and says so, instead of quietly
-// asserting nothing about a delete that actually succeeded. The same reason
-// every fixture on this branch asserts that its failure was manufactured.
+// at uid 1000, and 200 on darwin/arm64: 600 for 600.
+//
+// THE LOOP IS A VACUITY GUARD AT DEFAULT PARALLELISM AND FLAKE TOLERANCE
+// UNDER FORCED SINGLE-THREADING, AND raceAttempts IS SIZED FOR THE SECOND.
+// The distinction matters to anyone tempted to cut it to 1 on the strength of
+// the paragraph above, which is why it is spelled out rather than left as
+// "eight seems safe". At an explicit GOMAXPROCS=1 on Linux the single-attempt
+// win rate falls off 100%: two independent 200-run measurements gave 170/200
+// and 155/200, so the per-attempt loss is somewhere around 15-25% and is not
+// itself a stable number -- it is a race being measured, and a single figure
+// quoted to three significant digits would be its own kind of unchecked
+// claim. Sizing off the worse of the two, 0.225^8 is about 1 in 154,000,
+// which is why eight and not one. THE SHIPPED CONFIGURATION WAS THEN
+// MEASURED IN THAT REGIME RATHER THAN INFERRED FROM THE ARITHMETIC:
+// raceAttempts = 8 at GOMAXPROCS=1, uid 0, 200 consecutive runs under -race,
+// 200 for 200.
+//
+// At default parallelism nothing is being absorbed, and a failure there means
+// the writer has stopped winning entirely: the test fails and says so,
+// instead of quietly asserting nothing about a delete that actually
+// succeeded.
+//
+// That regime is hard to reach by accident, and deliberately not overstated
+// here. A CPU-quota runner does NOT land in it: Go floors container-derived
+// GOMAXPROCS at 2, measured inside a --cpus=1 container (nproc reports 5,
+// GOMAXPROCS reports 2), and at GOMAXPROCS=2 the single-attempt rate is
+// 200/200 again. It takes an explicit GOMAXPROCS=1 or -cpu=1. Nor does it
+// reproduce everywhere: on darwin/arm64, -cpu=1 is still 200/200 single
+// attempt, so this is a Linux scheduling effect and not a universal property
+// of the fixture.
+//
+// GOMAXPROCS is worth remembering as the knob for auditing ANY racing fixture
+// in this tree. Measurements at default parallelism say very little about the
+// adversarial case: forcing it to 1 turned "600 for 600, no question" into a
+// visible failure rate in one run, and it is what found the only soft spot in
+// this one.
 //
 // WHAT THIS DOES NOT COVER: EACCES specifically. The delete now fails with
 // ENOTEMPTY rather than EPERM, so the literal "an operator's mirror contains
