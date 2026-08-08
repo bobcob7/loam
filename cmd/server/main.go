@@ -342,7 +342,13 @@ func run(ctx context.Context, stop context.CancelFunc, cfg config.Config, onRead
 		return fmt.Errorf("building ingest orchestrator: %w", err)
 	}
 	defer closeIngest()
-	ingestPool := ingest.NewPool(cfg.Logger, pool, ingestOrchestrator, cfg.IngestWorkers)
+	// WithMeterProvider is not optional dressing: loam-gp7m suppressed the
+	// idle claim loop's spans (~121k root traces a day describing the
+	// absence of work), and this counter is what replaces them. Without
+	// this argument the suppression is a net observability regression --
+	// "is the ingest worker alive and claiming" would have no instrument at
+	// all. cfg.MeterProvider is never nil; see where it is set above.
+	ingestPool := ingest.NewPool(cfg.Logger, pool, ingestOrchestrator, cfg.IngestWorkers, ingest.WithMeterProvider(cfg.MeterProvider))
 	if err := ingestPool.RequeueOrphaned(ctx); err != nil {
 		pool.Close()
 		return fmt.Errorf("requeuing orphaned ingest jobs: %w", err)

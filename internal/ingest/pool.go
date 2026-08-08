@@ -14,8 +14,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/bobcob7/loam/internal/ingest/embed/ollama"
+	"github.com/bobcob7/loam/internal/telemetry"
 )
 
 // defaultPollInterval is the fallback cadence a worker re-checks for
@@ -120,6 +122,7 @@ type Pool struct {
 	backoffBase  time.Duration
 	backoffMax   time.Duration
 	maxAttempts  int
+	claims       metric.Int64Counter
 	wake         chan struct{}
 	mu           sync.Mutex
 	busy         map[uuid.UUID]struct{}
@@ -580,12 +583,16 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	for attempt := 1; attempt <= maxClaimAttempts; attempt++ {
 		job, claimed, err := p.claimOnce(ctx, excluded)
 		if err == nil {
+			outcome := claimOutcomeEmpty
 			if claimed {
 				p.busy[job.RepoID] = struct{}{}
+				outcome = claimOutcomeClaimed
 			}
+			p.recordClaim(ctx, outcome)
 			return job, claimed, nil
 		}
 		if !isRunningPerRepoViolation(err) {
+			p.recordClaim(ctx, claimOutcomeFailed)
 			return Job{}, false, err
 		}
 		p.logger.DebugContext(ctx, claimRejectedMsg,
@@ -594,6 +601,7 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 	}
 	p.logger.WarnContext(ctx, claimExhaustedMsg,
 		"max_claim_attempts", maxClaimAttempts)
+	p.recordClaim(ctx, claimOutcomeContended)
 	return Job{}, false, nil
 }
 
@@ -615,20 +623,92 @@ func (p *Pool) claim(ctx context.Context) (Job, bool, error) {
 // which is a real cost, but it is bounded by the other claim's own
 // transaction -- a claim, not a job run, since the job runs long after
 // its claim commits.
+//
+// # THE PROBE BOUNDARY (loam-gp7m), AND WHY IT IS PER-OUTCOME
+//
+// This function is the single largest producer of root traces loam emits.
+// Measured against the live deployment on 2026-08-07: ~1.40 parentless
+// `postgres.unnamed` spans per second, ~121,000 a day, ~65% of ALL root
+// traces for service.name=loam -- and ~85% of that wall is this function
+// polling an EMPTY queue. The arithmetic is structural, not a fit:
+// defaultPollInterval is 5s per worker, LOAM_INGEST_WORKERS defaults to 2
+// (internal/config), and an idle pass issues exactly THREE statements --
+// p.db.Begin (pgx implements it as Exec("begin"), so it reaches
+// internal/db's query tracer like any other statement), the unheadered
+// claimQuery, and the deferred Rollback (Exec("rollback")). 3 x 2 / 5s =
+// 1.20/s predicted against 1.18/s measured for this loop.
+//
+// Nothing is wrong with those statements. The harm is that six figures of
+// traces a day describing THE ABSENCE OF WORK crowd out the traces someone
+// opened Tempo to find. telemetry.WithProbe is the instrument for exactly
+// that shape -- "the success case carries no information, the failure case
+// is the point" -- and internal/db's queryTracer honours it by opening no
+// span on start and building a BACKDATED one only when the statement fails
+// (loam-om77). So a probe-marked claim that cannot reach Postgres, or hits
+// a broken schema, still produces its span, carrying its SQLSTATE and its
+// true duration and flagged loam.probe=true.
+//
+// WHAT THE MARKER MUST NOT COVER IS THE WHOLE DESIGN HERE. A tick that
+// FINDS work is not polling; it is the moment a job starts, and its trace
+// is one somebody genuinely wants. Marking the tick rather than the
+// OUTCOME would take that trace away too -- a strictly worse bug than the
+// one being fixed, because it would be invisible in exactly the direction
+// nobody checks. The queue's state is not knowable before the SELECT
+// returns, so the boundary is drawn at the earliest instant it IS knowable:
+//
+//   - pollCtx (marked) covers Begin and claimQuery. Both are speculative:
+//     on the overwhelmingly common path they establish that there is
+//     nothing to do and are rolled back.
+//   - ctx (unmarked) covers everything from the line where a candidate row
+//     is in hand -- both UPDATEs and the Commit -- so a successful claim
+//     still emits spans, and so does the job run p.run then performs on the
+//     same unmarked context.
+//   - closeCtx follows that same switch, so the deferred Rollback is marked
+//     on the idle path (where it is one of the three statements being
+//     removed) and unmarked once real work was in flight. After a
+//     successful Commit it is a no-op that never reaches the wire at all
+//     (pgx returns ErrTxClosed without issuing a statement), so the
+//     successful claim is exactly three spans, not four.
+//
+// The two statements that stay dark on a work-finding tick are Begin and
+// the SELECT, and that is a deliberate, bounded loss rather than an
+// oversight: their outcome is not yet known when they are issued, and the
+// transaction they open is fully described by the three spans that follow.
+// If either FAILS, the deferred span appears anyway -- which is why a
+// broken claim loop is still diagnosable from traces alone.
+//
+// The pool ACQUIRE is untouched by any of this. internal/db's
+// TraceAcquireEnd deliberately ignores the marker, so a claim against a
+// saturated or dead pool still emits its acquire failure -- the one span
+// that survives when the database is unreachable and no query span exists
+// to defer.
+//
+// AND THE HEALTHY CASE IS NOT SILENT: claim records a claim-cycle counter
+// on every pass, by outcome (see metrics.go). "Is the ingest worker alive
+// and claiming" is a per-interval question, which is a time series; it was
+// only ever answered by this trace volume as an accident of instrumenting
+// the wrong thing.
 func (p *Pool) claimOnce(ctx context.Context, excluded []uuid.UUID) (Job, bool, error) {
-	tx, err := p.db.Begin(ctx)
+	pollCtx := telemetry.WithProbe(ctx)
+	tx, err := p.db.Begin(pollCtx)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("beginning claim transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	// closeCtx is promoted from pollCtx to ctx the instant a candidate row
+	// is in hand, so the deferred Rollback is suppressed only on the idle
+	// path. The closure reads the variable when it RUNS, not when it is
+	// registered, which is what makes that promotion reach it.
+	closeCtx := pollCtx
+	defer func() { _ = tx.Rollback(closeCtx) }()
 	var job Job
-	err = tx.QueryRow(ctx, claimQuery, excluded).Scan(&job.ID, &job.RepoID, &job.TargetBranch, &job.Kind, &job.Attempts)
+	err = tx.QueryRow(pollCtx, claimQuery, excluded).Scan(&job.ID, &job.RepoID, &job.TargetBranch, &job.Kind, &job.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Job{}, false, nil
 	}
 	if err != nil {
 		return Job{}, false, fmt.Errorf("selecting a queued ingest job: %w", err)
 	}
+	closeCtx = ctx
 	if _, err := tx.Exec(ctx, `UPDATE ingest_jobs SET status = 'running', started_at = now() WHERE id = $1`, job.ID); err != nil {
 		return job, false, fmt.Errorf("marking ingest job %s running: %w", job.ID, err)
 	}
