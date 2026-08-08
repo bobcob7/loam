@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -361,18 +363,194 @@ func TestLoad_SyncIntervalAndIngestWorkersBoundaries(t *testing.T) {
 	}
 }
 
-func TestLoad_UnwritableDataDir(t *testing.T) {
-	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses directory permission checks")
+// unwritableDataDirShape is one way of making LOAM_DATA_DIR unusable that
+// UID 0 CANNOT BYPASS. plant builds the shape under a fresh parent and
+// returns the value to point LOAM_DATA_DIR at; wantErrno is the errno the
+// probe must fail with, so a shape that stopped working says which one it
+// was rather than "an error is expected but got nil".
+type unwritableDataDirShape struct {
+	name      string
+	plant     func(t *testing.T, parent string) string
+	wantErrno syscall.Errno
+}
+
+// unwritableDataDirShapes is the shared fixture behind the two tests below.
+//
+// BOTH USED TO CHMOD A DIRECTORY TO 0o500 AND SKIP UNDER ROOT, WHICH MEANT
+// NEITHER HAD EVER RUN IN CI (loam-0nuo). The per-PR gate runs `go test
+// ./... -race` inside golang:1.26.5 as uid 0; root holds CAP_DAC_OVERRIDE
+// and writes into a 0o500 directory regardless, so `if os.Geteuid() == 0 {
+// t.Skip(...) }` was the only thing keeping the gate green -- and a skip and
+// a pass are indistinguishable in the summary output CI is read from, so the
+// coverage looked present while the branch was never once exercised.
+//
+// The three shapes here fail for reasons that are not permission checks, so
+// uid 0 receives them exactly as an unprivileged user does (the technique is
+// loam-9g17's; internal/cli/staging_test.go carries its long-form rationale):
+//
+//   - ENOTDIR, because a path component is a regular file. os.MkdirAll stats
+//     the component, finds a non-directory, and fails.
+//   - EEXIST, because the data dir is a dangling symlink. MkdirAll's Mkdir
+//     gets EEXIST, its Lstat says the thing that exists is not a directory,
+//     and it reports the Mkdir failure rather than treating the path as
+//     already-created.
+//   - ENAMETOOLONG, because the data dir sits at the deepest path the
+//     filesystem will create. This is the one that reaches the SECOND arm of
+//     checkDataDirWritable: MkdirAll succeeds (the directory is already
+//     there), and the temp-file write probe inside it is what fails --
+//     structurally the same thing the 0o500 fixture used to do, which is
+//     what makes it a replacement rather than merely another error.
+//
+// Go 1.26.5 maps ONLY ENOENT to os.ErrNotExist (verified by running it, not
+// inherited: syscall.Errno.Is answers false for ENOTDIR, EEXIST and
+// ENAMETOOLONG), so all three are genuine failures rather than the
+// "directory is simply absent" path, which checkDataDirWritable creates its
+// way out of.
+//
+// WHAT THIS DOES NOT COVER: EACCES specifically. That is acceptable because
+// checkDataDirWritable does not discriminate on errno -- every failure of
+// either arm goes through the same dataDirError wrapper -- so the errno is
+// not part of the behaviour under test. What is under test is that a data
+// directory which cannot be written to fails Load loudly and says who was
+// denied and where, and that is now asserted at every uid, including inside
+// the gate.
+func unwritableDataDirShapes() []unwritableDataDirShape {
+	return []unwritableDataDirShape{
+		{
+			name: "a path component of the data directory is a regular file",
+			plant: func(t *testing.T, parent string) string {
+				blocker := filepath.Join(parent, "loam-data")
+				require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+				return filepath.Join(blocker, "mirrors-would-go-here")
+			},
+			wantErrno: syscall.ENOTDIR,
+		},
+		{
+			name: "the data directory is a dangling symlink",
+			plant: func(t *testing.T, parent string) string {
+				dir := filepath.Join(parent, "loam-data")
+				require.NoError(t, os.Symlink(filepath.Join(parent, "gone", "target"), dir))
+				info, err := os.Lstat(dir)
+				require.NoError(t, err)
+				require.NotZero(t, info.Mode()&os.ModeSymlink, "precondition: %s must actually be a symlink", dir)
+				return dir
+			},
+			wantErrno: syscall.EEXIST,
+		},
+		{
+			name: "the data directory exists but the write probe inside it cannot be completed",
+			plant: func(t *testing.T, parent string) string {
+				return longestCreatableDir(t, parent)
+			},
+			wantErrno: syscall.ENAMETOOLONG,
+		},
 	}
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "readonly")
-	require.NoError(t, os.Mkdir(dir, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	baseEnv(t, dir)
-	_, err := Load()
-	require.ErrorIs(t, err, errDataDirNotWritable)
+}
+
+// longestCreatableDir grows a directory chain under parent until the
+// filesystem refuses the next component, and returns the deepest directory
+// it actually created. A temp file cannot then be created inside it: its
+// name is longer than the single character whose addition just failed, so
+// the limit is exceeded by strictly more. Widths descend so the result is
+// the exact maximum rather than up to 128 characters short of it, which
+// matters because the probe's own filename is only ~28 characters long.
+//
+// The limit is a property of the filesystem, not of the caller's privileges
+// (PATH_MAX is 4096 on Linux and 1024 on darwin), so this is discovered at
+// runtime rather than hardcoded, and holds identically at uid 0. Measured:
+// it lands on 4095 = PATH_MAX-1 inside golang:1.26.5, and reaches the second
+// arm on darwin too.
+//
+// The iteration cap is the reason this loop is not the one construct in the
+// file whose failure mode is a hung test rather than a named assertion.
+// Termination otherwise depends entirely on the kernel eventually refusing,
+// which every POSIX kernel does -- getname() caps at PATH_MAX before the
+// filesystem is consulted -- but "no platform anyone has tried does this" is
+// exactly the assumption this bead exists to stop trusting. 1<<16 components
+// is unreachable at any plausible PATH_MAX and a hard stop at any other.
+func longestCreatableDir(t *testing.T, parent string) string {
+	t.Helper()
+	dir := parent
+	for _, width := range []int{128, 16, 1} {
+		component := strings.Repeat("d", width)
+		refused := false
+		for i := 0; i < 1<<16; i++ {
+			next := filepath.Join(dir, component)
+			if err := os.Mkdir(next, 0o700); err != nil {
+				refused = true
+				break
+			}
+			dir = next
+		}
+		require.True(t, refused, "this filesystem accepted 65536 components of %d characters without refusing: it has no path length limit for this fixture to find", width)
+	}
+	return dir
+}
+
+// probeDataDir repeats, step for step, what checkDataDirWritable does to
+// LOAM_DATA_DIR. The tests below call it as a PRECONDITION: proof that the
+// shape they planted really did make the directory unwritable for whoever
+// is running them. Without it, a shape that some future runtime, filesystem
+// or privilege level quietly made writable would fail as a bare "an error is
+// expected but got nil" -- the exact failure that cost loam-9g17 three
+// agents' worth of triage before anyone worked out that root ignores mode
+// bits.
+func probeDataDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".loam-write-check-*")
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Remove(f.Name())
+}
+
+// requireShapeIsUnwritable is the precondition BOTH tests below run, factored
+// into one place rather than copied: two spellings of the same fixture that
+// disagree about how many preconditions they carry is how the next person to
+// add a shape ends up copying whichever they read first.
+//
+// The os.ErrNotExist assertion is redundant TODAY -- Go 1.26.5 maps only
+// ENOENT, so requiring the shape's own errno already excludes it -- and is
+// kept because it is the assertion that would fire if that ever changed.
+// Were EEXIST or ENOTDIR to start mapping, the shape would silently become
+// the "no data directory here, create it and carry on" path, which returns
+// nil and proves nothing.
+func requireShapeIsUnwritable(t *testing.T, shape unwritableDataDirShape, dir string) {
+	t.Helper()
+	probeErr := probeDataDir(dir)
+	require.Error(t, probeErr, "precondition: the planted shape must really make %s unwritable for whoever is running this test", dir)
+	require.ErrorIs(t, probeErr, shape.wantErrno, "precondition: the failure must be the one this shape manufactures")
+	require.NotErrorIs(t, probeErr, os.ErrNotExist, "precondition: it must be unwritable, not merely absent -- absent is the create-it-and-carry-on path")
+}
+
+func TestLoad_UnwritableDataDir(t *testing.T) {
+	// Not parallel (nor are the subtests): t.Setenv is incompatible with
+	// t.Parallel.
+	for _, shape := range unwritableDataDirShapes() {
+		t.Run(shape.name, func(t *testing.T) {
+			dir := shape.plant(t, t.TempDir())
+			requireShapeIsUnwritable(t, shape, dir)
+			baseEnv(t, dir)
+			_, err := Load()
+			require.ErrorIs(t, err, errDataDirNotWritable)
+			// The errno survives dataDirError's %w as a structured value
+			// (os.PathError unwraps to syscall.Errno), so this reaches the
+			// underlying cause without asserting on the message text. It
+			// pins that Load failed for the reason the shape manufactured
+			// and not a later, incidental one: swallowing MkdirAll's error
+			// leaves a dangling LOAM_DATA_DIR reported as ENOENT from the
+			// write probe -- "no such file or directory" about a path that
+			// demonstrably exists as a symlink -- which is a diagnosability
+			// regression in precisely the misconfigured-bind-mount case
+			// dataDirError was written for.
+			require.ErrorIs(t, err, shape.wantErrno, "the wrapped cause must be the failure the shape manufactured, not a later one")
+		})
+	}
 }
 
 // TestLoad_UnwritableDataDirErrorNamesUIDAndPath pins the diagnosability
@@ -384,24 +562,28 @@ func TestLoad_UnwritableDataDir(t *testing.T) {
 // asking for permission is what makes it a mystery rather than a one-line
 // fix. Asserting the uid, the gid and the probed path together is the
 // contract; without all three the message is back to being unactionable.
+//
+// It runs over every shape because the contract belongs to dataDirError,
+// which both arms of checkDataDirWritable funnel into: a refactor that kept
+// the uid on one arm and dropped it on the other would be caught here.
 func TestLoad_UnwritableDataDirErrorNamesUIDAndPath(t *testing.T) {
-	// Not parallel: t.Setenv is incompatible with t.Parallel.
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses directory permission checks")
+	// Not parallel (nor are the subtests): t.Setenv is incompatible with
+	// t.Parallel.
+	for _, shape := range unwritableDataDirShapes() {
+		t.Run(shape.name, func(t *testing.T) {
+			dir := shape.plant(t, t.TempDir())
+			requireShapeIsUnwritable(t, shape, dir)
+			baseEnv(t, dir)
+			_, err := Load()
+			require.ErrorIs(t, err, errDataDirNotWritable)
+			assert.Contains(t, err.Error(), dir, "the operator cannot act on a permission error that does not name the directory")
+			assert.Contains(t, err.Error(), fmt.Sprintf("uid %d", os.Getuid()),
+				"the actionable fact is which uid was denied, not merely that something was")
+			assert.Contains(t, err.Error(), fmt.Sprintf("gid %d", os.Getgid()))
+			assert.Contains(t, err.Error(), fmt.Sprintf("chown -R %d:%d", os.Getuid(), os.Getgid()),
+				"the message should carry the fix, not only the diagnosis")
+		})
 	}
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "readonly")
-	require.NoError(t, os.Mkdir(dir, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	baseEnv(t, dir)
-	_, err := Load()
-	require.ErrorIs(t, err, errDataDirNotWritable)
-	assert.Contains(t, err.Error(), dir, "the operator cannot act on a permission error that does not name the directory")
-	assert.Contains(t, err.Error(), fmt.Sprintf("uid %d", os.Getuid()),
-		"the actionable fact is which uid was denied, not merely that something was")
-	assert.Contains(t, err.Error(), fmt.Sprintf("gid %d", os.Getgid()))
-	assert.Contains(t, err.Error(), fmt.Sprintf("chown -R %d:%d", os.Getuid(), os.Getgid()),
-		"the message should carry the fix, not only the diagnosis")
 }
 
 // TestLoad_TelemetryDefaults pins the state a deployment that has never
