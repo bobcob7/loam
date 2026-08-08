@@ -511,6 +511,33 @@ func TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig(t *testing.T) {
 
 	got := mustRunGit(t, dest, "config", "--get-all", "http.extraHeader")
 	assert.Equal(t, headers, strings.Split(got, "\n"), "all three headers must land in the clone's config exactly once each, in order, from Clone itself")
+
+	// Clone also persists a LEADING EMPTY entry -- its http.extraHeader
+	// reset (loam-54ze round 2) -- and this test cannot see it above for two
+	// independent reasons, both worth naming so nobody later "fixes" the
+	// assertion by folding the reset into it:
+	//
+	//  1. mustRunGit TrimSpaces, so a leading blank line is gone before
+	//     Split ever runs. Note this hides the entry ONLY BECAUSE IT IS
+	//     LEADING -- TrimSpace touches nothing in the middle. So if the
+	//     reset ever moved out of first position, the empty string WOULD
+	//     appear in the split and this assertion would break. That is a
+	//     FEATURE: a reset anywhere but first resets loam's own headers
+	//     too, which is the bug it exists to prevent. Do not "fix" such a
+	//     failure by trimming more tolerantly; fix the ordering.
+	//  2. `config --get-all` would not be evidence anyway: it dumps every
+	//     value including the empty one and never applies reset SEMANTICS.
+	//
+	// So the reset is asserted here against the raw config file, where its
+	// presence is unambiguous, and its EFFECT is asserted on the wire by
+	// TestExecGitCloner_Clone_ResetsAGlobalExtraHeader and
+	// _ResetPersistsForLaterOperations. Three assertions, three different
+	// things: the three headers arrive, the reset is written, the reset
+	// works.
+	raw, err := os.ReadFile(filepath.Join(dest, ".git", "config"))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "extraheader = \n",
+		"the empty reset entry must persist into the clone's config, ahead of the three real headers")
 }
 
 // TestExecGitCloner_SetConfig_LandsInRealGitConfig proves SetConfig writes

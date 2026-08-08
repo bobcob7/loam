@@ -313,8 +313,31 @@ func (t *Transport) runRaw(ctx context.Context, host string, args ...string) ([]
 // once the subprocess exits). Empty authHeaderValue injects no header
 // at all, for an anonymous operation.
 func gitEnv(home, authHeaderValue string) []string {
-	env := append(dropGitCurlVerbose(os.Environ()),
+	env := append(dropInheritedRepoVars(dropGitCurlVerbose(os.Environ())),
 		"GIT_CONFIG_NOSYSTEM=1",
+		// GIT_DIR pointed at a path inside home that never exists, for the
+		// same reason internal/cli's gitenv.go does it (loam-54ze): the two
+		// methods that call runRaw DIRECTLY -- Clone and LsRemote -- pass no
+		// --git-dir, so without this they perform ordinary repository
+		// discovery from this process's working directory and read whatever
+		// repository encloses it. Every other isolation knob in this
+		// function addresses the SYSTEM, GLOBAL and AMBIENT-ENVIRONMENT
+		// config layers; none of them touches the LOCAL one, which is the
+		// layer discovery reaches (measured against git 2.50.1:
+		// GIT_CONFIG_NOSYSTEM plus a nonexistent GIT_CONFIG_GLOBAL leave an
+		// enclosing repository's url.insteadOf fully in effect). Setting
+		// GIT_DIR makes git skip discovery altogether.
+		//
+		// Safe for Fetch/Push/DeleteRemoteRef, which reach runRaw through
+		// run and therefore carry an explicit --git-dir=<mirror> in argv:
+		// git's command-line --git-dir WINS over the environment variable
+		// (verified against git 2.50.1), so those keep addressing their
+		// mirror exactly as before. Safe for Clone, which establishes its
+		// own repository at the destination and never consults GIT_DIR for
+		// it -- and which, being a `git clone`, would not have read an
+		// enclosing repository anyway; it is in scope here only for the
+		// inherited-variable half.
+		"GIT_DIR="+filepath.Join(home, "unused-git-dir"),
 		// GIT_CONFIG_PARAMETERS is the OTHER ambient channel git reads
 		// config from, alongside GIT_CONFIG_COUNT below -- it is how git
 		// itself propagates `-c` to subprocesses, so an inherited value
@@ -358,6 +381,82 @@ func gitEnv(home, authHeaderValue string) []string {
 		"GIT_CONFIG_KEY_0=http.extraHeader",
 		"GIT_CONFIG_VALUE_0=Authorization: Basic "+authHeaderValue,
 	)
+}
+
+// inheritedRepoVars are the variables git uses to locate a repository, its
+// index or its object stores. Unlike the GIT_CONFIG_* family (which gitEnv
+// neutralises by OVERRIDING, since it needs those same keys to inject its
+// own header), these have no value this package ever wants, so they are
+// removed outright: an override would still have to name a plausible path,
+// and "absent" is the only value that means "do not consider it".
+//
+// They matter here because this package's environment is os.Environ() plus
+// overrides, not an explicit list -- so anything the loam server process
+// happens to run under is inherited by every git subprocess. GIT_DIR is the
+// sharp one (it redirects config, refs and objects wholesale, and beats
+// discovery), but GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY would equally let
+// an ambient value decide where a fetch writes.
+//
+// GIT_CEILING_DIRECTORIES is on the list for the opposite reason to the
+// rest: an ambient one would stop discovery EARLY. It is harmless once
+// GIT_DIR is set, and listed anyway so the set is "every variable that
+// participates in locating a repository" rather than "the ones that matter
+// given the current value of another variable".
+var inheritedRepoVars = map[string]struct{}{
+	"GIT_DIR":                          {},
+	"GIT_WORK_TREE":                    {},
+	"GIT_COMMON_DIR":                   {},
+	"GIT_INDEX_FILE":                   {},
+	"GIT_OBJECT_DIRECTORY":             {},
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+	"GIT_NAMESPACE":                    {},
+	"GIT_CEILING_DIRECTORIES":          {},
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
+	"GIT_CONFIG":                       {},
+	// GIT_TEMPLATE_DIR does not locate anything -- it decides what
+	// executable code lands in a repository this package CREATES, and on
+	// THIS side that is not a one-shot problem the way "code execution on
+	// Clone" would suggest. Clone here is `clone --mirror` into a
+	// LONG-LIVED bare mirror that internal/mirrorsync then fetches into on
+	// every scheduled tick, forever.
+	//
+	// Measured on git 2.50.1 against exactly that shape. post-checkout does
+	// NOT fire, because a bare clone checks out no tree -- but
+	// reference-transaction fires instead, four times during the clone, and
+	// the hooks are COPIED INTO THE MIRROR'S hooks/ DIRECTORY, where they
+	// persist. A later fetch into that mirror fired them again with
+	// GIT_TEMPLATE_DIR no longer set anywhere in the environment.
+	//
+	// So the accurate statement is PERMANENT CODE EXECUTION INSIDE THE LOAM
+	// SERVER, planted once by one ambient variable at enrollment time and
+	// re-executed on every sync of that repo thereafter, by a server process
+	// that has every forge credential this instance holds. That is the
+	// sharpest thing on either deny list, and it is why this variable is
+	// listed here rather than left to the "locating" charter -- that
+	// charter is what hid it in internal/cli for a revision; see gitenv.go.
+	//
+	// It also gives the "fetch uses dest's own hooks" residual real weight
+	// on this side: internal/cli's Fetch runs against a clone made two
+	// lines earlier, but THIS package's mirror is the dest of every fetch
+	// for the life of the repo, so anything that ever lands in its hooks/
+	// stays live indefinitely.
+	"GIT_TEMPLATE_DIR": {},
+}
+
+// dropInheritedRepoVars returns environ with every inheritedRepoVars entry
+// removed, preserving order otherwise. gitEnv appends its own GIT_DIR after
+// this, so the removal is what guarantees exactly one survives rather than
+// relying on exec.Cmd's last-value-wins.
+func dropInheritedRepoVars(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if _, hostile := inheritedRepoVars[name]; hostile {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
 }
 
 // dropGitCurlVerbose returns environ with any GIT_CURL_VERBOSE entry

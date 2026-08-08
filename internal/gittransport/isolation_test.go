@@ -1,9 +1,13 @@
 package gittransport
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bobcob7/loam/internal/fakeforge"
@@ -198,4 +202,221 @@ func TestTransport_LsRemoteNeverEmitsCurlTraceUnderHostileAmbientGitCurlVerbose(
 	require.NoError(t, err)
 	assert.NotContains(t, string(out), "== Info:", "curl trace output must never appear -- an ambient GIT_CURL_VERBOSE=0 must not survive into the git subprocess's environment")
 	assert.NotContains(t, string(out), "http.c:", "curl trace output must never appear -- an ambient GIT_CURL_VERBOSE=0 must not survive into the git subprocess's environment")
+}
+
+// TestTransport_LsRemoteIgnoresEnclosingRepositoryConfig closes the last
+// gap loam-54ze's sweep found on this side. Every other isolation test in
+// this file poisons the SYSTEM, GLOBAL or AMBIENT-ENVIRONMENT config layer.
+// None of them touched the LOCAL one -- the config of whatever repository
+// encloses this process's working directory -- and gitEnv's defences do not
+// reach it: measured against git 2.50.1, GIT_CONFIG_NOSYSTEM plus a
+// nonexistent GIT_CONFIG_GLOBAL leave an enclosing url.insteadOf fully in
+// effect.
+//
+// insteadOf is used as the probe rather than a header because it is the
+// setting no reset can undo and the one with the worst consequence: it
+// rewrites the URL, so the request goes to a host loam never named and
+// nothing loam sends is even relevant. Clone and LsRemote are the two
+// methods that reach runRaw directly, with no --git-dir in argv, so they
+// were the two that performed discovery at all.
+//
+// BEFORE gitEnv set GIT_DIR: the attacker server received the request and
+// the intended server received nothing. AFTER: the reverse. Asserting on
+// which SERVER was reached, rather than on the arguments passed, is the
+// only way to see it -- the arguments were always correct.
+//
+// Deliberately no t.Parallel(): t.Chdir is process-global state, and
+// testing.T.Chdir panics from a parallel test.
+func TestTransport_LsRemoteIgnoresEnclosingRepositoryConfig(t *testing.T) {
+	requireGit(t)
+	intended, intendedHits := newHitCountingServer(t)
+	attacker, attackerHits := newHitCountingServer(t)
+	t.Chdir(repoWithConfig(t, "url."+attacker+"/.insteadOf", intended+"/"))
+
+	_, err := New(&staticCredentialSource{}, newGitCredsConverter(), testLogger()).LsRemote(t.Context(), "", intended+"/acme/widgets.git")
+
+	require.Error(t, err, "neither stub is a real smart-HTTP backend, so ls-remote must fail -- what matters is which host it failed against")
+	assert.Positive(t, intendedHits(), "the request must reach the host this call named")
+	assert.Zero(t, attackerHits(), "an enclosing repository's url.insteadOf must never redirect a loam transport request")
+}
+
+// TestTransport_LsRemoteIgnoresAmbientGitDir is the same guarantee reached
+// by the other door. GIT_DIR does not merely point discovery somewhere
+// else, it REPLACES it: a loam server process that inherited one (git sets
+// it on every process it spawns, so anything running under a hook or an
+// alias has one) would read that repository's config on every Clone and
+// LsRemote regardless of its own working directory.
+//
+// BEFORE: the attacker server was reached. AFTER: gitEnv drops the
+// inherited value and supplies its own, pointing at a path that does not
+// exist.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_LsRemoteIgnoresAmbientGitDir(t *testing.T) {
+	requireGit(t)
+	intended, intendedHits := newHitCountingServer(t)
+	attacker, attackerHits := newHitCountingServer(t)
+	t.Setenv("GIT_DIR", filepath.Join(repoWithConfig(t, "url."+attacker+"/.insteadOf", intended+"/"), ".git"))
+
+	_, err := New(&staticCredentialSource{}, newGitCredsConverter(), testLogger()).LsRemote(t.Context(), "", intended+"/acme/widgets.git")
+
+	require.Error(t, err)
+	assert.Positive(t, intendedHits(), "the request must reach the host this call named")
+	assert.Zero(t, attackerHits(), "an ambient GIT_DIR must never decide which repository's config a loam transport request reads")
+}
+
+// TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable pins the
+// deny list against a HARDCODED LITERAL, and that is the entire point of
+// how it is written.
+//
+// The previous version built its input with `for name := range
+// inheritedRepoVars` and then checked membership against that same map. It
+// could not fail: deleting an entry removed it from the input and from the
+// expectation together, and the `assert.Len` on the survivors moved in
+// lockstep too. Deleting GIT_TEMPLATE_DIR left it GREEN. Assertion and
+// subject shared a code path, so no deletion from the server-side deny list
+// was detectable by any test in this package -- while the internal/cli
+// sibling, which spells its list out, caught exactly that mutation.
+//
+// This test covers MEMBERSHIP only -- it calls dropInheritedRepoVars
+// directly, so it stays green if gitEnv stops calling it at all. WIRING is
+// TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment's job, and the
+// two are only adequate together. Round 3 briefly broke exactly that pair:
+// closing membership here, this same commit deleted the wiring sibling, and
+// the hole moved rather than closed.
+//
+// Keeping the two lists in sync is a manual obligation, deliberately: an
+// automated cross-check would reintroduce the shared code path that caused
+// this.
+func TestDropInheritedRepoVars_RemovesEveryRepositoryLocatingVariable(t *testing.T) {
+	t.Parallel()
+	mustDrop := []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_TEMPLATE_DIR",
+	}
+	environ := []string{"PATH=/usr/bin", "HTTPS_PROXY=http://proxy.example"}
+	for _, name := range mustDrop {
+		environ = append(environ, name+"=/some/hostile/path")
+	}
+
+	filtered := dropInheritedRepoVars(environ)
+
+	surviving := make(map[string]struct{}, len(filtered))
+	for _, kv := range filtered {
+		name, _, _ := strings.Cut(kv, "=")
+		surviving[name] = struct{}{}
+	}
+	for _, name := range mustDrop {
+		_, stillThere := surviving[name]
+		assert.False(t, stillThere, "%s must be dropped -- it relocates a repository or plants executable code, and must never be inherited", name)
+	}
+	assert.Len(t, filtered, 2, "only the two unrelated entries should survive -- this package's env is os.Environ() plus overrides, so over-filtering is its own defect")
+	assert.Contains(t, surviving, "HTTPS_PROXY", "a real network git invocation legitimately wants the host's proxy configuration")
+}
+
+// TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment is the WIRING
+// half of the pair described on TestDropInheritedRepoVars above, and it
+// exists in this exact shape because of how it was lost and what that
+// concealed.
+//
+// It replaces TestTransport_GitEnvCarriesExactlyOneGitDir, which round 3
+// deleted by accident while rewriting its neighbour -- leaving gitEnv's USE
+// of dropInheritedRepoVars untested while a comment still claimed the
+// sibling covered it. With that call removed, GIT_TEMPLATE_DIR came straight
+// back into the subprocess environment: the variable this package documents
+// as PERMANENT CODE EXECUTION inside a server process holding every forge
+// credential.
+//
+// Two lessons are built into the assertions below.
+//
+// First, GIT_DIR ALONE IS THE WRONG PROBE, even though it is the variable
+// the deleted test was named for. exec.Cmd resolves duplicate keys
+// last-wins, and gitEnv appends its own GIT_DIR after the inherited one, so
+// with the filtering removed GIT_DIR still RESOLVES correctly -- every
+// behavioural test stays green and a probe that looked only at GIT_DIR's
+// effective value would report nothing wrong. Only the COUNT sees past
+// that, which is what the deleted test's require.Len(got, 1) was doing.
+// That count is kept below, and the absence check is widened to the whole
+// list so no other entry has to rely on GIT_DIR as its proxy.
+//
+// Second, the expectation is a HARDCODED LITERAL rather than `for name :=
+// range inheritedRepoVars`. Building it from the subject is precisely the
+// defect round 2 found in this file's other test: a deletion would vanish
+// from input and expectation together. Keeping the two literals in sync is
+// a deliberate manual obligation.
+//
+// Deliberately no t.Parallel(): t.Setenv is incompatible with a parallel
+// ancestor.
+func TestTransport_GitEnvComposesTheDenyListIntoItsEnvironment(t *testing.T) {
+	mustNotSurvive := []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_TEMPLATE_DIR",
+	}
+	for _, name := range mustNotSurvive {
+		t.Setenv(name, "/attacker/"+name)
+	}
+	home := t.TempDir()
+
+	env := gitEnv(home, "")
+
+	var gitDirs []string
+	inherited := make(map[string]string)
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if name == "GIT_DIR" {
+			gitDirs = append(gitDirs, value)
+			continue
+		}
+		if strings.HasPrefix(value, "/attacker/") {
+			inherited[name] = value
+		}
+	}
+
+	assert.Empty(t, inherited, "gitEnv must compose dropInheritedRepoVars into its environment -- every one of these relocates a repository or plants executable code")
+	require.Len(t, gitDirs, 1, "exactly one GIT_DIR must survive -- an inherited one merely OVERRIDDEN by append would still resolve correctly under last-wins, so the count is what sees the filtering being gone")
+	assert.Equal(t, filepath.Join(home, "unused-git-dir"), gitDirs[0])
+	assert.NoFileExists(t, gitDirs[0], "the GIT_DIR gitEnv names must not exist, or git would discover a repository there")
+}
+
+// newHitCountingServer returns an HTTP server's URL and a func reporting how
+// many requests it has received. Two of them, one standing in for the host
+// loam named and one for the host a hostile config redirects to, are what
+// make "where did the request actually go" observable at all.
+func newHitCountingServer(t *testing.T) (string, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits
+	}
+}
+
+// repoWithConfig builds a real git repository whose config carries one
+// key/value pair -- standing in for "the repository this process happens to
+// be sitting in", which on a server is whatever directory it was started
+// from and on a developer machine is a checkout.
+func repoWithConfig(t *testing.T, key, value string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "--quiet"}, {"config", key, value}} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoErrorf(t, err, "git %v: %s", args, out)
+	}
+	return dir
 }

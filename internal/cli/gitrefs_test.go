@@ -222,8 +222,15 @@ func TestExecGitRefs_LsRemote_SendsOnlyTheHeadersItWasGiven(t *testing.T) {
 	// A clone standing in for "the agent's working directory", carrying
 	// SOMEONE ELSE's identity headers in its own config.
 	dest, _ := singleBranchCloneOfWB1(t)
+	// All THREE fields differ from the caller's, deliberately (loam-54ze):
+	// with Role left unset in the foreign clone, a defence that dropped the
+	// header list entirely would be indistinguishable from one that
+	// replaced it correctly, for that field. Every assertion below is an
+	// Equal on the full value list, so both failure shapes -- inherited
+	// identity winning, and loam's own identity going missing -- are caught.
 	mustRunGit(t, dest, "config", "--add", "http.extraHeader", "Loam-Agent-Name: someone-else")
 	mustRunGit(t, dest, "config", "--add", "http.extraHeader", "Loam-Agent-Id: 999")
+	mustRunGit(t, dest, "config", "--add", "http.extraHeader", "Loam-Agent-Role: reviewer")
 	t.Chdir(dest)
 	headers := []string{
 		"Loam-Agent-Name: grace-hopper",

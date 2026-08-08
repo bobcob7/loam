@@ -327,13 +327,83 @@ func newGitCloner() gitCloner { return execGitCloner{} }
 // by TestExecGitCloner_Clone_HeadersPersistIntoRealGitConfig), so the
 // clone's later fetches/pushes still carry the same headers with no
 // separate write.
+//
+// It runs DETACHED (see gitenv.go), and the two halves of that do very
+// different amounts of work -- worth separating, because one is load-bearing
+// and the other is not:
+//
+//   - The ENVIRONMENT STRIPPING is load-bearing. An ambient
+//     GIT_CONFIG_PARAMETERS -- which git sets on the children of an alias,
+//     so a `loam clone` invoked that way inherits one -- carries arbitrary
+//     config into this clone, url.insteadOf included, and would silently
+//     redirect the very first request to a host loam never named. It also
+//     carried init.templatedir, which was CODE EXECUTION. GIT_TEMPLATE_DIR
+//     is the same execution by a shorter route. All are stripped, and all
+//     are pinned by tests.
+//   - The detached GIT_DIR itself is BELT-AND-BRACES, and deliberately not
+//     pinned, because there is nothing to observe. `git clone` establishes
+//     its own repository at the destination and consults GIT_DIR for
+//     nothing, and it reads no enclosing repository either (verified on git
+//     2.50.1: an enclosing url.insteadOf, core.hooksPath and
+//     http.extraHeader are all ignored). Cloning with and without the
+//     detached GIT_DIR, from inside a repository carrying all three,
+//     produced byte-identical destination configs. It is kept because it is
+//     free and it is the right default for a call site that must read no
+//     repository -- not because it closes anything today. See
+//     TestGitSubprocessEnv_DetachedGitDirPointsOutsideTheEnclosingRepository
+//     for why no test claims otherwise.
+//
+// The LEADING empty `--config http.extraHeader=` is the same reset
+// execGitRefs.LsRemote uses, for the same reason and against the same layer
+// (loam-54ze round 2). Detachment closes the enclosing repository; it does
+// not close the user's own ~/.gitconfig, which this package deliberately
+// keeps honouring. Measured on git 2.50.1 against a header-logging server,
+// with a global http.extraHeader carrying "Loam-Agent-Name: GLOBAL-ATTACKER":
+// without the reset the initial fetch sent [GLOBAL-ATTACKER real] and git
+// accumulates rather than replaces, so the attacker's identity arrived
+// FIRST and won; with it, [real].
+//
+// The trust-domain argument that protects the rest of the user's config
+// does not reach this key, and that asymmetry is deliberate rather than an
+// oversight. That argument is about not clobbering settings loam has no
+// opinion about -- http.proxy, http.sslCAInfo, core.autocrlf, LFS filters,
+// each of which decides whether the clone works at all or what it contains.
+// Loam-Agent-* is not one of those: it is loam's own identity assertion,
+// the thing the entire authorisation model is keyed on, and the reset
+// clears ONLY that key, leaving proxy, CA and filters untouched.
+//
+// One consequence beyond the initial fetch, verified rather than assumed:
+// --config persists, so the clone's .git/config carries the empty entry
+// ahead of the three real ones, and every LATER fetch and push from that
+// clone is reset the same way (measured: an operation from inside the clone
+// sent [real], not [GLOBAL-ATTACKER real]).
+//
+// That persistence is the MORE valuable half, not a side effect: it is what
+// protects the plain `git push` an agent runs by hand, which is exactly the
+// path that bypasses loam's own header construction entirely and would
+// otherwise carry whatever the user's global config prepends.
+//
+// IT HAS A COST, and it is stated here because its symptom points nowhere
+// near loam. A LEGITIMATE global http.extraHeader -- a corporate gateway
+// token, a routing header -- is silently dropped from a loam clone's
+// operations too, and presents as an unexplained network failure with
+// nothing implicating loam. Measured against a header-logging server: with
+// a global "X-Corp-Route: eu-west" set, an operation from inside a loam
+// clone sent only Loam-Agent-Name, and X-Corp-Route was absent.
+//
+// The workaround is verified and is one command: re-add the header to the
+// CLONE's own config (`git -C <clone> config --add http.extraHeader
+// "X-Corp-Route: eu-west"`). Because the reset lives at the head of the
+// clone's own multi-valued list, anything added afterward lands AFTER it
+// and survives -- measured, both X-Corp-Route and loam's identity arrived
+// on the wire together.
 func (execGitCloner) Clone(ctx context.Context, url, branch, dest string, headers []string) error {
-	args := []string{"clone", "--branch", branch, "--single-branch"}
+	args := []string{"clone", "--branch", branch, "--single-branch", "--config", "http.extraHeader="}
 	for _, h := range headers {
 		args = append(args, "--config", "http.extraHeader="+h)
 	}
 	args = append(args, url, dest)
-	return runGitCommand(ctx, "", args...)
+	return runDetachedGitCommand(ctx, args...)
 }
 
 // SetConfig implements gitCloner via `git -C dest config key value`.
@@ -351,21 +421,46 @@ func (execGitCloner) RenameBranch(ctx context.Context, dest, from, to string) er
 	return runGitCommand(ctx, dest, "branch", "-m", from, to)
 }
 
-// runGitCommand runs `git -C dir <args...>` (or `git <args...>` when dir is
-// empty, e.g. Clone, whose destination does not exist yet). err wraps the
-// process's combined stdout+stderr so callers can surface git's own reason
-// for a failure (a missing remote branch, an unreachable URL, ...).
+// runGitCommand runs `git -C dir <args...>`, run purely for its effect. err
+// wraps the process's combined stdout+stderr so callers can surface git's
+// own reason for a failure (a missing remote branch, an unreachable URL,
+// ...).
+//
+// dir == "" means the CALLER's own working copy, exactly as it does for
+// gitrefs.go's runGitOutput -- an invocation that must read NO repository
+// is runDetachedGitCommand instead.
 func runGitCommand(ctx context.Context, dir string, args ...string) error {
 	fullArgs := args
 	if dir != "" {
 		fullArgs = append([]string{"-C", dir}, args...)
 	}
+	return gitCombined(ctx, gitSubprocessEnv(""), args, fullArgs)
+}
+
+// runDetachedGitCommand runs `git <args...>` with no repository in scope at
+// all -- see gitenv.go. For Clone, whose destination does not exist yet and
+// which must inherit nothing from whatever repository the caller happens to
+// be standing in.
+func runDetachedGitCommand(ctx context.Context, args ...string) error {
+	gitDir, cleanup, err := gitDetached()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return gitCombined(ctx, gitSubprocessEnv(gitDir), args, args)
+}
+
+// gitCombined is the shared body of the two helpers above. reportArgs is
+// what a failure names (the caller's own arguments, without this package's
+// addressing flags); fullArgs is what git actually receives.
+func gitCombined(ctx context.Context, env []string, reportArgs, fullArgs []string) error {
 	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(out.Bytes()))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(reportArgs, " "), err, bytes.TrimSpace(out.Bytes()))
 	}
 	return nil
 }

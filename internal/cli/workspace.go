@@ -316,47 +316,68 @@ func (w *workspace) stagingPath(repo, workBranch string) (string, error) {
 }
 
 // execGitLookup is the real gitLookup, backed by the git binary on PATH.
+//
+// All three of its methods address a directory explicitly with `-C`, and
+// all three run under gitSubprocessEnv (see gitenv.go) so that addressing
+// is authoritative. Without it an ambient GIT_DIR wins: measured against
+// git 2.50.1, `GIT_DIR=<other>/.git git -C <dir> rev-parse
+// --absolute-git-dir` reports <other>, so `loam` invoked from a git hook or
+// alias would resolve the repo, origin URL and branch of the PARENT git's
+// repository while believing it had asked about dir -- and every workspace
+// inference downstream (which repo, which work branch) would be about the
+// wrong clone with nothing in the output saying so.
 type execGitLookup struct{}
 
 // CloneRoot implements gitLookup via `git rev-parse --show-toplevel`, which
 // walks up from dir to find the enclosing working copy's root at any
 // depth.
 func (execGitLookup) CloneRoot(dir string) (string, error) {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	out, err := gitLookupOutput(dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("%s is not inside a git working copy: %w", dir, err)
 	}
-	root := strings.TrimSpace(string(out))
-	if root == "" {
+	if out == "" {
 		return "", fmt.Errorf("%s is not inside a git working copy: git reported an empty toplevel", dir)
 	}
-	return root, nil
+	return out, nil
 }
 
 // OriginURL implements gitLookup via `git remote get-url origin`.
 func (execGitLookup) OriginURL(cloneRoot string) (string, error) {
-	out, err := exec.Command("git", "-C", cloneRoot, "remote", "get-url", "origin").Output()
+	out, err := gitLookupOutput(cloneRoot, "remote", "get-url", "origin")
 	if err != nil {
 		return "", fmt.Errorf("reading origin remote in %s: %w", cloneRoot, err)
 	}
-	url := strings.TrimSpace(string(out))
-	if url == "" {
+	if out == "" {
 		return "", fmt.Errorf("origin remote in %s is empty", cloneRoot)
 	}
-	return url, nil
+	return out, nil
 }
 
 // CurrentBranch implements gitLookup via `git symbolic-ref --short HEAD`.
 func (execGitLookup) CurrentBranch(cloneRoot string) (string, error) {
-	out, err := exec.Command("git", "-C", cloneRoot, "symbolic-ref", "--short", "HEAD").Output()
+	out, err := gitLookupOutput(cloneRoot, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("resolving current branch in %s: %w", cloneRoot, err)
 	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "" {
+	if out == "" {
 		return "", fmt.Errorf("resolving current branch in %s: no branch checked out", cloneRoot)
 	}
-	return branch, nil
+	return out, nil
+}
+
+// gitLookupOutput runs `git -C dir <args...>` under gitSubprocessEnv and
+// returns its trimmed stdout. Deliberately context-free: gitLookup's
+// methods take no context (they are called from workspace inference, which
+// has none), and every one of them is a local, sub-millisecond read.
+func gitLookupOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitSubprocessEnv("")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // resolveWorkBranchIdentity resolves repo and work-branch identifiers for a
