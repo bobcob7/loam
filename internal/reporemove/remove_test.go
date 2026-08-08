@@ -326,15 +326,26 @@ func deleteRacingAConcurrentWriter(t *testing.T) bool {
 // The distinction matters to anyone tempted to cut it to 1 on the strength of
 // the paragraph above, which is why it is spelled out rather than left as
 // "eight seems safe". At an explicit GOMAXPROCS=1 on Linux the single-attempt
-// win rate falls off 100%: two independent 200-run measurements gave 170/200
-// and 155/200, so the per-attempt loss is somewhere around 15-25% and is not
-// itself a stable number -- it is a race being measured, and a single figure
-// quoted to three significant digits would be its own kind of unchecked
-// claim. Sizing off the worse of the two, 0.225^8 is about 1 in 154,000,
-// which is why eight and not one. THE SHIPPED CONFIGURATION WAS THEN
-// MEASURED IN THAT REGIME RATHER THAN INFERRED FROM THE ARITHMETIC:
-// raceAttempts = 8 at GOMAXPROCS=1, uid 0, 200 consecutive runs under -race,
-// 200 for 200.
+// win rate falls off 100%. Five 200-run batches under -race gave 170, 155,
+// 150, 155 and 145 passes -- a per-attempt loss of 15% to 27.5%. Sizing off
+// the WORST OBSERVED value, 0.275^8 is about 1 in 30,600, which is why eight
+// and not one.
+//
+// The spread is worth more than the number, and is the reason a RANGE rather
+// than a rate appears above. Four of those batches came from one session and are
+// statistically indistinguishable from each other (chi-squared 1.86, 3 df,
+// p about 0.60); the fifth came from a different session and genuinely
+// differs (z = 2.84, p about 0.005). So the rate is stable WITHIN a session
+// and moves about nine points BETWEEN sessions -- which means any one
+// session's batches look perfectly repeatable and invite quoting a rate to
+// three significant digits that the next session will not reproduce. Two
+// independent measurements were what revealed the band; one would have
+// hidden it however many times it was repeated.
+//
+// THE SHIPPED CONFIGURATION WAS THEREFORE MEASURED IN THAT REGIME RATHER
+// THAN INFERRED FROM THE ARITHMETIC -- which matters precisely because the
+// arithmetic's INPUT turned out to be the soft part: raceAttempts = 8 at
+// GOMAXPROCS=1, uid 0, 200 consecutive runs under -race, 200 for 200.
 //
 // At default parallelism nothing is being absorbed, and a failure there means
 // the writer has stopped winning entirely: the test fails and says so,
